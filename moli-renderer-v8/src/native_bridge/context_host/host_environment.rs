@@ -862,7 +862,7 @@ impl JsContextHost {
     ) -> bool {
         let changed = self.viewport_surface() != viewport_surface;
         if changed {
-            self.invalidate_layout_inputs(LayoutInputChange::StyleEnvironment);
+            self.invalidate_layout_inputs(LayoutInputChange::ViewportSize);
         }
         unsafe { &mut *self.runtime }.set_viewport_surface(viewport_surface);
         changed

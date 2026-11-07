@@ -17,13 +17,19 @@ use crate::{
 };
 
 /// Invalidation required by a changed native input. Publication is a separate
-/// owner decision; these changes retain the last frozen layout for readers.
+/// owner decision; style and used-geometry changes retain the last frozen
+/// layout for readers, while a viewport resize retires it.
 #[derive(Clone, Copy)]
 pub(crate) enum LayoutInputChange {
-    /// Media and viewport changes invalidate computed styles through Stylo.
+    /// Media changes invalidate computed styles through Stylo.
     StyleEnvironment,
     /// Scrollbar policy and interactions change future geometry/paint output.
     UsedGeometry,
+    /// A resized viewport invalidates styles like a media change and also
+    /// changes the initial containing block, so the published frame no longer
+    /// describes the Document. Like Chromium's resize relayout, the next
+    /// geometry demand lays out at the new size.
+    ViewportSize,
 }
 
 /// Resets the entry flag on every return path, including unwinding.
@@ -88,6 +94,14 @@ impl JsContextHost {
                 self.document_layout_state
                     .borrow_mut()
                     .mark_visual_state_dirty();
+            }
+            LayoutInputChange::ViewportSize => {
+                self.style_engine
+                    .bump_target_context_epoch_for_document(self.document_handle());
+                self.clear_layout_rect_cache();
+                self.document_layout_state
+                    .borrow_mut()
+                    .clear_latest_layout();
             }
         }
     }

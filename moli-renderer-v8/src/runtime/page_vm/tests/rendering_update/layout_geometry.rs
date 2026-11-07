@@ -1177,3 +1177,49 @@ async fn nested_inline_intrinsic_keywords_survive_float_contribution_probes() {
     .await
     .expect("nested intrinsic keyword fixture should run");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_viewport_resize_relayouts_used_geometry() {
+    run_page_vm_async_test(async move {
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let mut page_vm = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/viewport-resize.html")?,
+        );
+        let viewport = |width: u32| crate::protocol_types::ViewportSurface {
+            inner_width: width,
+            inner_height: 600,
+            outer_width: width,
+            outer_height: 600,
+            device_pixel_ratio: 1.0,
+            ..Default::default()
+        };
+        page_vm.set_viewport_surface(Some(viewport(800)))?;
+        page_vm.vm_mut().eval(
+            r#"
+document.body.style.margin = '0';
+document.body.innerHTML = '<div id=b style="width:100%;height:10px"></div>';
+'installed'
+"#,
+        )?;
+        let geometry = r#"(() => { const b = document.getElementById('b');
+            return JSON.stringify([innerWidth, Math.round(b.getBoundingClientRect().width),
+                b.offsetWidth, b.clientWidth, document.documentElement.clientWidth]); })()"#;
+        assert_eq!(page_vm.vm_mut().eval(geometry)?, "[800,800,800,800,800]");
+
+        // Chromium relayouts on resize; the first sampled frame must not
+        // survive a narrower or a restored wide viewport.
+        page_vm.set_viewport_surface(Some(viewport(320)))?;
+        assert_eq!(page_vm.vm_mut().eval(geometry)?, "[320,320,320,320,320]");
+        page_vm.set_viewport_surface(Some(viewport(1024)))?;
+        assert_eq!(
+            page_vm.vm_mut().eval(geometry)?,
+            "[1024,1024,1024,1024,1024]"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("viewport resize fixture should run");
+}
