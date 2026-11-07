@@ -413,22 +413,6 @@ impl NativeModuleGraphFetchRequest {
             .start()
     }
 
-    pub(crate) fn fetch_source_for_document<F>(
-        &self,
-        loader: &crate::network::context::DocumentResourceLoader,
-        callback: F,
-    ) -> anyhow::Result<()>
-    where
-        F: FnOnce(
-                std::result::Result<ModuleGraphFetchedSource, String>,
-                Option<SharedNavigationResponseResult>,
-            ) + Send
-            + 'static,
-    {
-        self.prepare_source_fetch_for_document(loader, callback)?
-            .start()
-    }
-
     /// Builds the Document-owned module source request without starting it,
     /// so CDP Fetch interception can pause it before the network sees it.
     pub(crate) fn prepare_source_fetch_for_document<F>(

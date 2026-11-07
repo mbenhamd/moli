@@ -114,6 +114,15 @@ impl ChildBrowsingContextEntry {
     }
 }
 
+/// The frame-owned completion route of one child classic script load.
+#[derive(Clone, Copy)]
+struct ChildClassicScriptLoadCompletionTarget {
+    owner: FrameDocumentTaskOwner,
+    load_id: u64,
+    handle: DomHandle,
+    script_handle: DomHandle,
+}
+
 impl JsContextHost {
     fn child_classic_script_network_attribution(
         &self,
@@ -293,37 +302,18 @@ impl JsContextHost {
                 .map(str::to_owned)
             })
             .unwrap_or_else(|| self.document_character_set().to_owned());
-        let completion_tx = self.resource_completion_tx.clone();
-        let task_loader = loader.clone();
-        let browser_context_runtime = self.browser_context_runtime();
-        let client_id = self.service_worker_client_id_for_subresource_owner(
-            crate::native_bridge::context_host::OwnerDispatchScope::Child(handle),
-        );
-        let document_url = network_attribution.document_url.clone();
-        loader.spawn_resource_task(async move {
-            let outcome =
-                crate::planning::load_service_worker_aware_external_script_source_outcome(
-                    &script_for_load,
-                    &task_loader.fetch_context().request_origin(),
-                    task_loader.request_client(),
-                    task_loader.task_runner(),
-                    Some(&document_character_set),
-                    None,
-                    browser_context_runtime,
-                    client_id,
-                    document_url,
-                )
-                .await;
-            let _ = completion_tx.send_child_classic_script(ChildClassicScriptLoadCompletion {
+        self.start_child_classic_script_source_fetch(
+            loader,
+            script_for_load,
+            document_character_set,
+            ChildClassicScriptLoadCompletionTarget {
                 owner,
                 load_id,
                 handle,
                 script_handle,
-                result: outcome.source_result,
-                network_result: outcome.network_result,
-                network_attribution,
-            });
-        });
+            },
+            network_attribution,
+        );
         true
     }
 
@@ -688,7 +678,6 @@ impl JsContextHost {
         let child_handle = request_target.child_handle();
         let (_request_target, source_load) = request.into_parts();
         let (source_identity, input) = source_load.into_parts();
-        let completion_tx = self.resource_completion_tx.clone();
         let script_handle = source_identity.metadata().script_handle();
         let script_for_load = input.into_script();
         let load_id = source_identity
@@ -716,36 +705,127 @@ impl JsContextHost {
             }
             return;
         }
-        let task_loader = loader.clone();
-        let browser_context_runtime = self.browser_context_runtime();
-        let client_id = self.service_worker_client_id_for_subresource_owner(
-            crate::native_bridge::context_host::OwnerDispatchScope::Child(child_handle),
-        );
-        let document_url = network_attribution.document_url.clone();
-        loader.spawn_resource_task(async move {
-            let outcome =
-                crate::planning::load_service_worker_aware_external_script_source_outcome(
-                    &script_for_load,
-                    &task_loader.fetch_context().request_origin(),
-                    task_loader.request_client(),
-                    task_loader.task_runner(),
-                    Some(&document_character_set),
-                    None,
-                    browser_context_runtime,
-                    client_id,
-                    document_url,
-                )
-                .await;
-            let _ = completion_tx.send_child_classic_script(ChildClassicScriptLoadCompletion {
+        self.start_child_classic_script_source_fetch(
+            loader,
+            script_for_load,
+            document_character_set,
+            ChildClassicScriptLoadCompletionTarget {
                 owner: request_target.task_owner(),
                 load_id,
                 handle: child_handle,
                 script_handle,
+            },
+            network_attribution,
+        );
+    }
+
+    /// Starts a child frame's external classic script load, or pauses it for
+    /// CDP `Fetch` interception first.
+    ///
+    /// A child frame's classic script is a `Script` request like the
+    /// top-level Document's, so a `Fetch.enable` pattern must observe it and
+    /// be able to fulfill, fail or continue it before the network does. The
+    /// paused request names the child frame and completes through the same
+    /// frame-owned completion route as the network load.
+    fn start_child_classic_script_source_fetch(
+        &self,
+        loader: crate::network::context::DocumentResourceLoader,
+        script: PreparedScript,
+        document_character_set: String,
+        target: ChildClassicScriptLoadCompletionTarget,
+        network_attribution: ChildClassicScriptNetworkAttribution,
+    ) {
+        let completion_tx = self.resource_completion_tx.clone();
+        let browser_context_runtime = self.browser_context_runtime();
+        let client_id = self.service_worker_client_id_for_subresource_owner(
+            crate::native_bridge::context_host::OwnerDispatchScope::Child(target.handle),
+        );
+        let document_url = network_attribution.document_url.clone();
+        let request_origin = loader.fetch_context().request_origin();
+        let pause_info = (matches!(script.url.scheme(), "http" | "https")
+            && self.should_intercept_subresource(SubresourceResourceType::Script))
+        .then(|| self.root_document_lifecycle_identity())
+        .flatten()
+        .map(|source_document| {
+            (
+                source_document,
+                crate::types::PendingSubresourceFetchInfo {
+                    internal_id: 0,
+                    network_request_handle: None,
+                    frame_id: network_attribution.frame_id.clone(),
+                    document_url: network_attribution.document_url.clone(),
+                    url: script.url.clone(),
+                    websocket_socket_id: None,
+                    method: "GET".to_owned(),
+                    request_headers: Default::default(),
+                    request_body: None,
+                    request_body_bytes: None,
+                    resource_type: SubresourceResourceType::Script,
+                    request_cookie_report: None,
+                },
+            )
+        });
+        let finish = move |outcome: crate::planning::PreparedScriptSourceLoadOutcome| {
+            let _ = completion_tx.send_child_classic_script(ChildClassicScriptLoadCompletion {
+                owner: target.owner,
+                load_id: target.load_id,
+                handle: target.handle,
+                script_handle: target.script_handle,
                 result: outcome.source_result,
                 network_result: outcome.network_result,
                 network_attribution,
             });
-        });
+        };
+        let start_request_origin = request_origin.clone();
+        let start_character_set = document_character_set.clone();
+        let start =
+            move |script: PreparedScript,
+                  finish: crate::runtime::ChildClassicScriptSourceLoadFinish| {
+                let task_loader = loader.clone();
+                loader.spawn_resource_task(async move {
+                    let outcome =
+                        crate::planning::load_service_worker_aware_external_script_source_outcome(
+                            &script,
+                            &start_request_origin,
+                            task_loader.request_client(),
+                            task_loader.task_runner(),
+                            Some(&start_character_set),
+                            None,
+                            browser_context_runtime,
+                            client_id,
+                            document_url,
+                        )
+                        .await;
+                    finish(outcome);
+                });
+            };
+        let Some((source_document, info)) = pause_info else {
+            start(script, Box::new(finish));
+            return;
+        };
+        let (info, continuation) = self
+            .browser_context_runtime
+            .prepare_detached_child_classic_script_fetch(
+                info,
+                crate::runtime::DetachedChildClassicScriptFetch::new(
+                    script,
+                    request_origin,
+                    Some(document_character_set),
+                    Box::new(start),
+                    Box::new(finish),
+                ),
+            );
+        let appended = self.append_live_turn_owner_action(
+            crate::runtime::RendererOwnerAction::DetachedParserScriptFetchPause {
+                source_document,
+                info: Box::new(info),
+                continuation: continuation.clone(),
+            },
+        );
+        if !appended {
+            // Standalone fixtures without an output sink cannot pause.
+            continuation.continue_request(None);
+        }
     }
 
     fn child_classic_script_source_load_client_for_owner(

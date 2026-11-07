@@ -326,9 +326,10 @@ impl FrameDocumentDynamicImportOwnerActionHooks for ScriptVmChildDynamicImportOw
             ));
             return Ok(FrameDocumentDynamicImportWaitingFetchScheduleResult::MissingLoader);
         };
-        self.vm
-            .resource_scheduler()
+        let host = self.vm._context_host.borrow();
+        host.resource_scheduler()
             .schedule_child_dynamic_module_graph_fetch(
+                &host,
                 loader,
                 target,
                 load_id,

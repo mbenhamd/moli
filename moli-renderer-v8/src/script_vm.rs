@@ -674,7 +674,6 @@ use super::{
         node_runtime_and_handle_from_object,
     },
     planning::PreparedScript,
-    renderer_resource_scheduler::RendererResourceScheduler,
     runtime::{
         RendererActivityDiagnostics, RendererInputDispatchOutcome, RendererPageContextCancelReason,
         RendererPageContextCancelSender, RendererPageDiagnosticsSnapshot,

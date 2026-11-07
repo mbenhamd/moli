@@ -2756,16 +2756,19 @@ impl JsContextHost {
                 .is_none_or(|expected| expected.has_same_cdp_fetch_interception_type(resource_type))
     }
 
-    /// Starts one main-Document module graph fetch, or pauses it for CDP
-    /// `Fetch` interception the way a parser-blocking classic script is.
+    /// Starts one module graph fetch, or pauses it for CDP `Fetch`
+    /// interception the way a parser-blocking classic script is.
     ///
     /// Module scripts, static and dynamic imports and modulepreloads are
     /// `Script` requests in Chromium, so a `Fetch.enable` pattern for them
-    /// must observe and be able to fulfill each one before the network does.
-    pub(crate) fn start_main_module_source_fetch(
+    /// must observe and be able to fulfill each one before the network does,
+    /// in the top-level Document (`frame_id` `None`) and in every child frame
+    /// (its own frame id) alike.
+    pub(crate) fn start_module_source_fetch(
         &self,
         loader: &DocumentResourceLoader,
         fetch: crate::module_runtime::PreparedModuleSourceFetch,
+        frame_id: Option<String>,
     ) -> anyhow::Result<()> {
         if !matches!(fetch.url().scheme(), "http" | "https")
             || !self.should_intercept_subresource(SubresourceResourceType::Script)
@@ -2778,7 +2781,7 @@ impl JsContextHost {
         let info = crate::types::PendingSubresourceFetchInfo {
             internal_id: 0,
             network_request_handle: None,
-            frame_id: None,
+            frame_id,
             document_url: loader.fetch_context().document_url().clone(),
             url: fetch.url().clone(),
             websocket_socket_id: None,
