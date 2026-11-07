@@ -3,8 +3,12 @@ use crate::{
         CanvasContextKind, attach_canvas_like_context_object,
         build_canvas_rendering_context_2d_object, build_offscreen_canvas_object,
         build_webgl_context_object, build_webgl2_context_object, canvas_like_to_data_url,
+        canvas_like_to_image_file,
     },
-    util::{get_own_static_property, object_own_static_string_property, v8_string, v8str},
+    util::{
+        context_host_ptr_from_global_bridge, get_own_static_property,
+        object_own_static_string_property, v8_string, v8str,
+    },
     webidl,
 };
 
@@ -21,6 +25,17 @@ const CANVAS_CONTEXT_WEBGL2_SLOT: &str = "__moliCanvasContextWebGL2";
 struct HtmlCanvasGetContextArgs {
     #[webidl(required, converter = "enum")]
     kind: CanvasContextKind,
+}
+
+#[derive(webidl::WebIdlArgs)]
+#[webidl(prefix = "HTMLCanvasElement.toBlob")]
+struct HtmlCanvasToBlobArgs {
+    #[webidl(required, converter = "callback_function")]
+    callback: webidl::WebIdlCallbackFunction,
+    // Converted for its side effects; every requested type falls back to the
+    // single supported serialization, as HTML permits.
+    #[webidl(default = String::new())]
+    _type: String,
 }
 
 fn canvas_context_slot(kind: CanvasContextKind) -> &'static str {
@@ -269,4 +284,76 @@ pub(crate) fn canvas_to_data_url_callback<'s>(
     } else {
         rv.set(v8::undefined(scope).into());
     }
+}
+
+/// HTML `HTMLCanvasElement.toBlob(callback, type, quality)`.
+///
+/// The bitmap is copied and serialized with the `toDataURL` encoder before
+/// returning; the callback then runs from a queued task in the canvas's
+/// relevant realm with that Blob, or with null when the bitmap has no pixels
+/// or serialization fails. Moli does not model the bitmap origin-clean flag
+/// (no canvas operation taints it), so the SecurityError step never applies.
+pub(crate) fn canvas_to_blob_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    _rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    if node_runtime_and_handle_from_object_or_detached(scope, args.this()).is_err() {
+        return;
+    }
+    let Some(parsed) = webidl::parse_args::<HtmlCanvasToBlobArgs>(scope, &args) else {
+        return;
+    };
+    let canvas = args.this();
+    let image_file = canvas_like_to_image_file(scope, canvas);
+    let Some(context) = canvas.get_creation_context(scope) else {
+        return;
+    };
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
+        return;
+    };
+    let result: v8::Local<v8::Value> = image_file
+        .and_then(|bytes| {
+            crate::blob::build_blob_object(
+                scope,
+                bytes,
+                moli_canvas::CANVAS_SERIALIZATION_MIME_TYPE.to_owned(),
+            )
+        })
+        .map(Into::into)
+        .unwrap_or_else(|| v8::null(scope).into());
+    let callback = parsed.callback.value(scope);
+    let data = v8::Array::new_with_elements(scope, &[callback, result]);
+    let Some(task) = v8::Function::builder(run_canvas_to_blob_task)
+        .data(data.into())
+        .build(scope)
+    else {
+        return;
+    };
+    // The internal task scheduler binds the task to this realm's exact
+    // Window/Document and discards it when that owner retires.
+    unsafe { &mut *host_ptr }.queue_internal_task(scope, task);
+}
+
+fn run_canvas_to_blob_task<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    _rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    let Ok(data) = v8::Local::<v8::Array>::try_from(args.data()) else {
+        return;
+    };
+    let Some(callback) = data
+        .get_index(scope, 0)
+        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+    else {
+        return;
+    };
+    let Some(result) = data.get_index(scope, 1) else {
+        return;
+    };
+    // An exception propagates to the task invocation, which reports it.
+    let receiver = v8::undefined(scope);
+    let _ = callback.call(scope, receiver.into(), &[result]);
 }

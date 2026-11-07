@@ -5,17 +5,33 @@ use moli_web_mime::{
 
 use crate::types::byte_len;
 
+/// MIME type of every canvas serialization. HTML lets user agents fall back to
+/// PNG for any requested type they do not support, and PNG is the only
+/// canvas encoder this crate exposes.
+pub const CANVAS_SERIALIZATION_MIME_TYPE: &str = "image/png";
+
+/// Serialize a non-empty RGBA8 canvas bitmap as the bytes of an image file.
+///
+/// `toDataURL` and `toBlob` share this encoder, so both expose identical bytes
+/// with [`CANVAS_SERIALIZATION_MIME_TYPE`]. Returns `None` for a bitmap with no
+/// pixels or a buffer that does not match its dimensions.
+pub fn encode_image_file(bytes: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 || byte_len(width, height)? != bytes.len() {
+        return None;
+    }
+    Some(
+        moli_image::encode_png_rgba8(width, height, bytes)
+            .ok()?
+            .bytes,
+    )
+}
+
 pub fn encode_data_url(bytes: &[u8], width: u32, height: u32) -> Option<String> {
     if width == 0 || height == 0 {
         return Some("data:,".to_owned());
     }
-    if byte_len(width, height)? != bytes.len() {
-        return None;
-    }
-    let png_bytes = moli_image::encode_png_rgba8(width, height, bytes)
-        .ok()?
-        .bytes;
-    let mut data_url = String::from("data:image/png;base64,");
+    let png_bytes = encode_image_file(bytes, width, height)?;
+    let mut data_url = format!("data:{CANVAS_SERIALIZATION_MIME_TYPE};base64,");
     base64::Engine::encode_string(
         &base64::engine::general_purpose::STANDARD,
         png_bytes,

@@ -808,6 +808,89 @@ fn html_canvas_to_data_url_tracks_canvas_dimensions() {
     assert_eq!(empty, "data:,");
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn html_canvas_to_blob_queues_the_to_data_url_png_bytes() {
+    let loader = static_http_loader(std::iter::empty::<String>());
+    let mut vm =
+        new_storage_page_task_executor_test_vm_with_loader("https://canvas-to-blob.test/", &loader);
+    vm.eval(
+        r#"
+globalThis.toBlobResult = 'pending';
+(() => {
+  'use strict';
+  const canvas = document.createElement('canvas');
+  canvas.width = 17;
+  canvas.height = 9;
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#ff0000';
+  context.fillRect(2, 1, 5, 4);
+  const encoded = atob(canvas.toDataURL().split(',')[1]);
+  const zero = document.createElement('canvas');
+  zero.width = 0;
+  const nonCallable = (() => {
+    try { canvas.toBlob({}); return 'no throw'; } catch (error) { return error.name; }
+  })();
+  const calls = [];
+  zero.toBlob(blob => calls.push(['zero', blob]));
+  canvas.toBlob(async function (blob) {
+    calls.push(['canvas', this]);
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    toBlobResult = {
+      order: calls.map(([name]) => name),
+      zero: calls[0][1],
+      receiverUndefined: calls[1][1] === undefined,
+      isBlob: blob instanceof Blob,
+      type: blob.type,
+      size: blob.size,
+      encodedLength: encoded.length,
+      signature: Array.from(bytes.subarray(0, 8)),
+      matchesDataUrl: bytes.length === encoded.length
+        && bytes.every((byte, index) => byte === encoded.charCodeAt(index)),
+      nonCallable,
+      synchronous,
+    };
+  }, 'image/webp', 0.5);
+  const synchronous = calls.length;
+})();
+"#,
+    )
+    .expect("canvas toBlob setup should evaluate");
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(toBlobResult !== 'pending')",
+        "true",
+        "html_canvas_to_blob_queues_the_to_data_url_png_bytes",
+    )
+    .await;
+
+    let value: serde_json::Value = serde_json::from_str(
+        &vm.eval("JSON.stringify(toBlobResult)")
+            .expect("canvas toBlob result should serialize"),
+    )
+    .expect("canvas toBlob result should be valid json");
+    let encoded_length = value["encodedLength"]
+        .as_u64()
+        .expect("toDataURL decoded length");
+    assert!(encoded_length > 8, "toDataURL should encode a PNG file");
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "order": ["zero", "canvas"],
+            "zero": null,
+            "receiverUndefined": true,
+            "isBlob": true,
+            "type": "image/png",
+            "size": encoded_length,
+            "encodedLength": encoded_length,
+            "signature": [137, 80, 78, 71, 13, 10, 26, 10],
+            "matchesDataUrl": true,
+            "nonCallable": "TypeError",
+            "synchronous": 0,
+        })
+    );
+}
+
 #[test]
 fn html_canvas_fill_rect_mutates_pixels_and_export() {
     let mut vm = new_storage_test_vm("https://canvas-fill-rect.test/");
