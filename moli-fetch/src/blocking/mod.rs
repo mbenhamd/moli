@@ -451,7 +451,7 @@ fn append_fetch_metadata_headers(
     }
 }
 
-fn request_origin_header_value(request: &Request, request_url: &Url) -> Option<String> {
+pub(crate) fn request_origin_header_value(request: &Request, request_url: &Url) -> Option<String> {
     request.request_origin()?;
     if !matches!(request_url.scheme(), "http" | "https") {
         return None;

@@ -864,22 +864,60 @@ impl Request {
         if has_accept(&self.request_headers) {
             return;
         }
-        let kind = if self.is_navigation_request() {
-            crate::DefaultAcceptKind::Navigation
-        } else {
-            match self.browser_request_metadata {
-                Some(BrowserRequestMetadata::Image) => crate::DefaultAcceptKind::Image,
-                Some(BrowserRequestMetadata::EventSource) => crate::DefaultAcceptKind::EventSource,
-                Some(BrowserRequestMetadata::TextTrack) => crate::DefaultAcceptKind::TextTrack,
-                Some(BrowserRequestMetadata::TextModule) => crate::DefaultAcceptKind::TextModule,
-                Some(_) => crate::DefaultAcceptKind::Other,
-                None => return,
-            }
+        let Some(kind) = self.default_accept_kind() else {
+            return;
         };
         self.request_headers.push((
             "Accept".to_owned(),
             crate::default_accept_header(kind).as_bytes().to_vec(),
         ));
+    }
+
+    fn default_accept_kind(&self) -> Option<crate::DefaultAcceptKind> {
+        if self.is_navigation_request() {
+            return Some(crate::DefaultAcceptKind::Navigation);
+        }
+        Some(match self.browser_request_metadata? {
+            BrowserRequestMetadata::Image => crate::DefaultAcceptKind::Image,
+            BrowserRequestMetadata::EventSource => crate::DefaultAcceptKind::EventSource,
+            BrowserRequestMetadata::TextTrack => crate::DefaultAcceptKind::TextTrack,
+            BrowserRequestMetadata::TextModule => crate::DefaultAcceptKind::TextModule,
+            _ => crate::DefaultAcceptKind::Other,
+        })
+    }
+
+    /// The headers a CDP `Fetch.requestPaused` event reports for a request
+    /// paused before network admission: the explicit headers, then the
+    /// browser-selected Accept, Origin and Referer, as Chromium reports them.
+    ///
+    /// Clients depend on these: Playwright's `route.fulfill` adds the CORS
+    /// response headers only when the paused request carries `Origin`.
+    pub fn interception_request_headers(&self) -> crate::RequestHeaders {
+        let mut headers = self.request_headers.clone();
+        let present = |headers: &crate::RequestHeaders, name: &str| {
+            headers
+                .iter()
+                .any(|(header, _)| header.eq_ignore_ascii_case(name))
+        };
+        if !present(&headers, "accept")
+            && let Some(kind) = self.default_accept_kind()
+        {
+            headers.push((
+                "Accept".to_owned(),
+                crate::default_accept_header(kind).as_bytes().to_vec(),
+            ));
+        }
+        if !present(&headers, "origin")
+            && let Some(origin) = crate::blocking::request_origin_header_value(self, &self.url)
+        {
+            headers.push(("Origin".to_owned(), origin.into_bytes()));
+        }
+        if !present(&headers, "referer")
+            && let Some(referer) = self.referrer_header_value(&self.url)
+        {
+            headers.push(("Referer".to_owned(), referer.into_bytes()));
+        }
+        headers
     }
 
     pub fn with_browser_request_metadata(mut self, metadata: BrowserRequestMetadata) -> Self {

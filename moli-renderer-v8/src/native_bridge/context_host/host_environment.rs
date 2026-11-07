@@ -2778,6 +2778,9 @@ impl JsContextHost {
         let Some(source_document) = self.root_document_lifecycle_identity() else {
             return fetch.start();
         };
+        // The root frame is `None` here, as for every top-level subresource
+        // (`subresource_request_environment`); the protocol resolves it to the
+        // target's frame id when it emits `Fetch.requestPaused`.
         let info = crate::types::PendingSubresourceFetchInfo {
             internal_id: 0,
             network_request_handle: None,
@@ -2786,7 +2789,7 @@ impl JsContextHost {
             url: fetch.url().clone(),
             websocket_socket_id: None,
             method: "GET".to_owned(),
-            request_headers: Default::default(),
+            request_headers: fetch.interception_request_headers(),
             request_body: None,
             request_body_bytes: None,
             resource_type: SubresourceResourceType::Script,

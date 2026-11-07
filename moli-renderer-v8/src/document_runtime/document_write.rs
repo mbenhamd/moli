@@ -2445,13 +2445,12 @@ impl DocumentRuntime {
             record_document_write_modulepreload_warning(scope, host_ptr, runtime_warning);
         }
         for request in requests {
-            match self.start_main_document_modulepreload_fetch(
-                document_owner,
-                unsafe { &*host_ptr },
-                request,
-            ) {
+            match self.start_main_document_modulepreload_fetch(document_owner, request) {
                 Ok(outcome) => {
-                    let (_, csp_violations, runtime_warning) = outcome.into_parts();
+                    // The host is borrowed only to start the reserved fetch,
+                    // not across the `DocumentRuntime` call above.
+                    let (_, csp_violations, runtime_warning) =
+                        outcome.into_parts(unsafe { &*host_ptr });
                     for violation in csp_violations {
                         self.queue_content_security_policy_violation_event_best_effort(
                             scope, host_ptr, &violation,
