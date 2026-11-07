@@ -53,7 +53,7 @@ async fn computed_size_display_transitions_follow_the_sampled_box() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn computed_size_viewport_change_updates_style_but_not_sampled_geometry() {
+async fn computed_size_viewport_change_retires_sampled_geometry_without_layout() {
     run_page_vm_async_test(async move {
         let mut page = page_with_size_fixture(
             r#"<style>#target{width:20vw;height:10vh;color:red}
@@ -67,8 +67,8 @@ async fn computed_size_viewport_change_updates_style_but_not_sampled_geometry() 
         assert_eq!(page.vm().layout_pass_observability_for_test().1, passes);
         assert_eq!(read_without_layout(&mut page,
             "(() => {const s=getComputedStyle(document.getElementById('target'));return [s.width,s.height,s.color]})()")?,
-            json!(["64px","24px","rgb(0, 128, 0)"]),
-            "media style is live while ordinary geometry still belongs to the old viewport");
+            json!(["128px","48px","rgb(0, 128, 0)"]),
+            "a resize retires the old viewport's sample; CSSOM resolves against the new viewport");
         publish_size_layout_at(&mut page, 640, 480)?;
         assert_eq!(read_sizes(&mut page, &["target"])?, json!({"target":["128px","48px"]}));
         Ok::<_, anyhow::Error>(())
