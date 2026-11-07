@@ -7,7 +7,6 @@ use crate::modulepreload::{
     invalid_modulepreload_as_warning, modulepreload_fetch_candidate, modulepreload_href,
     resolve_parser_network_resource_url,
 };
-use crate::renderer_resource_scheduler::RendererResourceScheduler;
 
 /// Result of synchronously registering one main-Document modulepreload and, when
 /// this call wins the module-map fetch reservation, starting its network fetch.
@@ -114,7 +113,7 @@ impl DocumentRuntime {
     pub(crate) fn start_main_document_modulepreload_fetch(
         &mut self,
         document_owner: crate::frame_owner_model::FrameDocumentTaskOwner,
-        resource_scheduler: &RendererResourceScheduler,
+        host: &crate::native_bridge::JsContextHost,
         request: NativeModuleSingleFetchRequest,
     ) -> std::result::Result<MainDocumentModulepreloadFetchOutcome, ModuleLoadError> {
         let start = self.fetch_single_native_module_for_modulepreload(request)?;
@@ -125,11 +124,7 @@ impl DocumentRuntime {
                 runtime_warning: None,
             });
         };
-        self.schedule_reserved_main_document_modulepreload_fetch(
-            document_owner,
-            resource_scheduler,
-            request,
-        )
+        self.schedule_reserved_main_document_modulepreload_fetch(document_owner, host, request)
     }
 
     /// Schedules a fetch whose module-map entry was already reserved by a
@@ -137,7 +132,7 @@ impl DocumentRuntime {
     pub(crate) fn schedule_reserved_main_document_modulepreload_fetch(
         &mut self,
         document_owner: crate::frame_owner_model::FrameDocumentTaskOwner,
-        resource_scheduler: &RendererResourceScheduler,
+        host: &crate::native_bridge::JsContextHost,
         mut request: NativeModuleSingleFetchRequest,
     ) -> std::result::Result<MainDocumentModulepreloadFetchOutcome, ModuleLoadError> {
         let document_url = self.document_url().clone();
@@ -161,7 +156,8 @@ impl DocumentRuntime {
         let loader = self
             .current_document_resource_loader()
             .expect("main modulepreload requires the committed Document resource authority");
-        resource_scheduler.schedule_main_modulepreload_fetch(
+        host.resource_scheduler().schedule_main_modulepreload_fetch(
+            host,
             loader,
             crate::page_resource_completion::MainModulepreloadFetchTarget::new(
                 document_owner,

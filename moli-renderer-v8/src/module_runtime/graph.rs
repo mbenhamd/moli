@@ -394,6 +394,7 @@ impl NativeModuleGraphFetchRequest {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn fetch_source_callback_with_load<F>(
         &self,
         loader: &ResourceRequestClient,
@@ -408,7 +409,8 @@ impl NativeModuleGraphFetchRequest {
             ) + Send
             + 'static,
     {
-        self.fetch_source_callback_inner(loader, load, request_origin, callback)
+        self.prepare_source_fetch(loader, load, request_origin, callback)?
+            .start()
     }
 
     pub(crate) fn fetch_source_for_document<F>(
@@ -416,6 +418,24 @@ impl NativeModuleGraphFetchRequest {
         loader: &crate::network::context::DocumentResourceLoader,
         callback: F,
     ) -> anyhow::Result<()>
+    where
+        F: FnOnce(
+                std::result::Result<ModuleGraphFetchedSource, String>,
+                Option<SharedNavigationResponseResult>,
+            ) + Send
+            + 'static,
+    {
+        self.prepare_source_fetch_for_document(loader, callback)?
+            .start()
+    }
+
+    /// Builds the Document-owned module source request without starting it,
+    /// so CDP Fetch interception can pause it before the network sees it.
+    pub(crate) fn prepare_source_fetch_for_document<F>(
+        &self,
+        loader: &crate::network::context::DocumentResourceLoader,
+        callback: F,
+    ) -> anyhow::Result<PreparedModuleSourceFetch>
     where
         F: FnOnce(
                 std::result::Result<ModuleGraphFetchedSource, String>,
@@ -431,7 +451,7 @@ impl NativeModuleGraphFetchRequest {
             )
             .ok_or_else(|| anyhow::anyhow!("Document detached before module fetch registration"))?;
         let request_client = load.request_client();
-        self.fetch_source_callback_with_load(
+        self.prepare_source_fetch(
             &request_client,
             load,
             loader.fetch_context().request_origin(),
@@ -439,13 +459,13 @@ impl NativeModuleGraphFetchRequest {
         )
     }
 
-    fn fetch_source_callback_inner<F>(
+    fn prepare_source_fetch<F>(
         &self,
         loader: &ResourceRequestClient,
         load: crate::network::loads::ResourceLoadLease,
         request_origin: moli_url::WebOrigin,
         callback: F,
-    ) -> anyhow::Result<()>
+    ) -> anyhow::Result<PreparedModuleSourceFetch>
     where
         F: FnOnce(
                 std::result::Result<ModuleGraphFetchedSource, String>,
@@ -565,7 +585,114 @@ impl NativeModuleGraphFetchRequest {
             }
             callback(result, network_result);
         };
-        loader.fetch_cacheable_script_text_callback_with_load(request, load, completion)
+        Ok(PreparedModuleSourceFetch {
+            request,
+            request_client: loader.clone(),
+            load,
+            completion: Box::new(completion),
+        })
+    }
+}
+
+type ModuleSourceResponseCompletion =
+    Box<dyn FnOnce(anyhow::Result<moli_fetch::Response>) + Send + 'static>;
+
+/// One module source request whose network start is separate from its
+/// response conversion.
+///
+/// Network and `Fetch.fulfillRequest` responses run through the same
+/// completion (status, MIME, CORS and integrity checks), so an intercepted
+/// module is validated exactly like a fetched one, as in Chromium.
+pub(crate) struct PreparedModuleSourceFetch {
+    request: Request,
+    request_client: ResourceRequestClient,
+    load: crate::network::loads::ResourceLoadLease,
+    completion: ModuleSourceResponseCompletion,
+}
+
+impl std::fmt::Debug for PreparedModuleSourceFetch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedModuleSourceFetch")
+            .field("url", &self.request.url.as_str())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedModuleSourceFetch {
+    pub(crate) fn url(&self) -> &Url {
+        &self.request.url
+    }
+
+    /// Starts the network fetch. A request rejected before it reaches the
+    /// network returns an error and its completion does not run.
+    pub(crate) fn start(self) -> anyhow::Result<()> {
+        self.request_client
+            .fetch_cacheable_script_text_callback_with_load(
+                self.request,
+                self.load,
+                self.completion,
+            )
+    }
+
+    /// Starts the network fetch after `Fetch.continueRequest`, optionally at a
+    /// rewritten URL. A start failure is delivered to the completion because
+    /// no scheduler is waiting on a synchronous result any more.
+    pub(crate) fn continue_request(mut self, url: Option<Url>) {
+        if let Some(url) = url {
+            self.request.url = url;
+        }
+        let slot = std::sync::Arc::new(parking_lot::Mutex::new(Some(self.completion)));
+        let network_slot = slot.clone();
+        let started = self
+            .request_client
+            .fetch_cacheable_script_text_callback_with_load(
+                self.request,
+                self.load.clone(),
+                move |response| {
+                    if let Some(completion) = network_slot.lock().take() {
+                        completion(response);
+                    }
+                },
+            );
+        if let Err(error) = started {
+            self.load.finish();
+            if let Some(completion) = slot.lock().take() {
+                completion(Err(error));
+            }
+        }
+    }
+
+    /// Completes the request with a `Fetch.fulfillRequest` response.
+    pub(crate) fn fulfill(
+        self,
+        response_code: u16,
+        response_headers: Vec<(String, Vec<u8>)>,
+        response_body: Vec<u8>,
+    ) {
+        let head = moli_fetch::ResponseHead {
+            final_url: self.request.url.clone(),
+            status: response_code,
+            status_text: None,
+            headers: response_headers,
+            request_cookie_report: None,
+            cookie_set_reports: Vec::new(),
+            redirected: false,
+            redirect_chain: Vec::new(),
+            from_cache: false,
+            cache_state: Default::default(),
+            negotiated_http_version: None,
+        };
+        self.load.finish();
+        (self.completion)(Ok(moli_fetch::Response::from_head_and_lossy_body_bytes(
+            head,
+            response_body,
+        )));
+    }
+
+    /// Completes the request with a `Fetch.failRequest` network error.
+    pub(crate) fn fail(self, error_text: String) {
+        self.load.finish();
+        (self.completion)(Err(anyhow::anyhow!(error_text)));
     }
 }
 

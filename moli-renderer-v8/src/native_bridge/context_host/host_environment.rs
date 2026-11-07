@@ -2756,6 +2756,56 @@ impl JsContextHost {
                 .is_none_or(|expected| expected.has_same_cdp_fetch_interception_type(resource_type))
     }
 
+    /// Starts one main-Document module graph fetch, or pauses it for CDP
+    /// `Fetch` interception the way a parser-blocking classic script is.
+    ///
+    /// Module scripts, static and dynamic imports and modulepreloads are
+    /// `Script` requests in Chromium, so a `Fetch.enable` pattern for them
+    /// must observe and be able to fulfill each one before the network does.
+    pub(crate) fn start_main_module_source_fetch(
+        &self,
+        loader: &DocumentResourceLoader,
+        fetch: crate::module_runtime::PreparedModuleSourceFetch,
+    ) -> anyhow::Result<()> {
+        if !matches!(fetch.url().scheme(), "http" | "https")
+            || !self.should_intercept_subresource(SubresourceResourceType::Script)
+        {
+            return fetch.start();
+        }
+        let Some(source_document) = self.root_document_lifecycle_identity() else {
+            return fetch.start();
+        };
+        let info = crate::types::PendingSubresourceFetchInfo {
+            internal_id: 0,
+            network_request_handle: None,
+            frame_id: None,
+            document_url: loader.fetch_context().document_url().clone(),
+            url: fetch.url().clone(),
+            websocket_socket_id: None,
+            method: "GET".to_owned(),
+            request_headers: Default::default(),
+            request_body: None,
+            request_body_bytes: None,
+            resource_type: SubresourceResourceType::Script,
+            request_cookie_report: None,
+        };
+        let (info, continuation) = self
+            .browser_context_runtime
+            .prepare_detached_module_script_fetch(info, fetch);
+        let appended = self.append_live_turn_owner_action(
+            crate::runtime::RendererOwnerAction::DetachedParserScriptFetchPause {
+                source_document,
+                info: Box::new(info),
+                continuation: continuation.clone(),
+            },
+        );
+        if !appended {
+            // Standalone fixtures without an output sink cannot pause.
+            continuation.continue_request(None);
+        }
+        Ok(())
+    }
+
     pub(crate) fn fetch_subresource_interception_enabled(&self) -> bool {
         self.fetch_subresource_interception_enabled
     }

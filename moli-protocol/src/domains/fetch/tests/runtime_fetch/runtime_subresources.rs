@@ -2711,3 +2711,108 @@ async fn runtime_fetch_subresource_fulfill_request_preserves_binary_body() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn module_script_static_import_pauses_as_script_and_uses_fulfilled_source() {
+    async fn page() -> impl IntoResponse {
+        (
+            [(CONTENT_TYPE.as_str(), "text/html")],
+            "<!doctype html><html><body>ready</body></html>",
+        )
+    }
+
+    async fn module() -> impl IntoResponse {
+        (
+            [(CONTENT_TYPE.as_str(), "text/javascript")],
+            "export const v = 'REAL';",
+        )
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/page", get(page))
+                .route("/m.js", get(module)),
+        )
+        .await
+        .unwrap();
+    });
+
+    let page_url = format!("http://{addr}/page");
+    let module_url = format!("http://{addr}/m.js");
+    let mut ctx = TestContext::new();
+    with_loaded_http_document(&mut ctx, &page_url, "SID-1", "TID-1").await;
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 380,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    ctx.expect_result(380, json!({}), Some("SID-1"));
+    enable_runtime_async(&mut ctx, "SID-1", 403).await;
+
+    // A static import in an inserted module script, the shape Vitest browser
+    // mode relies on for `vi.mock`: Chromium pauses it as a `Script` request.
+    ctx.process_async(json!({
+        "id": 381,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-1",
+        "params": {
+            "expression": r#"(() => {
+  globalThis.__lm_module_value = "pending";
+  const script = document.createElement("script");
+  script.type = "module";
+  script.textContent = "import { v } from '/m.js'; globalThis.__lm_module_value = v;";
+  document.body.append(script);
+  return "scheduled";
+})()"#
+        }
+    }))
+    .await;
+    let _ = take_response_by_id(&mut ctx, 381);
+
+    let paused = wait_for_request_paused_on_session(
+        &mut ctx,
+        "SID-1",
+        &module_url,
+        Some("Script"),
+        "module script requestPaused event",
+    )
+    .await;
+    let request_id = paused["params"]["requestId"]
+        .as_str()
+        .expect("module script request id")
+        .to_owned();
+    assert_eq!(paused["params"]["request"]["method"], "GET");
+
+    ctx.process_async(json!({
+        "id": 382,
+        "method": "Fetch.fulfillRequest",
+        "sessionId": "SID-1",
+        "params": {
+            "requestId": request_id,
+            "responseCode": 200,
+            "responseHeaders": [{ "name": "content-type", "value": "text/javascript" }],
+            "body": "ZXhwb3J0IGNvbnN0IHYgPSAnTU9DS0VEJzs="
+        }
+    }))
+    .await;
+    ctx.expect_result(382, json!({}), Some("SID-1"));
+
+    evaluate_until_value_async(
+        &mut ctx,
+        "SID-1",
+        383,
+        "globalThis.__lm_module_value",
+        &json!("MOCKED"),
+        "fulfilled module source",
+    )
+    .await;
+
+    server.abort();
+}

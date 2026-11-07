@@ -2420,7 +2420,7 @@ impl DocumentRuntime {
         if link_handles.is_empty() {
             return;
         }
-        let (document_owner, resource_scheduler) = unsafe {
+        let document_owner = unsafe {
             let host = &*host_ptr;
             let Some(document_owner) = host.current_main_document_task_owner() else {
                 tracing::error!(
@@ -2435,7 +2435,7 @@ impl DocumentRuntime {
                 );
                 return;
             }
-            (document_owner, host.resource_scheduler())
+            document_owner
         };
 
         let (requests, runtime_warnings, _) = self
@@ -2447,7 +2447,7 @@ impl DocumentRuntime {
         for request in requests {
             match self.start_main_document_modulepreload_fetch(
                 document_owner,
-                &resource_scheduler,
+                unsafe { &*host_ptr },
                 request,
             ) {
                 Ok(outcome) => {

@@ -72,7 +72,8 @@ pub(crate) use graph::{
     ModuleGraphHandle, ModuleScriptGraphAdvance, ModuleScriptGraphFetchBatch,
     ModuleScriptGraphFetchContinuation, NativeDynamicModuleImportReady,
     NativeModuleGraphFetchRequest, NativeModuleGraphJob, NativeModuleGraphJobAdvance,
-    advance_module_script_graph, module_script_graph_advance_from_native, next_inline_module_url,
+    PreparedModuleSourceFetch, advance_module_script_graph,
+    module_script_graph_advance_from_native, next_inline_module_url,
     parser_owned_loaded_module_script_graph_job, runtime_owned_external_module_script_graph_job,
     runtime_owned_loaded_module_script_graph_job,
 };

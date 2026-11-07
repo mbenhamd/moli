@@ -126,12 +126,14 @@ impl RendererResourceScheduler {
 
     pub(crate) fn schedule_main_parser_module_graph_fetch(
         &self,
+        host: &crate::native_bridge::JsContextHost,
         loader: DocumentResourceLoader,
         target: MainParserModuleGraphFetchTarget,
         request: NativeModuleGraphFetchRequest,
         document_url: url::Url,
     ) {
         self.schedule_main_module_fetch(
+            host,
             loader,
             MainModuleFetchSchedule::Parser(target),
             request,
@@ -141,12 +143,14 @@ impl RendererResourceScheduler {
 
     pub(crate) fn schedule_main_runtime_module_graph_fetch(
         &self,
+        host: &crate::native_bridge::JsContextHost,
         loader: DocumentResourceLoader,
         target: MainRuntimeModuleGraphFetchTarget,
         request: NativeModuleGraphFetchRequest,
         document_url: url::Url,
     ) {
         self.schedule_main_module_fetch(
+            host,
             loader,
             MainModuleFetchSchedule::Runtime(target),
             request,
@@ -156,12 +160,14 @@ impl RendererResourceScheduler {
 
     pub(crate) fn schedule_main_modulepreload_fetch(
         &self,
+        host: &crate::native_bridge::JsContextHost,
         loader: DocumentResourceLoader,
         target: MainModulepreloadFetchTarget,
         request: NativeModuleGraphFetchRequest,
         document_url: url::Url,
     ) {
         self.schedule_main_module_fetch(
+            host,
             loader,
             MainModuleFetchSchedule::Modulepreload(target),
             request,
@@ -171,12 +177,14 @@ impl RendererResourceScheduler {
 
     pub(crate) fn schedule_main_dynamic_import_graph_fetch(
         &self,
+        host: &crate::native_bridge::JsContextHost,
         loader: DocumentResourceLoader,
         target: MainDynamicImportGraphFetchTarget,
         request: NativeModuleGraphFetchRequest,
         document_url: url::Url,
     ) {
         self.schedule_main_module_fetch(
+            host,
             loader,
             MainModuleFetchSchedule::DynamicImport(target),
             request,
@@ -186,6 +194,7 @@ impl RendererResourceScheduler {
 
     fn schedule_main_module_fetch(
         &self,
+        host: &crate::native_bridge::JsContextHost,
         loader: DocumentResourceLoader,
         schedule: MainModuleFetchSchedule,
         request: NativeModuleGraphFetchRequest,
@@ -219,7 +228,10 @@ impl RendererResourceScheduler {
                     callback_attribution,
                 );
             };
-        if let Err(error) = request.fetch_source_for_document(&loader, send_completion) {
+        let started = request
+            .prepare_source_fetch_for_document(&loader, send_completion)
+            .and_then(|fetch| host.start_main_module_source_fetch(&loader, fetch));
+        if let Err(error) = started {
             let error = error.to_string();
             trace_module_graph_fetch_schedule_error(
                 schedule.load_id(),
