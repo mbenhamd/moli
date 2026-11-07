@@ -12,23 +12,47 @@ use crate::modulepreload::{
 /// this call wins the module-map fetch reservation, starting its network fetch.
 ///
 /// CSP events are returned to the caller because only the V8 entry that owns the
-/// current scope may enqueue DOM events. The module-map reservation and resource
-/// scheduling themselves are completed before this value is returned.
-#[must_use = "CSP violations and the observable job result must be consumed"]
+/// current scope may enqueue DOM events. The module-map reservation is
+/// completed before this value is returned; the resource fetch starts when the
+/// caller consumes it with the page's `JsContextHost`, which may pause it for
+/// CDP `Fetch` interception. Keeping the host out of the `DocumentRuntime`
+/// borrow lets callers that reach the host through a raw pointer hold it only
+/// for that start.
+#[must_use = "the reserved fetch, CSP violations and the job result must be consumed"]
 pub(crate) struct MainDocumentModulepreloadFetchOutcome {
     job_run: Option<ModulePreloadJobRun>,
     csp_violations: Vec<DocumentContentSecurityPolicyViolation>,
     runtime_warning: Option<String>,
+    fetch: Option<MainDocumentModulepreloadFetch>,
+}
+
+/// A reserved main-Document modulepreload fetch that has not started yet.
+struct MainDocumentModulepreloadFetch {
+    loader: crate::network::context::DocumentResourceLoader,
+    target: crate::page_resource_completion::MainModulepreloadFetchTarget,
+    request: crate::module_runtime::NativeModuleGraphFetchRequest,
+    document_url: Url,
 }
 
 impl MainDocumentModulepreloadFetchOutcome {
+    /// Starts the reserved fetch, if any, and returns the observable parts.
     pub(crate) fn into_parts(
         self,
+        host: &crate::native_bridge::JsContextHost,
     ) -> (
         Option<ModulePreloadJobRun>,
         Vec<DocumentContentSecurityPolicyViolation>,
         Option<String>,
     ) {
+        if let Some(fetch) = self.fetch {
+            host.resource_scheduler().schedule_main_modulepreload_fetch(
+                host,
+                fetch.loader,
+                fetch.target,
+                fetch.request,
+                fetch.document_url,
+            );
+        }
         (self.job_run, self.csp_violations, self.runtime_warning)
     }
 }
@@ -113,7 +137,6 @@ impl DocumentRuntime {
     pub(crate) fn start_main_document_modulepreload_fetch(
         &mut self,
         document_owner: crate::frame_owner_model::FrameDocumentTaskOwner,
-        host: &crate::native_bridge::JsContextHost,
         request: NativeModuleSingleFetchRequest,
     ) -> std::result::Result<MainDocumentModulepreloadFetchOutcome, ModuleLoadError> {
         let start = self.fetch_single_native_module_for_modulepreload(request)?;
@@ -122,9 +145,10 @@ impl DocumentRuntime {
                 job_run: None,
                 csp_violations: Vec::new(),
                 runtime_warning: None,
+                fetch: None,
             });
         };
-        self.schedule_reserved_main_document_modulepreload_fetch(document_owner, host, request)
+        self.schedule_reserved_main_document_modulepreload_fetch(document_owner, request)
     }
 
     /// Schedules a fetch whose module-map entry was already reserved by a
@@ -132,7 +156,6 @@ impl DocumentRuntime {
     pub(crate) fn schedule_reserved_main_document_modulepreload_fetch(
         &mut self,
         document_owner: crate::frame_owner_model::FrameDocumentTaskOwner,
-        host: &crate::native_bridge::JsContextHost,
         mut request: NativeModuleSingleFetchRequest,
     ) -> std::result::Result<MainDocumentModulepreloadFetchOutcome, ModuleLoadError> {
         let document_url = self.document_url().clone();
@@ -148,6 +171,7 @@ impl DocumentRuntime {
                 job_run: Some(ModulePreloadJobRun::CompletedSynchronously),
                 csp_violations,
                 runtime_warning: Some(format!("native modulepreload failed: {}", error.message())),
+                fetch: None,
             });
         }
         request.set_csp_context(csp_context);
@@ -156,20 +180,19 @@ impl DocumentRuntime {
         let loader = self
             .current_document_resource_loader()
             .expect("main modulepreload requires the committed Document resource authority");
-        host.resource_scheduler().schedule_main_modulepreload_fetch(
-            host,
-            loader,
-            crate::page_resource_completion::MainModulepreloadFetchTarget::new(
-                document_owner,
-                load_id,
-            ),
-            fetch_request,
-            document_url,
-        );
         Ok(MainDocumentModulepreloadFetchOutcome {
             job_run: Some(ModulePreloadJobRun::Scheduled),
             csp_violations,
             runtime_warning: None,
+            fetch: Some(MainDocumentModulepreloadFetch {
+                loader,
+                target: crate::page_resource_completion::MainModulepreloadFetchTarget::new(
+                    document_owner,
+                    load_id,
+                ),
+                request: fetch_request,
+                document_url,
+            }),
         })
     }
 }

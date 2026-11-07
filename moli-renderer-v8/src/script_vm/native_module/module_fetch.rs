@@ -239,11 +239,7 @@ impl ScriptVm {
         })?;
         let outcome = self
             .document_runtime
-            .start_main_document_modulepreload_fetch(
-                document_owner,
-                &self._context_host.borrow(),
-                request,
-            )
+            .start_main_document_modulepreload_fetch(document_owner, request)
             .map_err(|error| error.message().to_owned())?;
         Ok(self.consume_main_document_modulepreload_fetch_outcome(outcome))
     }
@@ -302,11 +298,7 @@ impl ScriptVm {
         })?;
         let outcome = self
             .document_runtime
-            .schedule_reserved_main_document_modulepreload_fetch(
-                document_owner,
-                &self._context_host.borrow(),
-                request,
-            )
+            .schedule_reserved_main_document_modulepreload_fetch(document_owner, request)
             .map_err(|error| error.message().to_owned())?;
         Ok(self.consume_main_document_modulepreload_fetch_outcome(outcome))
     }
@@ -336,7 +328,8 @@ impl ScriptVm {
         &mut self,
         outcome: crate::document_runtime::MainDocumentModulepreloadFetchOutcome,
     ) -> Option<crate::module_runtime::ModulePreloadJobRun> {
-        let (job_run, csp_violations, runtime_warning) = outcome.into_parts();
+        let (job_run, csp_violations, runtime_warning) =
+            outcome.into_parts(&self._context_host.borrow());
         for violation in csp_violations {
             self.queue_content_security_policy_violation_event_best_effort(&violation);
         }
