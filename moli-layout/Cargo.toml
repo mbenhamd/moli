@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
+[features]
+# Exposes the incremental-layout differential check to other crates' tests.
+test-support = []
+
 [dependencies]
 brotlic = "0.8.2"
 euclid = "=0.22.14"

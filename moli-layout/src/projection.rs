@@ -264,9 +264,12 @@ where
         for (source, box_id) in &world.source_mapping {
             principal_sources[box_id.index()] = Some(*source);
         }
-        let scroll_proxy_links = world
-            .display_contents_mapping
-            .iter()
+        // The mapping is a hash map; order its sources by their first box so
+        // the projected vector is the same on every pass for the same tree.
+        let mut proxy_sources: Vec<_> = world.display_contents_mapping.iter().collect();
+        proxy_sources.sort_by_key(|(_, boxes)| boxes.first().map(|id| id.index()));
+        let scroll_proxy_links = proxy_sources
+            .into_iter()
             .flat_map(|(source, boxes)| {
                 boxes
                     .iter()

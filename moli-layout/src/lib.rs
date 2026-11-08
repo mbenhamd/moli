@@ -74,11 +74,11 @@ pub use normalize_source::{
 pub use pass::{
     EmbeddedFrameRenderer, EmbeddedFrameSnapshot, LayoutPassRequest, ScreenshotLayoutRequest,
     build_layout_pass, build_layout_pass_with_embedded_frames, build_screenshot_snapshot,
-    set_incremental_layout_verify_for_test,
 };
+#[cfg(feature = "test-support")]
 pub use retention::{
     incremental_numeric_reused_total, incremental_verify_comparison_count,
-    incremental_verify_mismatch_count,
+    incremental_verify_mismatch_count, set_incremental_layout_verify_for_test,
 };
 pub use scrollbar::{
     LayoutControlSurfaceHit, LayoutScrollbarAxis, LayoutScrollbarColors, LayoutScrollbarCornerHit,

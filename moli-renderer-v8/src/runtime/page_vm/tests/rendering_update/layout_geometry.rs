@@ -1491,50 +1491,136 @@ const INCREMENTAL_DIFFERENTIAL_MUTATIONS: &[&str] = &[
     "void 0;",
 ];
 
+/// Main-document numeric reuse is disabled while any float exists, so this
+/// fixture has none and no embedded frame: every reused box counted here
+/// belongs to the main document.
+const INCREMENTAL_FLOAT_FREE_FIXTURE: &str = r#"
+document.head.innerHTML = `<style>
+html{overflow:visible}body{margin:0;overflow:hidden}
+#lead{margin-top:30px;height:5px}
+.row{padding:2px}
+#fx{display:flex;width:300px}#fx>*{flex:1 1 auto}
+#gd{display:grid;grid-template-columns:auto 1fr;width:400px}
+#tb{border-collapse:collapse}td{padding:1px}
+#pw{width:200px}#pw>div{width:50%;padding-left:10%;height:10px}
+#sc{height:60px;overflow:auto;width:200px}
+#cq{container-type:inline-size;width:320px}.in{height:7px}
+@container (min-width:300px){.in{height:21px}}
+</style>`;
+document.body.innerHTML = `
+<div id=lead></div>
+<div id=rows></div>
+<div id=fx><span id=fxa>aa</span><span>bbb</span></div>
+<div id=gd><i id=gc>cell</i><b>two</b></div>
+<table id=tb><tr><td id=td1>t</td><td>u</td></tr></table>
+<div id=pw><div id=pwc></div></div>
+<div id=sc><div id=scx style="height:20px"></div></div>
+<div id=cq><div class=in></div></div>
+<input id=in1 value=abc><textarea id=ta1>x</textarea>
+<div id=host2></div>
+`;
+const r = document.getElementById('rows');
+for (let i = 0; i < 40; i++) {
+  const d = document.createElement('div'); d.className = 'row'; d.id = 'q' + i;
+  d.innerHTML = '<span>row</span><b> ' + i + '</b>'; r.appendChild(d);
+}
+const host = document.getElementById('host2');
+const root = host.attachShadow({mode:'open'});
+root.innerHTML = '<div id=sa><slot name=a></slot></div><div id=sb><slot name=b></slot></div>';
+host.innerHTML = '<span slot=a id=sla>first</span><span slot=b id=slb>second</span>';
+void document.body.offsetHeight; 'installed'
+"#;
+
+const INCREMENTAL_FLOAT_FREE_MUTATIONS: &[&str] = &[
+    "document.getElementById('q7').firstChild.textContent = 'changed text that is longer';",
+    "document.getElementById('fxa').textContent='a much longer flex item';",
+    "document.getElementById('gc').textContent='a longer grid auto track';",
+    "document.getElementById('td1').textContent='widen this table column please';",
+    "document.getElementById('pw').style.width='350px';",
+    "document.getElementById('scx').style.height='600px';",
+    "document.getElementById('scx').style.height='10px';",
+    "document.getElementById('cq').style.width='200px';",
+    "document.getElementById('cq').style.width='320px';",
+    "document.getElementById('cq').style.containerType='normal';",
+    "document.getElementById('cq').style.containerType='';",
+    "document.getElementById('in1').value='changed input value';",
+    "document.getElementById('ta1').value='two\\nlines';",
+    "document.getElementById('sla').textContent='first slotted text grows';",
+    "document.getElementById('slb').slot='a';",
+    "document.getElementById('slb').slot='b';",
+    // The viewport-defining body moves between body and root.
+    "document.documentElement.style.overflow='hidden';",
+    "document.documentElement.style.overflow='';",
+    "document.body.style.overflow='visible';",
+    "document.body.style.overflow='';",
+    "document.getElementById('q9').style.color='red';",
+];
+
+/// Drives `mutations` (then three viewport resizes) with the differential
+/// check on, failing on the first geometry that differs from a full rebuild.
+/// Returns how many boxes had numeric results reused.
+fn run_incremental_differential(fixture: &str, mutations: &[&str]) -> anyhow::Result<u64> {
+    moli_layout::set_incremental_layout_verify_for_test(true);
+    let result = (|| {
+        let mut page_vm = live_geometry_page(fixture)?;
+        let boxes = page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
+        let mismatches = moli_layout::incremental_verify_mismatch_count();
+        let compared = moli_layout::incremental_verify_comparison_count();
+        let reused = moli_layout::incremental_numeric_reused_total();
+        for mutation in mutations {
+            page_vm.vm_mut().eval(&format!("{mutation} 'ok'"))?;
+            let read = page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
+            assert_ne!(read, "0", "read after {mutation}");
+            assert_eq!(
+                moli_layout::incremental_verify_mismatch_count(),
+                mismatches,
+                "geometry differs from a full rebuild after: {mutation}"
+            );
+        }
+        // Viewport resize, growing then shrinking.
+        for width in [640, 1100, 800] {
+            page_vm.set_viewport_surface(Some(live_viewport(width, 0)))?;
+            page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
+            assert_eq!(
+                moli_layout::incremental_verify_mismatch_count(),
+                mismatches,
+                "geometry differs from a full rebuild after resize to {width}"
+            );
+        }
+        assert!(
+            moli_layout::incremental_verify_comparison_count() > compared,
+            "the differential check never compared an incremental pass (boxes read: {boxes})"
+        );
+        Ok(moli_layout::incremental_numeric_reused_total() - reused)
+    })();
+    moli_layout::set_incremental_layout_verify_for_test(false);
+    result
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn live_incremental_layout_matches_a_full_rebuild_across_mutations() {
     run_page_vm_async_test(async move {
-        moli_layout::set_incremental_layout_verify_for_test(true);
-        let result = async {
-            let mut page_vm = live_geometry_page(INCREMENTAL_DIFFERENTIAL_FIXTURE)?;
-            let boxes = page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
-            let mismatches = moli_layout::incremental_verify_mismatch_count();
-            let compared = moli_layout::incremental_verify_comparison_count();
-            let reused = moli_layout::incremental_numeric_reused_total();
-            for mutation in INCREMENTAL_DIFFERENTIAL_MUTATIONS {
-                page_vm.vm_mut().eval(&format!("{mutation} 'ok'"))?;
-                let read = page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
-                assert_ne!(read, "0", "read after {mutation}");
-                assert_eq!(
-                    moli_layout::incremental_verify_mismatch_count(),
-                    mismatches,
-                    "geometry differs from a full rebuild after: {mutation}"
-                );
-            }
-            // Viewport resize, growing then shrinking.
-            for width in [640, 1100, 800] {
-                page_vm.set_viewport_surface(Some(live_viewport(width, 0)))?;
-                page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
-                assert_eq!(
-                    moli_layout::incremental_verify_mismatch_count(),
-                    mismatches,
-                    "geometry differs from a full rebuild after resize to {width}"
-                );
-            }
-            assert!(
-                moli_layout::incremental_verify_comparison_count() > compared,
-                "the differential check never compared an incremental pass (boxes read: {boxes})"
-            );
-            assert!(
-                moli_layout::incremental_numeric_reused_total() > reused,
-                "no numeric results were reused"
-            );
-            Ok::<_, anyhow::Error>(())
-        }
-        .await;
-        moli_layout::set_incremental_layout_verify_for_test(false);
-        result
+        let reused = run_incremental_differential(
+            INCREMENTAL_DIFFERENTIAL_FIXTURE,
+            INCREMENTAL_DIFFERENTIAL_MUTATIONS,
+        )?;
+        assert!(reused > 0, "no numeric results were reused");
+        Ok::<_, anyhow::Error>(())
     })
     .await
     .expect("incremental differential fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_incremental_layout_reuses_main_document_numeric_results_exactly() {
+    run_page_vm_async_test(async move {
+        let reused = run_incremental_differential(
+            INCREMENTAL_FLOAT_FREE_FIXTURE,
+            INCREMENTAL_FLOAT_FREE_MUTATIONS,
+        )?;
+        assert!(reused > 0, "the main document reused no numeric results");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("float-free incremental differential fixture should run");
 }

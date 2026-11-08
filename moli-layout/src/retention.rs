@@ -13,11 +13,7 @@
 //! shape. Any structural difference, or any other doubt, falls back to the
 //! ordinary full pass.
 
-use std::{
-    fmt::Debug,
-    hash::Hash,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{cell::Cell, fmt::Debug, hash::Hash};
 
 use taffy::Layout;
 
@@ -37,6 +33,9 @@ where
     pub(crate) structural_len: usize,
     pub(crate) viewport: LayoutViewport,
     pub(crate) environment: LayoutEnvironment,
+    /// Viewport scroll policy as the builder produced it, before numeric
+    /// preparation revealed scrollbars or rewrote the root and defining body.
+    pub(crate) viewport_policy: crate::world::ViewportScrollPolicy,
 }
 
 /// Which boxes in a fresh world may take products from a retained world.
@@ -119,6 +118,19 @@ where
             && a.scroll_offset == b.scroll_offset
             && replaced_inputs_equal(a.replaced_context, b.replaced_context)
             && !old_box_has_revealed_scrollbars(b);
+    }
+    // Numeric preparation rewrites the root's and the viewport-defining
+    // body's Taffy overflow in place from this policy, without a new
+    // computed-style Arc. When the policy moved, those boxes changed.
+    if new.viewport_scroll_policy != prior.viewport_policy {
+        let rewritten = [
+            Some(new.root),
+            new.viewport_scroll_policy.defining_body(),
+            prior.viewport_policy.defining_body(),
+        ];
+        for id in rewritten.into_iter().flatten() {
+            local_same[id.index()] = false;
+        }
     }
     // Post-order over the box tree: a box is clean only when all children are.
     let mut clean = vec![false; count];
@@ -277,32 +289,53 @@ where
         .any(|layout_box| layout_box.style.is_floated())
 }
 
-static NUMERIC_REUSED_TOTAL: AtomicU64 = AtomicU64::new(0);
-static VERIFY_MISMATCHES: AtomicU64 = AtomicU64::new(0);
-static VERIFY_COMPARISONS: AtomicU64 = AtomicU64::new(0);
+// Thread-local so concurrent tests on other threads neither enable checks
+// here nor disturb these counts. A layout pass runs on its caller's thread.
+thread_local! {
+    static NUMERIC_REUSED_TOTAL: Cell<u64> = const { Cell::new(0) };
+    static VERIFY_MISMATCHES: Cell<u64> = const { Cell::new(0) };
+    static VERIFY_COMPARISONS: Cell<u64> = const { Cell::new(0) };
+    pub(crate) static VERIFY_FOR_TEST: Cell<bool> = const { Cell::new(false) };
+}
 
-/// Number of incremental passes whose geometry differed from a full rebuild.
+fn bump(counter: &'static std::thread::LocalKey<Cell<u64>>, by: u64) {
+    counter.with(|value| value.set(value.get().saturating_add(by)));
+}
+
+/// Number of incremental passes on this thread whose geometry differed from
+/// a full rebuild.
+#[cfg(feature = "test-support")]
 pub fn incremental_verify_mismatch_count() -> u64 {
-    VERIFY_MISMATCHES.load(Ordering::Relaxed)
+    VERIFY_MISMATCHES.with(Cell::get)
 }
 
-/// Number of incremental passes the differential check has compared.
+/// Number of incremental passes on this thread the differential check has
+/// compared.
+#[cfg(feature = "test-support")]
 pub fn incremental_verify_comparison_count() -> u64 {
-    VERIFY_COMPARISONS.load(Ordering::Relaxed)
+    VERIFY_COMPARISONS.with(Cell::get)
 }
 
-/// Total boxes whose numeric results a live pass moved from a retained world.
+/// Total boxes whose numeric results live passes on this thread moved from a
+/// retained world.
+#[cfg(feature = "test-support")]
 pub fn incremental_numeric_reused_total() -> u64 {
-    NUMERIC_REUSED_TOTAL.load(Ordering::Relaxed)
+    NUMERIC_REUSED_TOTAL.with(Cell::get)
+}
+
+/// Runs the differential check after every incremental pass on this thread.
+#[cfg(feature = "test-support")]
+pub fn set_incremental_layout_verify_for_test(enabled: bool) {
+    VERIFY_FOR_TEST.with(|flag| flag.set(enabled));
 }
 
 pub(crate) fn record_numeric_reused(count: usize) {
-    NUMERIC_REUSED_TOTAL.fetch_add(count as u64, Ordering::Relaxed);
+    bump(&NUMERIC_REUSED_TOTAL, count as u64);
 }
 
 pub(crate) fn record_verify_comparison(matched: bool) {
-    VERIFY_COMPARISONS.fetch_add(1, Ordering::Relaxed);
+    bump(&VERIFY_COMPARISONS, 1);
     if !matched {
-        VERIFY_MISMATCHES.fetch_add(1, Ordering::Relaxed);
+        bump(&VERIFY_MISMATCHES, 1);
     }
 }

@@ -11,7 +11,6 @@ use crate::{
 };
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::retention::{RetainedLayout, diff_worlds, record_verify_comparison};
@@ -255,7 +254,7 @@ where
     let mut reused_inline_count = 0usize;
     let mut reused_numeric_count = 0usize;
     let mut used_retained_world = false;
-    let (world, numeric_metrics, numeric_unrounded, structural_len) = loop {
+    let (world, numeric_metrics, numeric_unrounded, structural_len, built_policy) = loop {
         container_query_iteration_count += 1;
         let phase_started = Instant::now();
         let mut world = build_layout_world(source, styles)?;
@@ -276,6 +275,7 @@ where
         form_control_elapsed += phase_started.elapsed();
         let phase_started = Instant::now();
         let structural_len = world.boxes.len();
+        let built_policy = world.viewport_scroll_policy;
         let mut reuse = retained.take().and_then(|prior| diff_worlds(&world, prior));
         used_retained_world |= reuse.is_some();
         prepare_inline_contexts(&mut world, services, reuse.as_mut());
@@ -302,7 +302,13 @@ where
             || container_query_iteration_count >= hard_cap
             || !styles.update_query_container_sizes(&sizes)?
         {
-            break (world, numeric_metrics, numeric_unrounded, structural_len);
+            break (
+                world,
+                numeric_metrics,
+                numeric_unrounded,
+                structural_len,
+                built_policy,
+            );
         }
         seen_sizes.push(sizes);
         if can_retain {
@@ -314,6 +320,7 @@ where
                 structural_len,
                 viewport: request.viewport,
                 environment: request.environment,
+                viewport_policy: built_policy,
             });
         }
     };
@@ -392,6 +399,7 @@ where
             structural_len,
             viewport: request.viewport,
             environment: request.environment,
+            viewport_policy: built_policy,
         });
     }
     if used_retained_world && verify_incremental_layout() {
@@ -410,7 +418,19 @@ where
                 &mut NoEmbeddedFrames,
             );
             services.store_retained_world(retained);
-            record_verify_result(&result, &full?);
+            // The incremental result stands on its own; a failed check is
+            // reported, never turned into a failed read.
+            match full {
+                Ok(full) => record_verify_result(&result, &full),
+                Err(error) => {
+                    record_verify_comparison(false);
+                    tracing::error!(
+                        target: "moli_layout_incremental",
+                        %error,
+                        "full rebuild for the incremental layout check failed"
+                    );
+                }
+            }
         }
     }
     Ok(result)
@@ -419,27 +439,20 @@ where
 /// Whether incremental passes must also run and compare against a full pass.
 pub(crate) fn verify_incremental_layout() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
-    VERIFY_FOR_TEST.load(Ordering::Relaxed)
+    crate::retention::VERIFY_FOR_TEST.with(std::cell::Cell::get)
         || *FLAG.get_or_init(|| std::env::var_os("MOLI_LAYOUT_INCREMENTAL_VERIFY").is_some())
-}
-
-static VERIFY_FOR_TEST: AtomicBool = AtomicBool::new(false);
-
-/// Runs the incremental differential check on every later pass in this
-/// process, without the environment variable.
-pub fn set_incremental_layout_verify_for_test(enabled: bool) {
-    VERIFY_FOR_TEST.store(enabled, Ordering::Relaxed);
 }
 
 fn record_verify_result<N>(incremental: &LayoutPassResult<N>, full: &LayoutPassResult<N>)
 where
     N: Copy + std::fmt::Debug + Eq + std::hash::Hash,
 {
-    let matched = incremental.tree.same_geometry(&full.tree);
-    record_verify_comparison(matched);
-    if !matched {
+    let difference = incremental.tree.geometry_difference(&full.tree);
+    record_verify_comparison(difference.is_none());
+    if let Some(difference) = difference {
         tracing::error!(
             target: "moli_layout_incremental",
+            difference,
             incremental_boxes = incremental.tree.boxes.len(),
             full_boxes = full.tree.boxes.len(),
             "incremental layout geometry differs from a full rebuild"
