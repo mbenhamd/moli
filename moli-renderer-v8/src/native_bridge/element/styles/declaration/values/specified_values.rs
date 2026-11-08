@@ -1930,7 +1930,11 @@ fn serialize_border_side_shorthand(
     serialize_border_side_components(&width.value, &style.value, &color.value)
 }
 
-fn serialize_border_side_components(width: &str, style: &str, color: &str) -> Option<String> {
+pub(super) fn serialize_border_side_components(
+    width: &str,
+    style: &str,
+    color: &str,
+) -> Option<String> {
     let css_wide_keywords = [width, style, color]
         .iter()
         .map(|value| css_wide_keyword(value))

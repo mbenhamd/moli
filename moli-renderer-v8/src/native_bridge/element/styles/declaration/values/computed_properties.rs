@@ -2,6 +2,7 @@ use super::*;
 
 mod background;
 mod font;
+mod shorthands;
 
 pub(in crate::native_bridge::element::styles) fn style_property_value_with_context(
     runtime: &JsContextHost,
@@ -125,6 +126,10 @@ pub(super) fn computed_style_property_value_after_style_update(
     }
     if property == "-webkit-text-stroke" {
         return computed_webkit_text_stroke_shorthand_value(runtime, handle, context);
+    }
+    if let Some(value) = shorthands::computed_shorthand_value(runtime, handle, property, resolution)
+    {
+        return value;
     }
     if matches!(property, "text-decoration-fill" | "text-decoration-stroke")
         && let Some(value) = computed_text_decoration_paint_value(runtime, handle, property)
