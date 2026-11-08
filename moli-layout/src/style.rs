@@ -2105,6 +2105,9 @@ impl ResolvedLayoutStyle {
             will_change_containment: false,
             will_change_position: false,
             will_change_stacking_context: false,
+            size_containment: LogicalSizeContainment::default(),
+            contain_intrinsic_width: None,
+            contain_intrinsic_height: None,
             list_marker_type: parent.list_marker_type.clone(),
             list_marker_position: parent.list_marker_position,
         }
@@ -2173,6 +2176,9 @@ impl ResolvedLayoutStyle {
             will_change_containment: false,
             will_change_position: false,
             will_change_stacking_context: false,
+            size_containment: LogicalSizeContainment::default(),
+            contain_intrinsic_width: None,
+            contain_intrinsic_height: None,
             list_marker_type: parent.list_marker_type.clone(),
             list_marker_position: parent.list_marker_position,
         }
