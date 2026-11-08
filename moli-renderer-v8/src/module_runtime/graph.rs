@@ -464,6 +464,8 @@ impl NativeModuleGraphFetchRequest {
         let request_mode = request.request_mode;
         let credentials_mode = request.credentials_mode;
         let csp_context = self.csp_context.clone();
+        let url_rewrite = ModuleSourceUrlRewrite::default();
+        let completion_url_rewrite = url_rewrite.clone();
         let completion = move |response: anyhow::Result<moli_fetch::Response>| {
             let mut network_result: Option<SharedNavigationResponseResult> = None;
             let result = response
@@ -546,9 +548,13 @@ impl NativeModuleGraphFetchRequest {
                         .message()
                         .to_owned());
                     }
+                    // CSP and CORS above checked the URL actually fetched. A
+                    // `Fetch.continueRequest` rewrite is not observable by the
+                    // page, so the module's URL stays the requested one.
+                    let module_url = completion_url_rewrite.page_visible_url(head.final_url);
                     Ok(match kind {
                         ModuleKind::WebAssembly => ModuleGraphFetchedSource::new(
-                            head.final_url,
+                            module_url,
                             ModuleSource::binary(body_bytes),
                         )
                         .with_response_referrer_policy(response_referrer_policy),
@@ -556,7 +562,7 @@ impl NativeModuleGraphFetchRequest {
                         | ModuleKind::Json
                         | ModuleKind::Css
                         | ModuleKind::Text => ModuleGraphFetchedSource::new(
-                            head.final_url,
+                            module_url,
                             ModuleSource::text(moli_encoding::decode_utf8(&body_bytes)),
                         )
                         .with_response_referrer_policy(response_referrer_policy),
@@ -574,7 +580,28 @@ impl NativeModuleGraphFetchRequest {
             request_client: loader.clone(),
             load,
             completion: Some(Box::new(completion)),
+            url_rewrite,
         })
+    }
+}
+
+/// The URL a `Fetch.continueRequest` rewrite replaced, shared between a
+/// prepared module fetch and its completion.
+#[derive(Clone, Default)]
+struct ModuleSourceUrlRewrite(std::sync::Arc<parking_lot::Mutex<Option<(Url, Url)>>>);
+
+impl ModuleSourceUrlRewrite {
+    fn record(&self, rewritten: Url, original: Url) {
+        *self.0.lock() = Some((rewritten, original));
+    }
+
+    /// Maps the rewritten URL back to the requested one. A redirect after the
+    /// rewrite is a real response URL and is kept.
+    fn page_visible_url(&self, response_url: Url) -> Url {
+        match self.0.lock().as_ref() {
+            Some((rewritten, original)) if *rewritten == response_url => original.clone(),
+            _ => response_url,
+        }
     }
 }
 
@@ -596,6 +623,7 @@ pub(crate) struct PreparedModuleSourceFetch {
     request_client: ResourceRequestClient,
     load: crate::network::loads::ResourceLoadLease,
     completion: Option<ModuleSourceResponseCompletion>,
+    url_rewrite: ModuleSourceUrlRewrite,
 }
 
 impl Drop for PreparedModuleSourceFetch {
@@ -647,22 +675,14 @@ impl PreparedModuleSourceFetch {
     /// rewritten URL. A start failure is delivered to the completion because
     /// no scheduler is waiting on a synchronous result any more.
     ///
-    /// A rewritten URL is not observable by the page, as in Chromium: the
-    /// response keeps the original request URL, so the module's base URL and
-    /// `import.meta.url` do not change. A redirect after the rewrite is still
-    /// reported as the redirect target.
+    /// A rewritten URL is not observable by the page, as in Chromium: CSP and
+    /// CORS check the URL actually fetched, but the module keeps the requested
+    /// URL as its base URL and `import.meta.url`.
     pub(crate) fn continue_request(mut self, url: Option<Url>) {
-        let mut completion = self.take_completion();
+        let completion = self.take_completion();
         if let Some(url) = url.filter(|url| *url != self.request.url) {
             let original_url = std::mem::replace(&mut self.request.url, url.clone());
-            completion = Box::new(move |response: anyhow::Result<moli_fetch::Response>| {
-                completion(response.map(|mut response| {
-                    if response.final_url == url {
-                        response.final_url = original_url;
-                    }
-                    response
-                }));
-            });
+            self.url_rewrite.record(url, original_url);
         }
         let slot = std::sync::Arc::new(parking_lot::Mutex::new(Some(completion)));
         let network_slot = slot.clone();

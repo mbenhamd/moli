@@ -2816,3 +2816,184 @@ async fn module_script_static_import_pauses_as_script_and_uses_fulfilled_source(
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn module_script_pause_reports_origin_and_continue_rewrite_stays_unobservable() {
+    async fn page() -> impl IntoResponse {
+        (
+            [(CONTENT_TYPE.as_str(), "text/html")],
+            "<!doctype html><html><body>ready</body></html>",
+        )
+    }
+
+    async fn same_origin_target() -> impl IntoResponse {
+        (
+            [(CONTENT_TYPE.as_str(), "text/javascript")],
+            "globalThis.__lm_meta_url = import.meta.url;",
+        )
+    }
+
+    async fn cross_origin_without_cors() -> impl IntoResponse {
+        (
+            [(CONTENT_TYPE.as_str(), "text/javascript")],
+            "globalThis.__lm_rewrite = 'ran';",
+        )
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/page", get(page))
+                .route("/same-target.js", get(same_origin_target)),
+        )
+        .await
+        .unwrap();
+    });
+    // A different port is a different origin.
+    let other_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let other_addr = other_listener.local_addr().unwrap();
+    let other_server = tokio::spawn(async move {
+        axum::serve(
+            other_listener,
+            Router::new().route("/no-cors.js", get(cross_origin_without_cors)),
+        )
+        .await
+        .unwrap();
+    });
+
+    let page_url = format!("http://{addr}/page");
+    let mut ctx = TestContext::new();
+    with_loaded_http_document(&mut ctx, &page_url, "SID-1", "TID-1").await;
+    ctx.sent.clear();
+    ctx.process_async(json!({
+        "id": 390,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    ctx.expect_result(390, json!({}), Some("SID-1"));
+    enable_runtime_async(&mut ctx, "SID-1", 391).await;
+
+    // `import()` records a failed module fetch as "error" in `error_global`.
+    let insert_module = |id: u64, src: String, error_global: &str| {
+        json!({
+            "id": id,
+            "method": "Runtime.evaluate",
+            "sessionId": "SID-1",
+            "params": {
+                "expression": format!(
+                    r#"(() => {{
+  import({src:?}).catch(() => {{ globalThis.{error_global} = "error"; }});
+  return "scheduled";
+}})()"#
+                )
+            }
+        })
+    };
+    async fn paused_request_id(ctx: &mut TestContext, url: &str, label: &str) -> (String, Value) {
+        let paused =
+            wait_for_request_paused_on_session(ctx, "SID-1", url, Some("Script"), label).await;
+        let request_id = paused["params"]["requestId"]
+            .as_str()
+            .expect("module script request id")
+            .to_owned();
+        (request_id, paused)
+    }
+
+    // A cross-origin module request carries Origin, which Playwright's
+    // route.fulfill needs to add the CORS response headers.
+    let cross_origin_url = format!("http://{other_addr}/cors.js");
+    ctx.process_async(insert_module(392, cross_origin_url.clone(), "__lm_cors"))
+        .await;
+    let _ = take_response_by_id(&mut ctx, 392);
+    let (request_id, paused) =
+        paused_request_id(&mut ctx, &cross_origin_url, "cross-origin module pause").await;
+    assert_eq!(
+        paused["params"]["request"]["headers"]["Origin"],
+        json!(format!("http://{addr}"))
+    );
+    ctx.process_async(json!({
+        "id": 393,
+        "method": "Fetch.fulfillRequest",
+        "sessionId": "SID-1",
+        "params": {
+            "requestId": request_id,
+            "responseCode": 200,
+            "responseHeaders": [
+                { "name": "content-type", "value": "text/javascript" },
+                { "name": "access-control-allow-origin", "value": format!("http://{addr}") }
+            ],
+            // globalThis.__lm_cors = 'MOCKED';
+            "body": "Z2xvYmFsVGhpcy5fX2xtX2NvcnMgPSAnTU9DS0VEJzs="
+        }
+    }))
+    .await;
+    ctx.expect_result(393, json!({}), Some("SID-1"));
+    evaluate_until_value_async(
+        &mut ctx,
+        "SID-1",
+        394,
+        "globalThis.__lm_cors",
+        &json!("MOCKED"),
+        "fulfilled cross-origin module",
+    )
+    .await;
+
+    // A same-origin rewrite is not observable: import.meta.url stays the
+    // requested URL.
+    let requested_url = format!("http://{addr}/same.js");
+    ctx.process_async(insert_module(420, requested_url.clone(), "__lm_meta_url"))
+        .await;
+    let _ = take_response_by_id(&mut ctx, 420);
+    let (request_id, _) =
+        paused_request_id(&mut ctx, &requested_url, "same-origin rewrite pause").await;
+    ctx.process_async(json!({
+        "id": 421,
+        "method": "Fetch.continueRequest",
+        "sessionId": "SID-1",
+        "params": { "requestId": request_id, "url": format!("http://{addr}/same-target.js") }
+    }))
+    .await;
+    ctx.expect_result(421, json!({}), Some("SID-1"));
+    evaluate_until_value_async(
+        &mut ctx,
+        "SID-1",
+        422,
+        "globalThis.__lm_meta_url",
+        &json!(requested_url),
+        "import.meta.url after a same-origin rewrite",
+    )
+    .await;
+
+    // A rewrite to another origin is checked against the fetched URL: without
+    // Access-Control-Allow-Origin the module fails CORS instead of running.
+    let rewritten_url = format!("http://{addr}/rewrite.js");
+    ctx.process_async(insert_module(440, rewritten_url.clone(), "__lm_rewrite"))
+        .await;
+    let _ = take_response_by_id(&mut ctx, 440);
+    let (request_id, _) =
+        paused_request_id(&mut ctx, &rewritten_url, "cross-origin rewrite pause").await;
+    ctx.process_async(json!({
+        "id": 441,
+        "method": "Fetch.continueRequest",
+        "sessionId": "SID-1",
+        "params": { "requestId": request_id, "url": format!("http://{other_addr}/no-cors.js") }
+    }))
+    .await;
+    ctx.expect_result(441, json!({}), Some("SID-1"));
+    evaluate_until_value_async(
+        &mut ctx,
+        "SID-1",
+        442,
+        "globalThis.__lm_rewrite",
+        &json!("error"),
+        "module rewritten to a cross-origin URL without CORS",
+    )
+    .await;
+
+    server.abort();
+    other_server.abort();
+}
