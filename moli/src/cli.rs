@@ -623,6 +623,19 @@ pub struct CommonArgs {
     )]
     pub scrollbars: bool,
 
+    /// Relayout stale geometry like Chromium's forced reflow. Requires --layout.
+    /// Geometry reads, input hit tests, innerText, layout-dependent computed
+    /// styles and ResizeObserver sampling lay out again when the DOM, style,
+    /// scroll, resource, viewport or media inputs changed since the published
+    /// layout. Without this flag reads keep the last published layout.
+    #[arg(
+        long,
+        env = "MOLI_LIVE_GEOMETRY",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        requires_if("true", "layout")
+    )]
+    pub live_geometry: bool,
+
     /// Send Cookie header data or load a cookie file. Use - for stdin. May be repeated.
     /// In serve mode, literal data defaults to the first HTTP(S) top-level navigation host.
     #[arg(

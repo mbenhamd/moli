@@ -353,6 +353,9 @@ fn build_resize_observer_entries<'s>(
         return Ok(v8::Array::new(scope, 0));
     };
     let runtime = unsafe { &*host_ptr };
+    if !pending.is_empty() {
+        runtime.ensure_current_layout_for_observers();
+    }
     for handle in pending.iter().filter_map(|entry| entry.handle) {
         if let Some(document) = runtime.dom_host().owner_document_handle(handle) {
             by_document.entry(document).or_default().push(handle);

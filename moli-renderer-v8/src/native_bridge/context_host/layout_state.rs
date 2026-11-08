@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use moli_layout::{DocumentLayoutServices, FrozenLayoutTree, LayoutViewport};
 
-use super::layout_snapshot::LatestLayoutTreeCache;
+use super::layout_snapshot::{LatestLayoutTreeCache, LayoutInputKey};
 use crate::{
     css_resource_urls::{CompletedStylesheetWebFont, StylesheetLoadBlockingResource},
     document_runtime::DomHandle,
@@ -209,12 +209,21 @@ impl DocumentLayoutState {
         self.latest_layout.get_for_root(root)
     }
 
+    pub(super) fn latest_layout_is_current(
+        &self,
+        document: DomHandle,
+        inputs: &LayoutInputKey,
+    ) -> bool {
+        self.latest_layout.is_current(document, inputs)
+    }
+
     pub(super) fn publish_latest_layout(
         &mut self,
         document: DomHandle,
+        inputs: LayoutInputKey,
         tree: FrozenLayoutTree<DomHandle>,
     ) {
-        self.latest_layout.publish(document, tree);
+        self.latest_layout.publish(document, inputs, tree);
     }
 
     pub(super) fn clear_latest_layout(&mut self) {

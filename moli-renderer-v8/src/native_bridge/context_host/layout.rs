@@ -5,6 +5,7 @@ use moli_layout::{
 };
 
 use super::JsContextHost;
+use super::layout_snapshot::LayoutInputKey;
 use super::layout_state::InferredFrameStyleViewportCacheKey;
 use crate::{
     css_resource_urls::{
@@ -274,11 +275,43 @@ impl JsContextHost {
             .inferred_frame_style_viewport_cache_observability()
     }
 
-    /// Lazily publishes the first screen layout for this main Document.
+    /// The inputs a layout of the active Documents consumes at `viewport`.
+    /// The generations are the ones the visual-state token compares.
+    fn layout_input_key(
+        &self,
+        used_geometry: u64,
+        viewport: LayoutViewport,
+        environment_override: Option<StyloStyleEnvironment>,
+    ) -> LayoutInputKey {
+        LayoutInputKey {
+            dom: self.dom_host().dom_version(),
+            styles: self
+                .style_engine
+                .visual_style_input_generations(self.active_layout_document_handles()),
+            used_geometry,
+            resources: self.visual_resource_generation(),
+            viewport: (
+                viewport.css_width,
+                viewport.css_height,
+                viewport.device_pixel_ratio.to_bits(),
+            ),
+            environment: environment_override.unwrap_or_else(|| {
+                StyloStyleEnvironment::from_emulated_media(self.emulated_media())
+            }),
+        }
+    }
+
+    /// Publishes a screen layout for this main Document before a synchronous
+    /// geometry read.
     ///
-    /// Every consumer shares the same recursive tree. Missing nodes or newly
-    /// navigated frames in an existing tree must not refresh the whole page.
-    pub(crate) fn ensure_initial_layout(&self) -> Result<(), LayoutError> {
+    /// Every consumer shares the same recursive tree. Under the default
+    /// frozen policy the first read publishes it and later reads keep it
+    /// until a capture or invalidation replaces it. Under the live-geometry
+    /// policy a read lays out again when the published tree's input key no
+    /// longer matches the Document, like Blink's forced reflow, and reuses
+    /// the tree while the key is unchanged. A caller that is inspecting the
+    /// published tree keeps reading it unchanged.
+    pub(crate) fn ensure_current_layout(&self) -> Result<(), LayoutError> {
         if !self.layout_policy.uses_real_layout() {
             return Ok(());
         }
@@ -286,16 +319,23 @@ impl JsContextHost {
             return Err(LayoutError::ReentrantLayoutPass);
         }
         let document = self.document_handle();
-        if self
-            .document_layout_state
-            .borrow()
-            .latest_layout(document)
-            .is_some()
+        let viewport = self.layout_viewport_for_document(document);
         {
-            return Ok(());
+            let Ok(state) = self.document_layout_state.try_borrow_mut() else {
+                return Ok(());
+            };
+            let current = if self.layout_policy.relayouts_stale_reads() {
+                let key = self.layout_input_key(state.visual_state_generation(), viewport, None);
+                state.latest_layout_is_current(document, &key)
+            } else {
+                state.latest_layout(document).is_some()
+            };
+            if current {
+                return Ok(());
+            }
         }
         let request = LayoutPassRequest::new(
-            self.layout_viewport_for_document(document),
+            viewport,
             moli_layout::LayoutFlushReason::SynchronousGeometry,
         );
         let pass = self
@@ -303,6 +343,16 @@ impl JsContextHost {
             .ok_or(LayoutError::NoLayoutRoot)?;
         self.publish_layout_pass_for_document(document, pass);
         Ok(())
+    }
+
+    /// The rendering update samples observers from the published tree. Under
+    /// the live-geometry policy it first brings that tree up to date once, so
+    /// observer sizes agree with forced reads; a reentrant or failed pass
+    /// keeps the published tree.
+    pub(crate) fn ensure_current_layout_for_observers(&self) {
+        if self.layout_policy.relayouts_stale_reads() {
+            self.ensure_current_layout().ok();
+        }
     }
 
     /// FontFace and Canvas use the document's font service without requesting a
@@ -427,6 +477,18 @@ impl JsContextHost {
         document: DomHandle,
         pass: LayoutPassResult<DomHandle>,
     ) {
+        self.publish_layout_pass_for_document_in_environment(document, pass, None);
+    }
+
+    /// Publishes `pass`, recording the media environment it was built in so a
+    /// live-geometry read after a capture in another environment lays out
+    /// again.
+    pub(crate) fn publish_layout_pass_for_document_in_environment(
+        &self,
+        document: DomHandle,
+        pass: LayoutPassResult<DomHandle>,
+        environment_override: Option<StyloStyleEnvironment>,
+    ) {
         let metrics = pass.metrics;
         let pass_viewport = pass.viewport;
         let frame_viewports = self
@@ -454,8 +516,13 @@ impl JsContextHost {
         let tree = pass.into_tree();
         let frame_viewports_changed = {
             let mut state = self.document_layout_state.borrow_mut();
+            let inputs = self.layout_input_key(
+                state.visual_state_generation(),
+                pass_viewport,
+                environment_override,
+            );
             state.retain_live_frame_viewports(|frame| self.child_browsing_context_is_live(frame));
-            state.publish_latest_layout(document, tree);
+            state.publish_latest_layout(document, inputs, tree);
             state.update_frame_viewports(frame_viewports)
         };
         if frame_viewports_changed {
@@ -748,6 +815,14 @@ impl JsContextHost {
             self.completed_layout_pass_time.get(),
             self.last_layout_pass_metrics.get(),
         )
+    }
+
+    /// Runs `inspect` as if a layout pass were active on this host.
+    #[cfg(test)]
+    pub(crate) fn with_active_layout_pass_for_test<T>(&self, inspect: impl FnOnce() -> T) -> T {
+        let _active =
+            ActiveLayoutPass::enter(&self.layout_pass_active).expect("no layout pass is active");
+        inspect()
     }
 
     #[cfg(test)]

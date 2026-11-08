@@ -248,7 +248,11 @@ impl ScriptVm {
                     };
                     let value = consume(&mut pass)?;
                     if publishes_layout {
-                        context_host.publish_layout_pass_for_document(document, pass);
+                        context_host.publish_layout_pass_for_document_in_environment(
+                            document,
+                            pass,
+                            environment_override,
+                        );
                     }
                     Ok(Some((value, css_images)))
                 });
@@ -675,7 +679,7 @@ impl ScriptVm {
         {
             let host = self._context_host.borrow();
             if host.layout_policy().uses_real_layout() {
-                host.ensure_initial_layout()?;
+                host.ensure_current_layout()?;
                 let document = host
                     .layout_document_for_source(handle)
                     .ok_or(moli_layout::LayoutError::NoLayoutSnapshot)?;

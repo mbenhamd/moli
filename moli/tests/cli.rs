@@ -144,6 +144,7 @@ fn parses_explicit_fetch_command_with_compatibility_flags() {
                 disable_subframes: false,
                 layout: false,
                 scrollbars: false,
+                live_geometry: false,
                 cookie_file: Vec::new(),
                 document_start_script: Vec::new(),
                 document_start_script_file: Vec::new(),

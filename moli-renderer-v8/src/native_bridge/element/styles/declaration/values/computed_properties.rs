@@ -14,6 +14,7 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_with_conte
         let Some(property) = canonical_computed_cssom_query_property_name(property) else {
             return String::new();
         };
+        flush_layout_for_layout_dependent_property(runtime, handle, &property);
         return computed_style_property_value_with_context(runtime, handle, &property, context);
     }
     style_property_value_with_viewport_width(
@@ -23,6 +24,33 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_with_conte
         property,
         context.viewport_width(),
     )
+}
+
+/// Under the live-geometry policy, layout is brought up to date before a
+/// layout-dependent property resolves, like Blink, so used Grid tracks and used
+/// sizes describe the element's current box. The flush runs before the style
+/// observation starts and reuses the published layout while its input key is
+/// unchanged; a reentrant or failed flush keeps serving the published layout.
+/// The default frozen policy keeps sampling published geometry only.
+fn flush_layout_for_layout_dependent_property(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+    property: &str,
+) {
+    if runtime.layout_policy().relayouts_stale_reads()
+        && matches!(
+            property,
+            "grid-template-columns"
+                | "grid-template-rows"
+                | "width"
+                | "height"
+                | "inline-size"
+                | "block-size"
+        )
+        && runtime.dom_host().is_connected(handle)
+    {
+        runtime.ensure_current_layout().ok();
+    }
 }
 
 pub(super) fn computed_style_property_value_with_context(

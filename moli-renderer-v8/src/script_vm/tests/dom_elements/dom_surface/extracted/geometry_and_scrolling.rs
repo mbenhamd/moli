@@ -1385,3 +1385,38 @@ fn element_scroll_methods_leave_a_detached_element_at_zero() {
         r#"{"protoScroll":"function","protoScrollTo":"function","protoScrollBy":"function","first":[0,0],"second":[0,0],"third":[0,0],"fourth":[0,0],"fifth":[0,0],"enumerable":false}"#
     );
 }
+
+#[test]
+fn live_geometry_read_during_an_active_pass_fails_instead_of_returning_stale_geometry() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-reentrant.test/",
+        "<!doctype html><html><body style=margin:0><div id=target style=width:100px>a</div></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    let width = "document.getElementById('target').getBoundingClientRect().width";
+    assert_eq!(vm.eval(width).expect("first read"), "100");
+    vm.eval("document.getElementById('target').style.width='150px';'mutated'")
+        .expect("mutation");
+    let passes = vm.layout_pass_observability_for_test().1;
+    {
+        let host = vm._context_host.borrow();
+        let target = host
+            .dom_host()
+            .element_handle_by_id("target")
+            .expect("target element");
+        let read = host.with_active_layout_pass_for_test(|| {
+            crate::native_bridge::element::observable_geometry_query(
+                &host,
+                host.document_handle(),
+                &moli_layout::LayoutQuery::ClientRects { source: target },
+            )
+        });
+        assert!(
+            matches!(read, Err(moli_layout::LayoutError::ReentrantLayoutPass)),
+            "a stale published tree must not answer a nested read: {read:?}"
+        );
+    }
+    assert_eq!(vm.layout_pass_observability_for_test().1, passes);
+    assert_eq!(vm.eval(width).expect("fresh read"), "150");
+    assert_eq!(vm.layout_pass_observability_for_test().1, passes + 1);
+}

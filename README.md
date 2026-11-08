@@ -224,6 +224,16 @@ operations that genuinely require them.
 | Capture a screenshot | Rebuilds from the current DOM/style, replaces the frozen tree, renders a fresh frame, and discards its paint state after use |
 | Poll a screencast | Compares generation metadata only; clean state emits no frame, while changed state rebuilds and emits one fresh frame |
 
+By default a geometry read keeps the latest frozen layout tree after later DOM,
+style or scroll changes, until a capture replaces it. `--layout --live-geometry`
+(or `MOLI_LIVE_GEOMETRY=true`) selects Chromium's forced-reflow behaviour
+instead: a geometry read, coordinate input, `innerText`, a layout-dependent
+`getComputedStyle` value (used sizes, Grid tracks) or ResizeObserver sampling
+runs one fresh layout when the DOM, style, scroll, resource, viewport or media
+inputs changed since the frozen tree was built, and reuses that tree while they
+are unchanged. Layout is still a full rebuild per pass, so a loop that
+alternates writes and reads pays one pass per read.
+
 <p align="center">
   <a href="assets/moli_ondemand_rendering_flow.svg">
     <img
