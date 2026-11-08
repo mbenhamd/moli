@@ -6,7 +6,7 @@ use crate::{
     document_runtime::DomHandle,
     native_bridge::{JsContextHost, node_runtime_and_handle_from_object_or_detached},
 };
-use moli_canvas::{byte_len as canvas_byte_len, encode_data_url};
+use moli_canvas::{byte_len as canvas_byte_len, encode_data_url, encode_image_file};
 use moli_webapi_declare::WebApiObject;
 
 const CANVAS_BACKING_STORE_SLOT: &str = "__moliCanvasBackingStore";
@@ -113,6 +113,22 @@ pub(crate) fn canvas_like_to_data_url<'s>(
 ) -> Option<String> {
     let (bytes, width, height) = canvas_like_pixels_copy(scope, canvas)?;
     encode_data_url(&bytes, width, height)
+}
+
+/// Copy the canvas bitmap and serialize it with the `toDataURL` encoder.
+///
+/// Returns `None` when the bitmap has no pixels, which HTML `toBlob` reports
+/// as a null result, or when serialization fails.
+pub(crate) fn canvas_like_to_image_file<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    canvas: v8::Local<'s, v8::Object>,
+) -> Option<Vec<u8>> {
+    let (width, height) = canvas_like_dimensions(scope, canvas)?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let (bytes, width, height) = canvas_like_pixels_copy(scope, canvas)?;
+    encode_image_file(&bytes, width, height)
 }
 
 pub(super) fn canvas_owner_from_context<'s>(

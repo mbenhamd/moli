@@ -7,8 +7,9 @@ mod types;
 
 pub use blit::{blit_draw_image, blit_draw_image_filtered, blit_image_data, extract_image_data};
 pub use encode::{
-    data_image_intrinsic_dimensions, data_image_rgba8_pixels, encode_data_url,
-    image_dimensions_from_bytes, image_intrinsic_dimensions_from_bytes,
+    CANVAS_SERIALIZATION_MIME_TYPE, data_image_intrinsic_dimensions, data_image_rgba8_pixels,
+    encode_data_url, encode_image_file, image_dimensions_from_bytes,
+    image_intrinsic_dimensions_from_bytes,
 };
 pub use pixel::{
     copy_rgba8_rect, flip_y_rgba8_in_place, multiply_u8_color, premultiply_rgba8_in_place,
