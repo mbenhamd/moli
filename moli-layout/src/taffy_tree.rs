@@ -1781,7 +1781,7 @@ where
             return output;
         }
         if self.measure_baselines && inputs.run_mode == RunMode::ComputeSize {
-            return self.compute_child_layout_uncached(node_id, inputs, None);
+            return self.compute_complete_measurement(node_id, inputs);
         }
         compute_cached_layout(self, node_id, inputs, |world, node_id, inputs| {
             world.compute_child_layout_uncached(node_id, inputs, None)
@@ -2022,6 +2022,46 @@ where
         let previous = std::mem::replace(&mut self.measure_baselines, true);
         let output = self.compute_child_layout(node_id, inputs);
         self.measure_baselines = previous;
+        output
+    }
+
+    /// Answer a `measure_baselines` probe, reusing a result for identical inputs.
+    ///
+    /// Every complete measurement of a grid or flex container probes each
+    /// child several times, and each probe is itself complete, so without
+    /// reuse the work is exponential in container nesting depth. The key is
+    /// the whole `LayoutInput`. The one input outside it is the percentage
+    /// height policy of the table cell being measured; it reaches the cell
+    /// box alone (descendants see its effect through `parent_size`), so that
+    /// box is computed directly.
+    fn compute_complete_measurement(
+        &mut self,
+        node_id: NodeId,
+        inputs: LayoutInput,
+    ) -> LayoutOutput {
+        let id = LayoutBoxId::from_taffy(node_id);
+        let cacheable = self
+            .table_cell_percentage_height
+            .is_none_or(|(cell, _)| cell != id);
+        if cacheable
+            && let Some(output) = self.boxes[id.index()]
+                .complete_measure_cache
+                .as_mut()
+                .and_then(|cache| cache.get(inputs))
+        {
+            return output;
+        }
+        #[cfg(test)]
+        {
+            self.complete_measure_computations += 1;
+        }
+        let output = self.compute_child_layout_uncached(node_id, inputs, None);
+        if cacheable {
+            self.boxes[id.index()]
+                .complete_measure_cache
+                .get_or_insert_with(Default::default)
+                .store(inputs, output.clone());
+        }
         output
     }
 
@@ -3358,6 +3398,104 @@ mod tests {
         LengthPercentageAuto, Line, NodeId, Point, RequestedAxis, RoundTree, RunMode, Size,
         SizingMode, SizingPurpose, Style, TraversePartialTree, TraverseTree, WritingMode,
     };
+
+    #[test]
+    fn complete_measurement_of_nested_grids_is_linear_in_depth() {
+        use super::{LayoutBoxKind, LayoutWorld, prepare_world_layout};
+        use crate::{LayoutDisplay, PaintColor, ResolvedLayoutStyle};
+
+        const DEPTH: usize = 8;
+        let make_box = |kind, display, size: Size<Dimension>| {
+            LayoutWorld::<u8>::new_box(
+                None,
+                None,
+                None,
+                "nested-grid-measure".into(),
+                None,
+                None,
+                None,
+                kind,
+                ResolvedLayoutStyle::synthetic(
+                    display,
+                    Style {
+                        size,
+                        ..Style::default()
+                    },
+                    PaintColor::TRANSPARENT,
+                ),
+                None,
+            )
+        };
+        let grid = || {
+            make_box(
+                LayoutBoxKind::PrincipalGrid,
+                LayoutDisplay::Grid,
+                Size {
+                    width: Dimension::auto(),
+                    height: Dimension::auto(),
+                },
+            )
+        };
+        let mut world = LayoutWorld::new(grid(), false);
+        let root = world.root();
+        let mut parent = root;
+        for _ in 1..DEPTH {
+            let child = world.allocate(grid());
+            world.boxes[parent.index()].children.push(child);
+            world.boxes[child.index()].parent = Some(parent);
+            parent = child;
+        }
+        let leaf = world.allocate(make_box(
+            LayoutBoxKind::PrincipalBlock,
+            LayoutDisplay::Block,
+            Size {
+                width: Dimension::length(100.0),
+                height: Dimension::length(20.0),
+            },
+        ));
+        world.boxes[parent.index()].children.push(leaf);
+        world.boxes[leaf.index()].parent = Some(parent);
+        let _prepared = prepare_world_layout(&mut world, crate::PaintViewport::new(800, 600, 1.0));
+
+        let output = world.measure_complete_layout(
+            root.to_taffy(),
+            LayoutInput {
+                run_mode: RunMode::ComputeSize,
+                sizing_mode: SizingMode::InherentSize,
+                sizing_purpose: SizingPurpose::Layout,
+                axis: RequestedAxis::Both,
+                known_dimensions: Size {
+                    width: Some(200.0),
+                    height: None,
+                },
+                known_dimensions_are_definite: Size {
+                    width: true,
+                    height: true,
+                },
+                parent_size: Size {
+                    width: Some(200.0),
+                    height: None,
+                },
+                parent_writing_mode: WritingMode::HorizontalTb,
+                available_space: Size {
+                    width: AvailableSpace::Definite(200.0),
+                    height: AvailableSpace::MaxContent,
+                },
+                block_auto_behavior: AutoSizeBehavior::FitContent,
+                vertical_margins_are_collapsible: Line::FALSE,
+            },
+        );
+
+        assert_eq!(output.size.height, 20.0);
+        // Each box sees a small fixed set of constraints. Without reuse, every
+        // probe of every ancestor recomputes it: over 600,000 computations here.
+        assert!(
+            world.complete_measure_computations <= 16 * (DEPTH + 1),
+            "{} computations for {} boxes",
+            world.complete_measure_computations,
+            DEPTH + 1
+        );
+    }
 
     fn synthetic_block_box(source: u8, style: Style<Atom>) -> crate::LayoutBox<u8> {
         LayoutWorld::new_box(

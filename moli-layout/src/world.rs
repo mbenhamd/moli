@@ -271,6 +271,9 @@ pub struct LayoutBox<N> {
     /// One-based index into the owning world's compact numeric cache storage.
     cache_slot: Option<NonZeroU32>,
     pub(crate) table_measure_cache: Option<Box<crate::table::TableMeasureCache>>,
+    /// Complete results of `measure_baselines` probes, which Taffy's compact
+    /// cache cannot hold because it drops baselines.
+    pub(crate) complete_measure_cache: Option<Box<crate::table::TableMeasureCache>>,
     pub(crate) unrounded_layout: Layout,
     pub(crate) final_layout: Layout,
 }
@@ -654,6 +657,9 @@ where
     pub(crate) css_image_references: Vec<LayoutCssImageReference<N>>,
     /// Full numeric measurement retains baselines without publishing layouts.
     pub(crate) measure_baselines: bool,
+    /// Complete-measurement computations that missed the cache in this world.
+    #[cfg(test)]
+    pub(crate) complete_measure_computations: usize,
     /// The active table cell's used height need not be a percentage guarantee.
     pub(crate) table_cell_percentage_height: Option<(LayoutBoxId, bool)>,
     numeric_layout_tracking: bool,
@@ -682,6 +688,8 @@ where
             viewport_layout: ViewportLayoutState::default(),
             css_image_references: Vec::new(),
             measure_baselines: false,
+            #[cfg(test)]
+            complete_measure_computations: 0,
             table_cell_percentage_height: None,
             numeric_layout_tracking: false,
             numeric_layout_touched: Vec::new(),
@@ -695,6 +703,9 @@ where
             self.box_caches[(slot.get() - 1) as usize].clear();
         }
         if let Some(cache) = &mut layout_box.table_measure_cache {
+            cache.clear();
+        }
+        if let Some(cache) = &mut layout_box.complete_measure_cache {
             cache.clear();
         }
     }
@@ -1240,6 +1251,7 @@ where
             inline_formatting_context: false,
             cache_slot: None,
             table_measure_cache: None,
+            complete_measure_cache: None,
             unrounded_layout: Layout::with_order(0),
             final_layout: Layout::with_order(0),
         }
