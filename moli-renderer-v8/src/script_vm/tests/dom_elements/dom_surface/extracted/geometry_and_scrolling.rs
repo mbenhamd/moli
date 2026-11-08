@@ -1385,3 +1385,141 @@ fn element_scroll_methods_leave_a_detached_element_at_zero() {
         r#"{"protoScroll":"function","protoScrollTo":"function","protoScrollBy":"function","first":[0,0],"second":[0,0],"third":[0,0],"fourth":[0,0],"fifth":[0,0],"enumerable":false}"#
     );
 }
+
+#[test]
+fn live_geometry_read_during_an_active_pass_fails_instead_of_returning_stale_geometry() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-reentrant.test/",
+        "<!doctype html><html><body style=margin:0><div id=target style=width:100px>a</div></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    let width = "document.getElementById('target').getBoundingClientRect().width";
+    assert_eq!(vm.eval(width).expect("first read"), "100");
+    vm.eval("document.getElementById('target').style.width='150px';'mutated'")
+        .expect("mutation");
+    let passes = vm.layout_pass_observability_for_test().1;
+    {
+        let host = vm._context_host.borrow();
+        let target = host
+            .dom_host()
+            .element_handle_by_id("target")
+            .expect("target element");
+        let read = host.with_active_layout_pass_for_test(|| {
+            crate::native_bridge::element::observable_geometry_query(
+                &host,
+                host.document_handle(),
+                &moli_layout::LayoutQuery::ClientRects { source: target },
+            )
+        });
+        assert!(
+            matches!(read, Err(moli_layout::LayoutError::ReentrantLayoutPass)),
+            "a stale published tree must not answer a nested read: {read:?}"
+        );
+    }
+    assert_eq!(vm.layout_pass_observability_for_test().1, passes);
+    assert_eq!(vm.eval(width).expect("fresh read"), "150");
+    assert_eq!(vm.layout_pass_observability_for_test().1, passes + 1);
+}
+
+#[test]
+fn live_geometry_intersection_check_sees_a_target_a_mutation_moved_into_view() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-intersection.test/",
+        "<!doctype html><html><body style=margin:0><div id=t style='position:absolute;top:5000px;width:10px;height:10px'></div></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.eval(
+        r#"window.__states = [];
+        new IntersectionObserver(entries => {
+          for (const entry of entries) window.__states.push(entry.isIntersecting);
+        }).observe(document.getElementById('t'));
+        'observed'"#,
+    )
+    .expect("observer registers");
+    vm.eval("void 0").expect("initial delivery");
+    assert_eq!(
+        vm.eval("JSON.stringify(window.__states)")
+            .expect("initial state"),
+        "[false]"
+    );
+    // No script reads geometry after the mutation, so only the check itself
+    // can bring the layout current.
+    vm.eval("document.getElementById('t').style.top = '0px'; 'moved'")
+        .expect("move target");
+    vm.eval("void 0").expect("deliver queued observers");
+    assert_eq!(
+        vm.eval("JSON.stringify(window.__states)")
+            .expect("moved state"),
+        "[false,true]"
+    );
+}
+
+#[test]
+fn live_geometry_intersection_round_keeps_last_reported_state_when_layout_fails() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-intersection-failure.test/",
+        "<!doctype html><html><body style=margin:0><div id=t style='position:absolute;top:0;width:10px;height:10px'></div></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.eval(
+        r#"window.__states = [];
+        new IntersectionObserver(entries => {
+          for (const entry of entries) window.__states.push(entry.isIntersecting);
+        }).observe(document.getElementById('t'));
+        'observed'"#,
+    )
+    .expect("observer registers");
+    vm.eval("void 0").expect("initial delivery");
+    assert_eq!(
+        vm.eval("JSON.stringify(window.__states)").expect("initial"),
+        "[true]"
+    );
+    vm._context_host
+        .borrow()
+        .set_fail_live_layout_refresh_for_test(true);
+    vm.eval("document.getElementById('t').style.left = '1px'; 'moved'")
+        .expect("mutation");
+    vm.eval("void 0").expect("failed round");
+    assert_eq!(
+        vm.eval("JSON.stringify(window.__states)").expect("failed"),
+        "[true]"
+    );
+}
+
+#[test]
+fn live_geometry_scroll_in_a_batched_action_is_read_back_immediately() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-batched-scroll.test/",
+        "<!doctype html><html><body style=margin:0><div id=s style='height:100px;overflow:auto'><div id=c style=height:1000px></div></div></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    let top = "String(document.getElementById('c').getBoundingClientRect().top)";
+    assert_eq!(vm.eval(top).expect("first read"), "0");
+    vm.begin_batched_mouse_event_dispatch();
+    vm.eval("document.getElementById('s').scrollTop = 50; 'scrolled'")
+        .expect("scroll");
+    assert_eq!(vm.eval(top).expect("read in batch"), "-50");
+    vm.finish_batched_mouse_event_dispatch(Ok(()), true)
+        .expect("finish batch");
+}
+
+#[test]
+fn live_geometry_scroll_top_reconciles_after_content_shrinks() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-scroll-clamp.test/",
+        "<!doctype html><html><body style=margin:0><div id=s style='height:100px;overflow:auto'><div id=c style=height:1000px></div></div></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    assert_eq!(
+        vm.eval(
+            "const s = document.getElementById('s'), c = document.getElementById('c'); s.scrollTop = 800; c.style.height = '150px'; String(s.scrollTop)"
+        )
+        .expect("shrink"),
+        "50"
+    );
+    assert_eq!(
+        vm.eval("c.style.height = '1000px'; String(s.scrollTop)")
+            .expect("grow"),
+        "50"
+    );
+}

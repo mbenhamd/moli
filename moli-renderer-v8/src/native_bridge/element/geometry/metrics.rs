@@ -28,9 +28,44 @@ fn node_scroll_position_value<'s>(
         return 0.0;
     }
     // Scroll properties expose live state immediately. Layout geometry and
-    // hit-testing keep the offset captured by the last visual publication.
+    // hit-testing keep the offset captured by the last visual publication,
+    // unless the live-geometry policy lays out first: then the read clamps
+    // the stored offset to the current scroll range, like Blink's flush, and
+    // an element keeps the clamped offset if its content grows back.
     let (left, top) = node_scroll_position(runtime, handle);
-    if horizontal { left } else { top }
+    if !runtime.layout_policy().relayouts_stale_reads() {
+        return if horizontal { left } else { top };
+    }
+    // The getter has no error channel; a failed layout reads the stored offset.
+    let Ok(Some(metrics)) = read_element_metrics(runtime, handle) else {
+        return if horizontal { left } else { top };
+    };
+    let clamped_left = left.clamp(
+        f64::from(metrics.minimum_scroll_offset.x),
+        f64::from(metrics.maximum_scroll_offset.x),
+    );
+    let clamped_top = top.clamp(
+        f64::from(metrics.minimum_scroll_offset.y),
+        f64::from(metrics.maximum_scroll_offset.y),
+    );
+    let is_document_root = runtime
+        .dom_host()
+        .owner_document_handle(handle)
+        .and_then(|document| {
+            runtime
+                .dom_host()
+                .dom()
+                .document_element_handle_for_document(document)
+        })
+        == Some(handle);
+    if !is_document_root && (clamped_left != left || clamped_top != top) {
+        set_node_scroll_position(scope, runtime_ptr, handle, clamped_left, clamped_top, false);
+    }
+    if horizontal {
+        clamped_left
+    } else {
+        clamped_top
+    }
 }
 
 fn set_observable_node_scroll_position(

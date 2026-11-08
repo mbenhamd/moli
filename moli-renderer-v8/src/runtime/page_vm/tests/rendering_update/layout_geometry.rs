@@ -1177,3 +1177,227 @@ async fn nested_inline_intrinsic_keywords_survive_float_contribution_probes() {
     .await
     .expect("nested intrinsic keyword fixture should run");
 }
+
+fn live_viewport(width: u32, window_x: i32) -> crate::protocol_types::ViewportSurface {
+    crate::protocol_types::ViewportSurface {
+        inner_width: width,
+        inner_height: 600,
+        outer_width: width,
+        outer_height: 600,
+        device_pixel_ratio: 1.0,
+        window_x,
+        ..Default::default()
+    }
+}
+
+fn live_geometry_page(fixture: &str) -> anyhow::Result<PageVm> {
+    let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())?;
+    let mut page_vm = test_page_vm_with_loader_and_document_url(
+        &loader,
+        Vec::new(),
+        Url::parse("https://example.com/live-geometry.html")?,
+    );
+    page_vm
+        .vm_mut()
+        .set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    page_vm.set_viewport_surface(Some(live_viewport(800, 0)))?;
+    page_vm.vm_mut().eval(fixture)?;
+    Ok(page_vm)
+}
+
+fn layout_passes(page_vm: &PageVm) -> u64 {
+    page_vm.vm().layout_pass_observability_for_test().1
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_geometry_reads_relayout_once_after_mutation_scroll_and_resize() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}.wide{width:200px}.none{display:none}#s{height:100px;overflow:auto}#s>div{height:300px}</style>';
+document.body.innerHTML = '<div id=a>a</div><div id=b>b</div><div id=c>c</div><div id=d>d</div><div id=e hidden>e</div><div id=f></div><div id=s><div id=t></div></div><div id=x><span>a</span></div>';
+'installed'
+"#,
+        )?;
+        let geometry = r#"(() => { const $ = id => document.getElementById(id);
+            return JSON.stringify([['a','b','c','d','e'].map(id => $(id).getBoundingClientRect().width),
+                $('f').offsetHeight, $('t').getBoundingClientRect().top - $('s').getBoundingClientRect().top]); })()"#;
+        let passes = layout_passes(&page_vm);
+        assert_eq!(
+            page_vm.vm_mut().eval(geometry)?,
+            "[[800,800,800,800,0],0,0]"
+        );
+        assert_eq!(layout_passes(&page_vm), passes + 1);
+        // An unchanged Document reuses the published layout.
+        page_vm.vm_mut().eval(geometry)?;
+        assert_eq!(layout_passes(&page_vm), passes + 1);
+
+        // Moving the window alone changes no layout input, and nothing lays
+        // out before a read.
+        page_vm.set_viewport_surface(Some(live_viewport(800, 40)))?;
+        page_vm.vm_mut().eval(
+            r#"
+const $ = id => document.getElementById(id);
+$('a').classList.add('wide');
+$('b').style.width = '150px';
+$('c').setAttribute('style', 'width:120px');
+$('d').classList.add('none');
+$('e').hidden = false;
+$('f').appendChild(document.createElement('div')).style.height = '40px';
+'mutated'
+"#,
+        )?;
+        assert_eq!(layout_passes(&page_vm), passes + 1);
+        // Like Chromium, the scrollTop setter lays out to clamp the offset.
+        page_vm
+            .vm_mut()
+            .eval("document.getElementById('s').scrollTop = 50; 'scrolled'")?;
+        assert_eq!(layout_passes(&page_vm), passes + 2);
+        // The next synchronous read sees the class, inline style, attribute,
+        // subtree and scroll changes. Layout bakes scroll offsets into the
+        // tree, so the scroll costs this read one more pass.
+        assert_eq!(
+            page_vm.vm_mut().eval(geometry)?,
+            "[[200,150,120,0,800],40,-50]"
+        );
+        assert_eq!(layout_passes(&page_vm), passes + 3);
+        page_vm.vm_mut().eval(geometry)?;
+        assert_eq!(layout_passes(&page_vm), passes + 3);
+
+        // A resize alone does not lay out; the next read sees the new width.
+        page_vm.set_viewport_surface(Some(live_viewport(400, 40)))?;
+        assert_eq!(layout_passes(&page_vm), passes + 3);
+        assert_eq!(
+            page_vm.vm_mut().eval(geometry)?,
+            "[[200,150,120,0,400],40,-50]"
+        );
+        assert_eq!(layout_passes(&page_vm), passes + 4);
+
+        // A node inserted after a read has a box and rendered text at the
+        // next read, without a capture.
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                r#"(() => { const n = document.createElement('div'); n.style.height = '30px';
+                    document.body.appendChild(n); const r = n.getBoundingClientRect();
+                    const x = document.getElementById('x'); const b = document.createElement('span');
+                    b.textContent = 'b'; x.append(b);
+                    return JSON.stringify([r.width, r.height, n.getClientRects().length, x.innerText]); })()"#,
+            )?,
+            "[400,30,1,\"ab\"]"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("live geometry fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_geometry_computed_grid_tracks_and_sizes_follow_current_layout() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}#g{display:grid;width:600px;grid-template-columns:repeat(3,minmax(0,1fr))}</style>';
+document.body.innerHTML = '<div id=g><i>1</i><i>2</i><i>3</i></div><div id=w></div>';
+'installed'
+"#,
+        )?;
+        let read = r#"(() => { const g = getComputedStyle(document.getElementById('g'));
+            const w = getComputedStyle(document.getElementById('w'));
+            return JSON.stringify([g.gridTemplateColumns, w.width]); })()"#;
+        // Chromium serializes used tracks and sizes before any other read.
+        assert_eq!(
+            page_vm.vm_mut().eval(read)?,
+            r#"["200px 200px 200px","800px"]"#
+        );
+        let passes = layout_passes(&page_vm);
+        page_vm.vm_mut().eval(
+            "document.getElementById('g').style.gridTemplateColumns='200px 1fr';'mutated'",
+        )?;
+        assert_eq!(
+            page_vm.vm_mut().eval(read)?,
+            r#"["200px 400px","800px"]"#
+        );
+        assert_eq!(layout_passes(&page_vm), passes + 1);
+        page_vm.set_viewport_surface(Some(live_viewport(500, 0)))?;
+        page_vm
+            .vm_mut()
+            .eval("document.getElementById('g').style.width='300px';'mutated'")?;
+        assert_eq!(
+            page_vm.vm_mut().eval(read)?,
+            r#"["200px 100px","500px"]"#
+        );
+        assert_eq!(layout_passes(&page_vm), passes + 2);
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("live computed Grid track fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_geometry_hover_lays_out_only_when_a_hover_rule_restyles() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}div{height:50px}</style>';
+document.body.innerHTML = '<div id=a>a</div><div id=b>b</div>';
+'installed'
+"#,
+        )?;
+        let width = "String(document.getElementById('a').getBoundingClientRect().width)";
+        assert_eq!(page_vm.vm_mut().eval(width)?, "800");
+        let passes = layout_passes(&page_vm);
+        // Chromium lays out for neither hover nor the hit test while no
+        // selector depends on the hovered state.
+        for _ in 0..10 {
+            for y in [10.0, 70.0] {
+                page_vm
+                    .vm_mut()
+                    .dispatch_mouse_event_at_point(10.0, y, "mousemove", 0, Some(0), 0.0, 0.0)?;
+            }
+        }
+        assert_eq!(page_vm.vm_mut().eval(width)?, "800");
+        assert_eq!(layout_passes(&page_vm), passes);
+
+        // A hover rule that resizes the box makes the next read lay out.
+        page_vm.vm_mut().eval(
+            "document.head.insertAdjacentHTML('beforeend', '<style>#a:hover{width:300px}</style>');'ruled'",
+        )?;
+        page_vm
+            .vm_mut()
+            .dispatch_mouse_event_at_point(10.0, 10.0, "mousemove", 0, Some(0), 0.0, 0.0)?;
+        assert_eq!(page_vm.vm_mut().eval(width)?, "300");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("live hover fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_geometry_computed_auto_inset_follows_the_current_layout_in_one_pass() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}#pad{height:20px}#cb{position:relative}#abs{position:absolute}</style>';
+document.body.innerHTML = '<div id=pad></div><div id=cb><div id=abs>x</div></div>';
+'installed'
+"#,
+        )?;
+        // An absolutely positioned box with both insets auto resolves `top`
+        // from geometry. This pins that the value follows the current layout
+        // and that the read lays out once.
+        let top = "getComputedStyle(document.getElementById('abs')).top";
+        let first = page_vm.vm_mut().eval(top)?;
+        let passes = layout_passes(&page_vm);
+        page_vm
+            .vm_mut()
+            .eval("document.getElementById('pad').style.height='35px';'mutated'")?;
+        let second = page_vm.vm_mut().eval(top)?;
+        assert_eq!(layout_passes(&page_vm), passes + 1);
+        assert_eq!((first.as_str(), second.as_str()), ("20px", "35px"));
+        page_vm.vm_mut().eval(top)?;
+        assert_eq!(layout_passes(&page_vm), passes + 1);
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("live computed inset fixture should run");
+}

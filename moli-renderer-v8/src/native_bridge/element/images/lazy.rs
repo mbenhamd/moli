@@ -63,6 +63,15 @@ pub(super) fn revealed_lazy_image_handles(
         .collect()
 }
 
+pub(super) fn document_has_unadmitted_lazy_image(
+    runtime: &JsContextHost,
+    document: DomHandle,
+) -> bool {
+    (0..runtime.dom_host().dom().nodes().len())
+        .map(DomHandle::new)
+        .any(|handle| is_unadmitted_lazy_image(runtime, document, handle))
+}
+
 fn is_unadmitted_lazy_image(
     runtime: &JsContextHost,
     document: DomHandle,

@@ -73,6 +73,13 @@ pub(crate) fn queue_revealed_lazy_image_loads(
 ) {
     let handles = {
         let runtime = unsafe { &*runtime_ptr };
+        // Under the live-geometry policy a mutation that moves a lazy image
+        // into view reveals it from the current layout.
+        if runtime.layout_policy().relayouts_stale_reads()
+            && super::lazy::document_has_unadmitted_lazy_image(runtime, document)
+        {
+            let _ = runtime.refresh_live_layout_for_sampling();
+        }
         runtime
             .with_latest_layout_tree_for_document(document, |output| {
                 revealed_lazy_image_handles(runtime, document, output)

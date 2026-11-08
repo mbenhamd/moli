@@ -126,6 +126,14 @@ pub(crate) fn queue_scroll_observable_effects(
     document: Option<DomHandle>,
     queue_document_events: bool,
 ) {
+    // Under the live-geometry policy a read in the same batched action must
+    // see this offset, so the key moves now rather than when effects flush.
+    if unsafe { &*runtime_ptr }
+        .layout_policy()
+        .relayouts_stale_reads()
+    {
+        unsafe { &*runtime_ptr }.invalidate_layout_after_interaction_state_change();
+    }
     if unsafe { &mut *runtime_ptr }.defer_scroll_observable_effects(document, queue_document_events)
     {
         return;
@@ -151,14 +159,20 @@ pub(crate) fn apply_scroll_observable_effects(
     }
     // Native lazy loading combines the retained projection with live scroll
     // offsets. Geometry and input retain that projection until fresh visual
-    // publication replaces it.
+    // publication replaces it, or, under the live-geometry policy, until the
+    // next read lays out again because the scroll moved the layout key.
     for effects in &effects {
         if let Some(document) = effects.document() {
             queue_revealed_lazy_image_loads(scope, runtime_ptr, document);
         }
     }
     queue_revealed_lazy_media_loads(scope, runtime_ptr);
-    unsafe { &*runtime_ptr }.invalidate_layout_after_interaction_state_change();
+    if !unsafe { &*runtime_ptr }
+        .layout_policy()
+        .relayouts_stale_reads()
+    {
+        unsafe { &*runtime_ptr }.invalidate_layout_after_interaction_state_change();
+    }
     crate::observer_runtime::queue_intersection_checks(scope, runtime_ptr);
     if effects
         .iter()

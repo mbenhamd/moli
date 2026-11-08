@@ -16,6 +16,7 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_with_conte
         let Some(property) = canonical_computed_cssom_query_property_name(property) else {
             return String::new();
         };
+        flush_layout_for_layout_dependent_property(runtime, handle, &property);
         return computed_style_property_value_with_context(runtime, handle, &property, context);
     }
     style_property_value_with_viewport_width(
@@ -25,6 +26,45 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_with_conte
         property,
         context.viewport_width(),
     )
+}
+
+/// Under the live-geometry policy, layout is brought up to date before a
+/// layout-dependent property resolves, like Blink, so used Grid tracks, used
+/// sizes and auto insets describe the element's current box. The flush runs
+/// before the style observation starts, so the geometry reads the observation
+/// makes find the published layout current and lay out nothing. It reuses the
+/// published layout while its input key is unchanged; a failed flush discards
+/// the stale layout instead of serving it (see
+/// `JsContextHost::refresh_live_layout_for_sampling`). The default frozen
+/// policy keeps sampling published geometry only.
+fn flush_layout_for_layout_dependent_property(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+    property: &str,
+) {
+    if runtime.layout_policy().relayouts_stale_reads()
+        && matches!(
+            property,
+            "grid-template-columns"
+                | "grid-template-rows"
+                | "width"
+                | "height"
+                | "inline-size"
+                | "block-size"
+                | "top"
+                | "right"
+                | "bottom"
+                | "left"
+                | "inset-block-start"
+                | "inset-block-end"
+                | "inset-inline-start"
+                | "inset-inline-end"
+        )
+        && runtime.dom_host().is_connected(handle)
+    {
+        // On failure the stale tree is gone and the value is the computed one.
+        let _ = runtime.refresh_live_layout_for_sampling();
+    }
 }
 
 pub(super) fn computed_style_property_value_with_context(

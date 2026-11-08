@@ -231,6 +231,9 @@ impl ScriptVm {
         let (document, result) = {
             let context_host = self._context_host.borrow();
             let document = context_host.document_handle();
+            let inputs = publishes_layout
+                .then(|| context_host.live_layout_input_key(request.viewport, environment_override))
+                .flatten();
             let result = context_host
                 .build_layout_pass_for_document_in_environment(
                     document,
@@ -248,7 +251,12 @@ impl ScriptVm {
                     };
                     let value = consume(&mut pass)?;
                     if publishes_layout {
-                        context_host.publish_layout_pass_for_document(document, pass);
+                        context_host.publish_layout_pass_for_document_in_environment(
+                            document,
+                            pass,
+                            environment_override,
+                            inputs,
+                        );
                     }
                     Ok(Some((value, css_images)))
                 });
@@ -675,7 +683,7 @@ impl ScriptVm {
         {
             let host = self._context_host.borrow();
             if host.layout_policy().uses_real_layout() {
-                host.ensure_initial_layout()?;
+                host.ensure_current_layout()?;
                 let document = host
                     .layout_document_for_source(handle)
                     .ok_or(moli_layout::LayoutError::NoLayoutSnapshot)?;

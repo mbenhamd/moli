@@ -103,7 +103,7 @@ pub(crate) fn input_surface_hit_test(
                 control: None,
             });
     }
-    runtime.ensure_initial_layout()?;
+    runtime.ensure_current_layout()?;
     runtime
         .with_latest_layout_tree_for_document(document, |tree| {
             input_surface_hit_test_in_tree(

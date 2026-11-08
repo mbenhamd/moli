@@ -52,6 +52,7 @@ impl DomHost {
         let mut host = Self {
             dom,
             dom_version: Cell::new(0),
+            hover_version: Cell::new(0),
             query_version: Cell::new(0),
             shadow_root_binding_version: Cell::new(0),
             connected_shadow_roots_version: Cell::new(0),
@@ -195,6 +196,19 @@ impl DomHost {
 
     pub fn dom_version(&self) -> u64 {
         self.dom_version.get()
+    }
+
+    /// The DOM version without the bumps that only moved the hover chain.
+    /// Layout never reads the hover chain; hover reaches layout only through
+    /// the style invalidation of selectors that depend on it.
+    pub fn dom_version_excluding_hover(&self) -> u64 {
+        self.dom_version.get() - self.hover_version.get()
+    }
+
+    fn record_hover_mutation(&self) {
+        self.record_mutation(MutationScope::QueryState);
+        self.hover_version
+            .set(self.hover_version.get().saturating_add(1));
     }
 
     pub fn shadow_root_binding_version(&self) -> u64 {
@@ -664,7 +678,7 @@ impl DomHost {
         }
         *hovered = next;
         drop(hovered);
-        self.record_mutation(MutationScope::QueryState);
+        self.record_hover_mutation();
         true
     }
 
@@ -673,7 +687,7 @@ impl DomHost {
             return;
         }
         self.hovered_elements.borrow_mut().clear();
-        self.record_mutation(MutationScope::QueryState);
+        self.record_hover_mutation();
     }
 
     pub(super) fn prune_disconnected_hovered_elements(&self) {

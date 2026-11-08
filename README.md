@@ -224,6 +224,25 @@ operations that genuinely require them.
 | Capture a screenshot | Rebuilds from the current DOM/style, replaces the frozen tree, renders a fresh frame, and discards its paint state after use |
 | Poll a screencast | Compares generation metadata only; clean state emits no frame, while changed state rebuilds and emits one fresh frame |
 
+By default a geometry read keeps the latest frozen layout tree after later DOM,
+style or scroll changes, until a capture replaces it. `--layout --live-geometry`
+(or `MOLI_LIVE_GEOMETRY=true`) selects Chromium's forced-reflow behaviour
+instead: a geometry read, coordinate input, `innerText`, a layout-dependent
+`getComputedStyle` value (used sizes, Grid tracks) or ResizeObserver sampling
+runs one fresh layout when the DOM, style, scroll, resource, viewport or media
+inputs changed since the frozen tree was built, and reuses that tree while they
+are unchanged. IntersectionObserver and lazy-image checks sample the same
+current layout. Hovering a page without `:hover` rules lays out nothing.
+
+Each pass is still a full rebuild, so its cost grows with DOM size, and a loop
+that alternates writes and reads pays one pass per read. Setting a scroll offset
+costs one pass per set-then-read on a clean tree and two only on a dirty one.
+Measured with a 1,000-iteration write/read loop (release build, 3 runs, 16 cores
+under load): 72 to 149 ms on a small page against 6 to 13 ms in Chromium, about
+11 times its cost; with 2,000 rows about 85 ms per pass, so the loop takes 79 to
+94 s and can exceed CDP command timeouts. A read that finds the layout current
+costs about 3 to 10 µs.
+
 <p align="center">
   <a href="assets/moli_ondemand_rendering_flow.svg">
     <img

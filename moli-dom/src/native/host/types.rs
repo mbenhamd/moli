@@ -155,6 +155,8 @@ pub(super) struct ShadowSlotNameIndex {
 pub struct DomHost {
     pub(super) dom: NativeDom,
     pub(super) dom_version: Cell<u64>,
+    /// DOM-version bumps that only moved the hover chain.
+    pub(super) hover_version: Cell<u64>,
     pub(super) query_version: Cell<u64>,
     pub(super) shadow_root_binding_version: Cell<u64>,
     pub(super) connected_shadow_roots_version: Cell<u64>,
