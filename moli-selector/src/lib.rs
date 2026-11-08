@@ -278,6 +278,10 @@ pub fn html_directionality(host: &DomHost, handle: NodeId) -> CssDirection {
     stylo::html_directionality(host, handle)
 }
 
+pub fn html_directionality_is_content_derived(host: &DomHost, handle: NodeId) -> bool {
+    stylo::html_directionality_is_content_derived(host, handle)
+}
+
 pub fn validate_supports_selector_condition_argument(selector: &str) -> Result<(), SelectorError> {
     stylo::validate_supports_selector_condition_argument(selector)
 }

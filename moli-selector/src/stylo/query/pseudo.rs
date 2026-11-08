@@ -625,6 +625,33 @@ pub(crate) fn html_directionality(host: &DomHost, handle: NodeId) -> CssDirectio
     CssDirection::Ltr
 }
 
+/// Whether the HTML directionality of `handle` comes from `dir=auto` or `<bdi>`
+/// content. Those two sources have no `direction` presentation hint.
+pub(crate) fn html_directionality_is_content_derived(host: &DomHost, handle: NodeId) -> bool {
+    let mut current = Some(handle);
+    while let Some(handle) = current {
+        if let Some(element) = host.node(handle).and_then(Node::as_element) {
+            let dir = element.attribute("dir");
+            if dir.and_then(normalized_direction).is_some() {
+                return false;
+            }
+            if dir.is_some_and(|value| value.eq_ignore_ascii_case("auto"))
+                || element.is_html_element("bdi")
+            {
+                return true;
+            }
+            if element.is_html_input() && element.input_type() == InputType::Tel {
+                return false;
+            }
+        }
+        current = host
+            .node(handle)
+            .and_then(Node::parent_node)
+            .or_else(|| host.shadow_root_host(handle));
+    }
+    false
+}
+
 fn auto_direction_for_element(host: &DomHost, root: NodeId) -> Option<CssDirection> {
     if let Some(element) = host.node(root).and_then(Node::as_element) {
         if element.is_html_textarea() {
