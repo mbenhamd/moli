@@ -58,6 +58,32 @@ impl CurlConnectionDestination {
     }
 }
 
+/// Caller-owned cancellation probe for a job that has not started yet.
+pub type CurlJobCancelled = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// How a transfer occupies libcurl's per-host connection cap
+/// (`CURLMOPT_MAX_HOST_CONNECTIONS`) for its destination.
+///
+/// libcurl parks a transfer that finds the cap exhausted in its internal
+/// pending queue, where `CURLOPT_CONNECTTIMEOUT` keeps running. The scheduler
+/// therefore starts an [`Exclusive`](Self::Exclusive) transfer only when its
+/// destination has a free connection, so its connect timeout bounds the real
+/// TCP/TLS connect.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CurlConnectionUse {
+    /// Neither counted nor gated, as for a transfer through a proxy: libcurl
+    /// then counts the proxy host, not the origin.
+    #[default]
+    Untracked,
+    /// A direct transfer that may share an HTTP/2 connection. It is counted
+    /// against its destination but not gated, because a multiplexed stream
+    /// does not need a free connection.
+    Shared,
+    /// A direct transfer that needs one whole connection for its lifetime,
+    /// as with HTTP/1.x. It is counted and starts only below the cap.
+    Exclusive,
+}
+
 /// A configured curl transfer plus scheduler metadata.
 pub struct CurlMultiJob<H: Handler, C> {
     pub easy: Easy2<H>,
@@ -80,17 +106,11 @@ pub struct CurlMultiJob<H: Handler, C> {
     /// Higher values start before lower values when jobs are queued.
     pub priority: u8,
     pub label: String,
-    /// The transfer occupies one whole connection to `origin` for its
-    /// lifetime and cannot share it, as with a direct HTTP/1.x request.
-    ///
-    /// libcurl parks a transfer that finds `CURLMOPT_MAX_HOST_CONNECTIONS`
-    /// exhausted in its internal pending queue, and its
-    /// `CURLOPT_CONNECTTIMEOUT` keeps running there. The scheduler therefore
-    /// starts such a transfer only when the destination has a free connection
-    /// slot, so its connect timeout bounds the real TCP/TLS connect. Leave this
-    /// false when the transfer may multiplex onto an HTTP/2 connection or
-    /// connects through a proxy.
-    pub exclusive_connection: bool,
+    /// How this transfer uses libcurl's per-host connection cap.
+    pub connection: CurlConnectionUse,
+    /// Reports caller cancellation while the job waits in the scheduler, so
+    /// a cancelled job is completed there instead of being started.
+    pub cancelled: Option<CurlJobCancelled>,
 }
 
 impl<H: Handler, C> fmt::Debug for CurlMultiJob<H, C> {
@@ -101,7 +121,8 @@ impl<H: Handler, C> fmt::Debug for CurlMultiJob<H, C> {
             .field("dns_resolution", &self.dns_resolution)
             .field("priority", &self.priority)
             .field("label", &self.label)
-            .field("exclusive_connection", &self.exclusive_connection)
+            .field("connection", &self.connection)
+            .field("cancellable", &self.cancelled.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -158,19 +179,21 @@ impl<H: Handler + Send + 'static, C: Send + 'static> Clone for CurlHttpSender<H,
 }
 
 impl<H: Handler + Send + 'static, C: Send + 'static> CurlHttpSender<H, C> {
+    /// A rejected job comes back boxed: the job is large and submission
+    /// fails only while the runtime shuts down.
     pub fn submit(
         &self,
         job: CurlMultiJob<H, C>,
-    ) -> std::result::Result<CurlTransferId, CurlSubmitError<H, C>> {
+    ) -> std::result::Result<CurlTransferId, Box<CurlSubmitError<H, C>>> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
-            return Err(CurlSubmitError {
+            return Err(Box::new(CurlSubmitError {
                 job,
                 error: anyhow!("curl multi runtime is shutting down"),
-            });
+            }));
         }
         let transfer_id = match next_transfer_id() {
             Ok(transfer_id) => transfer_id,
-            Err(error) => return Err(CurlSubmitError { job, error }),
+            Err(error) => return Err(Box::new(CurlSubmitError { job, error })),
         };
         match self
             .command_tx
@@ -184,10 +207,10 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlHttpSender<H, C> {
                 let CurlRuntimeCommand::Request { job, .. } = error.into_inner() else {
                     unreachable!("submit only sends request commands");
                 };
-                Err(CurlSubmitError {
+                Err(Box::new(CurlSubmitError {
                     job,
                     error: anyhow!("curl multi runtime is shutting down"),
-                })
+                }))
             }
         }
     }

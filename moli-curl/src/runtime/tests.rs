@@ -74,7 +74,8 @@ fn submitted_identity_reaches_the_matching_runtime_completion() {
             dns_resolution: CurlDnsResolution::no_shared_resolution(),
             priority: 1,
             label: "identity-test".to_owned(),
-            exclusive_connection: false,
+            connection: crate::CurlConnectionUse::Untracked,
+            cancelled: None,
         })
         .expect("test curl transfer should be accepted");
 
@@ -123,7 +124,8 @@ fn shared_proxy_dns_failure_never_starts_the_http_transfer() {
             ),
             priority: 1,
             label: "proxy-dns-failure".to_owned(),
-            exclusive_connection: false,
+            connection: crate::CurlConnectionUse::Untracked,
+            cancelled: None,
         })
         .expect("test curl transfer should be accepted");
 
@@ -160,7 +162,8 @@ fn http_sender_does_not_keep_owner_alive_and_returns_rejected_job() {
                 dns_resolution: CurlDnsResolution::no_shared_resolution(),
                 priority: 1,
                 label: "closed".into(),
-                exclusive_connection: false,
+                connection: crate::CurlConnectionUse::Untracked,
+                cancelled: None,
             })
             .unwrap_err();
         assert!(error.error.to_string().contains("shutting down"));

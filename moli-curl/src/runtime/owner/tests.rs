@@ -43,7 +43,8 @@ fn request(
         dns_resolution: CurlDnsResolution::no_shared_resolution(),
         priority: 1,
         label: path.to_owned(),
-        exclusive_connection: false,
+        connection: crate::CurlConnectionUse::Untracked,
+        cancelled: None,
     }
 }
 

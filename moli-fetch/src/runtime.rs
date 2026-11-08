@@ -25,8 +25,8 @@ use moli_cookie_jar::{
     advance_cookie_request_context,
 };
 use moli_curl::{
-    CurlHttpSender, CurlMultiCompletion, CurlMultiJob, CurlMultiRuntime, CurlMultiRuntimeConfig,
-    CurlOriginKey,
+    CurlConnectionUse, CurlHttpSender, CurlJobCancelled, CurlMultiCompletion, CurlMultiJob,
+    CurlMultiRuntime, CurlMultiRuntimeConfig, CurlOriginKey,
 };
 use moli_url_policy::ensure_http_network_transport_url;
 use parking_lot::Mutex;
@@ -988,8 +988,8 @@ impl RuntimeOwner {
             Ok(resolution) => resolution,
             Err(error) => return Err((job.response_tx, error)),
         };
-        let exclusive_connection =
-            transfer_holds_exclusive_connection(&job.current_url, &proxy_route, job.http_version);
+        let connection = transfer_connection_use(&job.current_url, &proxy_route, job.http_version);
+        let cancelled = curl_job_cancelled(&job.cancel_handle);
         let context = ActiveBufferedTransferContext {
             job,
             request_cookie_report,
@@ -1003,7 +1003,8 @@ impl RuntimeOwner {
             dns_resolution,
             priority: request_fetch_priority_rank(&context.job.request),
             label,
-            exclusive_connection,
+            connection,
+            cancelled: Some(cancelled),
             context: ActiveTransferContext::Buffered(Box::new(context)),
         };
         match self.curl_http.submit(curl_job) {
@@ -1207,8 +1208,8 @@ impl RuntimeOwner {
             Ok(resolution) => resolution,
             Err(error) => return Err((Box::new(job), Some(easy), error)),
         };
-        let exclusive_connection =
-            transfer_holds_exclusive_connection(&job.current_url, &proxy_route, job.http_version);
+        let connection = transfer_connection_use(&job.current_url, &proxy_route, job.http_version);
+        let cancelled = curl_job_cancelled(&job.cancel_handle);
         let context = ActiveStreamingTransferContext {
             job,
             request_cookie_report,
@@ -1223,7 +1224,8 @@ impl RuntimeOwner {
             dns_resolution,
             priority: request_fetch_priority_rank(&context.job.request),
             label,
-            exclusive_connection,
+            connection,
+            cancelled: Some(cancelled),
             context: ActiveTransferContext::Streaming(Box::new(context)),
         };
         match self.curl_http.submit(curl_job) {
@@ -1440,8 +1442,8 @@ impl RuntimeOwner {
             Ok(resolution) => resolution,
             Err(error) => return Err((Box::new(job), Some(easy), error)),
         };
-        let exclusive_connection =
-            transfer_holds_exclusive_connection(&job.current_url, &proxy_route, job.http_version);
+        let connection = transfer_connection_use(&job.current_url, &proxy_route, job.http_version);
+        let cancelled = curl_job_cancelled(&job.cancel_handle);
         let context = ActiveRawStreamingTransferContext {
             job,
             request_cookie_report,
@@ -1457,7 +1459,8 @@ impl RuntimeOwner {
             dns_resolution,
             priority: request_fetch_priority_rank(&context.job.request),
             label,
-            exclusive_connection,
+            connection,
+            cancelled: Some(cancelled),
             context: ActiveTransferContext::StreamingRaw(Box::new(context)),
         };
         match self.curl_http.submit(curl_job) {
@@ -3669,14 +3672,26 @@ fn critical_client_hint_restart_redirect_info(
 /// A direct cleartext or HTTP/1-only transfer cannot share its connection:
 /// `configure_easy` offers HTTP/2 only over TLS. The curl scheduler starts
 /// such a transfer only when libcurl has a free per-host connection, so its
-/// connect timeout never includes time spent waiting for one.
-fn transfer_holds_exclusive_connection(
+/// connect timeout never includes time spent waiting for one. Other direct
+/// transfers still count against that cap; proxied ones count on the proxy.
+fn transfer_connection_use(
     url: &Url,
     proxy_route: &HttpProxyRoute,
     http_version: RequestHttpVersion,
-) -> bool {
-    !proxy_route.is_proxy()
-        && (http_version == RequestHttpVersion::Http1Only || url.scheme() == "http")
+) -> CurlConnectionUse {
+    if proxy_route.is_proxy() {
+        CurlConnectionUse::Untracked
+    } else if http_version == RequestHttpVersion::Http1Only || url.scheme() == "http" {
+        CurlConnectionUse::Exclusive
+    } else {
+        CurlConnectionUse::Shared
+    }
+}
+
+/// Lets the curl scheduler drop a job cancelled while it is still queued.
+fn curl_job_cancelled(cancel_handle: &FetchCancelHandle) -> CurlJobCancelled {
+    let cancel_handle = cancel_handle.clone();
+    Arc::new(move || cancel_handle.is_cancelled())
 }
 
 fn origin_key(request: &Request) -> Option<CurlOriginKey> {

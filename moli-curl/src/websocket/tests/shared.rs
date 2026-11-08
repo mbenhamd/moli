@@ -59,7 +59,8 @@ fn request(url: &str, handler: HttpCapture, timeout: Duration) -> CurlMultiJob<H
         dns_resolution: CurlDnsResolution::no_shared_resolution(),
         priority: 1,
         label: "mixed test".to_owned(),
-        exclusive_connection: false,
+        connection: crate::CurlConnectionUse::Untracked,
+        cancelled: None,
     }
 }
 
@@ -229,6 +230,44 @@ async fn shared_connection_limits_resume_http_after_websocket_release() {
         assert!(connector.connect(websocket_request(&base)).is_err());
         assert_eq!(stop_peer(&base, peer), ["/native", "/queued", "/after"]);
     }
+}
+
+#[tokio::test]
+async fn exclusive_http_waits_in_scheduler_until_same_port_websocket_closes() {
+    let (base, _, peer) = peer();
+    let (runtime, completed) = CurlMultiRuntime::new(config(false)).unwrap();
+    let mut connection = runtime
+        .websocket_connector()
+        .connect(websocket_request(&base))
+        .unwrap();
+    opened(&mut connection).await;
+    let (queued, _waiting) = oneshot::channel();
+    let mut job = request(
+        &(base.clone() + "/queued"),
+        HttpCapture {
+            queued: Some(queued),
+            ..HttpCapture::default()
+        },
+        DEADLINE,
+    );
+    job.connection = crate::CurlConnectionUse::Exclusive;
+    let id = runtime.http_sender().submit(job).unwrap();
+    assert!(
+        completed.recv_timeout(Duration::from_millis(300)).is_err(),
+        "the WebSocket holds the only connection to this host"
+    );
+    echo(&mut connection).await;
+    drop(connection);
+    let completion = completed.recv_timeout(DEADLINE).unwrap();
+    assert_eq!(completion.transfer_id, id);
+    completion.result.unwrap();
+    let easy = completion.easy.unwrap();
+    assert_eq!(easy.get_ref().body, b"ok");
+    // libcurl never parked it in its pending queue, where the connect
+    // timeout would have kept running.
+    assert!(easy.get_ref().queued.is_some());
+    drop(runtime);
+    assert_eq!(stop_peer(&base, peer), ["/native", "/queued"]);
 }
 
 #[tokio::test]
