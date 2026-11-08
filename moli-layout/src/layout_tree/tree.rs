@@ -1,6 +1,6 @@
 //! The immutable retained tree and its memory-retention boundary.
 
-use std::{fmt::Debug, hash::Hash, ops::Deref};
+use std::{fmt::Debug, hash::Hash, ops::Deref, sync::OnceLock};
 
 use crate::LayoutError;
 
@@ -9,6 +9,7 @@ use super::model::{
     LayoutFragment, LayoutFragmentId, LayoutOutputBoxId, LayoutPoint, LayoutScrollExtent,
     LayoutSize, LayoutViewport,
 };
+use super::source_query::SourceProvenanceIndex;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CssSizingBox {
@@ -94,6 +95,10 @@ pub const MAX_RETAINED_LAYOUT_TREE_BYTES: usize = 256 * 1024 * 1024;
 /// they preserve results that cannot be reconstructed after the working tree,
 /// Taffy caches, Parley state, and computed styles are dropped. Source and
 /// hit-test indexes are derived from the box provenance and fragments.
+///
+/// The source-provenance index is derived lazily by the first source query,
+/// owned by this tree, and dropped with it. A tree that is never queried by
+/// source never builds it, and no index survives into the next pass.
 pub struct FrozenLayoutTree<N>
 where
     N: Copy + Debug + Eq + Hash,
@@ -111,6 +116,10 @@ where
     viewport_coordinate_space: FrozenCoordinateSpace,
     pub clip_chain: Vec<LayoutClipNode>,
     embedded_frames: Vec<FrozenEmbeddedFrame<N>>,
+    /// Lazily derived from `boxes`, `fragments`, and `scroll_proxy_links`.
+    /// Code that patches those vectors in place after a source query must call
+    /// [`Self::invalidate_source_index`].
+    source_index: OnceLock<SourceProvenanceIndex<N>>,
 }
 
 impl<N> FrozenLayoutTree<N>
@@ -279,7 +288,20 @@ where
             viewport_coordinate_space,
             clip_chain,
             embedded_frames,
+            source_index: OnceLock::new(),
         }
+    }
+
+    pub(super) fn source_index_cell(&self) -> &OnceLock<SourceProvenanceIndex<N>> {
+        &self.source_index
+    }
+
+    /// Drops the lazily derived source-provenance index. Required after any
+    /// in-place change to box provenance, box fragments, fragment kinds, or
+    /// scroll-proxy links on a tree that may already have answered a source
+    /// query; the next source query rebuilds it from the canonical vectors.
+    pub fn invalidate_source_index(&mut self) {
+        self.source_index.take();
     }
 }
 
