@@ -2121,7 +2121,13 @@ where
             Size::ZERO
         };
         let inherent = inputs.sizing_mode == SizingMode::InherentSize;
-        let aspect_ratio = layout_box.resolved_aspect_ratio();
+        // Fully size-contained replaced content has no natural ratio; an
+        // explicit `aspect-ratio` still applies.
+        let aspect_ratio = if axes.width && axes.height {
+            layout_box.style.resolved_aspect_ratio(None)
+        } else {
+            layout_box.resolved_aspect_ratio()
+        };
         let resolved_size = style
             .size
             .maybe_resolve(inputs.parent_size, resolve_stylo_calc_value)
