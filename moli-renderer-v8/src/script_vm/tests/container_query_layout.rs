@@ -221,8 +221,8 @@ fn an_attribute_no_selector_reads_needs_no_pass_but_a_size_change_does() {
 fn slotted_content_queries_and_follows_its_shadow_tree_container() {
     let mut vm = live_vm(
         r#"<style>
-          @container (min-width: 300px) { #slotted { color: rgb(1, 1, 1); } }
           #slotted { color: rgb(0, 0, 0); }
+          @container (min-width: 300px) { #slotted { color: rgb(1, 1, 1); } }
         </style>
         <div id="host"><span id="slotted">s</span></div>"#,
     );
