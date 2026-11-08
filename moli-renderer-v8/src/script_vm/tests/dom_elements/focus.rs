@@ -144,3 +144,91 @@ fn focusing_frame_owner_then_input_dispatches_child_window_focus_and_blur() {
         "top-window-blur,frame-focus,child-window-focus,frame-blur,child-window-blur,input-focus,top-window-focus|true"
     );
 }
+
+fn press_tab(vm: &mut StandaloneScriptVmHarness, shift: bool) {
+    let modifiers = if shift { 8 } else { 0 };
+    vm.dispatch_key_event("keydown", "Tab", "Tab", "", modifiers, false, false)
+        .expect("Tab keydown should dispatch");
+    vm.dispatch_key_event("keyup", "Tab", "Tab", "", modifiers, false, false)
+        .expect("Tab keyup should dispatch");
+}
+
+fn focused_path(vm: &mut StandaloneScriptVmHarness) -> String {
+    vm.eval(
+        r#"(() => {
+  const name = element => element ? element.id || element.localName : 'null';
+  const frame = document.getElementById('frame');
+  const child = frame && frame.contentDocument;
+  return child && document.activeElement === frame
+    ? `frame>${name(child.activeElement)}`
+    : name(document.activeElement);
+})()"#,
+    )
+    .expect("focused path should evaluate")
+}
+
+#[test]
+fn tab_key_moves_focus_between_controls_inside_child_frame_and_back_out() {
+    let mut vm = new_parsed_test_vm(
+        "https://tab-child-frame.test/",
+        r#"<html><body>
+            <button id="pre">pre</button>
+            <iframe id="frame"></iframe>
+            <button id="post">post</button>
+        </body></html>"#,
+    );
+    vm.eval(
+        r#"
+(() => {
+  const childDocument = document.getElementById('frame').contentDocument;
+  childDocument.open();
+  childDocument.write('<button id="a">a</button><button id="b">b</button><input id="e">');
+  childDocument.close();
+  window.__childKeydowns = [];
+  childDocument.addEventListener('keydown', event => __childKeydowns.push(event.target.id));
+  childDocument.getElementById('a').focus();
+})()
+"#,
+    )
+    .expect("child frame fixture should initialize");
+
+    let mut path = vec![focused_path(&mut vm)];
+    for shift in [false, false, false, true, true, true, true] {
+        press_tab(&mut vm, shift);
+        path.push(focused_path(&mut vm));
+    }
+    let child_keydowns = vm
+        .eval("__childKeydowns.join(',')")
+        .expect("child keydown log should evaluate");
+
+    assert_eq!(
+        path.join("|"),
+        "frame>a|frame>b|frame>e|post|frame>e|frame>b|frame>a|pre"
+    );
+    assert_eq!(child_keydowns, "a,b,e,e,b,a");
+}
+
+#[test]
+fn tab_key_skips_visibility_hidden_and_display_none_controls() {
+    let mut vm = new_parsed_test_vm(
+        "https://tab-unrendered-controls.test/",
+        r#"<html><body>
+            <button id="first">first</button>
+            <button id="hidden" style="visibility:hidden">hidden</button>
+            <button id="none" style="display:none">none</button>
+            <div style="display:none"><input id="nested"></div>
+            <div style="visibility:hidden"><button id="shown" style="visibility:visible">shown</button></div>
+            <button id="last">last</button>
+        </body></html>"#,
+    );
+    vm.eval("document.getElementById('first').focus()")
+        .expect("first control should focus");
+
+    let mut path = vec![focused_path(&mut vm)];
+    for shift in [false, false, true, true] {
+        press_tab(&mut vm, shift);
+        path.push(focused_path(&mut vm));
+    }
+
+    assert_eq!(path.join("|"), "first|shown|last|shown|first");
+}
