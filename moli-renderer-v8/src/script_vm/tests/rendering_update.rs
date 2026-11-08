@@ -49,6 +49,57 @@ scrollTo(0, 20);
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn element_scroll_fires_non_bubbling_scroll_and_scrollend_once_per_rendering_update() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_storage_page_task_executor_test_vm("https://element-scroll-events.test/");
+
+    vm.eval(
+        r#"
+const root = document.documentElement || document.appendChild(document.createElement("html"));
+const body = document.body || root.appendChild(document.createElement("body"));
+body.innerHTML = `<div id="scroller" style="height:10px;overflow:auto"><div style="height:100px"></div></div>`;
+const scroller = document.getElementById("scroller");
+globalThis.__elementScrollLog = [];
+scroller.addEventListener("scroll", (event) =>
+  __elementScrollLog.push("scroll:" + scroller.scrollTop + ":" + event.bubbles));
+scroller.addEventListener("scrollend", (event) =>
+  __elementScrollLog.push("scrollend:" + event.bubbles));
+document.addEventListener("scroll", () => __elementScrollLog.push("document-scroll"));
+window.addEventListener("scrollend", () => __elementScrollLog.push("window-scrollend"));
+scroller.scrollTop = 10;
+scroller.scrollTop = 20;
+scroller.scrollTop = 20;
+"queued"
+"#,
+    )
+    .expect("element scroll producers should run");
+
+    assert_eq!(
+        vm.eval("__elementScrollLog.join('|')")
+            .expect("pre-turn log should be readable"),
+        "",
+        "element scroll events must wait for the rendering update"
+    );
+    assert!(
+        vm.run_one_rendering_update_executor_turn(&loader)
+            .await
+            .expect("rendering update should run"),
+        "an element scroll must queue a rendering update"
+    );
+    assert_eq!(
+        vm.eval("__elementScrollLog.join('|')")
+            .expect("post-turn log should be readable"),
+        "scroll:20:false|scrollend:false"
+    );
+    assert!(
+        !vm.run_one_rendering_update_executor_turn(&loader)
+            .await
+            .expect("empty rendering source should remain usable"),
+        "repeated scrolls of one element must coalesce to one update"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn animation_and_scroll_share_rendering_fifo_but_consume_one_task_per_turn() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm =
