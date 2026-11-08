@@ -1362,7 +1362,7 @@ fn inline_size_containment_zeroes_intrinsic_width_in_a_flex_row() {
                     width: length(400.0),
                     height: length(60.0),
                 },
-                align_items: Some(taffy::AlignItems::Start),
+                align_items: taffy::AlignItems::START,
                 ..Style::default()
             },
             PaintColor::TRANSPARENT,
