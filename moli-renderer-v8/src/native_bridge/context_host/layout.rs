@@ -290,7 +290,7 @@ impl JsContextHost {
             return None;
         }
         Some(LayoutInputKey {
-            dom: self.dom_host().dom_version_excluding_hover(),
+            dom: self.dom_host().dom_version_excluding_interaction_state(),
             styles: self
                 .style_engine
                 .visual_style_input_generations(self.active_layout_document_handles()),

@@ -158,6 +158,9 @@ pub struct DomHost {
     /// DOM-version bumps that only moved the hover chain.
     pub(super) hover_version: Cell<u64>,
     pub(super) query_version: Cell<u64>,
+    /// DOM-version bumps that only moved focus between elements whose boxes
+    /// do not read focus.
+    pub(super) focus_version: Cell<u64>,
     pub(super) shadow_root_binding_version: Cell<u64>,
     pub(super) connected_shadow_roots_version: Cell<u64>,
     /// Per-Document identity of the connected ShadowRoot TreeScope universe.

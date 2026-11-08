@@ -54,6 +54,7 @@ impl DomHost {
             dom_version: Cell::new(0),
             hover_version: Cell::new(0),
             query_version: Cell::new(0),
+            focus_version: Cell::new(0),
             shadow_root_binding_version: Cell::new(0),
             connected_shadow_roots_version: Cell::new(0),
             document_tree_scope_versions: RefCell::new(HashMap::new()),
@@ -198,11 +199,13 @@ impl DomHost {
         self.dom_version.get()
     }
 
-    /// The DOM version without the bumps that only moved the hover chain.
-    /// Layout never reads the hover chain; hover reaches layout only through
-    /// the style invalidation of selectors that depend on it.
-    pub fn dom_version_excluding_hover(&self) -> u64 {
-        self.dom_version.get() - self.hover_version.get()
+    /// The DOM version without the bumps that only moved the hover chain or
+    /// moved focus between elements whose boxes do not read focus. Layout
+    /// never reads the hover chain, and reads focus only for the selection of
+    /// a focused text control; otherwise hover and focus reach layout only
+    /// through the style invalidation of selectors that depend on them.
+    pub fn dom_version_excluding_interaction_state(&self) -> u64 {
+        self.dom_version.get() - self.hover_version.get() - self.focus_version.get()
     }
 
     fn record_hover_mutation(&self) {
@@ -607,8 +610,37 @@ impl DomHost {
         if self.active_element.get() == handle {
             return;
         }
-        self.active_element.set(handle);
+        let previous = self.active_element.replace(handle);
         self.record_mutation(MutationScope::QueryState);
+        let layout_reads_focus = [previous, handle]
+            .into_iter()
+            .flatten()
+            .any(|handle| self.is_text_control(handle));
+        if !layout_reads_focus {
+            self.focus_version
+                .set(self.focus_version.get().saturating_add(1));
+        }
+    }
+
+    /// Whether layout reads focus for `handle`: a focused text control lays
+    /// out its selection.
+    fn is_text_control(&self, handle: DomHandle) -> bool {
+        self.node(handle)
+            .and_then(Node::as_element)
+            .is_some_and(|element| {
+                element.is_html_textarea()
+                    || (element.is_html_input()
+                        && !matches!(
+                            element.input_type(),
+                            crate::forms::InputType::Hidden
+                                | crate::forms::InputType::Checkbox
+                                | crate::forms::InputType::Radio
+                                | crate::forms::InputType::Button
+                                | crate::forms::InputType::Submit
+                                | crate::forms::InputType::Reset
+                                | crate::forms::InputType::Image
+                        ))
+            })
     }
 
     pub fn element_matches_focus(&self, handle: DomHandle) -> bool {
