@@ -75,8 +75,14 @@ impl<N> LayoutBox<N> {
     }
 
     /// Physical axes under size containment on this box.
+    ///
+    /// Native text controls and selects keep their control-sized box, as
+    /// measured against Chromium for `input`, `textarea` and `select`
+    /// (`select` matches main rather than Chromium's arrow-only width).
     pub(crate) fn size_contained_axes(&self) -> Size<bool> {
-        if !self.is_eligible_for_size_containment() {
+        if !self.is_eligible_for_size_containment()
+            || self.style.taffy.item_is_compressible_replaced
+        {
             return Size {
                 width: false,
                 height: false,

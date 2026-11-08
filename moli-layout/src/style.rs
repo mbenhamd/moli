@@ -829,10 +829,12 @@ impl ResolvedLayoutStyle {
             computed.get_box().has_transform_or_perspective()
                 || will_change.intersects(WillChangeBits::TRANSFORM | WillChangeBits::PERSPECTIVE);
         if matches!(display, LayoutDisplay::Block | LayoutDisplay::BlockListItem)
-            && (layout_containment || paint_containment)
+            && (layout_containment
+                || paint_containment
+                || computed.clone_container_type().is_size_container_type())
         {
-            // Layout and paint containment establish an independent formatting
-            // context. Taffy's FlowRoot keeps the computed CSS display intact
+            // Layout and paint containment, and a size query container,
+            // establish an independent formatting context. Taffy's FlowRoot keeps the computed CSS display intact
             // in `display` while selecting the non-collapsing block algorithm.
             taffy.display = TaffyDisplay::FlowRoot;
         }
