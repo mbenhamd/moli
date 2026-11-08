@@ -59,6 +59,65 @@ fn element_get_animations_tracks_script_created_animations() {
     );
 }
 #[test]
+fn document_and_shadow_root_get_animations_return_tree_scope_animations_in_composite_order() {
+    let mut vm = new_parsed_test_vm(
+        "https://document-animations.test/",
+        "<!doctype html><style>@keyframes move { from { left: 0px; } to { left: 20px; } } \
+         .animated { position: relative; animation: move 100s linear; }</style>\
+         <body><div id=\"first\"></div><div id=\"second\"></div><div id=\"host\"></div>\
+         <div id=\"css\" class=\"animated\"></div></body>",
+    );
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              const first = document.getElementById("first");
+              const second = document.getElementById("second");
+              const shadow = document.getElementById("host").attachShadow({ mode: "open" });
+              const inner = document.createElement("div");
+              shadow.append(inner);
+              const keyframes = { opacity: [0, 1] };
+              const names = new Map();
+              const track = (animation, name) => { names.set(animation, name); return animation; };
+              const b1 = track(second.animate(keyframes, 100000), "b1");
+              track(first.animate(keyframes, 100000), "a1");
+              track(inner.animate(keyframes, 100000), "shadow");
+              track(second.animate(keyframes, 100000), "b2");
+              track(first.animate(keyframes, 10), "finished").finish();
+              const ids = list => list.map(animation => names.get(animation) ?? "css").join(",");
+              const describe = prototype => {
+                const descriptor = Object.getOwnPropertyDescriptor(prototype, "getAnimations");
+                return [typeof descriptor?.value, descriptor?.value?.name, descriptor?.value?.length,
+                        descriptor?.enumerable, descriptor?.writable, descriptor?.configurable].join(":");
+              };
+              const before = ids(document.getAnimations());
+              const inShadow = ids(shadow.getAnimations());
+              b1.cancel();
+              let brand;
+              try { Document.prototype.getAnimations.call(shadow); } catch (error) { brand = error.constructor.name; }
+              return JSON.stringify({
+                document: describe(Document.prototype),
+                shadowRoot: describe(ShadowRoot.prototype),
+                fragment: typeof DocumentFragment.prototype.getAnimations,
+                isArray: Array.isArray(document.getAnimations()),
+                before,
+                inShadow,
+                afterCancel: ids(document.getAnimations()),
+                brand,
+              });
+            })()
+            "#,
+        )
+        .expect("DocumentOrShadowRoot.getAnimations probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"document":"function:getAnimations:0:true:true:true","shadowRoot":"function:getAnimations:0:true:true:true","fragment":"undefined","isArray":true,"before":"css,b1,a1,b2","inShadow":"shadow","afterCancel":"css,a1,b2","brand":"TypeError"}"#
+    );
+}
+
+#[test]
 fn animation_internal_callback_state_ignores_public_spoofing() {
     let mut vm = new_parsed_test_vm(
         "https://animations-callback-slots.test/page.html",

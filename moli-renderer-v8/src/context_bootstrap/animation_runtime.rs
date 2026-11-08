@@ -1,4 +1,5 @@
 use super::*;
+use crate::document_runtime::DomHandle;
 use crate::web_api_interfaces;
 use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
 
@@ -25,6 +26,11 @@ const ANIMATION_MICROTASK_TOKEN_SLOT: &str = "__moliAnimationMicrotaskToken";
 const CSS_ANIMATION_TARGET_SLOT: &str = "__moliCssAnimationTarget";
 const KEYFRAME_EFFECT_TARGET_SLOT: &str = "__moliKeyframeEffectTarget";
 const KEYFRAME_EFFECT_KEYFRAMES_SLOT: &str = "__moliKeyframeEffectKeyframes";
+const ANIMATION_SEQUENCE_SLOT: &str = "__moliAnimationSequence";
+
+/// Creation order of every `Animation`, which composite order sorts script
+/// animations by (Web Animations §5.4.2, "animation composite order").
+static NEXT_ANIMATION_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Default, WebApiObject)]
 #[webapi(plain)]
@@ -155,6 +161,28 @@ struct ElementAnimationPrototypeDeclaration {
     get_animations: (),
 }
 
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::Document, enumerable, receiver)]
+struct DocumentAnimationPrototypeDeclaration {
+    #[webapi(
+        method,
+        length = 0,
+        callback = document_or_shadow_root_get_animations_callback
+    )]
+    get_animations: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::ShadowRoot, enumerable, receiver)]
+struct ShadowRootAnimationPrototypeDeclaration {
+    #[webapi(
+        method,
+        length = 0,
+        callback = document_or_shadow_root_get_animations_callback
+    )]
+    get_animations: (),
+}
+
 #[derive(WebApiObject)]
 #[webapi(plain)]
 struct AnimationFinishMicrotaskPayloadDeclaration<'s> {
@@ -186,6 +214,14 @@ pub(super) fn install_animation_template_bindings<'s>(
         }
         "Element" => {
             ElementAnimationPrototypeDeclaration::initialize_prototype_template(scope, prototype);
+        }
+        "Document" => {
+            DocumentAnimationPrototypeDeclaration::initialize_prototype_template(scope, prototype);
+        }
+        "ShadowRoot" => {
+            ShadowRootAnimationPrototypeDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
         }
         _ => {}
     }
@@ -268,6 +304,13 @@ fn initialize_animation_object<'s>(
     AnimationObjectDeclaration::new(effect, timeline, ready, finished, finished_resolve)
         .initialize(scope, animation)
         .expect("Animation declaration should initialize object");
+    let sequence = NEXT_ANIMATION_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    set_private_value(
+        scope,
+        animation,
+        ANIMATION_SEQUENCE_SLOT,
+        v8::Number::new(scope, sequence as f64).into(),
+    );
 }
 
 fn require_animation_receiver<'s>(
@@ -551,6 +594,83 @@ fn element_get_animations_callback<'s>(
         }
     }
     rv.set(v8::Array::new_with_elements(scope, &animations).into());
+}
+
+/// `DocumentOrShadowRoot.getAnimations()`: the relevant animations whose
+/// target is in this tree (not in a nested shadow tree), in composite order:
+/// CSS animations in tree order, then script animations in creation order.
+fn document_or_shadow_root_get_animations_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    let mut css_animations = Vec::new();
+    let mut script_animations = Vec::new();
+    if let Ok((runtime_ptr, root)) = node_runtime_and_handle_from_object(scope, args.this()) {
+        let elements = tree_element_handles(unsafe { &*runtime_ptr }, root);
+        for handle in elements {
+            // Script animations live on the element's wrapper, so an element
+            // without one has none.
+            let wrapper = unsafe { &*runtime_ptr }
+                .native_bridge()
+                .cached_handle_wrapper(scope, handle);
+            if let Some(wrapper) = wrapper {
+                script_animations.extend(element_registry::for_element(scope, wrapper));
+            }
+            if !crate::native_bridge::element::css_animation_start_applies(
+                unsafe { &*runtime_ptr },
+                handle,
+            ) {
+                continue;
+            }
+            let target = wrapper.or_else(|| {
+                unsafe { &mut *runtime_ptr }
+                    .native_bridge_mut()
+                    .wrap_handle(scope, runtime_ptr, handle)
+            });
+            if let Some(target) = target
+                && let Some(animation) = new_running_animation(scope)
+            {
+                set_private_value(scope, animation, CSS_ANIMATION_TARGET_SLOT, target.into());
+                css_animations.push(animation);
+            }
+        }
+    }
+    let mut script_animations = script_animations
+        .into_iter()
+        .map(|animation| {
+            let sequence = private_number(scope, animation, ANIMATION_SEQUENCE_SLOT);
+            (sequence.unwrap_or(f64::MAX), animation)
+        })
+        .collect::<Vec<_>>();
+    script_animations.sort_by(|(left, _), (right, _)| left.total_cmp(right));
+    let animations = css_animations
+        .into_iter()
+        .chain(
+            script_animations
+                .into_iter()
+                .map(|(_, animation)| animation),
+        )
+        .map(v8::Local::<v8::Value>::from)
+        .collect::<Vec<_>>();
+    rv.set(v8::Array::new_with_elements(scope, &animations).into());
+}
+
+/// Element descendants of `root` in tree order, without entering shadow trees.
+fn tree_element_handles(runtime: &JsContextHost, root: DomHandle) -> Vec<DomHandle> {
+    let host = runtime.dom_host();
+    let mut elements = Vec::new();
+    let mut stack = host.child_handles_reversed(root).collect::<Vec<_>>();
+    while let Some(handle) = stack.pop() {
+        if host
+            .node(handle)
+            .is_some_and(|node| node.as_element().is_some())
+        {
+            elements.push(handle);
+        }
+        stack.extend(host.child_handles_reversed(handle));
+    }
+    elements
 }
 
 fn new_keyframe_effect_for_target<'s>(
