@@ -27,11 +27,14 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_with_conte
 }
 
 /// Under the live-geometry policy, layout is brought up to date before a
-/// layout-dependent property resolves, like Blink, so used Grid tracks and used
-/// sizes describe the element's current box. The flush runs before the style
-/// observation starts and reuses the published layout while its input key is
-/// unchanged; a reentrant or failed flush keeps serving the published layout.
-/// The default frozen policy keeps sampling published geometry only.
+/// layout-dependent property resolves, like Blink, so used Grid tracks, used
+/// sizes and auto insets describe the element's current box. The flush runs
+/// before the style observation starts, so the geometry reads the observation
+/// makes find the published layout current and lay out nothing. It reuses the
+/// published layout while its input key is unchanged; a failed flush discards
+/// the stale layout instead of serving it (see
+/// `JsContextHost::refresh_live_layout_for_sampling`). The default frozen
+/// policy keeps sampling published geometry only.
 fn flush_layout_for_layout_dependent_property(
     runtime: &JsContextHost,
     handle: DomHandle,
@@ -46,10 +49,18 @@ fn flush_layout_for_layout_dependent_property(
                 | "height"
                 | "inline-size"
                 | "block-size"
+                | "top"
+                | "right"
+                | "bottom"
+                | "left"
+                | "inset-block-start"
+                | "inset-block-end"
+                | "inset-inline-start"
+                | "inset-inline-end"
         )
         && runtime.dom_host().is_connected(handle)
     {
-        runtime.ensure_current_layout().ok();
+        runtime.refresh_live_layout_for_sampling();
     }
 }
 

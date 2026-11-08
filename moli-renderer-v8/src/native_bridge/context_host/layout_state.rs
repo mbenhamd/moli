@@ -220,7 +220,7 @@ impl DocumentLayoutState {
     pub(super) fn publish_latest_layout(
         &mut self,
         document: DomHandle,
-        inputs: LayoutInputKey,
+        inputs: Option<LayoutInputKey>,
         tree: FrozenLayoutTree<DomHandle>,
     ) {
         self.latest_layout.publish(document, inputs, tree);

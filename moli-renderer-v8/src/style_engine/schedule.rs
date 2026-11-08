@@ -30,7 +30,18 @@ pub(super) fn queue_style_invalidation_for_scope(
     let Some(source_scope) = source_scope else {
         return;
     };
-    document_state.note_style_input_change();
+    // A hover change is a style input only when some selector depends on the
+    // hovered state; one that invalidates no element leaves every computed
+    // style, and so the live-geometry layout inputs, unchanged. Other causes
+    // keep bumping the generation up front.
+    let state_change = matches!(
+        &cause,
+        PendingStyleInvalidationCause::StateChange { state, .. }
+            if *state == dom::ElementState::HOVER
+    );
+    if !state_change {
+        document_state.note_style_input_change();
+    }
     let plan_started = profile_enabled.then(std::time::Instant::now);
     let work = pending_work_for_pending_cause(
         host,
@@ -61,6 +72,9 @@ pub(super) fn queue_style_invalidation_for_scope(
         }
         return;
     };
+    if state_change {
+        document_state.note_style_input_change();
+    }
     let extend_started = profile_enabled.then(std::time::Instant::now);
     queue_style_invalidation_targets(pending_invalidations, work);
     if let Some(started) = total_started {

@@ -231,8 +231,15 @@ instead: a geometry read, coordinate input, `innerText`, a layout-dependent
 `getComputedStyle` value (used sizes, Grid tracks) or ResizeObserver sampling
 runs one fresh layout when the DOM, style, scroll, resource, viewport or media
 inputs changed since the frozen tree was built, and reuses that tree while they
-are unchanged. Layout is still a full rebuild per pass, so a loop that
-alternates writes and reads pays one pass per read.
+are unchanged. IntersectionObserver and lazy-image checks sample the same
+current layout. Hovering a page without `:hover` rules lays out nothing.
+
+Each pass is still a full rebuild, so its cost grows with DOM size, and a loop
+that alternates writes and reads pays one pass per read. Measured on a
+release build: about 0.3 ms per write/read iteration on a small page (about
+11 times Chromium's cost), and about 85 ms per pass with 2,000 table rows,
+where a 1,000-iteration loop takes 79 to 94 s and can exceed CDP command
+timeouts. A read that finds the layout current costs about 3 to 10 µs.
 
 <p align="center">
   <a href="assets/moli_ondemand_rendering_flow.svg">

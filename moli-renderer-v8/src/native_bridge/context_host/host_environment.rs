@@ -2070,8 +2070,16 @@ impl JsContextHost {
         }
         // Hover changes the source style, not the published rendered world.
         // Geometry reads and pointer phases keep consuming the retained
-        // snapshot until a fresh visual publication replaces it.
-        self.invalidate_layout_after_interaction_state_change();
+        // snapshot until a fresh visual publication replaces it. Under the
+        // live-geometry policy hover is a layout input only through the style
+        // invalidation above, which bumps the style generation when a
+        // selector depends on the hovered state, so moving the pointer over
+        // a page without :hover rules lays out nothing.
+        if self.layout_policy().relayouts_stale_reads() {
+            self.clear_layout_rect_cache();
+        } else {
+            self.invalidate_layout_after_interaction_state_change();
+        }
         true
     }
 

@@ -1420,3 +1420,40 @@ fn live_geometry_read_during_an_active_pass_fails_instead_of_returning_stale_geo
     assert_eq!(vm.eval(width).expect("fresh read"), "150");
     assert_eq!(vm.layout_pass_observability_for_test().1, passes + 1);
 }
+
+#[test]
+fn live_geometry_intersection_check_sees_a_target_a_mutation_moved_into_view() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-intersection.test/",
+        "<!doctype html><html><body style=margin:0><div id=t style='position:absolute;top:5000px;width:10px;height:10px'></div></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.eval(
+        r#"window.__states = [];
+        new IntersectionObserver(entries => {
+          for (const entry of entries) window.__states.push(entry.isIntersecting);
+        }).observe(document.getElementById('t'));
+        'observed'"#,
+    )
+    .expect("observer registers");
+    vm.eval("void 0").expect("initial delivery");
+    assert_eq!(
+        vm.eval("JSON.stringify(window.__states)").expect("initial state"),
+        "[false]"
+    );
+    // The check after the mutation samples the current layout, as the
+    // forced read in the same turn does, so the entry reports the target on
+    // screen without a capture.
+    assert_eq!(
+        vm.eval(
+            "const t = document.getElementById('t'); t.style.top = '0px'; String(t.getBoundingClientRect().top)"
+        )
+        .expect("move and read"),
+        "0"
+    );
+    vm.eval("void 0").expect("deliver queued observers");
+    assert_eq!(
+        vm.eval("JSON.stringify(window.__states)").expect("moved state"),
+        "[false,true]"
+    );
+}

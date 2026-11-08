@@ -231,6 +231,9 @@ impl ScriptVm {
         let (document, result) = {
             let context_host = self._context_host.borrow();
             let document = context_host.document_handle();
+            let inputs = publishes_layout
+                .then(|| context_host.live_layout_input_key(request.viewport, environment_override))
+                .flatten();
             let result = context_host
                 .build_layout_pass_for_document_in_environment(
                     document,
@@ -252,6 +255,7 @@ impl ScriptVm {
                             document,
                             pass,
                             environment_override,
+                            inputs,
                         );
                     }
                     Ok(Some((value, css_images)))

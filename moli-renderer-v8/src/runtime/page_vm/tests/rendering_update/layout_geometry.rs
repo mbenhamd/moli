@@ -1332,3 +1332,73 @@ document.body.innerHTML = '<div id=g><i>1</i><i>2</i><i>3</i></div><div id=w></d
     .await
     .expect("live computed Grid track fixture should run");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_geometry_hover_lays_out_only_when_a_hover_rule_restyles() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}div{height:50px}</style>';
+document.body.innerHTML = '<div id=a>a</div><div id=b>b</div>';
+'installed'
+"#,
+        )?;
+        let width = "String(document.getElementById('a').getBoundingClientRect().width)";
+        assert_eq!(page_vm.vm_mut().eval(width)?, "800");
+        let passes = layout_passes(&page_vm);
+        // Chromium lays out for neither hover nor the hit test while no
+        // selector depends on the hovered state.
+        for _ in 0..10 {
+            for y in [10.0, 70.0] {
+                page_vm
+                    .vm_mut()
+                    .dispatch_mouse_event_at_point(10.0, y, "mousemove", 0, Some(0), 0.0, 0.0)?;
+            }
+        }
+        assert_eq!(page_vm.vm_mut().eval(width)?, "800");
+        assert_eq!(layout_passes(&page_vm), passes);
+
+        // A hover rule that resizes the box makes the next read lay out.
+        page_vm.vm_mut().eval(
+            "document.head.insertAdjacentHTML('beforeend', '<style>#a:hover{width:300px}</style>');'ruled'",
+        )?;
+        page_vm
+            .vm_mut()
+            .dispatch_mouse_event_at_point(10.0, 10.0, "mousemove", 0, Some(0), 0.0, 0.0)?;
+        assert_eq!(page_vm.vm_mut().eval(width)?, "300");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("live hover fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_geometry_computed_auto_inset_lays_out_before_the_style_observation() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}#pad{height:20px}#cb{position:relative}#abs{position:absolute}</style>';
+document.body.innerHTML = '<div id=pad></div><div id=cb><div id=abs>x</div></div>';
+'installed'
+"#,
+        )?;
+        // An absolutely positioned box with both insets auto resolves `top`
+        // from geometry. This pins that the value follows the current layout
+        // and that the read lays out once, before the style observation; it
+        // does not pin the static-position approximation itself.
+        let top = "getComputedStyle(document.getElementById('abs')).top";
+        let first = page_vm.vm_mut().eval(top)?;
+        let passes = layout_passes(&page_vm);
+        page_vm
+            .vm_mut()
+            .eval("document.getElementById('pad').style.height='35px';'mutated'")?;
+        let second = page_vm.vm_mut().eval(top)?;
+        assert_eq!(layout_passes(&page_vm), passes + 1);
+        assert_eq!((first.as_str(), second.as_str()), ("20px", "35px"));
+        page_vm.vm_mut().eval(top)?;
+        assert_eq!(layout_passes(&page_vm), passes + 1);
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("live computed inset fixture should run");
+}

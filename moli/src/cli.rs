@@ -625,9 +625,13 @@ pub struct CommonArgs {
 
     /// Relayout stale geometry like Chromium's forced reflow. Requires --layout.
     /// Geometry reads, input hit tests, innerText, layout-dependent computed
-    /// styles and ResizeObserver sampling lay out again when the DOM, style,
-    /// scroll, resource, viewport or media inputs changed since the published
-    /// layout. Without this flag reads keep the last published layout.
+    /// styles and Resize/IntersectionObserver sampling lay out again when the
+    /// DOM, style, scroll, resource, viewport or media inputs changed since the
+    /// published layout. Without this flag reads keep the last published layout.
+    /// Each relayout rebuilds the whole page, so its cost grows with DOM size
+    /// (about 0.3 ms on a small page, about 85 ms with 2,000 table rows): a
+    /// write/read loop pays one rebuild per iteration and can exceed CDP
+    /// command timeouts on large pages.
     #[arg(
         long,
         env = "MOLI_LIVE_GEOMETRY",

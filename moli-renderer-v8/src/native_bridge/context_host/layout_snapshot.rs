@@ -10,7 +10,7 @@ use crate::document_runtime::DomHandle;
 /// policy a synchronous read lays out again only when this key differs, so
 /// repeated reads of an unchanged Document reuse the same frozen tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct LayoutInputKey {
+pub(crate) struct LayoutInputKey {
     pub(super) dom: u64,
     pub(super) styles: Vec<(DomHandle, u64, u64)>,
     pub(super) used_geometry: u64,
@@ -22,7 +22,9 @@ pub(super) struct LayoutInputKey {
 
 struct LatestFrozenLayout {
     document: DomHandle,
-    inputs: LayoutInputKey,
+    /// Recorded only under the live-geometry policy; frozen policies never
+    /// compare inputs.
+    inputs: Option<LayoutInputKey>,
     tree: Box<FrozenLayoutTree<DomHandle>>,
 }
 
@@ -57,13 +59,15 @@ impl LatestLayoutTreeCache {
     pub(super) fn is_current(&self, document: DomHandle, inputs: &LayoutInputKey) -> bool {
         self.latest
             .as_ref()
-            .is_some_and(|snapshot| snapshot.document == document && snapshot.inputs == *inputs)
+            .is_some_and(|snapshot| {
+                snapshot.document == document && snapshot.inputs.as_ref() == Some(inputs)
+            })
     }
 
     pub(super) fn publish(
         &mut self,
         document: DomHandle,
-        inputs: LayoutInputKey,
+        inputs: Option<LayoutInputKey>,
         tree: FrozenLayoutTree<DomHandle>,
     ) {
         self.latest = Some(LatestFrozenLayout {
