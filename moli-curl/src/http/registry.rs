@@ -11,7 +11,7 @@ use super::{
     },
 };
 use crate::{
-    CurlMultiRuntimeConfig, CurlTransferId,
+    CurlConnectionUse, CurlMultiRuntimeConfig, CurlOriginKey, CurlTransferId,
     dns_adapter::{CurlDnsOwnerCompletion, CurlDnsOwnerResidence, CurlDnsReady},
     http::CurlConnectionDestination,
 };
@@ -198,17 +198,39 @@ impl<H: Handler, C> HttpRegistry<H, C> {
         if self.closed || self.active.len() >= self.config.max_active.get() {
             return None;
         }
-        self.pending.iter().position(|pending| {
+        // Destinations where an older exclusive job is still waiting. Newer
+        // shareable jobs there would keep every slot busy and could hold the
+        // exclusive job until its deadline, so they wait behind it.
+        let mut held_destinations = Vec::new();
+        for (index, pending) in self.pending.iter().enumerate() {
             let origin = pending.job.origin.as_ref();
-            job_is_eligible(origin, &self.active, self.config.max_host_active)
+            let connection = pending.job.connection;
+            if connection == CurlConnectionUse::Shared
+                && !held_destinations.is_empty()
+                && origin
+                    .and_then(CurlOriginKey::connection_destination)
+                    .is_some_and(|destination| held_destinations.contains(&destination))
+            {
+                continue;
+            }
+            if job_is_eligible(origin, &self.active, self.config.max_host_active)
                 && exclusive_connection_slot_available(
                     origin,
-                    pending.job.connection,
+                    connection,
                     &self.active,
                     self.config.max_host_connections,
                     other_connections,
                 )
-        })
+            {
+                return Some(index);
+            }
+            if connection == CurlConnectionUse::Exclusive
+                && let Some(destination) = origin.and_then(CurlOriginKey::connection_destination)
+            {
+                held_destinations.push(destination);
+            }
+        }
+        None
     }
 
     fn start_eligible_jobs(
@@ -563,7 +585,7 @@ fn env_flag_enabled(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CurlConnectionUse, CurlDnsResolution, CurlOriginKey};
+    use crate::CurlDnsResolution;
     use curl::easy::Easy2;
     use std::{
         cell::Cell,
@@ -719,17 +741,7 @@ mod tests {
         assert!(!registry.contains(waiting));
         assert!(!registry.has_eligible_jobs(&no_other_connections));
 
-        // Shareable work is counted but never held back.
-        let shared = test_transfer_id(4);
-        registry.admit(
-            shared,
-            job_using("shared", host.clone(), CurlConnectionUse::Shared),
-        );
-        registry.advance(&mut multi, &no_other_connections);
-        assert!(registry.contains(shared));
-
         // Proxied work holds a slot on the proxy host, not on this origin.
-        registry.complete(&mut multi, vec![(shared, Ok(()))]);
         let proxied = test_transfer_id(5);
         registry.admit(
             proxied,
@@ -743,6 +755,64 @@ mod tests {
         assert!(registry.has_eligible_jobs(&no_other_connections));
         registry.advance(&mut multi, &no_other_connections);
         assert!(registry.contains(waiting));
+        registry.shutdown(&mut multi);
+    }
+
+    #[test]
+    fn newer_shared_jobs_wait_behind_an_older_exclusive_job_to_the_same_host() {
+        let (mut registry, mut multi, _completed) = registry_with_host_cap(2);
+        let host = origin_at("x.test", 443);
+        let streams = [test_transfer_id(1), test_transfer_id(2)];
+        for (index, stream) in streams.into_iter().enumerate() {
+            registry.admit(
+                stream,
+                job_using(
+                    &format!("stream-{index}"),
+                    host.clone(),
+                    CurlConnectionUse::Shared,
+                ),
+            );
+        }
+        registry.advance(&mut multi, &no_other_connections);
+        assert!(streams.iter().all(|stream| registry.contains(*stream)));
+
+        // An HTTP/1 fallback waits for a slot; newer shareable work to the
+        // same host waits behind it, while other hosts are unaffected.
+        let fallback = test_transfer_id(3);
+        let newer = test_transfer_id(4);
+        let other_host = test_transfer_id(5);
+        registry.admit(
+            fallback,
+            job_using("fallback", host.clone(), CurlConnectionUse::Exclusive),
+        );
+        registry.admit(newer, job_using("newer", host, CurlConnectionUse::Shared));
+        registry.admit(
+            other_host,
+            job_using(
+                "other-host",
+                origin_at("y.test", 443),
+                CurlConnectionUse::Shared,
+            ),
+        );
+        registry.advance(&mut multi, &no_other_connections);
+        assert!(registry.contains(other_host));
+        assert!(!registry.contains(fallback));
+        assert!(!registry.contains(newer));
+        assert!(!registry.has_eligible_jobs(&no_other_connections));
+
+        registry.complete(&mut multi, vec![(streams[0], Ok(()))]);
+        assert_eq!(
+            registry.next_eligible_job_index(&no_other_connections),
+            registry
+                .pending
+                .iter()
+                .position(|pending| pending.transfer_id == fallback),
+            "the waiting fallback takes the freed slot first"
+        );
+        registry.advance(&mut multi, &no_other_connections);
+        assert!(registry.contains(fallback));
+        // Once the fallback holds its connection, shareable work resumes.
+        assert!(registry.contains(newer));
         registry.shutdown(&mut multi);
     }
 

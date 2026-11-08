@@ -69,15 +69,16 @@ pub type CurlJobCancelled = Arc<dyn Fn() -> bool + Send + Sync>;
 /// therefore starts an [`Exclusive`](Self::Exclusive) transfer only when its
 /// destination has a free connection, so its connect timeout bounds the real
 /// TCP/TLS connect.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CurlConnectionUse {
     /// Neither counted nor gated, as for a transfer through a proxy: libcurl
     /// then counts the proxy host, not the origin.
-    #[default]
     Untracked,
     /// A direct transfer that may share an HTTP/2 connection. It is counted
-    /// against its destination but not gated, because a multiplexed stream
-    /// does not need a free connection.
+    /// against its destination and not gated by free connections, because a
+    /// multiplexed stream does not need one. It still waits behind an older
+    /// exclusive job to the same destination, so a stream of new shareable
+    /// work cannot starve an HTTP/1 fallback.
     Shared,
     /// A direct transfer that needs one whole connection for its lifetime,
     /// as with HTTP/1.x. It is counted and starts only below the cap.
