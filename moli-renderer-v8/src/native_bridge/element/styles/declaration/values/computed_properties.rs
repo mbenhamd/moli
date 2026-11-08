@@ -3,6 +3,7 @@ use super::*;
 mod background;
 mod font;
 mod shorthands;
+pub(super) use self::shorthands::pseudo_computed_shorthand_value;
 
 pub(in crate::native_bridge::element::styles) fn style_property_value_with_context(
     runtime: &JsContextHost,

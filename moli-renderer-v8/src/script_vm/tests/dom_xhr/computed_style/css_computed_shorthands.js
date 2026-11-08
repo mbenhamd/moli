@@ -75,6 +75,19 @@
         ['overflow:hidden auto', 'overflow', 'hidden auto'],
         ['flex-flow:column wrap', 'flex-flow', 'column wrap'],
         ['transition:opacity 1s ease-in .5s', 'transition', 'opacity 1s ease-in 0.5s'],
+        // A grid container's grid-template serializes its computed track lists.
+        ['display:grid;grid-template:repeat(2,10px) / 20px', 'grid-template', 'repeat(2, 10px) / 20px'],
+        ['display:grid;grid-template-areas:"a b" "c d";grid-template-rows:auto auto;grid-template-columns:1fr 1fr', 'grid-template', '"a b" "c d" / 1fr 1fr'],
+        ['display:grid;height:100px;grid-template-areas:"a b" "c d";grid-template-rows:10px 20%;grid-template-columns:1fr 1fr', 'grid-template', '"a b" 10px "c d" 20% / 1fr 1fr'],
+        ['grid-template-areas:"a"', 'grid-template', ''],
+        ['grid-template-areas:"a";grid-template-columns:10px', 'grid-template', ''],
+        ['grid-template-areas:"a" "b";grid-template-rows:10px auto', 'grid-template', '"a" 10px "b"'],
+        ['display:grid;grid-template-areas:"a" "b";grid-template-rows:10px auto;grid-template-columns:30px', 'grid-template', '"a" 10px "b" / 30px'],
+        ['display:grid;grid-template-areas:"a" "b";grid-template-rows:[x] 10px [y] 20px;grid-template-columns:30px', 'grid-template', '[x] "a" 10px [y] "b" 20px / 30px'],
+        ['display:grid;grid-template:[top] "a" 10px [bot] / [l] 50px [r]', 'grid-template', '[top] "a" 10px [bot] / [l] 50px [r]'],
+        ['grid-template-areas:"a b";grid-template-rows:10px [n]', 'grid-template', '"a b" 10px [n]'],
+        ['display:grid;grid-template-areas:"a b";grid-template-rows:10px [n];grid-template-columns:1fr 2fr', 'grid-template', '"a b" 10px [n] / 1fr 2fr'],
+        ['display:grid;grid-template-areas:"a" "b";grid-template-rows:10px 20px;grid-template-columns:repeat(2,5px)', 'grid-template', ''],
     ];
     const failures = [];
     for (const [text, property, expected] of cases) {
@@ -92,5 +105,16 @@
     const camel = [style.borderRadius, style.gap, style.flex].join('|');
     if (camel !== '18px|4px 8px|1 1 0%') failures.push(`camelCase accessors: ${camel}`);
     element.remove();
+    const sheet = document.createElement('style');
+    sheet.textContent = '#pseudo-shorthands::before{content:"x";border-radius:3px 9px;flex:2;outline:2px dashed red}';
+    document.head.append(sheet);
+    const host = document.createElement('div');
+    host.id = 'pseudo-shorthands';
+    document.body.append(host);
+    const before = getComputedStyle(host, '::before');
+    const pseudo = ['border-radius', 'flex', 'gap', 'outline'].map((property) => before.getPropertyValue(property)).join('|');
+    if (pseudo !== '3px 9px|2 1 0%|normal|rgb(255, 0, 0) dashed 2px') failures.push(`::before shorthands: ${pseudo}`);
+    host.remove();
+    sheet.remove();
     return failures.length ? failures.join('\n') : 'true';
 })()

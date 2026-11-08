@@ -336,7 +336,14 @@ impl<'a> ComputedStyleRead<'a> {
                 pseudo_element,
                 read_document,
             )
-            .and_then(|style| style.resolved_property_value(&property))
+            .and_then(|style| {
+                pseudo_computed_shorthand_value(&property, &|longhand| {
+                    style
+                        .resolved_property_value(longhand)
+                        .filter(|value| !value.is_empty())
+                })
+                .or_else(|| style.resolved_property_value(&property))
+            })
             .unwrap_or_default()
     }
 

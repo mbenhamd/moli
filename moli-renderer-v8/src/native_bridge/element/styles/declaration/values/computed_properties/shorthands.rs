@@ -113,11 +113,42 @@ pub(super) fn computed_shorthand_value(
     property: &str,
     resolution: StyleResolutionContext<'_>,
 ) -> Option<String> {
-    let shorthand = computed_shorthand(property)?;
+    computed_shorthand(property)?;
     let read = |longhand: &str| {
         let value = resolution.computed_property(runtime, handle, longhand);
         (!value.is_empty()).then_some(value)
     };
+    // `grid-template` serializes the computed track lists: the resolved
+    // longhands of a grid container are used pixel sizes, which would lose
+    // `repeat()`, `fr`, percentages and line names. Only an empty computed
+    // list resolves to the container's used (implicit) tracks, as in Chromium.
+    let read_tracks = |longhand: &str| {
+        let value = resolution.raw_property(runtime, handle, longhand);
+        if value == "none" {
+            return read(longhand);
+        }
+        (!value.is_empty()).then_some(value)
+    };
+    serialize_computed_shorthand(property, &read, &read_tracks)
+}
+
+/// Serializes a table shorthand of a pseudo-element from its computed style
+/// snapshot's longhands.
+pub(in super::super) fn pseudo_computed_shorthand_value(
+    property: &str,
+    read: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    serialize_computed_shorthand(property, read, read)
+}
+
+/// `read` returns a longhand's resolved value and `read_tracks` a
+/// `grid-template-{rows,columns}` value to serialize into `grid-template`.
+fn serialize_computed_shorthand(
+    property: &str,
+    read: &dyn Fn(&str) -> Option<String>,
+    read_tracks: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let shorthand = computed_shorthand(property)?;
     Some(match shorthand {
         ComputedShorthand::Sequence {
             longhands,
@@ -212,8 +243,8 @@ pub(super) fn computed_shorthand_value(
             [row_start, column_start, row_end, column_end][..lines].join(" / ")
         }
         ComputedShorthand::GridTemplate => {
-            let rows = read("grid-template-rows")?;
-            let columns = read("grid-template-columns")?;
+            let rows = read_tracks("grid-template-rows")?;
+            let columns = read_tracks("grid-template-columns")?;
             let areas = read("grid-template-areas")?;
             serialize_grid_template(&rows, &columns, &areas)
         }
@@ -221,8 +252,8 @@ pub(super) fn computed_shorthand_value(
             serialize_border_side_components(&read(width)?, &read(style)?, &read(color)?)?
         }
         ComputedShorthand::BorderSidePair([start, end]) => {
-            let start = computed_shorthand_value(runtime, handle, start, resolution)?;
-            let end = computed_shorthand_value(runtime, handle, end, resolution)?;
+            let start = serialize_computed_shorthand(start, read, read_tracks)?;
+            let end = serialize_computed_shorthand(end, read, read_tracks)?;
             if start == end { start } else { String::new() }
         }
     })
@@ -257,31 +288,93 @@ fn serialize_grid_template(rows: &str, columns: &str, areas: &str) -> String {
             format!("{rows} / {columns}")
         };
     }
-    // `<grid-template-areas>` needs exactly one plain track per area row;
-    // anything else (line names, `repeat()`, a count mismatch) has no
-    // shorthand serialization here.
-    let (Some(area_rows), Some(tracks)) = (
-        box_shorthand_value_components(areas),
-        box_shorthand_value_components(rows),
+    // The areas form is `[<line-names>? <string> <track-size>? <line-names>?]+
+    // [/ <explicit-track-list>]?`: one row track per area string, and no
+    // `repeat()` on either axis. Anything else has no shorthand serialization.
+    if rows == "none" {
+        return String::new();
+    }
+    let (Some(area_rows), Some(row_tokens), Some(column_tokens)) = (
+        track_list_tokens(areas),
+        track_list_tokens(rows),
+        track_list_tokens(columns),
     ) else {
         return String::new();
     };
-    if area_rows.len() != tracks.len()
-        || tracks
+    if area_rows.iter().any(|area| !area.starts_with('"'))
+        || row_tokens
             .iter()
-            .any(|track| track.starts_with('[') || track.starts_with("repeat("))
+            .chain(&column_tokens)
+            .any(|token| token.starts_with("repeat("))
     {
         return String::new();
     }
-    let mut serialized = area_rows
-        .iter()
-        .zip(&tracks)
-        .map(|(area, track)| format!("{area} {track}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    if columns != "none" {
-        serialized.push_str(" / ");
-        serialized.push_str(columns);
+    let mut tracks = Vec::with_capacity(area_rows.len());
+    let mut pending_names = None;
+    for token in &row_tokens {
+        if token.starts_with('[') {
+            if pending_names.replace(token.as_str()).is_some() {
+                return String::new();
+            }
+        } else {
+            tracks.push((pending_names.take(), token.as_str()));
+        }
     }
-    serialized
+    if tracks.len() != area_rows.len() {
+        return String::new();
+    }
+    let mut parts = Vec::with_capacity(row_tokens.len() + area_rows.len() + 2);
+    for ((names, size), area) in tracks.into_iter().zip(&area_rows) {
+        // Names between two tracks serialize after the earlier track's size,
+        // which is the same position as before the later area string.
+        parts.extend(names);
+        parts.push(area.as_str());
+        // `auto` is the omitted `<track-size>` default.
+        if size != "auto" {
+            parts.push(size);
+        }
+    }
+    parts.extend(pending_names);
+    if columns != "none" {
+        parts.push("/");
+        parts.push(columns);
+    }
+    parts.join(" ")
+}
+
+/// Splits a computed track list or `grid-template-areas` value on top-level
+/// whitespace, keeping `[line names]`, `"area strings"` and `function(...)`
+/// groups whole.
+fn track_list_tokens(value: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    for ch in value.chars() {
+        if in_string {
+            current.push(ch);
+            in_string = ch != '"';
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.checked_sub(1)?,
+            _ if ch.is_whitespace() && depth == 0 => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                continue;
+            }
+            _ => {}
+        }
+        current.push(ch);
+    }
+    if in_string || depth != 0 {
+        return None;
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Some(tokens)
 }
