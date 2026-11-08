@@ -159,6 +159,22 @@ where
                 - insets.top
                 - insets.bottom)
                 .max(0.0);
+            // Blink answers from the size known before the box's contents
+            // are laid out, so an auto block size with a block-flow parent
+            // reads as zero even when intrinsic or minimum sizes grow it.
+            let block_size_was_unknown = layout_box.style.taffy.size.height.is_auto()
+                && layout_box.style.taffy.position != taffy::Position::Absolute
+                && !layout_box.layout_parent.is_some_and(|parent| {
+                    matches!(
+                        self.boxes[parent.index()].style.taffy.display,
+                        taffy::Display::Flex | taffy::Display::Grid
+                    )
+                });
+            let content_height = if axes.height && block_size_was_unknown {
+                0.0
+            } else {
+                content_height
+            };
             sizes.push((
                 source,
                 LayoutQueryContainerSize {

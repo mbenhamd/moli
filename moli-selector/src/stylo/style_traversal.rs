@@ -1602,6 +1602,14 @@ impl Drop for SnapshotHandlesReset<'_> {
 }
 
 impl<'a> StyleNode<'a> {
+    fn light_tree_parent_or_shadow_host(self) -> Option<StyleElement<'a>> {
+        let parent = self.parent_node()?;
+        if let Some(element) = parent.as_element() {
+            return Some(element);
+        }
+        parent.as_shadow_root().map(|root| root.host())
+    }
+
     fn data(self) -> &'a StyleNodeData {
         // SAFETY: Style node data is owned by the style adapter's per-resolution
         // arena and remains stable until the adapter is rebound for the next
@@ -1921,11 +1929,16 @@ impl<'a> TNode for StyleNode<'a> {
     }
 
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {
-        let parent = self.parent_node()?;
-        if let Some(element) = parent.as_element() {
-            return Some(element);
+        // The flat-tree parent, so a slotted element's container lookup
+        // walks through its slot into the shadow tree.
+        if let Some(slot) = self.host().assigned_slot_for_node(self.handle()) {
+            return StyleElement::from_handle_in_document(
+                self.style_state(),
+                self.document(),
+                slot,
+            );
         }
-        parent.as_shadow_root().map(|root| root.host())
+        self.light_tree_parent_or_shadow_host()
     }
 
     fn opaque(&self) -> OpaqueNode {
@@ -1994,7 +2007,7 @@ impl<'a> TElement for StyleElement<'a> {
     fn inheritance_parent(&self) -> Option<Self> {
         // Shadow-tree roots inherit from their host. Keep this separate from
         // the selector parent, which must not cross a ShadowRoot boundary.
-        self.traversal_parent()
+        self.as_node().light_tree_parent_or_shadow_host()
     }
 
     fn traversal_children(&self) -> LayoutIterator<Self::TraversalChildrenIterator> {

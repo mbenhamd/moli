@@ -188,3 +188,81 @@ fn print_pass_does_not_poison_screen_container_sizes() {
     }
     assert_eq!(vm.eval(read).expect("eval"), "rgb(2, 2, 2)");
 }
+
+#[test]
+fn an_attribute_no_selector_reads_needs_no_pass_but_a_size_change_does() {
+    let mut vm = live_vm(STYLES);
+    vm.eval("getComputedStyle(document.getElementById('dep')).color")
+        .expect("eval");
+    let before = passes(&vm);
+    let result = vm
+        .eval(
+            r#"(() => {
+              const dep = document.getElementById('dep');
+              for (let i = 0; i < 5; i++) { dep.setAttribute('data-x', String(i)); getComputedStyle(dep).color; }
+              return getComputedStyle(dep).color;
+            })()"#,
+        )
+        .expect("eval");
+    assert_eq!(result, "rgb(0, 0, 0)");
+    assert_eq!(passes(&vm), before);
+    let grown = vm
+        .eval(
+            r#"(() => {
+              document.getElementById('toggle').classList.add('wide');
+              return getComputedStyle(document.getElementById('dep')).color;
+            })()"#,
+        )
+        .expect("eval");
+    assert_eq!(grown, "rgb(70, 70, 70)");
+}
+
+#[test]
+fn slotted_content_queries_and_follows_its_shadow_tree_container() {
+    let mut vm = live_vm(
+        r#"<style>
+          @container (min-width: 300px) { #slotted { color: rgb(1, 1, 1); } }
+          #slotted { color: rgb(0, 0, 0); }
+        </style>
+        <div id="host"><span id="slotted">s</span></div>
+        <script>
+          const root = document.getElementById('host').attachShadow({ mode: 'open' });
+          root.innerHTML = '<div id="in" style="container-type:inline-size;width:100px"><slot></slot></div>';
+        </script>"#,
+    );
+    let result = vm
+        .eval(
+            r#"(() => {
+              const slotted = document.getElementById('slotted');
+              const small = getComputedStyle(slotted).color;
+              document.getElementById('host').shadowRoot.getElementById('in').style.width = '400px';
+              document.body.getBoundingClientRect();
+              return small + '|' + getComputedStyle(slotted).color;
+            })()"#,
+        )
+        .expect("eval");
+    assert_eq!(result, "rgb(0, 0, 0)|rgb(1, 1, 1)");
+}
+
+#[test]
+fn a_pseudo_element_read_flushes_container_sizes() {
+    let mut vm = live_vm(
+        r#"<style>
+          #c { container-type: inline-size; width: 100px; }
+          #k::before { content: ""; display: block; width: 50cqw; height: 1px; }
+          #k::after { content: ""; display: block; width: 20cqi; height: 1px; }
+        </style>
+        <div id="c"><div id="k" style="display:inline-block"></div></div>"#,
+    );
+    let result = vm
+        .eval(
+            r#"(() => {
+              const k = document.getElementById('k');
+              const first = getComputedStyle(k, '::before').width;
+              document.getElementById('c').style.width = '400px';
+              return [first, getComputedStyle(k, '::before').width, getComputedStyle(k, '::after').width].join('|');
+            })()"#,
+        )
+        .expect("eval");
+    assert_eq!(result, "50px|200px|80px");
+}
