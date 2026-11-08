@@ -150,7 +150,7 @@ impl DomHost {
             if name.eq_ignore_ascii_case("id") || name.eq_ignore_ascii_case("name") {
                 self.record_named_index_candidate(handle);
             }
-            self.record_mutation(MutationScope::QueryState);
+            self.record_attribute_mutation(name);
             if name.eq_ignore_ascii_case("id") || name.eq_ignore_ascii_case("name") {
                 self.update_target_after_indicated_part_mutation(handle);
             }
@@ -420,7 +420,7 @@ impl DomHost {
             if name.eq_ignore_ascii_case("id") || name.eq_ignore_ascii_case("name") {
                 self.record_named_index_candidate(handle);
             }
-            self.record_mutation(MutationScope::QueryState);
+            self.record_attribute_mutation(name);
             if name.eq_ignore_ascii_case("id") || name.eq_ignore_ascii_case("name") {
                 self.update_target_after_indicated_part_mutation(handle);
             }

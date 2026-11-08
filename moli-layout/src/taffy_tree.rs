@@ -2137,7 +2137,13 @@ where
             Size::ZERO
         };
         let inherent = inputs.sizing_mode == SizingMode::InherentSize;
-        let aspect_ratio = layout_box.resolved_aspect_ratio();
+        // Fully size-contained replaced content has no natural ratio; an
+        // explicit `aspect-ratio` still applies.
+        let aspect_ratio = if axes.width && axes.height {
+            layout_box.style.resolved_aspect_ratio(None)
+        } else {
+            layout_box.resolved_aspect_ratio()
+        };
         let resolved_size = style
             .size
             .maybe_resolve(inputs.parent_size, resolve_stylo_calc_value)
@@ -2188,6 +2194,18 @@ where
             } else {
                 content
             });
+        }
+        // With no natural ratio, a replaced box's own width must not be
+        // derived from the injected zero height through its natural size.
+        if inherent
+            && axes.width
+            && axes.height
+            && layout_box.is_replaced()
+            && known.width.is_none()
+        {
+            known.width = resolved_size
+                .width
+                .map(|width| width.maybe_clamp(min_size.width, max_size.width));
         }
         LayoutInput {
             known_dimensions: known,

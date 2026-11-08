@@ -85,8 +85,23 @@ impl<N> LayoutBox<N> {
     }
 
     /// Physical axes under size containment on this box.
+    ///
+    /// Native text controls and selects keep their control-sized box, as
+    /// measured against Chromium for `input`, `textarea` and `select`
+    /// (`select` matches main rather than Chromium's arrow-only width).
+    /// Moli has no rendered-legend layout, so a contained fieldset would lose
+    /// its legend too; it keeps main's size instead.
     pub(crate) fn size_contained_axes(&self) -> Size<bool> {
-        if !self.is_eligible_for_size_containment() {
+        let is_fieldset = self.element_semantics.as_ref().is_some_and(|semantics| {
+            matches!(
+                semantics.category,
+                crate::LayoutElementCategory::FormControl(crate::LayoutFormControlKind::FieldSet)
+            )
+        });
+        if !self.is_eligible_for_size_containment()
+            || self.style.taffy.item_is_compressible_replaced
+            || is_fieldset
+        {
             return Size {
                 width: false,
                 height: false,
@@ -153,6 +168,22 @@ where
                 - insets.top
                 - insets.bottom)
                 .max(0.0);
+            // Blink answers from the size known before the box's contents
+            // are laid out, so an auto block size with a block-flow parent
+            // reads as zero even when intrinsic or minimum sizes grow it.
+            let block_size_was_unknown = layout_box.style.taffy.size.height.is_auto()
+                && layout_box.style.taffy.position != taffy::Position::Absolute
+                && !layout_box.layout_parent.is_some_and(|parent| {
+                    matches!(
+                        self.boxes[parent.index()].style.taffy.display,
+                        taffy::Display::Flex | taffy::Display::Grid
+                    )
+                });
+            let content_height = if axes.height && block_size_was_unknown {
+                0.0
+            } else {
+                content_height
+            };
             sizes.push((
                 source,
                 LayoutQueryContainerSize {

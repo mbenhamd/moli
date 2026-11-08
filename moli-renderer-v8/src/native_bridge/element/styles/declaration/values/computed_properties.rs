@@ -43,23 +43,33 @@ fn flush_layout_for_layout_dependent_property(
     property: &str,
     context: StyleComputationContext,
 ) {
-    if runtime.layout_policy().relayouts_stale_reads()
-        && !runtime.layout_pass_is_active()
-        && !is_layout_dependent_property(property)
-        && runtime.dom_host().is_connected(handle)
-        // This read drains pending style work first, so the flag reflects a
-        // just-toggled class, and it is memoized for the property read.
-        && ComputedStyleRead::new_with_context(runtime, handle, context).depends_on_size_container()
-    {
-        // Any property can depend on layout through @container or cq* units.
-        let _ = runtime.refresh_live_layout_for_sampling();
+    if !is_layout_dependent_property(property) {
+        flush_layout_for_size_container_read(runtime, handle, context);
         return;
     }
-    if runtime.layout_policy().relayouts_stale_reads()
-        && is_layout_dependent_property(property)
-        && runtime.dom_host().is_connected(handle)
-    {
+    if runtime.layout_policy().relayouts_stale_reads() && runtime.dom_host().is_connected(handle) {
         // On failure the stale tree is gone and the value is the computed one.
+        let _ = runtime.refresh_live_layout_for_sampling();
+    }
+}
+
+/// Any property, on an element or its pseudo-element, can depend on layout
+/// through `@container` or `cq*` units. Only a change that can move a
+/// container's used size pays for a pass; an attribute no selector reads
+/// leaves the store valid.
+pub(super) fn flush_layout_for_size_container_read(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+    context: StyleComputationContext,
+) {
+    if runtime.layout_policy().relayouts_stale_reads()
+        && !runtime.layout_pass_is_active()
+        && runtime.dom_host().is_connected(handle)
+        // This read drains pending style work first, so the flag and the
+        // staleness check below see a just-toggled class.
+        && ComputedStyleRead::new_with_context(runtime, handle, context).depends_on_size_container()
+        && runtime.size_container_read_needs_layout()
+    {
         let _ = runtime.refresh_live_layout_for_sampling();
     }
 }

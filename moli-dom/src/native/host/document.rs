@@ -53,6 +53,7 @@ impl DomHost {
             dom,
             dom_version: Cell::new(0),
             hover_version: Cell::new(0),
+            style_only_attribute_version: Cell::new(0),
             query_version: Cell::new(0),
             shadow_root_binding_version: Cell::new(0),
             connected_shadow_roots_version: Cell::new(0),
@@ -203,6 +204,26 @@ impl DomHost {
     /// the style invalidation of selectors that depend on it.
     pub fn dom_version_excluding_hover(&self) -> u64 {
         self.dom_version.get() - self.hover_version.get()
+    }
+
+    /// The DOM version without hover moves and without changes to attributes
+    /// that reach layout only through the style invalidation of selectors
+    /// reading them.
+    pub fn layout_relevant_dom_version(&self) -> u64 {
+        self.dom_version_excluding_hover() - self.style_only_attribute_version.get()
+    }
+
+    pub(super) fn record_attribute_mutation(&self, name: &str) {
+        self.record_mutation(MutationScope::QueryState);
+        let lower = name.to_ascii_lowercase();
+        if lower == "class"
+            || lower == "id"
+            || lower.starts_with("data-")
+            || lower.starts_with("aria-")
+        {
+            self.style_only_attribute_version
+                .set(self.style_only_attribute_version.get().saturating_add(1));
+        }
     }
 
     fn record_hover_mutation(&self) {
