@@ -833,6 +833,8 @@ pub(crate) struct JsContextHost {
     scrollbars_hidden: bool,
     document_layout_state: RefCell<layout_state::DocumentLayoutState>,
     layout_pass_active: Cell<bool>,
+    #[cfg(test)]
+    fail_live_layout_refresh_for_test: Cell<bool>,
     completed_layout_pass_count: Cell<u64>,
     completed_layout_pass_time: Cell<std::time::Duration>,
     last_layout_pass_metrics: Cell<Option<moli_layout::LayoutPassMetrics>>,

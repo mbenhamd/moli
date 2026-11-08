@@ -78,7 +78,7 @@ pub(crate) fn queue_revealed_lazy_image_loads(
         if runtime.layout_policy().relayouts_stale_reads()
             && super::lazy::document_has_unadmitted_lazy_image(runtime, document)
         {
-            runtime.refresh_live_layout_for_sampling();
+            let _ = runtime.refresh_live_layout_for_sampling();
         }
         runtime
             .with_latest_layout_tree_for_document(document, |output| {

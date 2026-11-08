@@ -235,11 +235,13 @@ are unchanged. IntersectionObserver and lazy-image checks sample the same
 current layout. Hovering a page without `:hover` rules lays out nothing.
 
 Each pass is still a full rebuild, so its cost grows with DOM size, and a loop
-that alternates writes and reads pays one pass per read. Measured on a
-release build: about 0.3 ms per write/read iteration on a small page (about
-11 times Chromium's cost), and about 85 ms per pass with 2,000 table rows,
-where a 1,000-iteration loop takes 79 to 94 s and can exceed CDP command
-timeouts. A read that finds the layout current costs about 3 to 10 µs.
+that alternates writes and reads pays one pass per read. Setting a scroll offset
+costs one pass per set-then-read on a clean tree and two only on a dirty one.
+Measured with a 1,000-iteration write/read loop (release build, 3 runs, 16 cores
+under load): 72 to 149 ms on a small page against 6 to 13 ms in Chromium, about
+11 times its cost; with 2,000 rows about 85 ms per pass, so the loop takes 79 to
+94 s and can exceed CDP command timeouts. A read that finds the layout current
+costs about 3 to 10 µs.
 
 <p align="center">
   <a href="assets/moli_ondemand_rendering_flow.svg">

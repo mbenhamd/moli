@@ -279,8 +279,8 @@ impl JsContextHost {
     /// Documents consumes at `viewport`: the generations the visual-state
     /// token compares, the viewport and the media environment. Frozen
     /// policies never compare inputs and get `None`, so their publications do
-    /// no extra work. Callers take the key before building a pass; the
-    /// publication checks that only the pass's own style flush moved it.
+    /// no extra work. Callers take the key before building a pass, and
+    /// the publication adopts only the style generations the pass flushed.
     pub(crate) fn live_layout_input_key(
         &self,
         viewport: LayoutViewport,
@@ -324,20 +324,23 @@ impl JsContextHost {
         if self.layout_pass_active.get() {
             return Err(LayoutError::ReentrantLayoutPass);
         }
+        if self.document_layout_state.try_borrow_mut().is_err() {
+            // A native caller holding the layout state is inspecting the
+            // published tree and keeps reading it: replacing the tree would
+            // panic on this borrow. Such a holder runs no script. Only shared
+            // holders are expected; a mutable holder would mean a geometry
+            // demand from inside a state mutation.
+            debug_assert!(
+                self.document_layout_state.try_borrow().is_ok(),
+                "a geometry read raced a mutable layout-state borrow"
+            );
+            return Ok(());
+        }
         let document = self.document_handle();
         let viewport = self.layout_viewport_for_document(document);
         let inputs = self.live_layout_input_key(viewport, None);
         {
-            let Ok(state) = self.document_layout_state.try_borrow() else {
-                // Layout state is borrowed mutably only inside native critical
-                // sections that run no script and read no geometry: a layout
-                // pass (rejected above by the reentrancy guard), a publication
-                // and the state setters. A script-reachable read therefore never
-                // gets here; if a native caller does, it keeps the published
-                // tree instead of panicking.
-                debug_assert!(false, "a geometry read raced a mutable layout-state borrow");
-                return Ok(());
-            };
+            let state = self.document_layout_state.borrow();
             let current = match &inputs {
                 Some(inputs) => state.latest_layout_is_current(document, inputs),
                 None => state.latest_layout(document).is_some(),
@@ -364,27 +367,45 @@ impl JsContextHost {
     ///
     /// `getComputedStyle` and observers never throw in Chromium, so a failed
     /// pass is not propagated. It must not leave stale geometry behind either:
-    /// the out-of-date tree is discarded, so samplers see no box (computed
-    /// rather than used values, no observer geometry) and the next geometry
-    /// read retries and reports the error. Script cannot run during a layout
+    /// the out-of-date tree is discarded, so `getComputedStyle` falls back to
+    /// computed values and the next geometry read retries and reports the
+    /// error. Returns `false` after such a failure: a layout failure is not a
+    /// geometry change, so an observer abandons its sampling round and keeps
+    /// its last-reported state. A Document with no root has no boxes to
+    /// report, which samplers read as such. Script cannot run during a layout
     /// pass, so a reentrant demand never comes from these samplers.
-    pub(crate) fn refresh_live_layout_for_sampling(&self) {
+    pub(crate) fn refresh_live_layout_for_sampling(&self) -> bool {
         if !self.layout_policy.relayouts_stale_reads() {
-            return;
+            return true;
         }
-        match self.ensure_current_layout() {
-            Ok(()) => {}
+        let result = self.ensure_current_layout();
+        #[cfg(test)]
+        let result = if self.fail_live_layout_refresh_for_test.get() {
+            Err(LayoutError::NoLayoutSnapshot)
+        } else {
+            result
+        };
+        match result {
+            Ok(()) => true,
             Err(LayoutError::ReentrantLayoutPass) => {
                 debug_assert!(false, "a layout sampler ran inside a layout pass");
+                false
             }
             Err(error) => {
+                let no_root = matches!(error, LayoutError::NoLayoutRoot);
                 tracing::warn!(%error, "live layout refresh failed; discarding the stale layout");
                 self.clear_layout_rect_cache();
                 self.document_layout_state
                     .borrow_mut()
                     .clear_latest_layout();
+                no_root
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fail_live_layout_refresh_for_test(&self, fail: bool) {
+        self.fail_live_layout_refresh_for_test.set(fail);
     }
 
     /// FontFace and Canvas use the document's font service without requesting a
@@ -515,9 +536,9 @@ impl JsContextHost {
     }
 
     /// Publishes `pass`. Under the live-geometry policy `inputs` is the key
-    /// taken before the pass was built; the publication records the key of
-    /// the inputs the pass consumed, including the media environment it was
-    /// built in, so a
+    /// taken before the pass was built; the publication records it with the
+    /// style generations the pass flushed to, including the media environment
+    /// it was built in, so a
     /// live-geometry read after a capture in another environment lays out
     /// again.
     pub(crate) fn publish_layout_pass_for_document_in_environment(
@@ -553,10 +574,13 @@ impl JsContextHost {
             .collect::<Vec<_>>();
         let tree = pass.into_tree();
         let frame_viewports_changed = {
-            // The pass's own style flush applies deferred invalidations and
-            // advances the style generations it then lays out from, so the
-            // published key is taken after the build. No script runs during a
-            // pass, so every other input must match the key taken before it.
+            // The pass's own style flush advances the style generations it
+            // then lays out from, so only those come from after the build.
+            // The rest stay as taken before it: a resource generation that a
+            // decoder worker bumps during the pass then costs one more
+            // relayout instead of recording a tree built without that image
+            // as current. No script runs during a pass, so the main-thread
+            // inputs cannot move.
             let inputs = inputs.map(|before| {
                 let after = self
                     .live_layout_input_key(pass_viewport, environment_override)
@@ -565,20 +589,21 @@ impl JsContextHost {
                     (
                         before.dom,
                         before.used_geometry,
-                        before.resources,
                         before.viewport,
                         &before.environment,
                     ),
                     (
                         after.dom,
                         after.used_geometry,
-                        after.resources,
                         after.viewport,
                         &after.environment,
                     ),
                     "layout inputs changed while the pass was built"
                 );
-                after
+                LayoutInputKey {
+                    styles: after.styles,
+                    ..before
+                }
             });
             let mut state = self.document_layout_state.borrow_mut();
             state.retain_live_frame_viewports(|frame| self.child_browsing_context_is_live(frame));

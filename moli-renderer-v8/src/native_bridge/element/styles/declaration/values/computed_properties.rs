@@ -60,7 +60,8 @@ fn flush_layout_for_layout_dependent_property(
         )
         && runtime.dom_host().is_connected(handle)
     {
-        runtime.refresh_live_layout_for_sampling();
+        // On failure the stale tree is gone and the value is the computed one.
+        let _ = runtime.refresh_live_layout_for_sampling();
     }
 }
 

@@ -109,8 +109,14 @@ pub(super) fn compute_intersection_check_batch(
 
     // Under the live-geometry policy a check samples the current layout, so an
     // observed target moved by a mutation reports the same intersection a
-    // forced geometry read sees.
-    runtime.refresh_live_layout_for_sampling();
+    // forced geometry read sees. A failed layout is not a geometry change, so
+    // the round ends with nothing queued and last-reported state untouched.
+    if !runtime.refresh_live_layout_for_sampling() {
+        return Ok(CompletedIntersectionCheckBatch {
+            results: Vec::new(),
+            geometry_cache: batch.geometry_cache,
+        });
+    }
     let mut work = Vec::new();
     for observer in batch.observers {
         for target in observer.targets {

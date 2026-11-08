@@ -629,7 +629,7 @@ pub struct CommonArgs {
     /// DOM, style, scroll, resource, viewport or media inputs changed since the
     /// published layout. Without this flag reads keep the last published layout.
     /// Each relayout rebuilds the whole page, so its cost grows with DOM size
-    /// (about 0.3 ms on a small page, about 85 ms with 2,000 table rows): a
+    /// (about 0.1 ms on a small page, about 85 ms with 2,000 rows): a
     /// write/read loop pays one rebuild per iteration and can exceed CDP
     /// command timeouts on large pages.
     #[arg(

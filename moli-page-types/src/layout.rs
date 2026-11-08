@@ -15,8 +15,9 @@ pub enum LayoutPolicy {
     /// layout-dependent computed style lays out again first when the DOM,
     /// style, used-geometry, visual-resource, viewport or media inputs of the
     /// published layout changed. ResizeObserver sampling in the rendering
-    /// update does the same. Nothing else lays out without a capture, and an
-    /// unchanged Document reuses the published layout.
+    /// update, IntersectionObserver checks and lazy-image reveal do the same.
+    /// Nothing else lays out without a capture, and an unchanged Document
+    /// reuses the published layout.
     Live,
 }
 

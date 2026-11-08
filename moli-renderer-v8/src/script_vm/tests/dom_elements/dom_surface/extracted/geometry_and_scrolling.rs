@@ -1453,3 +1453,73 @@ fn live_geometry_intersection_check_sees_a_target_a_mutation_moved_into_view() {
         "[false,true]"
     );
 }
+
+#[test]
+fn live_geometry_intersection_round_keeps_last_reported_state_when_layout_fails() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-intersection-failure.test/",
+        "<!doctype html><html><body style=margin:0><div id=t style='position:absolute;top:0;width:10px;height:10px'></div></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.eval(
+        r#"window.__states = [];
+        new IntersectionObserver(entries => {
+          for (const entry of entries) window.__states.push(entry.isIntersecting);
+        }).observe(document.getElementById('t'));
+        'observed'"#,
+    )
+    .expect("observer registers");
+    vm.eval("void 0").expect("initial delivery");
+    assert_eq!(
+        vm.eval("JSON.stringify(window.__states)").expect("initial"),
+        "[true]"
+    );
+    vm._context_host
+        .borrow()
+        .set_fail_live_layout_refresh_for_test(true);
+    vm.eval("document.getElementById('t').style.left = '1px'; 'moved'")
+        .expect("mutation");
+    vm.eval("void 0").expect("failed round");
+    assert_eq!(
+        vm.eval("JSON.stringify(window.__states)").expect("failed"),
+        "[true]"
+    );
+}
+
+#[test]
+fn live_geometry_scroll_in_a_batched_action_is_read_back_immediately() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-batched-scroll.test/",
+        "<!doctype html><html><body style=margin:0><div id=s style='height:100px;overflow:auto'><div id=c style=height:1000px></div></div></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    let top = "String(document.getElementById('c').getBoundingClientRect().top)";
+    assert_eq!(vm.eval(top).expect("first read"), "0");
+    vm.begin_batched_mouse_event_dispatch();
+    vm.eval("document.getElementById('s').scrollTop = 50; 'scrolled'")
+        .expect("scroll");
+    assert_eq!(vm.eval(top).expect("read in batch"), "-50");
+    vm.finish_batched_mouse_event_dispatch(Ok(()), true)
+        .expect("finish batch");
+}
+
+#[test]
+fn live_geometry_scroll_top_reconciles_after_content_shrinks() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-scroll-clamp.test/",
+        "<!doctype html><html><body style=margin:0><div id=s style='height:100px;overflow:auto'><div id=c style=height:1000px></div></div></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    assert_eq!(
+        vm.eval(
+            "const s = document.getElementById('s'), c = document.getElementById('c'); s.scrollTop = 800; c.style.height = '150px'; String(s.scrollTop)"
+        )
+        .expect("shrink"),
+        "50"
+    );
+    assert_eq!(
+        vm.eval("c.style.height = '1000px'; String(s.scrollTop)")
+            .expect("grow"),
+        "50"
+    );
+}
