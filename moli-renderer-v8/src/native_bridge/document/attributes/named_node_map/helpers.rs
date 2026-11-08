@@ -61,6 +61,30 @@ pub(super) fn named_node_map_attribute_names<'s>(
     fallback_named_node_map_attribute_names(scope, element)
 }
 
+/// The length of the map: `named_node_map_attribute_names(..).len()`
+/// without building the names of a live element.
+pub(super) fn named_node_map_attribute_count<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    element: v8::Local<'s, v8::Object>,
+) -> usize {
+    if let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, element)
+        && let Some(native_element) = unsafe { &*runtime_ptr }
+            .dom_host()
+            .node(handle)
+            .and_then(Node::as_element)
+    {
+        return native_element
+            .attributes()
+            .iter()
+            .filter(|attribute| {
+                !(attribute.value().is_empty()
+                    && is_synthetic_detached_style_name(scope, element, &attribute.name()))
+            })
+            .count();
+    }
+    named_node_map_attribute_names(scope, element).len()
+}
+
 fn fallback_named_node_map_attribute_names<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     element: v8::Local<'s, v8::Object>,
@@ -263,12 +287,13 @@ pub(super) fn attribute_node_for_index<'s>(
     element: v8::Local<'s, v8::Object>,
     index: usize,
 ) -> Option<v8::Local<'s, v8::Value>> {
-    if native_named_node_map_attribute_names(scope, element).is_some() {
-        return indexed_attribute_object(scope, element, index).map(Into::into);
+    if let Some(attr) = indexed_attribute_object(scope, element, index) {
+        return Some(attr.into());
     }
-    indexed_attribute_object(scope, element, index)
-        .map(Into::into)
-        .or_else(|| fallback_attribute_node_for_index(scope, element, index))
+    if native_named_node_map_attribute_names(scope, element).is_some() {
+        return None;
+    }
+    fallback_attribute_node_for_index(scope, element, index)
 }
 
 fn fallback_attribute_node_for_name<'s>(
