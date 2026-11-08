@@ -9,7 +9,7 @@ use std::{
 
 use curl::{easy::Handler, multi::Easy2Handle};
 
-use super::{CurlMultiJob, CurlOriginKey, CurlTransferId};
+use super::{CurlConnectionDestination, CurlMultiJob, CurlOriginKey, CurlTransferId};
 
 pub(super) struct CurlActiveTransfer<H: Handler, C> {
     pub(super) handle: Easy2Handle<H>,
@@ -19,6 +19,7 @@ pub(super) struct CurlActiveTransfer<H: Handler, C> {
     pub(super) label: String,
     pub(super) started_at: Instant,
     pub(super) queued_for: Duration,
+    pub(super) exclusive_connection: bool,
 }
 
 pub(super) struct CurlPendingJob<H: Handler, C> {
@@ -90,6 +91,40 @@ pub(super) fn job_is_eligible<H: Handler, C>(
     }
 }
 
+/// Starts a connection-exclusive transfer only while libcurl's per-host cap
+/// has a free slot for its destination. Each active exclusive transfer and
+/// each other connection holder on the shared Multi, such as a WebSocket,
+/// occupies one slot. Idle pooled connections do not: libcurl evicts them when
+/// a new connection needs the slot.
+pub(super) fn exclusive_connection_slot_available<H: Handler, C>(
+    origin: Option<&CurlOriginKey>,
+    exclusive_connection: bool,
+    active: &HashMap<CurlTransferId, CurlActiveTransfer<H, C>>,
+    max_host_connections: Option<NonZeroUsize>,
+    other_connections: &dyn Fn(&CurlConnectionDestination) -> usize,
+) -> bool {
+    let (true, Some(limit), Some(destination)) = (
+        exclusive_connection,
+        max_host_connections,
+        origin.and_then(CurlOriginKey::connection_destination),
+    ) else {
+        return true;
+    };
+    let exclusive_active = active
+        .values()
+        .filter(|active| {
+            active.exclusive_connection
+                && active
+                    .origin
+                    .as_ref()
+                    .and_then(CurlOriginKey::connection_destination)
+                    .as_ref()
+                    == Some(&destination)
+        })
+        .count();
+    exclusive_active + other_connections(&destination) < limit.get()
+}
+
 pub(super) fn active_origin_count<H: Handler, C>(
     active: &HashMap<CurlTransferId, CurlActiveTransfer<H, C>>,
     origin: &CurlOriginKey,
@@ -156,6 +191,7 @@ mod tests {
             dns_resolution: CurlDnsResolution::no_shared_resolution(),
             priority,
             label: label.to_owned(),
+            exclusive_connection: false,
         }
     }
 
@@ -303,6 +339,7 @@ mod tests {
             label: "active".to_owned(),
             started_at: Instant::now(),
             queued_for: Duration::ZERO,
+            exclusive_connection: false,
         };
         let active = HashMap::from([(test_transfer_id(1), active)]);
         let cap = NonZeroUsize::new(1);

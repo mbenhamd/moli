@@ -59,6 +59,7 @@ fn request(url: &str, handler: HttpCapture, timeout: Duration) -> CurlMultiJob<H
         dns_resolution: CurlDnsResolution::no_shared_resolution(),
         priority: 1,
         label: "mixed test".to_owned(),
+        exclusive_connection: false,
     }
 }
 

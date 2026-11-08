@@ -57,7 +57,7 @@ use crate::{
     },
     dns::curl_dns_resolution,
     network_fetch_result::NetworkObservationRecorder,
-    proxy::resolve_http_proxy_route,
+    proxy::{HttpProxyRoute, resolve_http_proxy_route},
     proxy_connect::{ProxyConnectResponse, ProxyConnectResponseRecorder},
 };
 
@@ -988,6 +988,8 @@ impl RuntimeOwner {
             Ok(resolution) => resolution,
             Err(error) => return Err((job.response_tx, error)),
         };
+        let exclusive_connection =
+            transfer_holds_exclusive_connection(&job.current_url, &proxy_route, job.http_version);
         let context = ActiveBufferedTransferContext {
             job,
             request_cookie_report,
@@ -1001,6 +1003,7 @@ impl RuntimeOwner {
             dns_resolution,
             priority: request_fetch_priority_rank(&context.job.request),
             label,
+            exclusive_connection,
             context: ActiveTransferContext::Buffered(Box::new(context)),
         };
         match self.curl_http.submit(curl_job) {
@@ -1204,6 +1207,8 @@ impl RuntimeOwner {
             Ok(resolution) => resolution,
             Err(error) => return Err((Box::new(job), Some(easy), error)),
         };
+        let exclusive_connection =
+            transfer_holds_exclusive_connection(&job.current_url, &proxy_route, job.http_version);
         let context = ActiveStreamingTransferContext {
             job,
             request_cookie_report,
@@ -1218,6 +1223,7 @@ impl RuntimeOwner {
             dns_resolution,
             priority: request_fetch_priority_rank(&context.job.request),
             label,
+            exclusive_connection,
             context: ActiveTransferContext::Streaming(Box::new(context)),
         };
         match self.curl_http.submit(curl_job) {
@@ -1434,6 +1440,8 @@ impl RuntimeOwner {
             Ok(resolution) => resolution,
             Err(error) => return Err((Box::new(job), Some(easy), error)),
         };
+        let exclusive_connection =
+            transfer_holds_exclusive_connection(&job.current_url, &proxy_route, job.http_version);
         let context = ActiveRawStreamingTransferContext {
             job,
             request_cookie_report,
@@ -1449,6 +1457,7 @@ impl RuntimeOwner {
             dns_resolution,
             priority: request_fetch_priority_rank(&context.job.request),
             label,
+            exclusive_connection,
             context: ActiveTransferContext::StreamingRaw(Box::new(context)),
         };
         match self.curl_http.submit(curl_job) {
@@ -3655,6 +3664,19 @@ fn critical_client_hint_restart_redirect_info(
         from_cache: false,
         negotiated_http_version: Some(NegotiatedHttpVersion::Http11),
     }
+}
+
+/// A direct cleartext or HTTP/1-only transfer cannot share its connection:
+/// `configure_easy` offers HTTP/2 only over TLS. The curl scheduler starts
+/// such a transfer only when libcurl has a free per-host connection, so its
+/// connect timeout never includes time spent waiting for one.
+fn transfer_holds_exclusive_connection(
+    url: &Url,
+    proxy_route: &HttpProxyRoute,
+    http_version: RequestHttpVersion,
+) -> bool {
+    !proxy_route.is_proxy()
+        && (http_version == RequestHttpVersion::Http1Only || url.scheme() == "http")
 }
 
 fn origin_key(request: &Request) -> Option<CurlOriginKey> {

@@ -112,6 +112,7 @@ fn request(
             dns_resolution: CurlDnsResolution::no_shared_resolution(),
             priority: 1,
             label: "owner probe HTTP".into(),
+            exclusive_connection: false,
         })
         .map_err(|error| error.error)?;
     let completion = completed.recv_timeout(Duration::from_secs(10))?;

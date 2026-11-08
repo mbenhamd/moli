@@ -43,6 +43,7 @@ fn request(
         dns_resolution: CurlDnsResolution::no_shared_resolution(),
         priority: 1,
         label: path.to_owned(),
+        exclusive_connection: false,
     }
 }
 
@@ -118,7 +119,7 @@ fn completion_starts_queued_job(per_origin: bool) {
     // consume all submission wakeups while the peer still holds its response.
     let first = sender.submit(request(address, "/held", None)).unwrap();
     owner.drain_commands();
-    owner.http.advance(&mut owner.multi);
+    owner.http.advance(&mut owner.multi, &|_| 0);
     let setup_deadline = Instant::now() + TEST_TIMEOUT;
     loop {
         owner.process_completed_transfers();
@@ -139,7 +140,7 @@ fn completion_starts_queued_job(per_origin: bool) {
         ))
         .unwrap();
     owner.drain_commands();
-    owner.http.advance(&mut owner.multi);
+    owner.http.advance(&mut owner.multi, &|_| 0);
     assert!(owner.http.contains(first));
     assert!(!owner.http.contains(second));
     // In particular, B's submit() wakeup must not rescue the owner after A

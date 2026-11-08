@@ -31,6 +31,33 @@ pub struct CurlOriginKey {
     pub port: Option<u16>,
 }
 
+impl CurlOriginKey {
+    /// libcurl applies `CURLMOPT_MAX_HOST_CONNECTIONS` per host name and port,
+    /// regardless of scheme, so `http` and `ws` transfers share one budget.
+    pub(crate) fn connection_destination(&self) -> Option<CurlConnectionDestination> {
+        Some(CurlConnectionDestination {
+            host: self.host.clone(),
+            port: self.port?,
+        })
+    }
+}
+
+/// The host name and port that libcurl's per-host connection cap counts.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CurlConnectionDestination {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+}
+
+impl CurlConnectionDestination {
+    pub(crate) fn from_url(url: &url::Url) -> Option<Self> {
+        Some(Self {
+            host: url.host_str()?.to_owned(),
+            port: url.port_or_known_default()?,
+        })
+    }
+}
+
 /// A configured curl transfer plus scheduler metadata.
 pub struct CurlMultiJob<H: Handler, C> {
     pub easy: Easy2<H>,
@@ -53,6 +80,17 @@ pub struct CurlMultiJob<H: Handler, C> {
     /// Higher values start before lower values when jobs are queued.
     pub priority: u8,
     pub label: String,
+    /// The transfer occupies one whole connection to `origin` for its
+    /// lifetime and cannot share it, as with a direct HTTP/1.x request.
+    ///
+    /// libcurl parks a transfer that finds `CURLMOPT_MAX_HOST_CONNECTIONS`
+    /// exhausted in its internal pending queue, and its
+    /// `CURLOPT_CONNECTTIMEOUT` keeps running there. The scheduler therefore
+    /// starts such a transfer only when the destination has a free connection
+    /// slot, so its connect timeout bounds the real TCP/TLS connect. Leave this
+    /// false when the transfer may multiplex onto an HTTP/2 connection or
+    /// connects through a proxy.
+    pub exclusive_connection: bool,
 }
 
 impl<H: Handler, C> fmt::Debug for CurlMultiJob<H, C> {
@@ -63,6 +101,7 @@ impl<H: Handler, C> fmt::Debug for CurlMultiJob<H, C> {
             .field("dns_resolution", &self.dns_resolution)
             .field("priority", &self.priority)
             .field("label", &self.label)
+            .field("exclusive_connection", &self.exclusive_connection)
             .finish_non_exhaustive()
     }
 }

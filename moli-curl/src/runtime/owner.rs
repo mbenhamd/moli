@@ -81,7 +81,10 @@ impl<H: Handler, C> CurlRuntimeOwner<H, C> {
     fn drive(&mut self) {
         loop {
             self.drain_commands();
-            self.http.advance(&mut self.multi);
+            let websockets = &self.websockets;
+            self.http.advance(&mut self.multi, &|destination| {
+                websockets.connections_to(destination)
+            });
             self.process_completed_transfers();
             let progressed = self
                 .websockets
@@ -99,8 +102,12 @@ impl<H: Handler, C> CurlRuntimeOwner<H, C> {
             }
 
             // HTTP completions can release slots after advance() has run.
-            let runnable =
-                progressed || !self.command_rx.is_empty() || self.http.has_eligible_jobs();
+            let websockets = &self.websockets;
+            let runnable = progressed
+                || !self.command_rx.is_empty()
+                || self
+                    .http
+                    .has_eligible_jobs(&|destination| websockets.connections_to(destination));
             if !runnable && !self.http.has_curl_work() && self.websockets.is_empty() {
                 self.wait_for_next_owner_event();
             } else {
