@@ -1401,3 +1401,39 @@ document.body.innerHTML = '<div id=pad></div><div id=cb><div id=abs>x</div></div
     .await
     .expect("live computed inset fixture should run");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_geometry_scrolls_a_node_adopted_back_from_a_foreign_document() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}.s{height:100px;overflow:auto}.s>div{height:300px}</style>';
+document.body.innerHTML = '<div id=s class=s><div></div></div>';
+'installed'
+"#,
+        )?;
+        // Moving a rendered scroller through another Document and back keeps
+        // it a live scroller: Chromium honors scrollTop and scrollTo again.
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                r#"(() => { const s = document.getElementById('s');
+                    const foreign = document.implementation.createHTMLDocument('');
+                    foreign.body.appendChild(s);
+                    s.scrollTop = 40;
+                    const whileForeign = s.scrollTop;
+                    document.body.appendChild(s);
+                    s.scrollTop = 1e9;
+                    const max = s.scrollTop;
+                    s.scrollTo(0, 50);
+                    const scrolledTo = s.scrollTop;
+                    s.scrollBy(0, 10);
+                    return JSON.stringify([whileForeign, s.scrollHeight, s.clientHeight, max, scrolledTo, s.scrollTop,
+                        s.firstElementChild.getBoundingClientRect().top]); })()"#,
+            )?,
+            "[0,300,100,200,50,60,-60]"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("adopted scroller fixture should run");
+}

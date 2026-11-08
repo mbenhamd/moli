@@ -101,6 +101,27 @@ fn set_observable_node_scroll_position(
     }
 }
 
+/// A node object keeps its detached-object identity after another Document
+/// adopts it back, so that identity alone does not make scrolling inert. Only a
+/// node outside a connected, rendered Document ignores scroll requests.
+fn scroll_receiver_is_detached<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    runtime_ptr: *mut JsContextHost,
+    object: v8::Local<'s, v8::Object>,
+    handle: DomHandle,
+) -> bool {
+    if document::detached_native_handle_for_runtime(scope, runtime_ptr, object).is_none() {
+        return false;
+    }
+    let runtime = unsafe { &*runtime_ptr };
+    let rendered = runtime.dom_host().is_connected(handle)
+        && runtime
+            .dom_host()
+            .owner_document_handle(handle)
+            .is_some_and(|document| runtime.document_has_browsing_context(document));
+    !rendered
+}
+
 fn node_scroll_position_setter_for_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
@@ -115,9 +136,7 @@ fn node_scroll_position_setter_for_object<'s>(
         .number_value(scope)
         .filter(|value| value.is_finite())
         .unwrap_or(0.0);
-    let receiver_is_detached =
-        document::detached_native_handle_for_runtime(scope, runtime_ptr, object).is_some();
-    if receiver_is_detached {
+    if scroll_receiver_is_detached(scope, runtime_ptr, object, handle) {
         return Ok(());
     }
     let runtime = unsafe { &*runtime_ptr };
@@ -172,9 +191,7 @@ fn scroll_node_to<'s>(
     else {
         return Ok(());
     };
-    let receiver_is_detached =
-        document::detached_native_handle_for_runtime(scope, runtime_ptr, args.this()).is_some();
-    if receiver_is_detached {
+    if scroll_receiver_is_detached(scope, runtime_ptr, args.this(), handle) {
         return Ok(());
     }
     let (current_left, current_top) = node_scroll_position(unsafe { &*runtime_ptr }, handle);
