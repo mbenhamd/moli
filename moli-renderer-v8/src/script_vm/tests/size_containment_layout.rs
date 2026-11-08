@@ -51,7 +51,7 @@ fn a_size_contained_image_drops_its_natural_ratio_but_keeps_an_explicit_one() {
             r#"<img id="natural" src="{svg}" style="contain:size;width:100px;display:block">
             <img id="explicit" src="{svg}" style="contain:size;width:100px;aspect-ratio:4/1;display:block">"#
         ),
-        r#"['natural','explicit'].map((id) => document.getElementById(id).getBoundingClientRect().height).join('|')"#,
+        r#"['natural','explicit'].map((id) => { const r = document.getElementById(id).getBoundingClientRect(); return r.width + 'x' + r.height; }).join('|')"#,
     );
-    assert_eq!(result, "0|25");
+    assert_eq!(result, "100x0|100x25");
 }

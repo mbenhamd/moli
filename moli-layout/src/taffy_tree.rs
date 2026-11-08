@@ -2179,6 +2179,18 @@ where
                 content
             });
         }
+        // With no natural ratio, a replaced box's own width must not be
+        // derived from the injected zero height through its natural size.
+        if inherent
+            && axes.width
+            && axes.height
+            && layout_box.is_replaced()
+            && known.width.is_none()
+        {
+            known.width = resolved_size
+                .width
+                .map(|width| width.maybe_clamp(min_size.width, max_size.width));
+        }
         LayoutInput {
             known_dimensions: known,
             known_dimensions_are_definite: Size {
