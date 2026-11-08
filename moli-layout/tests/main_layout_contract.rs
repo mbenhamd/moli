@@ -1279,6 +1279,118 @@ fn block_percentage_box_sizing_and_min_max_resolve_against_containing_block() {
     );
 }
 
+fn containment_fixture_styles(container: ResolvedLayoutStyle) -> FixtureStyles {
+    let mut styles = FixtureStyles::default();
+    styles.0.insert(
+        0,
+        resolved(
+            LayoutDisplay::Block,
+            Style {
+                size: Size {
+                    width: length(400.0),
+                    height: Dimension::auto(),
+                },
+                ..Style::default()
+            },
+            PaintColor::TRANSPARENT,
+        ),
+    );
+    styles.0.insert(1, container);
+    styles
+        .0
+        .insert(2, fixed_box(LayoutDisplay::Block, 50.0, 40.0, RED));
+    styles
+        .0
+        .insert(3, fixed_box(LayoutDisplay::Block, 20.0, 10.0, BLUE));
+    styles
+}
+
+fn containment_fixture_source() -> FixtureSource {
+    FixtureSource {
+        nodes: vec![
+            FixtureNode::div("root", vec![1, 3]),
+            FixtureNode::div("container", vec![2]),
+            FixtureNode::div("content", Vec::new()),
+            FixtureNode::div("after", Vec::new()),
+        ],
+    }
+}
+
+#[test]
+fn size_containment_sizes_block_axis_as_empty_but_paints_content() {
+    let source = containment_fixture_source();
+    let container =
+        resolved(LayoutDisplay::Block, Style::default(), GREEN).with_size_containment(false, true);
+    let mut styles = containment_fixture_styles(container);
+    let snapshot = render(&source, &mut styles, PaintViewport::new(800, 600, 1.0));
+    // The contained block contributes no height, so the next sibling starts
+    // at y=0; its content still paints, overflowing the empty box.
+    assert_rect(
+        solid_rect(&snapshot, BLUE),
+        PaintRect::new(0.0, 0.0, 20.0, 10.0),
+    );
+    assert_rect(
+        solid_rect(&snapshot, RED),
+        PaintRect::new(0.0, 0.0, 50.0, 40.0),
+    );
+
+    let container = resolved(LayoutDisplay::Block, Style::default(), GREEN)
+        .with_size_containment(false, true)
+        .with_contain_intrinsic_size(None, Some(30.0));
+    let mut styles = containment_fixture_styles(container);
+    let snapshot = render(&source, &mut styles, PaintViewport::new(800, 600, 1.0));
+    assert_rect(
+        solid_rect(&snapshot, BLUE),
+        PaintRect::new(0.0, 30.0, 20.0, 10.0),
+    );
+    assert_rect(
+        solid_rect(&snapshot, GREEN),
+        PaintRect::new(0.0, 0.0, 400.0, 30.0),
+    );
+}
+
+#[test]
+fn inline_size_containment_zeroes_intrinsic_width_in_a_flex_row() {
+    let source = containment_fixture_source();
+    let mut styles = FixtureStyles::default();
+    styles.0.insert(
+        0,
+        resolved(
+            LayoutDisplay::Flex,
+            Style {
+                size: Size {
+                    width: length(400.0),
+                    height: length(60.0),
+                },
+                align_items: Some(taffy::AlignItems::Start),
+                ..Style::default()
+            },
+            PaintColor::TRANSPARENT,
+        ),
+    );
+    styles.0.insert(
+        1,
+        resolved(LayoutDisplay::Block, Style::default(), GREEN)
+            .with_size_containment(true, false)
+            .with_contain_intrinsic_size(Some(70.0), None),
+    );
+    styles
+        .0
+        .insert(2, fixed_box(LayoutDisplay::Block, 50.0, 40.0, RED));
+    styles
+        .0
+        .insert(3, fixed_box(LayoutDisplay::Block, 20.0, 10.0, BLUE));
+    let snapshot = render(&source, &mut styles, PaintViewport::new(800, 600, 1.0));
+    assert_rect(
+        solid_rect(&snapshot, BLUE),
+        PaintRect::new(70.0, 0.0, 20.0, 10.0),
+    );
+    assert_rect(
+        solid_rect(&snapshot, GREEN),
+        PaintRect::new(0.0, 0.0, 70.0, 40.0),
+    );
+}
+
 #[test]
 fn block_margin_collapse_matches_parent_child_and_sibling_rules() {
     let source = FixtureSource {

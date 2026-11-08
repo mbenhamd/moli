@@ -7,6 +7,8 @@
 
 use std::{fmt::Debug, hash::Hash};
 
+use taffy::Size;
+
 use crate::world::{LayoutBox, LayoutBoxId, LayoutBoxKind, LayoutWorld};
 
 impl<N> LayoutBox<N> {
@@ -45,6 +47,42 @@ impl<N> LayoutBox<N> {
                     | LayoutBoxKind::AnonymousTableRowGroup
                     | LayoutBoxKind::AnonymousTableRow
             )
+    }
+
+    /// Mirrors Blink's `LayoutObject::IsEligibleForSizeContainment()`.
+    ///
+    /// Size containment skips every box whose size the table algorithm owns,
+    /// which is narrower than paint/layout containment: wrappers and cells are
+    /// ineligible too, while captions stay eligible.
+    pub(crate) fn is_eligible_for_size_containment(&self) -> bool {
+        self.is_css_box()
+            && !matches!(
+                self.kind,
+                LayoutBoxKind::TableWrapper
+                    | LayoutBoxKind::InlineTableWrapper
+                    | LayoutBoxKind::AnonymousTableWrapper
+                    | LayoutBoxKind::TableRowGroup
+                    | LayoutBoxKind::TableHeaderGroup
+                    | LayoutBoxKind::TableFooterGroup
+                    | LayoutBoxKind::TableColumnGroup
+                    | LayoutBoxKind::TableColumn
+                    | LayoutBoxKind::TableRow
+                    | LayoutBoxKind::TableCell
+                    | LayoutBoxKind::AnonymousTableRowGroup
+                    | LayoutBoxKind::AnonymousTableRow
+                    | LayoutBoxKind::AnonymousTableCell
+            )
+    }
+
+    /// Physical axes under size containment on this box.
+    pub(crate) fn size_contained_axes(&self) -> Size<bool> {
+        if !self.is_eligible_for_size_containment() {
+            return Size {
+                width: false,
+                height: false,
+            };
+        }
+        self.style.size_containment_axes()
     }
 
     pub(crate) fn creates_stacking_context(
