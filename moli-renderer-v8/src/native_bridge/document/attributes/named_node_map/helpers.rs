@@ -90,6 +90,17 @@ fn fallback_named_node_map_attribute_names<'s>(
     out
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static ATTR_MATERIALIZATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many indexed Attr lookups ran since the last call.
+#[cfg(test)]
+pub(crate) fn take_named_node_map_attr_materializations_for_test() -> u64 {
+    ATTR_MATERIALIZATIONS.with(|count| count.replace(0))
+}
+
 pub(super) struct IndexedAttribute {
     name: String,
     value: String,
@@ -190,6 +201,8 @@ fn indexed_attribute_object<'s>(
     index: usize,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let attribute = indexed_attribute(scope, element, index)?;
+    #[cfg(test)]
+    ATTR_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
     let cache = live_attr_cache_object(scope, element)?;
     let cache_key = indexed_attribute_cache_key(&attribute);
     let namespace_key =

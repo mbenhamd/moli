@@ -61,3 +61,42 @@ fn attribute_node_lookup_uses_native_metadata_and_namespace_identity() {
         "[]",
     );
 }
+
+#[test]
+fn named_node_map_access_materializes_only_the_attrs_it_reads() {
+    use crate::native_bridge::document::take_named_node_map_attr_materializations_for_test;
+    let mut vm = new_storage_test_vm("https://attribute-map-cost.test/");
+    vm.eval(
+        r#"window.element = document.createElement('div');
+        for (let index = 0; index < 20; index++) element.setAttribute('data-a' + index, String(index));
+        document.body.appendChild(element);
+        'ready'"#,
+    )
+    .expect("element setup");
+    take_named_node_map_attr_materializations_for_test();
+    assert_eq!(
+        vm.eval("let total = 0; for (let i = 0; i < 10; i++) total += element.attributes.length; String(total)")
+            .expect("length reads"),
+        "200"
+    );
+    assert_eq!(
+        take_named_node_map_attr_materializations_for_test(),
+        0,
+        "reading the map length must not build Attr objects"
+    );
+    assert_eq!(
+        vm.eval(
+            r#"const seen = []; for (const attr of element.attributes) seen.push(attr.name + '=' + attr.value);
+            const map = element.attributes;
+            element.setAttribute('data-a3', 'changed');
+            JSON.stringify([seen.length, seen[3], map === element.attributes, map[3].value, map.length])"#
+        )
+        .expect("iteration"),
+        r#"[20,"data-a3=3",true,"changed",20]"#
+    );
+    let iteration = take_named_node_map_attr_materializations_for_test();
+    assert!(
+        iteration <= 21,
+        "iteration reads each Attr once and the indexed read one more, not {iteration}"
+    );
+}

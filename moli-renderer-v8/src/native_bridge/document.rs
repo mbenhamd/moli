@@ -121,6 +121,8 @@ use attributes::{
 pub(crate) use attributes::{
     live_get_attribute_node_object, live_named_node_map_wrapper, new_attr_object,
 };
+#[cfg(test)]
+pub(crate) use attributes::take_named_node_map_attr_materializations_for_test;
 pub(super) use construction::{
     bridge_create_comment_callback, bridge_create_element_callback,
     bridge_create_element_ns_callback, bridge_create_processing_instruction_callback,
