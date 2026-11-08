@@ -4642,6 +4642,43 @@ frame.srcdoc = `<!doctype html><body>
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn child_document_label_for_targets_first_element_with_duplicate_id() {
+    let mut vm = new_storage_test_vm("https://child-document-duplicate-label-ids.test/");
+    vm.eval(
+        r#"
+globalThis.frame = document.createElement('iframe');
+frame.srcdoc = `<!doctype html><body>
+  <label id="dup-label" for="dup">Duplicate</label>
+  <input id="dup" class="first"><input id="dup" class="second">
+  <label id="mixed-label" for="mixed">Mixed</label>
+  <div id="mixed"></div><input id="mixed" class="control">
+</body>`;
+(document.body || document.documentElement || document).appendChild(frame);
+"#,
+    )
+    .expect("child frame should be inserted");
+    crate::script_vm::tests::run_child_navigation_commit_and_host_load_for_test(
+        &mut vm,
+        "child document duplicate label ids",
+    )
+    .await;
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const child = frame.contentDocument;
+  const ids = selector => Array.from(child.querySelector(selector).labels).map(l => l.id).join(',');
+  return [ids('.first'), ids('.second'), ids('.control')].join('|');
+})()
+"#,
+        )
+        .expect("duplicate label ids should evaluate");
+
+    assert_eq!(result, "dup-label||");
+}
+
 #[test]
 fn labels_include_shadow_tree_and_implicit_reference_targets() {
     let mut vm = new_streamed_parser_test_vm(
