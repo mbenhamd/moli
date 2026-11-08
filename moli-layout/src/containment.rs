@@ -76,7 +76,7 @@ impl<N> LayoutBox<N> {
 
     /// Physical axes under size containment on this box.
     ///
-    /// Native text controls and selects keep their control-sized box, as
+    /// Native text inputs, textareas and selects keep their control-sized box, as
     /// measured against Chromium for `input`, `textarea` and `select`
     /// (`select` matches main rather than Chromium's arrow-only width).
     /// Moli has no rendered-legend layout, so a contained fieldset would lose
@@ -88,10 +88,26 @@ impl<N> LayoutBox<N> {
                 crate::LayoutElementCategory::FormControl(crate::LayoutFormControlKind::FieldSet)
             )
         });
-        if !self.is_eligible_for_size_containment()
-            || self.style.taffy.item_is_compressible_replaced
-            || is_fieldset
-        {
+        let is_text_or_select_control = self.element_semantics.as_ref().is_some_and(|semantics| {
+            use crate::{LayoutFormControlKind as Control, LayoutInputControlKind as Input};
+            match semantics.category {
+                crate::LayoutElementCategory::FormControl(Control::TextArea | Control::Select) => {
+                    true
+                }
+                crate::LayoutElementCategory::FormControl(Control::Input(kind)) => matches!(
+                    kind,
+                    Input::Text
+                        | Input::Search
+                        | Input::Email
+                        | Input::Password
+                        | Input::Telephone
+                        | Input::Url
+                        | Input::Number
+                ),
+                _ => false,
+            }
+        });
+        if !self.is_eligible_for_size_containment() || is_text_or_select_control || is_fieldset {
             return Size {
                 width: false,
                 height: false,

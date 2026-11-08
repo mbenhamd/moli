@@ -2179,17 +2179,20 @@ where
                 content
             });
         }
-        // With no natural ratio, a replaced box's own width must not be
-        // derived from the injected zero height through its natural size.
-        if inherent
-            && axes.width
-            && axes.height
-            && layout_box.is_replaced()
-            && known.width.is_none()
-        {
-            known.width = resolved_size
-                .width
-                .map(|width| width.maybe_clamp(min_size.width, max_size.width));
+        // With no natural ratio, a replaced box's specified sizes must not be
+        // derived from an injected zero on the other axis through its
+        // natural size.
+        if inherent && axes.width && axes.height && layout_box.is_replaced() {
+            if known.width.is_none() {
+                known.width = resolved_size
+                    .width
+                    .map(|width| width.maybe_clamp(min_size.width, max_size.width));
+            }
+            if known.height.is_none() {
+                known.height = resolved_size
+                    .height
+                    .map(|height| height.maybe_clamp(min_size.height, max_size.height));
+            }
         }
         LayoutInput {
             known_dimensions: known,
