@@ -569,16 +569,21 @@ fn author_direction_overrides_dir_attribute_hint() {
   const autoBefore = direction(autoChild);
   auto.firstChild.data = 'ת';
 
+  const mathNs = 'http://www.w3.org/1998/Math/MathML';
+  const math = ltrScope.appendChild(document.createElementNS(mathNs, 'math'));
+  math.setAttribute('dir', 'rtl');
+  const mi = math.appendChild(document.createElementNS(mathNs, 'mi'));
+
   return [
     initial, direction(authored), direction(authoredChild), direction(inherited),
-    autoBefore, direction(auto), direction(autoChild),
+    autoBefore, direction(auto), direction(autoChild), direction(math), direction(mi),
   ].join('|');
 })()
 "#,
         )
         .expect("direction cascade computed style should evaluate");
 
-    assert_eq!(result, "ltr|ltr|ltr|rtl|ltr|rtl|rtl");
+    assert_eq!(result, "ltr|ltr|ltr|rtl|ltr|rtl|rtl|rtl|rtl");
 }
 
 #[test]
