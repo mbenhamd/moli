@@ -1373,7 +1373,7 @@ document.body.innerHTML = '<div id=a>a</div><div id=b>b</div>';
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn live_geometry_computed_auto_inset_lays_out_before_the_style_observation() {
+async fn live_geometry_computed_auto_inset_follows_the_current_layout_in_one_pass() {
     run_page_vm_async_test(async move {
         let mut page_vm = live_geometry_page(
             r#"
@@ -1384,8 +1384,7 @@ document.body.innerHTML = '<div id=pad></div><div id=cb><div id=abs>x</div></div
         )?;
         // An absolutely positioned box with both insets auto resolves `top`
         // from geometry. This pins that the value follows the current layout
-        // and that the read lays out once, before the style observation; it
-        // does not pin the static-position approximation itself.
+        // and that the read lays out once.
         let top = "getComputedStyle(document.getElementById('abs')).top";
         let first = page_vm.vm_mut().eval(top)?;
         let passes = layout_passes(&page_vm);

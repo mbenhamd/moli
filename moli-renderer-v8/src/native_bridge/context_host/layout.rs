@@ -504,6 +504,7 @@ impl JsContextHost {
         Ok(Some(pass))
     }
 
+    #[cfg(test)]
     pub(crate) fn publish_layout_pass_for_document(
         &self,
         document: DomHandle,

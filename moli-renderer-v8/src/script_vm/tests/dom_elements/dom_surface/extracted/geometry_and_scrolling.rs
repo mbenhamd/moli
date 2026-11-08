@@ -1438,22 +1438,18 @@ fn live_geometry_intersection_check_sees_a_target_a_mutation_moved_into_view() {
     .expect("observer registers");
     vm.eval("void 0").expect("initial delivery");
     assert_eq!(
-        vm.eval("JSON.stringify(window.__states)").expect("initial state"),
+        vm.eval("JSON.stringify(window.__states)")
+            .expect("initial state"),
         "[false]"
     );
-    // The check after the mutation samples the current layout, as the
-    // forced read in the same turn does, so the entry reports the target on
-    // screen without a capture.
-    assert_eq!(
-        vm.eval(
-            "const t = document.getElementById('t'); t.style.top = '0px'; String(t.getBoundingClientRect().top)"
-        )
-        .expect("move and read"),
-        "0"
-    );
+    // No script reads geometry after the mutation, so only the check itself
+    // can bring the layout current.
+    vm.eval("document.getElementById('t').style.top = '0px'; 'moved'")
+        .expect("move target");
     vm.eval("void 0").expect("deliver queued observers");
     assert_eq!(
-        vm.eval("JSON.stringify(window.__states)").expect("moved state"),
+        vm.eval("JSON.stringify(window.__states)")
+            .expect("moved state"),
         "[false,true]"
     );
 }

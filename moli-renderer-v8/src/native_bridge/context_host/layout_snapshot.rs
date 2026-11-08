@@ -57,11 +57,9 @@ impl LatestLayoutTreeCache {
 
     /// Whether the latest tree for `document` was built from `inputs`.
     pub(super) fn is_current(&self, document: DomHandle, inputs: &LayoutInputKey) -> bool {
-        self.latest
-            .as_ref()
-            .is_some_and(|snapshot| {
-                snapshot.document == document && snapshot.inputs.as_ref() == Some(inputs)
-            })
+        self.latest.as_ref().is_some_and(|snapshot| {
+            snapshot.document == document && snapshot.inputs.as_ref() == Some(inputs)
+        })
     }
 
     pub(super) fn publish(
