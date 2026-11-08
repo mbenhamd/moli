@@ -237,10 +237,9 @@ impl ScriptVm {
         let document_owner = self.current_main_document_task_owner().ok_or_else(|| {
             "main modulepreload fetch started without a current Document owner".to_owned()
         })?;
-        let resource_scheduler = self.resource_scheduler();
         let outcome = self
             .document_runtime
-            .start_main_document_modulepreload_fetch(document_owner, &resource_scheduler, request)
+            .start_main_document_modulepreload_fetch(document_owner, request)
             .map_err(|error| error.message().to_owned())?;
         Ok(self.consume_main_document_modulepreload_fetch_outcome(outcome))
     }
@@ -297,14 +296,9 @@ impl ScriptVm {
         let document_owner = self.current_main_document_task_owner().ok_or_else(|| {
             "main modulepreload fetch started without a current Document owner".to_owned()
         })?;
-        let resource_scheduler = self.resource_scheduler();
         let outcome = self
             .document_runtime
-            .schedule_reserved_main_document_modulepreload_fetch(
-                document_owner,
-                &resource_scheduler,
-                request,
-            )
+            .schedule_reserved_main_document_modulepreload_fetch(document_owner, request)
             .map_err(|error| error.message().to_owned())?;
         Ok(self.consume_main_document_modulepreload_fetch_outcome(outcome))
     }
@@ -334,7 +328,8 @@ impl ScriptVm {
         &mut self,
         outcome: crate::document_runtime::MainDocumentModulepreloadFetchOutcome,
     ) -> Option<crate::module_runtime::ModulePreloadJobRun> {
-        let (job_run, csp_violations, runtime_warning) = outcome.into_parts();
+        let (job_run, csp_violations, runtime_warning) =
+            outcome.into_parts(&self._context_host.borrow());
         for violation in csp_violations {
             self.queue_content_security_policy_violation_event_best_effort(&violation);
         }
@@ -477,8 +472,10 @@ impl ScriptVm {
                 load_id,
             );
             let document_url = self.document_runtime.document_url().clone();
-            self.resource_scheduler()
+            let host = self._context_host.borrow();
+            host.resource_scheduler()
                 .schedule_main_dynamic_import_graph_fetch(
+                    &host,
                     document_loader.clone(),
                     target,
                     request,
@@ -1087,35 +1084,37 @@ impl ScriptVm {
             .document_runtime
             .current_document_resource_loader()
             .expect("main module graph requires the committed Document resource authority");
+        let host = self._context_host.borrow();
+        let resource_scheduler = host.resource_scheduler();
         for (load_id, request) in scheduled {
             match fetch_schedule_owner {
                 FetchScheduleOwner::Parser(pending_script_id) => {
-                    self.resource_scheduler()
-                        .schedule_main_parser_module_graph_fetch(
-                            document_loader.clone(),
-                            crate::page_resource_completion::MainParserModuleGraphFetchTarget::new(
-                                pending_script_id,
-                                load_id,
-                            ),
-                            request,
-                            self.document_runtime.document_url().clone(),
-                        );
+                    resource_scheduler.schedule_main_parser_module_graph_fetch(
+                        &host,
+                        document_loader.clone(),
+                        crate::page_resource_completion::MainParserModuleGraphFetchTarget::new(
+                            pending_script_id,
+                            load_id,
+                        ),
+                        request,
+                        self.document_runtime.document_url().clone(),
+                    );
                 }
                 FetchScheduleOwner::Runtime {
                     document_owner,
                     dynamic_script_owner_id,
                 } => {
-                    self.resource_scheduler()
-                        .schedule_main_runtime_module_graph_fetch(
-                            document_loader.clone(),
-                            crate::page_resource_completion::MainRuntimeModuleGraphFetchTarget::new(
-                                document_owner,
-                                dynamic_script_owner_id,
-                                load_id,
-                            ),
-                            request,
-                            self.document_runtime.document_url().clone(),
-                        );
+                    resource_scheduler.schedule_main_runtime_module_graph_fetch(
+                        &host,
+                        document_loader.clone(),
+                        crate::page_resource_completion::MainRuntimeModuleGraphFetchTarget::new(
+                            document_owner,
+                            dynamic_script_owner_id,
+                            load_id,
+                        ),
+                        request,
+                        self.document_runtime.document_url().clone(),
+                    );
                 }
             }
         }

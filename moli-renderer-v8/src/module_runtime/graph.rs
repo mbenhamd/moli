@@ -394,6 +394,7 @@ impl NativeModuleGraphFetchRequest {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn fetch_source_callback_with_load<F>(
         &self,
         loader: &ResourceRequestClient,
@@ -408,7 +409,8 @@ impl NativeModuleGraphFetchRequest {
             ) + Send
             + 'static,
     {
-        self.fetch_source_callback_inner(loader, load, request_origin, callback)
+        self.prepare_source_fetch(loader, load, request_origin, callback)?
+            .start()
     }
 
     pub(crate) fn fetch_source_for_document<F>(
@@ -416,6 +418,24 @@ impl NativeModuleGraphFetchRequest {
         loader: &crate::network::context::DocumentResourceLoader,
         callback: F,
     ) -> anyhow::Result<()>
+    where
+        F: FnOnce(
+                std::result::Result<ModuleGraphFetchedSource, String>,
+                Option<SharedNavigationResponseResult>,
+            ) + Send
+            + 'static,
+    {
+        self.prepare_source_fetch_for_document(loader, callback)?
+            .start()
+    }
+
+    /// Builds the Document-owned module source request without starting it,
+    /// so CDP Fetch interception can pause it before the network sees it.
+    pub(crate) fn prepare_source_fetch_for_document<F>(
+        &self,
+        loader: &crate::network::context::DocumentResourceLoader,
+        callback: F,
+    ) -> anyhow::Result<PreparedModuleSourceFetch>
     where
         F: FnOnce(
                 std::result::Result<ModuleGraphFetchedSource, String>,
@@ -431,7 +451,7 @@ impl NativeModuleGraphFetchRequest {
             )
             .ok_or_else(|| anyhow::anyhow!("Document detached before module fetch registration"))?;
         let request_client = load.request_client();
-        self.fetch_source_callback_with_load(
+        self.prepare_source_fetch(
             &request_client,
             load,
             loader.fetch_context().request_origin(),
@@ -439,13 +459,13 @@ impl NativeModuleGraphFetchRequest {
         )
     }
 
-    fn fetch_source_callback_inner<F>(
+    fn prepare_source_fetch<F>(
         &self,
         loader: &ResourceRequestClient,
         load: crate::network::loads::ResourceLoadLease,
         request_origin: moli_url::WebOrigin,
         callback: F,
-    ) -> anyhow::Result<()>
+    ) -> anyhow::Result<PreparedModuleSourceFetch>
     where
         F: FnOnce(
                 std::result::Result<ModuleGraphFetchedSource, String>,
@@ -460,6 +480,8 @@ impl NativeModuleGraphFetchRequest {
         let request_mode = request.request_mode;
         let credentials_mode = request.credentials_mode;
         let csp_context = self.csp_context.clone();
+        let url_rewrite = ModuleSourceUrlRewrite::default();
+        let completion_url_rewrite = url_rewrite.clone();
         let completion = move |response: anyhow::Result<moli_fetch::Response>| {
             let mut network_result: Option<SharedNavigationResponseResult> = None;
             let result = response
@@ -542,9 +564,13 @@ impl NativeModuleGraphFetchRequest {
                         .message()
                         .to_owned());
                     }
+                    // CSP and CORS above checked the URL actually fetched. A
+                    // `Fetch.continueRequest` rewrite is not observable by the
+                    // page, so the module's URL stays the requested one.
+                    let module_url = completion_url_rewrite.page_visible_url(head.final_url);
                     Ok(match kind {
                         ModuleKind::WebAssembly => ModuleGraphFetchedSource::new(
-                            head.final_url,
+                            module_url,
                             ModuleSource::binary(body_bytes),
                         )
                         .with_response_referrer_policy(response_referrer_policy),
@@ -552,7 +578,7 @@ impl NativeModuleGraphFetchRequest {
                         | ModuleKind::Json
                         | ModuleKind::Css
                         | ModuleKind::Text => ModuleGraphFetchedSource::new(
-                            head.final_url,
+                            module_url,
                             ModuleSource::text(moli_encoding::decode_utf8(&body_bytes)),
                         )
                         .with_response_referrer_policy(response_referrer_policy),
@@ -565,7 +591,167 @@ impl NativeModuleGraphFetchRequest {
             }
             callback(result, network_result);
         };
-        loader.fetch_cacheable_script_text_callback_with_load(request, load, completion)
+        Ok(PreparedModuleSourceFetch {
+            request,
+            request_client: loader.clone(),
+            load,
+            completion: Some(Box::new(completion)),
+            url_rewrite,
+        })
+    }
+}
+
+/// The URL a `Fetch.continueRequest` rewrite replaced, shared between a
+/// prepared module fetch and its completion.
+#[derive(Clone, Default)]
+struct ModuleSourceUrlRewrite(std::sync::Arc<parking_lot::Mutex<Option<(Url, Url)>>>);
+
+impl ModuleSourceUrlRewrite {
+    fn record(&self, rewritten: Url, original: Url) {
+        *self.0.lock() = Some((rewritten, original));
+    }
+
+    /// Maps the rewritten URL back to the requested one. A redirect after the
+    /// rewrite is a real response URL and is kept.
+    fn page_visible_url(&self, response_url: Url) -> Url {
+        match self.0.lock().as_ref() {
+            Some((rewritten, original)) if *rewritten == response_url => original.clone(),
+            _ => response_url,
+        }
+    }
+}
+
+type ModuleSourceResponseCompletion =
+    Box<dyn FnOnce(anyhow::Result<moli_fetch::Response>) + Send + 'static>;
+
+/// One module source request whose network start is separate from its
+/// response conversion.
+///
+/// Network and `Fetch.fulfillRequest` responses run through the same
+/// completion (status, MIME, CORS and integrity checks), so an intercepted
+/// module is validated exactly like a fetched one, as in Chromium.
+///
+/// Dropping a fetch whose completion never ran (a paused request the protocol
+/// discards without resuming) fails it as aborted, so the waiting module
+/// script fires `error` and `import()` rejects instead of hanging.
+pub(crate) struct PreparedModuleSourceFetch {
+    request: Request,
+    request_client: ResourceRequestClient,
+    load: crate::network::loads::ResourceLoadLease,
+    completion: Option<ModuleSourceResponseCompletion>,
+    url_rewrite: ModuleSourceUrlRewrite,
+}
+
+impl Drop for PreparedModuleSourceFetch {
+    fn drop(&mut self) {
+        if let Some(completion) = self.completion.take() {
+            self.load.finish();
+            completion(Err(anyhow::anyhow!(moli_fetch::NET_ERR_ABORTED_ERROR_TEXT)));
+        }
+    }
+}
+
+impl std::fmt::Debug for PreparedModuleSourceFetch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedModuleSourceFetch")
+            .field("url", &self.request.url.as_str())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedModuleSourceFetch {
+    /// The headers reported by the CDP `Fetch.requestPaused` event.
+    pub(crate) fn interception_request_headers(&self) -> moli_fetch::RequestHeaders {
+        self.request.interception_request_headers()
+    }
+
+    pub(crate) fn url(&self) -> &Url {
+        &self.request.url
+    }
+
+    /// Starts the network fetch. A request rejected before it reaches the
+    /// network returns an error and its completion does not run.
+    pub(crate) fn start(mut self) -> anyhow::Result<()> {
+        let completion = self.take_completion();
+        self.request_client
+            .fetch_cacheable_script_text_callback_with_load(
+                self.request.clone(),
+                self.load.clone(),
+                completion,
+            )
+    }
+
+    fn take_completion(&mut self) -> ModuleSourceResponseCompletion {
+        self.completion
+            .take()
+            .expect("a prepared module fetch completes exactly once")
+    }
+
+    /// Starts the network fetch after `Fetch.continueRequest`, optionally at a
+    /// rewritten URL. A start failure is delivered to the completion because
+    /// no scheduler is waiting on a synchronous result any more.
+    ///
+    /// A rewritten URL is not observable by the page, as in Chromium: CSP and
+    /// CORS check the URL actually fetched, but the module keeps the requested
+    /// URL as its base URL and `import.meta.url`.
+    pub(crate) fn continue_request(mut self, url: Option<Url>) {
+        let completion = self.take_completion();
+        if let Some(url) = url.filter(|url| *url != self.request.url) {
+            let original_url = std::mem::replace(&mut self.request.url, url.clone());
+            self.url_rewrite.record(url, original_url);
+        }
+        let slot = std::sync::Arc::new(parking_lot::Mutex::new(Some(completion)));
+        let network_slot = slot.clone();
+        let started = self
+            .request_client
+            .fetch_cacheable_script_text_callback_with_load(
+                self.request.clone(),
+                self.load.clone(),
+                move |response| {
+                    if let Some(completion) = network_slot.lock().take() {
+                        completion(response);
+                    }
+                },
+            );
+        if let Err(error) = started {
+            self.load.finish();
+            if let Some(completion) = slot.lock().take() {
+                completion(Err(error));
+            }
+        }
+    }
+
+    /// Completes the request with a `Fetch.fulfillRequest` response.
+    pub(crate) fn fulfill(
+        mut self,
+        response_code: u16,
+        response_headers: Vec<(String, Vec<u8>)>,
+        response_body: Vec<u8>,
+    ) {
+        let head = moli_fetch::ResponseHead {
+            final_url: self.request.url.clone(),
+            status: response_code,
+            status_text: None,
+            headers: response_headers,
+            request_cookie_report: None,
+            cookie_set_reports: Vec::new(),
+            redirected: false,
+            redirect_chain: Vec::new(),
+            from_cache: false,
+            cache_state: Default::default(),
+            negotiated_http_version: None,
+        };
+        self.load.finish();
+        (self.take_completion())(Ok(moli_fetch::Response::from_head_and_lossy_body_bytes(
+            head,
+            response_body,
+        )));
+    }
+
+    /// Completes the request with a `Fetch.failRequest` network error.
+    pub(crate) fn fail(mut self, error_text: String) {
+        self.load.finish();
+        (self.take_completion())(Err(anyhow::anyhow!(error_text)));
     }
 }
 
@@ -4300,6 +4486,57 @@ import "./c.mjs";
         };
         source_result?;
         Ok(response)
+    }
+
+    /// The protocol can discard a paused module fetch without resuming it
+    /// (its source Document was replaced, or no request id was available).
+    /// The module must then fail, so `<script type=module>` fires `error`
+    /// and `import()` rejects, instead of waiting forever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_an_unresumed_module_source_fetch_fails_it_as_aborted() -> anyhow::Result<()> {
+        let loader = ResourceRequestClient::new(&FetchConfig::default())?;
+        let request = NativeModuleGraphFetchRequest {
+            source_url: url("https://app.example.test/paused.mjs"),
+            initiator_url: url("https://app.example.test/page"),
+            fetch_metadata: ModuleFetchMetadata::default(),
+            kind: ModuleKind::JavaScript,
+            tree_client: None,
+            tree_graph_level: None,
+            module_key: None,
+            dependency: None,
+            csp_context: None,
+        };
+        let registry = ResourceLoadRegistry::new(
+            RendererResourceTaskRunner::from_current_tokio()
+                .expect("module fetch test must own a Tokio runtime"),
+        );
+        let load = registry
+            .register(
+                ResourceLoadKind::Script,
+                ResourceLoadDisposition::Ordinary,
+                loader.frozen_request_client(),
+                None,
+            )
+            .expect("module fetch test load should register");
+        let (tx, rx) = oneshot::channel();
+        let fetch = request.prepare_source_fetch(
+            &loader,
+            load,
+            moli_url::WebOrigin::from_url(request.initiator_url()),
+            move |result, network_result| {
+                let _ = tx.send((result, network_result));
+            },
+        )?;
+
+        drop(fetch);
+
+        let (result, _) = rx.await?;
+        let error = result.expect_err("a discarded module fetch must fail");
+        assert!(
+            error.contains(moli_fetch::NET_ERR_ABORTED_ERROR_TEXT),
+            "unexpected module fetch error: {error}"
+        );
+        Ok(())
     }
 
     async fn read_http_request_head(stream: &mut tokio::net::TcpStream) -> std::io::Result<()> {

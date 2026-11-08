@@ -132,6 +132,19 @@ pub(crate) fn detached_parser_script_fetch_pause_prepared_outputs_for_renderer_r
     )
 }
 
+/// Starts paused script fetches whose interception cannot be offered to a
+/// client. Abandoned fetches (their Document is gone) are dropped instead,
+/// which fails them.
+fn continue_detached_script_fetches_unintercepted(
+    sources: impl IntoIterator<Item = PendingSubresourceFetchPauseSource>,
+) {
+    for source in sources {
+        if let Some(continuation) = source.detached_parser_script_fetch_continuation {
+            continuation.continue_request(None);
+        }
+    }
+}
+
 fn prepare_subresource_fetch_pause_sources(
     conn: &mut CdpConnection,
     owner: &CommandOwnerScope,
@@ -157,6 +170,9 @@ fn prepare_subresource_fetch_pause_sources(
             frame_id.to_owned(),
         ))
     })() else {
+        // Interception no longer applies to this target, so its paused
+        // scripts proceed to the network rather than failing.
+        continue_detached_script_fetches_unintercepted(sources);
         return network::NetworkPreparedOutputs::from_subresource_fetch_pauses_and_continuations(
             outputs, automatic,
         );
@@ -164,7 +180,8 @@ fn prepare_subresource_fetch_pause_sources(
     let loader_id = conn
         .current_document_loader_id_for_owner(owner)
         .unwrap_or_else(|| DEFAULT_LOADER_ID.to_owned());
-    for source in sources {
+    let mut sources = sources.into_iter();
+    while let Some(source) = sources.next() {
         let PendingSubresourceFetchPauseSource {
             info,
             detached_parser_script_fetch_continuation,
@@ -173,6 +190,11 @@ fn prepare_subresource_fetch_pause_sources(
         let Some((request_id, network_request_id)) =
             conn.allocate_pending_subresource_fetch_request_ids_for_owner(owner)
         else {
+            // Without a request id no client can resume the pause.
+            if let Some(continuation) = detached_parser_script_fetch_continuation {
+                continuation.continue_request(None);
+            }
+            continue_detached_script_fetches_unintercepted(sources);
             return network::NetworkPreparedOutputs::from_subresource_fetch_pauses_and_continuations(outputs, automatic);
         };
         let (network_request_id, request_loader_id) = match &child_document {
@@ -201,6 +223,7 @@ fn prepare_subresource_fetch_pause_sources(
                 &request_id,
                 document.redirect.is_some(),
             ) else {
+                continue_detached_script_fetches_unintercepted(sources);
                 return network::NetworkPreparedOutputs::from_subresource_fetch_pauses_and_continuations(outputs, automatic);
             };
             child_fetch_ids = ids;

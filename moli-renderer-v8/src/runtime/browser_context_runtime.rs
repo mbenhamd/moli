@@ -230,9 +230,23 @@ struct DetachedParserScriptFetchContinuationInner {
     completer: SharedScriptSourceLoadCompleter,
 }
 
+/// The renderer-side owner of one CDP-paused script fetch.
+#[derive(Debug)]
+enum DetachedScriptFetch {
+    /// A parser-blocking classic `<script src>`.
+    ParserScript(Box<DetachedParserScriptFetchContinuationInner>),
+    /// One module script graph fetch: a module script, a static or dynamic
+    /// import, or a modulepreload.
+    ModuleScript(Box<crate::module_runtime::PreparedModuleSourceFetch>),
+}
+
+/// Resumes a script fetch paused by CDP `Fetch` interception.
+///
+/// Classic parser scripts and module graph fetches share this continuation
+/// so the protocol layer handles every paused script request the same way.
 #[derive(Clone, Debug)]
 pub struct DetachedParserScriptFetchContinuation {
-    inner: Arc<Mutex<Option<DetachedParserScriptFetchContinuationInner>>>,
+    inner: Arc<Mutex<Option<DetachedScriptFetch>>>,
 }
 
 impl PartialEq for DetachedParserScriptFetchContinuation {
@@ -251,26 +265,39 @@ impl DetachedParserScriptFetchContinuation {
         completer: SharedScriptSourceLoadCompleter,
     ) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Some(
-                DetachedParserScriptFetchContinuationInner {
+            inner: Arc::new(Mutex::new(Some(DetachedScriptFetch::ParserScript(
+                Box::new(DetachedParserScriptFetchContinuationInner {
                     script,
                     request_origin,
                     request_client,
                     task_runner,
                     document_character_set,
                     completer,
-                },
-            ))),
+                }),
+            )))),
         }
     }
 
-    fn take(&self) -> Option<DetachedParserScriptFetchContinuationInner> {
+    pub(crate) fn module_script(fetch: crate::module_runtime::PreparedModuleSourceFetch) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Some(DetachedScriptFetch::ModuleScript(
+                Box::new(fetch),
+            )))),
+        }
+    }
+
+    fn take(&self) -> Option<DetachedScriptFetch> {
         self.inner.lock().take()
     }
 
     pub fn fail(&self, error_text: String) -> bool {
-        let Some(inner) = self.take() else {
-            return false;
+        let inner = match self.take() {
+            None => return false,
+            Some(DetachedScriptFetch::ModuleScript(fetch)) => {
+                fetch.fail(error_text);
+                return true;
+            }
+            Some(DetachedScriptFetch::ParserScript(inner)) => *inner,
         };
         inner
             .completer
@@ -289,8 +316,13 @@ impl DetachedParserScriptFetchContinuation {
         response_headers: Vec<(String, Vec<u8>)>,
         response_body: Vec<u8>,
     ) -> bool {
-        let Some(inner) = self.take() else {
-            return false;
+        let inner = match self.take() {
+            None => return false,
+            Some(DetachedScriptFetch::ModuleScript(fetch)) => {
+                fetch.fulfill(response_code, response_headers, response_body);
+                return true;
+            }
+            Some(DetachedScriptFetch::ParserScript(inner)) => *inner,
         };
         let text = String::from_utf8_lossy(&response_body).into_owned();
         let response = crate::protocol_types::NavigationResponse::from_head_and_materialized_body(
@@ -321,8 +353,13 @@ impl DetachedParserScriptFetchContinuation {
     }
 
     pub fn continue_request(&self, url: Option<Url>) -> bool {
-        let Some(mut inner) = self.take() else {
-            return false;
+        let mut inner = match self.take() {
+            None => return false,
+            Some(DetachedScriptFetch::ModuleScript(fetch)) => {
+                fetch.continue_request(url);
+                return true;
+            }
+            Some(DetachedScriptFetch::ParserScript(inner)) => *inner,
         };
         if let Some(url) = url {
             inner.script.url = url;
@@ -898,6 +935,28 @@ impl RendererBrowserContextRuntime {
                 document_character_set,
                 completer,
             ),
+        )
+    }
+
+    /// Binds a module graph fetch to a detached Fetch-interception
+    /// continuation. Ids share the parser script space because both kinds
+    /// travel through the same paused-request residence.
+    pub(crate) fn prepare_detached_module_script_fetch(
+        &self,
+        mut info: crate::protocol_types::PendingSubresourceFetchInfo,
+        fetch: crate::module_runtime::PreparedModuleSourceFetch,
+    ) -> (
+        crate::protocol_types::PendingSubresourceFetchInfo,
+        DetachedParserScriptFetchContinuation,
+    ) {
+        info.internal_id = self
+            .inner
+            .next_detached_parser_script_fetch_id
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        (
+            info,
+            DetachedParserScriptFetchContinuation::module_script(fetch),
         )
     }
 
