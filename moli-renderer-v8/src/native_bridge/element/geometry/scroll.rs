@@ -48,6 +48,9 @@ pub(super) fn set_node_scroll_position(
     };
     if changed && queue_observable_effects {
         queue_scroll_observable_effects(scope, runtime_ptr, document, false);
+        // The element joins its Document's pending scroll event targets; the
+        // next rendering update fires `scroll` and `scrollend` at it.
+        let _ = unsafe { &mut *runtime_ptr }.queue_element_scroll_events(scope, handle);
     }
     changed
 }

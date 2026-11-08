@@ -1934,6 +1934,25 @@ pub(crate) fn dispatch_document_event_for_handle(
     document_handle: DomHandle,
     event_type: &str,
 ) -> bool {
+    let (bubbles, _) = super::host::host_event_defaults(event_type);
+    dispatch_rendering_update_event_for_handle(
+        scope,
+        host_ptr,
+        document_handle,
+        event_type,
+        bubbles,
+    )
+}
+
+/// Fire a non-cancelable rendering-update event (such as `scroll`) at a node.
+/// An element's `scroll` and `scrollend` do not bubble; a Document's do.
+pub(crate) fn dispatch_rendering_update_event_for_handle(
+    scope: &mut v8::PinScope<'_, '_>,
+    host_ptr: *mut JsContextHost,
+    target_handle: DomHandle,
+    event_type: &str,
+    bubbles: bool,
+) -> bool {
     let runtime = unsafe { &mut *host_ptr };
     let global = scope.get_current_context().global(scope);
     let Some(event_ctor) = global
@@ -1945,8 +1964,7 @@ pub(crate) fn dispatch_document_event_for_handle(
     let Some(event_type_str) = v8_string(scope, event_type) else {
         return false;
     };
-    let (bubbles, cancelable) = super::host::host_event_defaults(event_type);
-    let init = WindowDocumentEventInitDeclaration::new(bubbles, cancelable)
+    let init = WindowDocumentEventInitDeclaration::new(bubbles, false)
         .bind(scope)
         .expect("window document event init declaration should bind");
     let Some(event) = event_ctor.new_instance(scope, &[event_type_str.into(), init.into()]) else {
@@ -1959,9 +1977,9 @@ pub(crate) fn dispatch_document_event_for_handle(
     let _ = runtime.dispatch_public_event_best_effort(
         scope,
         host_ptr,
-        EventTargetHandle::Node(document_handle),
+        EventTargetHandle::Node(target_handle),
         event,
-        "rendering-update document event",
+        "rendering-update event",
     );
     true
 }
