@@ -697,6 +697,15 @@ impl ResolvedLayoutPseudoStyle {
 }
 
 /// Renderer-owned access to element, lazy marker, and anonymous styles.
+/// Content-box size a query container answers `@container` and `cq*` units
+/// with. An axis is `None` when the box cannot be queried on it, such as the
+/// block axis of an `inline-size` container.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayoutQueryContainerSize {
+    pub width: Option<f32>,
+    pub height: Option<f32>,
+}
+
 pub trait LayoutStyleResolver<N>
 where
     N: Copy + Debug + Eq + Hash,
@@ -715,6 +724,17 @@ where
         _node: N,
     ) -> Result<Option<ResolvedLayoutPseudoStyle>, LayoutError> {
         Ok(None)
+    }
+
+    /// Publishes the used sizes of this document's query containers. Returns
+    /// `true` when any size changed, after making later style reads reflect
+    /// them; the pass then rebuilds its world. Resolvers without container
+    /// queries keep the default.
+    fn update_query_container_sizes(
+        &mut self,
+        _sizes: &[(N, LayoutQueryContainerSize)],
+    ) -> Result<bool, LayoutError> {
+        Ok(false)
     }
 
     fn anonymous_style(

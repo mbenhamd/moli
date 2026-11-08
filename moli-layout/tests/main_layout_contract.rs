@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use moli_layout::{
     DocumentLayoutServices, LayoutDisplay, LayoutElementCategory, LayoutElementSemantics,
     LayoutError, LayoutFlushReason, LayoutNamespace, LayoutPassRequest, LayoutPosition,
-    LayoutReplacedKind, LayoutSource, LayoutSourceKind, LayoutStyleResolver, PaintBlendMode,
-    PaintCaptureRequest, PaintColor, PaintFragment, PaintRect, PaintSnapshot, PaintViewport,
-    ReplacedMetrics, ResolvedLayoutElementStyles, ResolvedLayoutStyle, ScreenshotLayoutRequest,
-    build_layout_pass, build_screenshot_snapshot,
+    LayoutQueryContainerSize, LayoutReplacedKind, LayoutSource, LayoutSourceKind,
+    LayoutStyleResolver, LayoutViewport, PaintBlendMode, PaintCaptureRequest, PaintColor,
+    PaintFragment, PaintRect, PaintSnapshot, PaintViewport, ReplacedMetrics,
+    ResolvedLayoutElementStyles, ResolvedLayoutStyle, ScreenshotLayoutRequest, build_layout_pass,
+    build_screenshot_snapshot,
 };
 use style::Atom;
 use taffy::{
@@ -1389,6 +1390,97 @@ fn inline_size_containment_zeroes_intrinsic_width_in_a_flex_row() {
         solid_rect(&snapshot, GREEN),
         PaintRect::new(0.0, 0.0, 70.0, 40.0),
     );
+}
+
+/// Fixture resolver standing in for a style engine: each reported size runs
+/// `apply`, which restyles `styles` and says whether anything changed.
+struct QueryContainerFixture {
+    styles: FixtureStyles,
+    apply: fn(&mut FixtureStyles, f32) -> bool,
+}
+
+impl LayoutStyleResolver<usize> for QueryContainerFixture {
+    fn element_styles(
+        &mut self,
+        node: usize,
+    ) -> Result<Option<ResolvedLayoutElementStyles>, LayoutError> {
+        self.styles.element_styles(node)
+    }
+
+    fn update_query_container_sizes(
+        &mut self,
+        sizes: &[(usize, LayoutQueryContainerSize)],
+    ) -> Result<bool, LayoutError> {
+        let width = sizes
+            .iter()
+            .find(|(node, _)| *node == 1)
+            .and_then(|(_, size)| size.width)
+            .expect("the query container reports its inline size");
+        Ok((self.apply)(&mut self.styles, width))
+    }
+}
+
+fn query_container_iterations(fixture: &mut QueryContainerFixture) -> usize {
+    let source = containment_fixture_source();
+    let mut services = DocumentLayoutServices::new();
+    build_layout_pass(
+        &source,
+        fixture,
+        &mut services,
+        LayoutPassRequest::new(LayoutViewport::new(800, 600, 1.0), LayoutFlushReason::Test),
+    )
+    .expect("layout pass")
+    .metrics
+    .container_query_iteration_count
+}
+
+fn query_container_fixture(
+    width: f32,
+    apply: fn(&mut FixtureStyles, f32) -> bool,
+) -> QueryContainerFixture {
+    let mut styles = containment_fixture_styles(
+        fixed_box(LayoutDisplay::Block, width, 40.0, GREEN).with_query_container(true, false),
+    );
+    styles
+        .0
+        .insert(2, fixed_box(LayoutDisplay::Block, 50.0, 40.0, RED));
+    QueryContainerFixture { styles, apply }
+}
+
+#[test]
+fn container_query_feedback_adds_one_iteration_only_for_a_change() {
+    let mut fixture = query_container_fixture(300.0, |_styles, _width| false);
+    // An unchanged page (update reports false) does not iterate again.
+    assert_eq!(query_container_iterations(&mut fixture), 1);
+
+    let mut fixture = query_container_fixture(300.0, {
+        |styles, _width| {
+            if styles.0.contains_key(&99) {
+                return false;
+            }
+            styles
+                .0
+                .insert(99, fixed_box(LayoutDisplay::Block, 1.0, 1.0, RED));
+            true
+        }
+    });
+    assert_eq!(query_container_iterations(&mut fixture), 2);
+}
+
+#[test]
+fn container_query_feedback_stops_when_sizes_oscillate() {
+    // The first size observed toggles the container's own width between two
+    // values forever, as an auto scrollbar flip would.
+    let mut fixture = query_container_fixture(400.0, |styles, width| {
+        let next = if width == 400.0 { 100.0 } else { 400.0 };
+        styles.0.insert(
+            1,
+            fixed_box(LayoutDisplay::Block, next, 40.0, GREEN).with_query_container(true, false),
+        );
+        true
+    });
+    // 400 -> 100 -> 400: the repeated vector ends the pass deterministically.
+    assert_eq!(query_container_iterations(&mut fixture), 3);
 }
 
 #[test]

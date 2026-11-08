@@ -438,6 +438,40 @@ impl JsContextHost {
             .clear_latest_layout();
     }
 
+    pub(crate) fn update_container_query_sizes(
+        &self,
+        document: DomHandle,
+        sizes: moli_selector::ContainerQuerySizes,
+    ) -> bool {
+        self.style_engine
+            .update_container_query_sizes(self.dom_host(), document, sizes)
+    }
+
+    pub(crate) fn begin_container_query_store(&self, document: DomHandle) {
+        self.style_engine
+            .begin_container_query_store(self.dom_host(), document);
+    }
+
+    pub(crate) fn container_query_sizes_snapshot(
+        &self,
+        document: DomHandle,
+    ) -> Option<moli_selector::ContainerQuerySizes> {
+        self.style_engine.container_query_sizes_snapshot(document)
+    }
+
+    pub(crate) fn restore_container_query_sizes(
+        &self,
+        document: DomHandle,
+        snapshot: Option<moli_selector::ContainerQuerySizes>,
+    ) {
+        self.style_engine
+            .restore_container_query_sizes(self.dom_host(), document, snapshot);
+    }
+
+    pub(crate) fn layout_pass_is_active(&self) -> bool {
+        self.layout_pass_active.get()
+    }
+
     pub(crate) fn build_layout_pass_for_document(
         &self,
         document: DomHandle,

@@ -3,6 +3,7 @@ mod beforeinput_target_validation;
 mod fetch_cache_modes;
 
 mod child_document_web_fonts;
+mod container_query_layout;
 mod credential_container;
 mod credential_json_options;
 mod cross_document_drag_events;

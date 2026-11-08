@@ -90,8 +90,8 @@ pub(crate) use selector_parse::{
     validate_supports_selector_condition_argument,
 };
 pub use style_traversal::{
-    StyloDocument, StyloDomHostBinding, StyloDomStyleAdapter, StyloElement, StyloElementDataStore,
-    StyloNode, StyloShadowRoot,
+    ContainerQuerySizes, StyloDocument, StyloDomHostBinding, StyloDomStyleAdapter, StyloElement,
+    StyloElementDataStore, StyloNode, StyloShadowRoot,
 };
 
 /// Query-only `DomHost` wrapper around Stylo `dom_apis`.

@@ -1,6 +1,7 @@
 use moli_layout::{
-    LayoutAnonymousStyleContext, LayoutDisplay, LayoutError, LayoutStyleResolver, LayoutViewport,
-    ResolvedLayoutElementStyles, ResolvedLayoutPseudoStyle, ResolvedLayoutStyle,
+    LayoutAnonymousStyleContext, LayoutDisplay, LayoutError, LayoutQueryContainerSize,
+    LayoutStyleResolver, LayoutViewport, ResolvedLayoutElementStyles, ResolvedLayoutPseudoStyle,
+    ResolvedLayoutStyle,
 };
 use std::time::Instant;
 
@@ -19,6 +20,13 @@ pub(super) struct NativeLayoutStyleResolver<'a> {
     anonymous_context: Option<PreparedAnonymousStyleContext<'a>>,
     scripting_enabled: bool,
     profile: Option<NativeLayoutStyleResolverProfile>,
+    root: DomHandle,
+    document: DomHandle,
+    viewport: LayoutViewport,
+    environment_override: Option<StyloStyleEnvironment>,
+    /// The screen store to restore after an environment-override pass, whose
+    /// print-sized containers must not answer later screen styles.
+    screen_container_sizes: Option<Option<moli_selector::ContainerQuerySizes>>,
 }
 
 #[derive(Default)]
@@ -45,6 +53,10 @@ impl<'a> NativeLayoutStyleResolver<'a> {
         viewport: LayoutViewport,
         environment_override: Option<StyloStyleEnvironment>,
     ) -> Self {
+        let screen_container_sizes = environment_override
+            .is_some()
+            .then(|| runtime.container_query_sizes_snapshot(document));
+        runtime.begin_container_query_store(document);
         let mut reads = layout_style_read_scope(runtime, document, viewport, environment_override);
         // Drain pending invalidations and update the retained world before
         // freezing the anonymous-style context for this synchronous pass.
@@ -56,6 +68,11 @@ impl<'a> NativeLayoutStyleResolver<'a> {
             scripting_enabled: runtime.document_scripting_enabled(document),
             profile: moli_trace::cpu_profile_enabled()
                 .then(NativeLayoutStyleResolverProfile::default),
+            root,
+            document,
+            viewport,
+            environment_override,
+            screen_container_sizes,
         }
     }
 
@@ -125,7 +142,50 @@ fn layout_style_viewport(runtime: &JsContextHost, viewport: LayoutViewport) -> S
     .with_device_pixel_ratio(screen.device_pixel_ratio)
 }
 
+impl Drop for NativeLayoutStyleResolver<'_> {
+    fn drop(&mut self) {
+        if let Some(snapshot) = self.screen_container_sizes.take() {
+            self.runtime
+                .restore_container_query_sizes(self.document, snapshot);
+        }
+    }
+}
+
 impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
+    fn update_query_container_sizes(
+        &mut self,
+        sizes: &[(DomHandle, LayoutQueryContainerSize)],
+    ) -> Result<bool, LayoutError> {
+        let store = sizes
+            .iter()
+            .map(|(node, size)| {
+                (
+                    *node,
+                    euclid::default::Size2D::new(
+                        size.width.map(app_units::Au::from_f32_px),
+                        size.height.map(app_units::Au::from_f32_px),
+                    ),
+                )
+            })
+            .collect();
+        if !self
+            .runtime
+            .update_container_query_sizes(self.document, store)
+        {
+            return Ok(false);
+        }
+        // Drop the observation that pinned the previous iteration's styles,
+        // then drain the invalidations for the next world.
+        self.reads = layout_style_read_scope(
+            self.runtime,
+            self.document,
+            self.viewport,
+            self.environment_override,
+        );
+        self.anonymous_context = self.reads.read(self.root).prepare_anonymous_style_context();
+        Ok(true)
+    }
+
     fn element_styles(
         &mut self,
         node: DomHandle,

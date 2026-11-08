@@ -705,6 +705,65 @@ impl MoliStyleEngine {
         )
     }
 
+    /// Publishes a document's used query-container sizes. Each changed
+    /// container's subtree restyles on the next read, and the visual
+    /// generation advances so screencast and live-geometry keys see the
+    /// change. Returns whether anything changed.
+    pub(crate) fn update_container_query_sizes(
+        &self,
+        host: &DomHost,
+        document: DomHandle,
+        sizes: moli_selector::ContainerQuerySizes,
+    ) -> bool {
+        let changed = self
+            .dom_adapter
+            .update_container_query_sizes(document, sizes);
+        self.invalidate_changed_query_containers(host, document, changed)
+    }
+
+    /// Opens a document's size store for its first layout. Styles computed
+    /// from a pre-layout `style=` estimate then restyle against used sizes.
+    pub(crate) fn begin_container_query_store(&self, host: &DomHost, document: DomHandle) {
+        if self.dom_adapter.begin_container_query_store(document) {
+            self.invalidate_changed_query_containers(host, document, vec![document]);
+        }
+    }
+
+    pub(crate) fn container_query_sizes_snapshot(
+        &self,
+        document: DomHandle,
+    ) -> Option<moli_selector::ContainerQuerySizes> {
+        self.dom_adapter.container_query_sizes_snapshot(document)
+    }
+
+    pub(crate) fn restore_container_query_sizes(
+        &self,
+        host: &DomHost,
+        document: DomHandle,
+        snapshot: Option<moli_selector::ContainerQuerySizes>,
+    ) {
+        let changed = self
+            .dom_adapter
+            .restore_container_query_sizes(document, snapshot);
+        self.invalidate_changed_query_containers(host, document, changed);
+    }
+
+    fn invalidate_changed_query_containers(
+        &self,
+        host: &DomHost,
+        document: DomHandle,
+        changed: Vec<DomHandle>,
+    ) -> bool {
+        if changed.is_empty() {
+            return false;
+        }
+        let world = self.world_for_document(document);
+        self.invalidation_cleanup_for_world(&world)
+            .invalidate_subtrees(host, changed);
+        world.document_state.note_visual_input_change();
+        true
+    }
+
     pub(crate) fn clear_for_document_replacement(&mut self, document: DomHandle) {
         self.clear_owner_document_indexes_for_document(document);
         self.dom_adapter.clear_element_data_for_document(document);
