@@ -757,7 +757,14 @@ impl JsContextHost {
                     url: script.url.clone(),
                     websocket_socket_id: None,
                     method: "GET".to_owned(),
-                    request_headers: Default::default(),
+                    // Origin only for a CORS-mode (`crossorigin`) script, as
+                    // in Chromium; Playwright's fulfill keys CORS headers on it.
+                    request_headers: crate::planning::external_script_request(
+                        &script,
+                        &request_origin,
+                        None,
+                    )
+                    .interception_request_headers(),
                     request_body: None,
                     request_body_bytes: None,
                     resource_type: SubresourceResourceType::Script,

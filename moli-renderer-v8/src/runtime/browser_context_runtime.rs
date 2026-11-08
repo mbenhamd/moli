@@ -1333,6 +1333,49 @@ mod tests {
         },
     };
 
+    /// The protocol can discard a paused child-frame classic script without
+    /// resuming it. The frame's load must then fail, so the script fires
+    /// `error` instead of the child parser waiting for it forever.
+    #[test]
+    fn dropping_an_unresumed_child_classic_script_fetch_fails_its_load() {
+        let url = url::Url::parse("https://child.example.test/c.js").expect("test url");
+        let script = crate::planning::PreparedScript {
+            position: 0,
+            node_id: crate::dom::NodeId::new(1),
+            kind: crate::types::ScriptKind::Classic,
+            mode: crate::types::ScriptMode::Normal,
+            source_kind: crate::types::ScriptSourceKind::External,
+            fetch_metadata: crate::planning::ScriptFetchMetadata::default(),
+            source: crate::planning::ScriptSource::External,
+            url: url.clone(),
+            base_url: url.clone(),
+            initiator_url: url.clone(),
+            host_script_handle: None,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let continuation = super::DetachedParserScriptFetchContinuation::child_classic_script(
+            super::DetachedChildClassicScriptFetch::new(
+                script,
+                moli_url::WebOrigin::from_url(&url),
+                None,
+                Box::new(|_, _| panic!("a discarded pause must not start the network load")),
+                Box::new(move |outcome| {
+                    let _ = tx.send(outcome);
+                }),
+            ),
+        );
+
+        drop(continuation);
+
+        let outcome = rx
+            .try_recv()
+            .expect("dropping the paused fetch must finish the frame's load");
+        assert_eq!(
+            outcome.source_result.expect_err("the load must fail"),
+            "child script fetch interception closed before completion"
+        );
+    }
+
     async fn assert_single_page_reservation_release(
         output_rx: &mut crate::runtime::RendererOutputTransportReceiver,
         token: RendererPageReservationToken,

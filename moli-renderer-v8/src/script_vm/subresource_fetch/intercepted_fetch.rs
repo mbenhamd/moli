@@ -27,6 +27,17 @@ impl ScriptVm {
         // protocol snapshot to rediscover.
         let (load, completer) =
             crate::planning::SharedScriptSourceLoad::pending_with_owner_wake(None);
+        let request_origin = self
+            .current_main_document_resource_loader()
+            .expect("parser interception requires its Document authority")
+            .fetch_context()
+            .request_origin();
+        let request_headers = crate::planning::external_script_request(
+            &script,
+            &request_origin,
+            Some(moli_fetch::RequestResourceType::ParserBlockingScript),
+        )
+        .interception_request_headers();
         let (info, continuation) = browser_context_runtime.prepare_detached_parser_script_fetch(
             PendingSubresourceFetchInfo {
                 internal_id: 0,
@@ -36,17 +47,14 @@ impl ScriptVm {
                 url: script.url.clone(),
                 websocket_socket_id: None,
                 method: "GET".to_owned(),
-                request_headers: Default::default(),
+                request_headers,
                 request_body: None,
                 request_body_bytes: None,
                 resource_type: SubresourceResourceType::Script,
                 request_cookie_report: None,
             },
             script,
-            self.current_main_document_resource_loader()
-                .expect("parser interception requires its Document authority")
-                .fetch_context()
-                .request_origin(),
+            request_origin,
             request_client,
             task_runner,
             document_character_set,
