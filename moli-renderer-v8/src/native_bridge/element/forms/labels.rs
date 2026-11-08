@@ -91,10 +91,9 @@ fn collect_shadow_including_labels_at(
     }
 }
 
-fn shadow_including_label_handles(runtime: &JsContextHost) -> Vec<DomHandle> {
+fn shadow_including_label_handles(runtime: &JsContextHost, document: DomHandle) -> Vec<DomHandle> {
     let mut labels = Vec::new();
-    let (root, include_root) = (runtime.dom_host().document_handle(), false);
-    collect_shadow_including_labels_from(runtime, root, include_root, &mut labels);
+    collect_shadow_including_labels_from(runtime, document, false, &mut labels);
     labels
 }
 
@@ -128,7 +127,14 @@ fn shadow_including_contains(
 
 fn label_handles_for_control(runtime: &JsContextHost, control_handle: DomHandle) -> Vec<DomHandle> {
     if runtime.dom_host().is_connected(control_handle) {
-        return shadow_including_label_handles(runtime);
+        // A control in a child browsing context shares this host with the top
+        // document, so its labels must come from its own node document.
+        return runtime
+            .dom_host()
+            .owner_document_handle(control_handle)
+            .map_or_else(Vec::new, |document| {
+                shadow_including_label_handles(runtime, document)
+            });
     }
 
     let root = runtime

@@ -4584,6 +4584,64 @@ fn labels_follow_shadow_root_reference_target_chain() {
         "true|direct-label|true|nested-label|true|0;true|0;true|direct-label"
     );
 }
+#[tokio::test(flavor = "current_thread")]
+async fn child_document_controls_resolve_labels_in_their_own_document() {
+    let mut vm = new_storage_test_vm("https://child-document-labels.test/");
+    vm.eval(
+        r#"
+globalThis.frame = document.createElement('iframe');
+frame.srcdoc = `<!doctype html><body>
+  <label id="for-label" for="plain">Plain</label><input id="plain">
+  <label id="implicit-label">Implicit<select id="implicit"></select></label>
+  <div id="shadow-host"></div>
+  <label id="reference-label" for="reference-host">Reference</label>
+  <div id="reference-host"></div>
+</body>`;
+(document.body || document.documentElement || document).appendChild(frame);
+"#,
+    )
+    .expect("child frame should be inserted");
+    crate::script_vm::tests::run_child_navigation_commit_and_host_load_for_test(
+        &mut vm,
+        "child document labels",
+    )
+    .await;
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const child = frame.contentDocument;
+  const ids = list => Array.from(list).map(element => element.id).join(',');
+  const shadow = child.getElementById('shadow-host').attachShadow({ mode: 'open' });
+  shadow.innerHTML = '<label id="shadow-label" for="shadow-input">S</label><input id="shadow-input">';
+  const reference = child.getElementById('reference-host').attachShadow({ mode: 'open' });
+  reference.innerHTML = '<input id="reference-input">';
+  reference.referenceTarget = 'reference-input';
+  const liveList = child.getElementById('plain').labels;
+  const before = liveList.length;
+  const added = child.createElement('label');
+  added.id = 'added-label';
+  added.htmlFor = 'plain';
+  child.body.appendChild(added);
+  return JSON.stringify({
+    plain: ids(liveList),
+    before,
+    implicit: ids(child.getElementById('implicit').labels),
+    shadow: ids(shadow.getElementById('shadow-input').labels),
+    reference: ids(reference.getElementById('reference-input').labels),
+  });
+})()
+"#,
+        )
+        .expect("child document labels should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"plain":"for-label,added-label","before":1,"implicit":"implicit-label","shadow":"shadow-label","reference":"reference-label"}"#
+    );
+}
+
 #[test]
 fn labels_include_shadow_tree_and_implicit_reference_targets() {
     let mut vm = new_streamed_parser_test_vm(
