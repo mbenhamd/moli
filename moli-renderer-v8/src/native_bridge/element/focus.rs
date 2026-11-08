@@ -8,6 +8,7 @@ use super::forms::{
     dispatch_text_control_event, form_control_is_effectively_disabled, text_control_value,
 };
 use super::geometry::{read_element_metrics, scroll_node_into_view_if_needed};
+use super::rendered_state::{ElementBoxState, ElementRenderedState};
 use super::styles::{StyleMode, style_property_value};
 use super::{
     construct_click_event, construct_focus_event, construct_interest_event,
@@ -674,6 +675,36 @@ fn collect_sequential_focus_entries(
         return;
     };
 
+    if (element.is_html_element("iframe") || element.is_html_element("frame"))
+        && let Some(child_document) = runtime.child_browsing_context_document_handle(handle)
+    {
+        // A navigable container is not a tab stop of its own. HTML's
+        // sequential focus navigation order splices the nested Document's
+        // order in at the container's position, so Tab steps into the frame
+        // and back out of it. A focused container (no focused element inside
+        // its Document yet) stays in the order only as the starting point.
+        if !frame_owner_admits_sequential_focus(runtime, handle) {
+            return;
+        }
+        let tab_index = element_attribute(runtime, handle, "tabindex")
+            .and_then(|value| parse_tab_index_attribute(&value))
+            .unwrap_or(0);
+        if tab_index < 0 {
+            return;
+        }
+        let mut handles = Vec::new();
+        if active == Some(handle) {
+            handles.push(handle);
+        }
+        handles.extend(sequential_focus_order_for_children(
+            runtime,
+            runtime.dom_host().child_handles(child_document).collect(),
+            active,
+        ));
+        push_focus_entry_with_tab_index(tab_index, handles, entries, order);
+        return;
+    }
+
     if element.is_html_element("slot") {
         let Some(tab_index) = slot_focus_scope_tab_index(runtime, handle) else {
             return;
@@ -778,7 +809,7 @@ fn push_focus_entry(
     order: &mut usize,
 ) {
     push_focus_entry_with_tab_index(
-        sequential_tab_index(runtime, handle, None).unwrap_or(0),
+        sequential_tab_index_without_scroll_descendant_check(runtime, handle).unwrap_or(0),
         handles,
         entries,
         order,
@@ -997,7 +1028,45 @@ fn is_sequentially_focusable(
     if active == Some(handle) {
         return true;
     }
+    if !is_rendered_for_sequential_focus(runtime, handle) {
+        return false;
+    }
     !element_is_scrollable(runtime, handle) || !has_sequential_focusable_descendant(runtime, handle)
+}
+
+/// Blink only treats an element as keyboard focusable while it has a layout
+/// box and its computed `visibility` is `visible`. Sequential navigation
+/// therefore skips `display:none` subtrees (including ones hidden through a
+/// frame owner, closed `<details>`, or `content-visibility:hidden`) and
+/// `visibility:hidden` controls. The currently focused element is admitted
+/// by the caller even when it stopped rendering, so navigation still starts
+/// from its tree position.
+fn is_rendered_for_sequential_focus(runtime: &JsContextHost, handle: DomHandle) -> bool {
+    let state = ElementRenderedState::read(runtime, handle);
+    state.box_state() != ElementBoxState::NoBox
+        && state
+            .target_style()
+            .is_none_or(|style| style.visibility_visible)
+}
+
+/// A frame owner contributes its nested Document's order only while the
+/// owner itself could take keyboard focus. Rendering checks on the nested
+/// elements reach the owner's `display` but not its `visibility`, a closed
+/// `<details>` around it, or `inert`, because those stop at the child
+/// Document boundary.
+fn frame_owner_admits_sequential_focus(runtime: &JsContextHost, owner: DomHandle) -> bool {
+    is_rendered_for_sequential_focus(runtime, owner) && !is_inert_in_flat_tree(runtime, owner)
+}
+
+fn is_inert_in_flat_tree(runtime: &JsContextHost, handle: DomHandle) -> bool {
+    let mut current = Some(handle);
+    while let Some(candidate) = current {
+        if element_has_attribute(runtime, candidate, "inert") {
+            return true;
+        }
+        current = flat_tree_parent(runtime, candidate);
+    }
+    false
 }
 
 fn has_sequential_focusable_descendant(runtime: &JsContextHost, handle: DomHandle) -> bool {
@@ -1036,6 +1105,7 @@ fn is_interactive_sequential_focusable_descendant(
         .is_some_and(|value| value >= 0);
     (is_interactive_element || has_non_negative_tab_index)
         && sequential_tab_index_without_scroll_descendant_check(runtime, handle).is_some()
+        && is_rendered_for_sequential_focus(runtime, handle)
 }
 
 fn explicit_negative_tab_index(runtime: &JsContextHost, handle: DomHandle) -> bool {
