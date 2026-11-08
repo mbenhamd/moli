@@ -224,18 +224,16 @@ fn slotted_content_queries_and_follows_its_shadow_tree_container() {
           @container (min-width: 300px) { #slotted { color: rgb(1, 1, 1); } }
           #slotted { color: rgb(0, 0, 0); }
         </style>
-        <div id="host"><span id="slotted">s</span></div>
-        <script>
-          const root = document.getElementById('host').attachShadow({ mode: 'open' });
-          root.innerHTML = '<div id="in" style="container-type:inline-size;width:100px"><slot></slot></div>';
-        </script>"#,
+        <div id="host"><span id="slotted">s</span></div>"#,
     );
     let result = vm
         .eval(
             r#"(() => {
+              const root = document.getElementById('host').attachShadow({ mode: 'open' });
+              root.innerHTML = '<div id="in" style="container-type:inline-size;width:100px"><slot></slot></div>';
               const slotted = document.getElementById('slotted');
               const small = getComputedStyle(slotted).color;
-              document.getElementById('host').shadowRoot.getElementById('in').style.width = '400px';
+              root.getElementById('in').style.width = '400px';
               document.body.getBoundingClientRect();
               return small + '|' + getComputedStyle(slotted).color;
             })()"#,
