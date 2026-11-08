@@ -10,6 +10,7 @@ use curl::{
 
 use super::{CurlWebSocketEvent, SessionIo, WsFlags, readiness::IoState, request::Handshake};
 use crate::CurlTransferId;
+use crate::http::CurlConnectionDestination;
 use crate::runtime::diagnostics::Diagnostics;
 
 const CHUNK_BYTES: usize = 16 * 1024;
@@ -35,6 +36,7 @@ pub(super) struct Session {
     phase: Phase,
     reading: IoState,
     writing: IoState,
+    destination: Option<CurlConnectionDestination>,
 }
 
 impl Session {
@@ -44,6 +46,7 @@ impl Session {
         mut easy: Easy2<Handshake>,
         io: SessionIo,
         deadline: Instant,
+        destination: Option<CurlConnectionDestination>,
     ) -> Option<Self> {
         #[cfg(test)]
         {
@@ -75,6 +78,7 @@ impl Session {
                     phase: Phase::Opening { deadline },
                     reading: IoState::default(),
                     writing: IoState::default(),
+                    destination,
                 })
             }
             Err(error) => {
@@ -82,6 +86,10 @@ impl Session {
                 None
             }
         }
+    }
+
+    pub(super) fn destination(&self) -> Option<&CurlConnectionDestination> {
+        self.destination.as_ref()
     }
 
     pub(super) fn handshake_deadline(&self) -> Option<Instant> {

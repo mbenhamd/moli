@@ -1,6 +1,7 @@
 mod cache_request_controls;
 mod cache_request_controls_modes;
 mod cache_request_modes;
+mod connection_pool_wait;
 mod cookie_context;
 mod cookie_store;
 mod corp;

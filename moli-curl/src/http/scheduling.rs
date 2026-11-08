@@ -9,7 +9,9 @@ use std::{
 
 use curl::{easy::Handler, multi::Easy2Handle};
 
-use super::{CurlMultiJob, CurlOriginKey, CurlTransferId};
+use super::{
+    CurlConnectionDestination, CurlConnectionUse, CurlMultiJob, CurlOriginKey, CurlTransferId,
+};
 
 pub(super) struct CurlActiveTransfer<H: Handler, C> {
     pub(super) handle: Easy2Handle<H>,
@@ -19,6 +21,7 @@ pub(super) struct CurlActiveTransfer<H: Handler, C> {
     pub(super) label: String,
     pub(super) started_at: Instant,
     pub(super) queued_for: Duration,
+    pub(super) connection: CurlConnectionUse,
 }
 
 pub(super) struct CurlPendingJob<H: Handler, C> {
@@ -31,23 +34,43 @@ impl<H: Handler, C> CurlPendingJob<H, C> {
     pub(super) fn deadline_reached(&self, now: Instant) -> bool {
         self.job.deadline.is_some_and(|deadline| deadline <= now)
     }
+
+    pub(super) fn cancelled(&self) -> bool {
+        self.job
+            .cancelled
+            .as_ref()
+            .is_some_and(|cancelled| cancelled())
+    }
 }
 
 pub(super) fn take_expired_pending_jobs<H: Handler, C>(
     pending: &mut VecDeque<CurlPendingJob<H, C>>,
     now: Instant,
 ) -> Vec<CurlPendingJob<H, C>> {
+    take_pending_jobs_where(pending, |job| job.deadline_reached(now))
+}
+
+pub(super) fn take_cancelled_pending_jobs<H: Handler, C>(
+    pending: &mut VecDeque<CurlPendingJob<H, C>>,
+) -> Vec<CurlPendingJob<H, C>> {
+    take_pending_jobs_where(pending, CurlPendingJob::cancelled)
+}
+
+fn take_pending_jobs_where<H: Handler, C>(
+    pending: &mut VecDeque<CurlPendingJob<H, C>>,
+    mut take: impl FnMut(&CurlPendingJob<H, C>) -> bool,
+) -> Vec<CurlPendingJob<H, C>> {
     let mut retained = VecDeque::with_capacity(pending.len());
-    let mut expired = Vec::new();
+    let mut taken = Vec::new();
     while let Some(job) = pending.pop_front() {
-        if job.deadline_reached(now) {
-            expired.push(job);
+        if take(&job) {
+            taken.push(job);
         } else {
             retained.push_back(job);
         }
     }
     *pending = retained;
-    expired
+    taken
 }
 
 pub(super) fn enqueue_pending_job<H: Handler, C>(
@@ -88,6 +111,45 @@ pub(super) fn job_is_eligible<H: Handler, C>(
         (Some(origin), Some(limit)) => active_origin_count(active, origin) < limit.get(),
         _ => true,
     }
+}
+
+/// Starts an exclusive transfer only while libcurl's per-host cap has a free
+/// slot for its destination. Every direct active transfer to the destination
+/// counts, because a shareable request may still have negotiated HTTP/1.1 and
+/// hold a whole connection. Other connection holders on the shared Multi, such
+/// as WebSockets, count too. Idle pooled connections do not: libcurl evicts
+/// them when a new connection needs the slot.
+///
+/// HTTP/2 streams sharing one connection each count here, so an exclusive
+/// transfer may wait for a slot libcurl would have had. That errs toward
+/// waiting in this queue, never toward libcurl's pending queue.
+pub(super) fn exclusive_connection_slot_available<H: Handler, C>(
+    origin: Option<&CurlOriginKey>,
+    connection: CurlConnectionUse,
+    active: &HashMap<CurlTransferId, CurlActiveTransfer<H, C>>,
+    max_host_connections: Option<NonZeroUsize>,
+    other_connections: &dyn Fn(&CurlConnectionDestination) -> usize,
+) -> bool {
+    let (CurlConnectionUse::Exclusive, Some(limit), Some(destination)) = (
+        connection,
+        max_host_connections,
+        origin.and_then(CurlOriginKey::connection_destination),
+    ) else {
+        return true;
+    };
+    let direct_active = active
+        .values()
+        .filter(|active| {
+            active.connection != CurlConnectionUse::Untracked
+                && active
+                    .origin
+                    .as_ref()
+                    .and_then(CurlOriginKey::connection_destination)
+                    .as_ref()
+                    == Some(&destination)
+        })
+        .count();
+    direct_active + other_connections(&destination) < limit.get()
 }
 
 pub(super) fn active_origin_count<H: Handler, C>(
@@ -156,6 +218,8 @@ mod tests {
             dns_resolution: CurlDnsResolution::no_shared_resolution(),
             priority,
             label: label.to_owned(),
+            connection: CurlConnectionUse::Untracked,
+            cancelled: None,
         }
     }
 
@@ -303,6 +367,7 @@ mod tests {
             label: "active".to_owned(),
             started_at: Instant::now(),
             queued_for: Duration::ZERO,
+            connection: CurlConnectionUse::Untracked,
         };
         let active = HashMap::from([(test_transfer_id(1), active)]);
         let cap = NonZeroUsize::new(1);

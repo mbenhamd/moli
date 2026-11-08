@@ -5,13 +5,15 @@ use super::{
     CurlMultiCompletion, CurlMultiJob,
     scheduling::{
         CurlActiveTransfer, CurlPendingJob, active_origin_count, enqueue_existing_pending_job,
-        enqueue_pending_job, job_is_eligible, pending_origin_count, take_expired_pending_jobs,
+        enqueue_pending_job, exclusive_connection_slot_available, job_is_eligible,
+        pending_origin_count, take_cancelled_pending_jobs, take_expired_pending_jobs,
         take_transfers_in_notification_order,
     },
 };
 use crate::{
-    CurlMultiRuntimeConfig, CurlTransferId,
+    CurlConnectionUse, CurlMultiRuntimeConfig, CurlOriginKey, CurlTransferId,
     dns_adapter::{CurlDnsOwnerCompletion, CurlDnsOwnerResidence, CurlDnsReady},
+    http::CurlConnectionDestination,
 };
 use anyhow::{Context, Result, anyhow};
 use crossbeam_channel::{Receiver, Sender};
@@ -61,8 +63,13 @@ impl<H: Handler, C> HttpRegistry<H, C> {
 
     /// Pending work can run after completions release scheduler capacity.
     /// Use the same global and per-origin limits as the actual startup path.
-    pub(crate) fn has_eligible_jobs(&self) -> bool {
-        self.next_eligible_job_index().is_some()
+    /// `other_connections` counts non-HTTP connections, such as WebSockets,
+    /// that hold a libcurl per-host connection slot on the shared Multi.
+    pub(crate) fn has_eligible_jobs(
+        &self,
+        other_connections: &dyn Fn(&CurlConnectionDestination) -> usize,
+    ) -> bool {
+        self.next_eligible_job_index(other_connections).is_some()
     }
 
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
@@ -77,10 +84,14 @@ impl<H: Handler, C> HttpRegistry<H, C> {
         self.dns.completion_receiver()
     }
 
-    pub(crate) fn advance(&mut self, multi: &mut Multi) {
+    pub(crate) fn advance(
+        &mut self,
+        multi: &mut Multi,
+        other_connections: &dyn Fn(&CurlConnectionDestination) -> usize,
+    ) {
         self.drain_dns_completions();
         self.expire_waiting_jobs();
-        self.start_eligible_jobs(multi);
+        self.start_eligible_jobs(multi, other_connections);
     }
 
     pub(crate) fn contains(&self, id: CurlTransferId) -> bool {
@@ -180,21 +191,54 @@ impl<H: Handler, C> HttpRegistry<H, C> {
         }
     }
 
-    fn next_eligible_job_index(&self) -> Option<usize> {
+    fn next_eligible_job_index(
+        &self,
+        other_connections: &dyn Fn(&CurlConnectionDestination) -> usize,
+    ) -> Option<usize> {
         if self.closed || self.active.len() >= self.config.max_active.get() {
             return None;
         }
-        self.pending.iter().position(|pending| {
-            job_is_eligible(
-                pending.job.origin.as_ref(),
-                &self.active,
-                self.config.max_host_active,
-            )
-        })
+        // Destinations where an older exclusive job is still waiting. Newer
+        // shareable jobs there would keep every slot busy and could hold the
+        // exclusive job until its deadline, so they wait behind it.
+        let mut held_destinations = Vec::new();
+        for (index, pending) in self.pending.iter().enumerate() {
+            let origin = pending.job.origin.as_ref();
+            let connection = pending.job.connection;
+            if connection == CurlConnectionUse::Shared
+                && !held_destinations.is_empty()
+                && origin
+                    .and_then(CurlOriginKey::connection_destination)
+                    .is_some_and(|destination| held_destinations.contains(&destination))
+            {
+                continue;
+            }
+            if job_is_eligible(origin, &self.active, self.config.max_host_active)
+                && exclusive_connection_slot_available(
+                    origin,
+                    connection,
+                    &self.active,
+                    self.config.max_host_connections,
+                    other_connections,
+                )
+            {
+                return Some(index);
+            }
+            if connection == CurlConnectionUse::Exclusive
+                && let Some(destination) = origin.and_then(CurlOriginKey::connection_destination)
+            {
+                held_destinations.push(destination);
+            }
+        }
+        None
     }
 
-    fn start_eligible_jobs(&mut self, multi: &mut Multi) {
-        while let Some(index) = self.next_eligible_job_index() {
+    fn start_eligible_jobs(
+        &mut self,
+        multi: &mut Multi,
+        other_connections: &dyn Fn(&CurlConnectionDestination) -> usize,
+    ) {
+        while let Some(index) = self.next_eligible_job_index(other_connections) {
             let pending = self
                 .pending
                 .remove(index)
@@ -285,6 +329,10 @@ impl<H: Handler, C> HttpRegistry<H, C> {
             self.complete_timed_out_job(pending, "while waiting to start");
             return;
         }
+        if pending.cancelled() {
+            self.complete_cancelled_job(pending);
+            return;
+        }
         let transfer_id = pending.transfer_id;
         let queued_for = pending.enqueued_at.elapsed();
         let mut job = pending.job;
@@ -356,6 +404,7 @@ impl<H: Handler, C> HttpRegistry<H, C> {
                         label,
                         started_at: Instant::now(),
                         queued_for,
+                        connection: job.connection,
                     },
                 );
                 assert!(previous.is_none(), "curl transfer identity is unique");
@@ -377,6 +426,25 @@ impl<H: Handler, C> HttpRegistry<H, C> {
         for pending in self.dns.take_expired(now, |pending| pending.job.deadline) {
             self.complete_timed_out_job(pending, "while waiting for DNS");
         }
+        // A burst of queued work can be abandoned at once, as when a page
+        // navigates away. Complete it here rather than starting it in curl.
+        for pending in take_cancelled_pending_jobs(&mut self.pending) {
+            self.complete_cancelled_job(pending);
+        }
+    }
+
+    fn complete_cancelled_job(&self, pending: CurlPendingJob<H, C>) {
+        let CurlPendingJob {
+            transfer_id, job, ..
+        } = pending;
+        self.send_completion(CurlMultiCompletion {
+            transfer_id,
+            easy: Some(job.easy),
+            context: job.context,
+            result: Err(anyhow!(
+                "curl multi runtime request cancelled while waiting to start"
+            )),
+        });
     }
 
     fn complete_timed_out_job(&self, pending: CurlPendingJob<H, C>, stage: &'static str) {
@@ -517,8 +585,15 @@ fn env_flag_enabled(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CurlDnsResolution, CurlOriginKey};
+    use crate::CurlDnsResolution;
     use curl::easy::Easy2;
+    use std::{
+        cell::Cell,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
     #[derive(Debug)]
     struct TestHandler;
 
@@ -537,7 +612,13 @@ mod tests {
             dns_resolution: CurlDnsResolution::no_shared_resolution(),
             priority,
             label: label.to_owned(),
+            connection: CurlConnectionUse::Untracked,
+            cancelled: None,
         }
+    }
+
+    fn no_other_connections(_: &CurlConnectionDestination) -> usize {
+        0
     }
 
     fn test_transfer_id(sequence: usize) -> CurlTransferId {
@@ -565,36 +646,265 @@ mod tests {
         let no_origin = test_transfer_id(4);
 
         registry.admit(first, test_job("first", 1, Some(origin("a.test"))));
-        registry.advance(&mut multi);
+        registry.advance(&mut multi, &no_other_connections);
         assert!(registry.contains(first));
-        assert!(!registry.has_eligible_jobs());
+        assert!(!registry.has_eligible_jobs(&no_other_connections));
 
         // A free global slot does not bypass the origin cap.
         registry.admit(blocked, test_job("blocked", 2, Some(origin("a.test"))));
-        assert!(!registry.has_eligible_jobs());
+        assert!(!registry.has_eligible_jobs(&no_other_connections));
         // A blocked high-priority head must not hide eligible work elsewhere.
         registry.admit(other_origin, test_job("other", 0, Some(origin("b.test"))));
-        assert!(registry.has_eligible_jobs());
-        registry.advance(&mut multi);
+        assert!(registry.has_eligible_jobs(&no_other_connections));
+        registry.advance(&mut multi, &no_other_connections);
         assert!(registry.contains(other_origin));
         assert!(!registry.contains(blocked));
 
         // The global cap also applies to jobs without an origin key.
         registry.admit(no_origin, test_job("no-origin", 0, None));
-        assert!(!registry.has_eligible_jobs());
+        assert!(!registry.has_eligible_jobs(&no_other_connections));
         registry.complete(&mut multi, vec![(other_origin, Ok(()))]);
-        assert!(registry.has_eligible_jobs());
-        registry.advance(&mut multi);
+        assert!(registry.has_eligible_jobs(&no_other_connections));
+        registry.advance(&mut multi, &no_other_connections);
         assert!(registry.contains(no_origin));
         assert!(!registry.contains(blocked));
 
         registry.complete(&mut multi, vec![(first, Ok(()))]);
-        assert!(registry.has_eligible_jobs());
-        registry.advance(&mut multi);
+        assert!(registry.has_eligible_jobs(&no_other_connections));
+        registry.advance(&mut multi, &no_other_connections);
         assert!(registry.contains(blocked));
-        assert!(!registry.has_eligible_jobs());
+        assert!(!registry.has_eligible_jobs(&no_other_connections));
         registry.shutdown(&mut multi);
-        assert!(!registry.has_eligible_jobs());
+        assert!(!registry.has_eligible_jobs(&no_other_connections));
+    }
+
+    fn origin_at(host: &str, port: u16) -> CurlOriginKey {
+        CurlOriginKey {
+            scheme: "http".to_owned(),
+            host: host.to_owned(),
+            port: Some(port),
+        }
+    }
+
+    fn job_using(
+        label: &str,
+        origin: CurlOriginKey,
+        connection: CurlConnectionUse,
+    ) -> CurlMultiJob<TestHandler, String> {
+        let mut job = test_job(label, 1, Some(origin));
+        job.connection = connection;
+        job
+    }
+
+    fn registry_with_host_cap(
+        max_host_connections: usize,
+    ) -> (
+        HttpRegistry<TestHandler, String>,
+        Multi,
+        Receiver<CurlMultiCompletion<TestHandler, String>>,
+    ) {
+        let config = CurlMultiRuntimeConfig {
+            max_host_connections: NonZeroUsize::new(max_host_connections),
+            ..CurlMultiRuntimeConfig::default()
+        };
+        let (completion_tx, completed) = crossbeam_channel::unbounded();
+        (
+            HttpRegistry::new(config, completion_tx),
+            Multi::new(),
+            completed,
+        )
+    }
+
+    #[test]
+    fn exclusive_jobs_wait_until_a_failed_transfer_releases_its_slot() {
+        let (mut registry, mut multi, _completed) = registry_with_host_cap(2);
+        let host = origin_at("a.test", 80);
+        let first = test_transfer_id(1);
+        let second = test_transfer_id(2);
+        let waiting = test_transfer_id(3);
+        // A shareable transfer may have negotiated HTTP/1.1 and hold a whole
+        // connection, so it occupies a slot too.
+        registry.admit(
+            first,
+            job_using("first", host.clone(), CurlConnectionUse::Shared),
+        );
+        registry.admit(
+            second,
+            job_using("second", host.clone(), CurlConnectionUse::Exclusive),
+        );
+        registry.admit(
+            waiting,
+            job_using("waiting", host.clone(), CurlConnectionUse::Exclusive),
+        );
+        registry.advance(&mut multi, &no_other_connections);
+        assert!(registry.contains(first) && registry.contains(second));
+        assert!(!registry.contains(waiting));
+        assert!(!registry.has_eligible_jobs(&no_other_connections));
+
+        // Proxied work holds a slot on the proxy host, not on this origin.
+        let proxied = test_transfer_id(5);
+        registry.admit(
+            proxied,
+            job_using("proxied", host, CurlConnectionUse::Untracked),
+        );
+        registry.advance(&mut multi, &no_other_connections);
+        assert!(registry.contains(proxied));
+        assert!(!registry.contains(waiting));
+
+        registry.complete(&mut multi, vec![(second, Err(curl::Error::new(28)))]);
+        assert!(registry.has_eligible_jobs(&no_other_connections));
+        registry.advance(&mut multi, &no_other_connections);
+        assert!(registry.contains(waiting));
+        registry.shutdown(&mut multi);
+    }
+
+    #[test]
+    fn newer_shared_jobs_wait_behind_an_older_exclusive_job_to_the_same_host() {
+        let (mut registry, mut multi, _completed) = registry_with_host_cap(2);
+        let host = origin_at("x.test", 443);
+        let streams = [test_transfer_id(1), test_transfer_id(2)];
+        for (index, stream) in streams.into_iter().enumerate() {
+            registry.admit(
+                stream,
+                job_using(
+                    &format!("stream-{index}"),
+                    host.clone(),
+                    CurlConnectionUse::Shared,
+                ),
+            );
+        }
+        registry.advance(&mut multi, &no_other_connections);
+        assert!(streams.iter().all(|stream| registry.contains(*stream)));
+
+        // An HTTP/1 fallback waits for a slot; newer shareable work to the
+        // same host waits behind it, while other hosts are unaffected.
+        let fallback = test_transfer_id(3);
+        let newer = test_transfer_id(4);
+        let other_host = test_transfer_id(5);
+        registry.admit(
+            fallback,
+            job_using("fallback", host.clone(), CurlConnectionUse::Exclusive),
+        );
+        registry.admit(newer, job_using("newer", host, CurlConnectionUse::Shared));
+        registry.admit(
+            other_host,
+            job_using(
+                "other-host",
+                origin_at("y.test", 443),
+                CurlConnectionUse::Shared,
+            ),
+        );
+        registry.advance(&mut multi, &no_other_connections);
+        assert!(registry.contains(other_host));
+        assert!(!registry.contains(fallback));
+        assert!(!registry.contains(newer));
+        assert!(!registry.has_eligible_jobs(&no_other_connections));
+
+        registry.complete(&mut multi, vec![(streams[0], Ok(()))]);
+        assert_eq!(
+            registry.next_eligible_job_index(&no_other_connections),
+            registry
+                .pending
+                .iter()
+                .position(|pending| pending.transfer_id == fallback),
+            "the waiting fallback takes the freed slot first"
+        );
+        registry.advance(&mut multi, &no_other_connections);
+        assert!(registry.contains(fallback));
+        // Once the fallback holds its connection, shareable work resumes.
+        assert!(registry.contains(newer));
+        registry.shutdown(&mut multi);
+    }
+
+    #[test]
+    fn exclusive_job_starts_when_a_same_port_websocket_closes() {
+        let (mut registry, mut multi, _completed) = registry_with_host_cap(1);
+        let websockets = Cell::new(1);
+        let websocket_on_a_80 = |destination: &CurlConnectionDestination| {
+            if destination.host == "a.test" && destination.port == 80 {
+                websockets.get()
+            } else {
+                0
+            }
+        };
+        let blocked = test_transfer_id(1);
+        let other_port = test_transfer_id(2);
+        let other_host = test_transfer_id(3);
+
+        registry.admit(
+            blocked,
+            job_using(
+                "blocked",
+                origin_at("a.test", 80),
+                CurlConnectionUse::Exclusive,
+            ),
+        );
+        registry.admit(
+            other_port,
+            job_using(
+                "other-port",
+                origin_at("a.test", 8080),
+                CurlConnectionUse::Exclusive,
+            ),
+        );
+        registry.admit(
+            other_host,
+            job_using(
+                "other-host",
+                origin_at("b.test", 80),
+                CurlConnectionUse::Exclusive,
+            ),
+        );
+        registry.advance(&mut multi, &websocket_on_a_80);
+        assert!(!registry.contains(blocked));
+        assert!(registry.contains(other_port));
+        assert!(registry.contains(other_host));
+        assert!(!registry.has_eligible_jobs(&websocket_on_a_80));
+
+        websockets.set(0);
+        assert!(registry.has_eligible_jobs(&websocket_on_a_80));
+        registry.advance(&mut multi, &websocket_on_a_80);
+        assert!(registry.contains(blocked));
+        registry.shutdown(&mut multi);
+    }
+
+    #[test]
+    fn cancelled_queued_job_completes_without_starting() {
+        let (mut registry, mut multi, completed) = registry_with_host_cap(1);
+        let host = origin_at("a.test", 80);
+        let holder = test_transfer_id(1);
+        let queued = test_transfer_id(2);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut queued_job = job_using("queued", host.clone(), CurlConnectionUse::Exclusive);
+        queued_job.cancelled = Some(Arc::new({
+            let cancel = cancel.clone();
+            move || cancel.load(Ordering::SeqCst)
+        }));
+        registry.admit(
+            holder,
+            job_using("holder", host, CurlConnectionUse::Exclusive),
+        );
+        registry.admit(queued, queued_job);
+        registry.advance(&mut multi, &no_other_connections);
+        assert!(!registry.contains(queued));
+
+        cancel.store(true, Ordering::SeqCst);
+        registry.advance(&mut multi, &no_other_connections);
+        let completion = completed.try_recv().expect("cancelled job completes");
+        assert_eq!(completion.transfer_id, queued);
+        assert!(
+            completion
+                .result
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
+
+        // The released queue position must not start later.
+        registry.complete(&mut multi, vec![(holder, Ok(()))]);
+        registry.advance(&mut multi, &no_other_connections);
+        assert!(!registry.contains(queued));
+        assert!(!registry.has_curl_work());
     }
 
     #[test]

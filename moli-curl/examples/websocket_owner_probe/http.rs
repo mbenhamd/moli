@@ -112,6 +112,8 @@ fn request(
             dns_resolution: CurlDnsResolution::no_shared_resolution(),
             priority: 1,
             label: "owner probe HTTP".into(),
+            connection: moli_curl::CurlConnectionUse::Untracked,
+            cancelled: None,
         })
         .map_err(|error| error.error)?;
     let completion = completed.recv_timeout(Duration::from_secs(10))?;

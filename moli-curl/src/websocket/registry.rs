@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     CurlDnsResolution, CurlTransferId, dns_adapter::CurlDnsOwnerResidence,
-    runtime::diagnostics::Diagnostics,
+    http::CurlConnectionDestination, runtime::diagnostics::Diagnostics,
 };
 
 struct Pending {
@@ -25,6 +25,7 @@ struct Pending {
     dns: CurlDnsResolution,
     deadline: Instant,
     io: SessionIo,
+    destination: Option<CurlConnectionDestination>,
 }
 
 pub(crate) struct WebSocketRegistry {
@@ -104,12 +105,25 @@ impl WebSocketRegistry {
                 .finish(Err("WebSocket handshake timeout is too large".to_owned()));
             return;
         };
+        // A direct WebSocket holds a libcurl per-host connection slot that
+        // HTTP/1 scheduling must see. Through a proxy the slot belongs to the
+        // proxy host, which HTTP scheduling does not gate.
+        let destination = submission
+            .request
+            .proxy
+            .as_deref()
+            .is_none_or(str::is_empty)
+            .then(|| url::Url::parse(&submission.request.url).ok())
+            .flatten()
+            .as_ref()
+            .and_then(CurlConnectionDestination::from_url);
         let pending = Pending {
             id: submission.id,
             easy,
             dns: submission.request.dns_resolution,
             deadline,
             io: submission.io,
+            destination,
         };
         match pending.dns.target().cloned() {
             Some(target) => self.dns.start(pending.id, pending, target, multi.waker()),
@@ -156,6 +170,7 @@ impl WebSocketRegistry {
             pending.easy,
             pending.io,
             pending.deadline,
+            pending.destination,
         ) {
             self.sessions.insert(pending.id, session);
         }
@@ -225,6 +240,15 @@ impl WebSocketRegistry {
 
     pub(crate) fn session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// Direct sessions, including open handshakes, attached to libcurl for
+    /// `destination`. Each one holds a per-host connection slot.
+    pub(crate) fn connections_to(&self, destination: &CurlConnectionDestination) -> usize {
+        self.sessions
+            .values()
+            .filter(|session| session.destination() == Some(destination))
+            .count()
     }
 
     pub(crate) fn poll_fds(&mut self) -> &mut [WaitFd] {
