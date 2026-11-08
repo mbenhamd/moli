@@ -232,3 +232,76 @@ fn tab_key_skips_visibility_hidden_and_display_none_controls() {
 
     assert_eq!(path.join("|"), "first|shown|last|shown|first");
 }
+
+#[test]
+fn tab_key_does_not_enter_inert_hidden_or_closed_details_frames() {
+    let mut vm = new_parsed_test_vm(
+        "https://tab-unfocusable-frames.test/",
+        r#"<html><body>
+            <button id="pre">pre</button>
+            <div inert><iframe id="inert"></iframe></div>
+            <iframe id="hidden" style="visibility:hidden"></iframe>
+            <div style="visibility:hidden"><iframe id="hidden-parent"></iframe></div>
+            <details><summary>s</summary><iframe id="closed-details"></iframe></details>
+            <button id="post">post</button>
+        </body></html>"#,
+    );
+    vm.eval(
+        r#"
+(() => {
+  for (const frame of document.querySelectorAll('iframe')) {
+    const childDocument = frame.contentDocument;
+    childDocument.open();
+    childDocument.write(`<button id="${frame.id}-button">q</button>`);
+    childDocument.close();
+  }
+  document.getElementById('pre').focus();
+})()
+"#,
+    )
+    .expect("unfocusable frame fixture should initialize");
+
+    let focused = |vm: &mut StandaloneScriptVmHarness| {
+        vm.eval(
+            r#"(() => {
+  const active = document.activeElement;
+  return active.localName === 'iframe'
+    ? `${active.id}>${active.contentDocument.activeElement.id}`
+    : active.id;
+})()"#,
+        )
+        .expect("focused element should evaluate")
+    };
+    let mut path = vec![focused(&mut vm)];
+    for shift in [false, true] {
+        press_tab(&mut vm, shift);
+        path.push(focused(&mut vm));
+    }
+
+    assert_eq!(path.join("|"), "pre|post|pre");
+}
+
+#[test]
+fn tab_key_stops_on_scroller_whose_only_focusable_descendant_is_hidden() {
+    let mut vm = new_rendered_test_vm(
+        "https://tab-scroller-hidden-descendant.test/",
+        r#"<html><body>
+            <button id="pre">pre</button>
+            <div id="scroller" style="overflow:auto;height:40px">
+              <div style="height:200px"></div>
+              <button style="visibility:hidden">h</button>
+            </div>
+            <button id="post">post</button>
+        </body></html>"#,
+    );
+    vm.eval("document.getElementById('pre').focus()")
+        .expect("pre should focus");
+
+    let mut path = vec![focused_path(&mut vm)];
+    for shift in [false, false, true] {
+        press_tab(&mut vm, shift);
+        path.push(focused_path(&mut vm));
+    }
+
+    assert_eq!(path.join("|"), "pre|scroller|post|scroller");
+}

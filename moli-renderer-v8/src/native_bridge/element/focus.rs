@@ -683,6 +683,9 @@ fn collect_sequential_focus_entries(
         // order in at the container's position, so Tab steps into the frame
         // and back out of it. A focused container (no focused element inside
         // its Document yet) stays in the order only as the starting point.
+        if !frame_owner_admits_sequential_focus(runtime, handle) {
+            return;
+        }
         let tab_index = element_attribute(runtime, handle, "tabindex")
             .and_then(|value| parse_tab_index_attribute(&value))
             .unwrap_or(0);
@@ -1046,6 +1049,26 @@ fn is_rendered_for_sequential_focus(runtime: &JsContextHost, handle: DomHandle) 
             .is_none_or(|style| style.visibility_visible)
 }
 
+/// A frame owner contributes its nested Document's order only while the
+/// owner itself could take keyboard focus. Rendering checks on the nested
+/// elements reach the owner's `display` but not its `visibility`, a closed
+/// `<details>` around it, or `inert`, because those stop at the child
+/// Document boundary.
+fn frame_owner_admits_sequential_focus(runtime: &JsContextHost, owner: DomHandle) -> bool {
+    is_rendered_for_sequential_focus(runtime, owner) && !is_inert_in_flat_tree(runtime, owner)
+}
+
+fn is_inert_in_flat_tree(runtime: &JsContextHost, handle: DomHandle) -> bool {
+    let mut current = Some(handle);
+    while let Some(candidate) = current {
+        if element_has_attribute(runtime, candidate, "inert") {
+            return true;
+        }
+        current = flat_tree_parent(runtime, candidate);
+    }
+    false
+}
+
 fn has_sequential_focusable_descendant(runtime: &JsContextHost, handle: DomHandle) -> bool {
     let mut stack = runtime.dom_host().child_handles(handle).collect::<Vec<_>>();
     if let Some(shadow_root) = runtime.dom_host().shadow_root_handle(handle) {
@@ -1082,6 +1105,7 @@ fn is_interactive_sequential_focusable_descendant(
         .is_some_and(|value| value >= 0);
     (is_interactive_element || has_non_negative_tab_index)
         && sequential_tab_index_without_scroll_descendant_check(runtime, handle).is_some()
+        && is_rendered_for_sequential_focus(runtime, handle)
 }
 
 fn explicit_negative_tab_index(runtime: &JsContextHost, handle: DomHandle) -> bool {
