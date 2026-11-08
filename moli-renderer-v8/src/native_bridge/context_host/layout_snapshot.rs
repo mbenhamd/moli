@@ -21,7 +21,9 @@ pub(crate) struct LayoutInputKey {
 }
 
 /// What can move layout without changing [`LayoutInputKey`]'s other fields:
-/// DOM changes other than style-only attributes, and style invalidations.
+/// any DOM change other than a hover move, and style invalidations. Every
+/// attribute write counts: `content: attr()`, presentational attributes and
+/// box construction read attributes without any selector depending on them.
 pub(super) type LayoutDirtyMark = (u64, u64);
 
 struct LatestFrozenLayout {

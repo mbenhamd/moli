@@ -309,7 +309,7 @@ impl JsContextHost {
 
     fn layout_dirty_mark(&self) -> super::layout_snapshot::LayoutDirtyMark {
         (
-            self.dom_host().layout_relevant_dom_version(),
+            self.dom_host().dom_version_excluding_hover(),
             self.style_engine
                 .style_invalidation_generation(self.active_layout_document_handles()),
         )
