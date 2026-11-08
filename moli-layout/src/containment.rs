@@ -89,9 +89,18 @@ impl<N> LayoutBox<N> {
     /// Native text controls and selects keep their control-sized box, as
     /// measured against Chromium for `input`, `textarea` and `select`
     /// (`select` matches main rather than Chromium's arrow-only width).
+    /// Moli has no rendered-legend layout, so a contained fieldset would lose
+    /// its legend too; it keeps main's size instead.
     pub(crate) fn size_contained_axes(&self) -> Size<bool> {
+        let is_fieldset = self.element_semantics.as_ref().is_some_and(|semantics| {
+            matches!(
+                semantics.category,
+                crate::LayoutElementCategory::FormControl(crate::LayoutFormControlKind::FieldSet)
+            )
+        });
         if !self.is_eligible_for_size_containment()
             || self.style.taffy.item_is_compressible_replaced
+            || is_fieldset
         {
             return Size {
                 width: false,
