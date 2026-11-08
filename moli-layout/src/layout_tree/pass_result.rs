@@ -56,6 +56,12 @@ pub struct LayoutPassMetrics {
     /// Style-and-layout iterations this pass ran to converge container
     /// queries. One when no container size changed.
     pub container_query_iteration_count: usize,
+    /// Boxes this pass found identical to the retained world.
+    pub retained_reused_box_count: usize,
+    /// Inline formatting contexts moved from the retained world.
+    pub retained_reused_inline_count: usize,
+    /// Boxes whose numeric results moved from the retained world.
+    pub retained_reused_numeric_count: usize,
     pub box_count: usize,
     pub fragment_count: usize,
     /// Paint-order events considered for this capture before viewport culling.

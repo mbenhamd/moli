@@ -10,7 +10,11 @@ use crate::{
     taffy_tree::{compute_prepared_world_layout, prepare_world_layout},
 };
 use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+use crate::retention::{RetainedLayout, diff_worlds, record_verify_comparison};
 
 /// Owned products for one embedded browsing context in the same synchronous
 /// layout demand as its parent.
@@ -83,6 +87,7 @@ pub struct LayoutPassRequest {
     pub reason: LayoutFlushReason,
     environment: crate::LayoutEnvironment,
     paint_capture: Option<PaintCaptureRequest>,
+    retain_world: bool,
 }
 
 impl LayoutPassRequest {
@@ -94,6 +99,7 @@ impl LayoutPassRequest {
                 scrollbars_hidden: false,
             },
             paint_capture: None,
+            retain_world: false,
         }
     }
 
@@ -116,6 +122,14 @@ impl LayoutPassRequest {
     /// Sets document-wide runtime policy without changing authored CSS styles.
     pub const fn with_environment(mut self, environment: crate::LayoutEnvironment) -> Self {
         self.environment = environment;
+        self
+    }
+
+    /// Keeps this pass's world for the next one so unchanged boxes reuse their
+    /// shaped text and numeric results. Only the live-geometry policy asks
+    /// for this; every other pass stays one-shot.
+    pub const fn with_retained_world(mut self) -> Self {
+        self.retain_world = true;
         self
     }
 
@@ -162,6 +176,7 @@ pub fn build_screenshot_snapshot<S, R>(
 ) -> Result<PaintSnapshot, LayoutError>
 where
     S: LayoutSource,
+    S::NodeId: 'static,
     R: LayoutStyleResolver<S::NodeId>,
 {
     build_layout_pass(
@@ -189,6 +204,7 @@ pub fn build_layout_pass<S, R>(
 ) -> Result<LayoutPassResult<S::NodeId>, LayoutError>
 where
     S: LayoutSource,
+    S::NodeId: 'static,
     R: LayoutStyleResolver<S::NodeId>,
 {
     build_layout_pass_with_embedded_frames(source, styles, services, request, &mut NoEmbeddedFrames)
@@ -209,6 +225,7 @@ pub fn build_layout_pass_with_embedded_frames<S, R, F>(
 ) -> Result<LayoutPassResult<S::NodeId>, LayoutError>
 where
     S: LayoutSource,
+    S::NodeId: 'static,
     R: LayoutStyleResolver<S::NodeId>,
     F: EmbeddedFrameRenderer<S::NodeId>,
 {
@@ -225,7 +242,20 @@ where
     // scrollbars (or equivalent) oscillate, and the pass keeps the current
     // world rather than alternate forever. Only the last world is published.
     let mut seen_sizes: Vec<Vec<(S::NodeId, crate::LayoutQueryContainerSize)>> = Vec::new();
-    let (world, numeric_metrics) = loop {
+    // Web fonts change shaping through registration and per-pass face order,
+    // neither of which a box comparison can see, so they keep the full path.
+    let can_retain = request.retain_world && services.web_font_count() == 0;
+    let mut retained: Option<RetainedLayout<S::NodeId>> = if can_retain {
+        services.take_retained_world()
+    } else {
+        services.clear_retained_world();
+        None
+    };
+    let mut reused_box_count = 0usize;
+    let mut reused_inline_count = 0usize;
+    let mut reused_numeric_count = 0usize;
+    let mut used_retained_world = false;
+    let (world, numeric_metrics, numeric_unrounded, structural_len) = loop {
         container_query_iteration_count += 1;
         let phase_started = Instant::now();
         let mut world = build_layout_world(source, styles)?;
@@ -245,11 +275,25 @@ where
         prepare_form_controls(&mut world, styles)?;
         form_control_elapsed += phase_started.elapsed();
         let phase_started = Instant::now();
-        prepare_inline_contexts(&mut world, services);
+        let structural_len = world.boxes.len();
+        let mut reuse = retained.take().and_then(|prior| diff_worlds(&world, prior));
+        used_retained_world |= reuse.is_some();
+        prepare_inline_contexts(&mut world, services, reuse.as_mut());
         inline_preparation_elapsed += phase_started.elapsed();
         world.validate_invariants()?;
         let phase_started = Instant::now();
-        let numeric_metrics = compute_world_layout_with_scrollbars(&mut world, request.viewport);
+        let (numeric_metrics, numeric_unrounded) = compute_world_layout_with_scrollbars(
+            &mut world,
+            request.viewport,
+            request.environment,
+            reuse.as_mut(),
+        );
+        if let Some(reuse) = reuse {
+            reused_box_count += reuse.reused_box_count;
+            reused_inline_count += reuse.reused_inline_count;
+            reused_numeric_count += reuse.reused_numeric_count;
+            crate::retention::record_numeric_reused(reuse.reused_numeric_count);
+        }
         numeric_layout_elapsed += phase_started.elapsed();
 
         let (sizes, depth) = world.query_container_sizes();
@@ -258,9 +302,20 @@ where
             || container_query_iteration_count >= hard_cap
             || !styles.update_query_container_sizes(&sizes)?
         {
-            break (world, numeric_metrics);
+            break (world, numeric_metrics, numeric_unrounded, structural_len);
         }
         seen_sizes.push(sizes);
+        if can_retain {
+            // The next iteration diffs against this world, so a restyle that
+            // touched few containers pays only for what it changed.
+            retained = Some(RetainedLayout {
+                world,
+                numeric_unrounded,
+                structural_len,
+                viewport: request.viewport,
+                environment: request.environment,
+            });
+        }
     };
     let phase_started = Instant::now();
     let mut embedded_frames = HashMap::new();
@@ -300,7 +355,7 @@ where
         }
     }
     let embedded_frame_elapsed = phase_started.elapsed();
-    finish_layout_pass(
+    let result = finish_layout_pass(
         &world,
         source,
         request.viewport,
@@ -325,8 +380,71 @@ where
             numeric_feedback_overflow_recomputed_node_count: numeric_metrics
                 .feedback_overflow_recomputed_node_count,
             container_query_iteration_count,
+            retained_reused_box_count: reused_box_count,
+            retained_reused_inline_count: reused_inline_count,
+            retained_reused_numeric_count: reused_numeric_count,
         },
-    )
+    )?;
+    if can_retain {
+        services.store_retained_world(RetainedLayout {
+            world,
+            numeric_unrounded,
+            structural_len,
+            viewport: request.viewport,
+            environment: request.environment,
+        });
+    }
+    if used_retained_world && verify_incremental_layout() {
+        // Run the same demand with no retained products, then compare.
+        // Embedded frames verify in their own recursive passes, so the check
+        // passes no frame renderer and compares this document's geometry.
+        if let Some(retained) = services.take_retained_world::<RetainedLayout<S::NodeId>>() {
+            let full = build_layout_pass_with_embedded_frames(
+                source,
+                styles,
+                services,
+                LayoutPassRequest {
+                    retain_world: false,
+                    ..request
+                },
+                &mut NoEmbeddedFrames,
+            );
+            services.store_retained_world(retained);
+            record_verify_result(&result, &full?);
+        }
+    }
+    Ok(result)
+}
+
+/// Whether incremental passes must also run and compare against a full pass.
+pub(crate) fn verify_incremental_layout() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    VERIFY_FOR_TEST.load(Ordering::Relaxed)
+        || *FLAG.get_or_init(|| std::env::var_os("MOLI_LAYOUT_INCREMENTAL_VERIFY").is_some())
+}
+
+static VERIFY_FOR_TEST: AtomicBool = AtomicBool::new(false);
+
+/// Runs the incremental differential check on every later pass in this
+/// process, without the environment variable.
+pub fn set_incremental_layout_verify_for_test(enabled: bool) {
+    VERIFY_FOR_TEST.store(enabled, Ordering::Relaxed);
+}
+
+fn record_verify_result<N>(incremental: &LayoutPassResult<N>, full: &LayoutPassResult<N>)
+where
+    N: Copy + std::fmt::Debug + Eq + std::hash::Hash,
+{
+    let matched = incremental.tree.same_geometry(&full.tree);
+    record_verify_comparison(matched);
+    if !matched {
+        tracing::error!(
+            target: "moli_layout_incremental",
+            incremental_boxes = incremental.tree.boxes.len(),
+            full_boxes = full.tree.boxes.len(),
+            "incremental layout geometry differs from a full rebuild"
+        );
+    }
 }
 
 /// Resolves `overflow:auto` with a monotonic browser-style feedback loop.
@@ -358,7 +476,9 @@ struct NumericLayoutMetrics {
 fn compute_world_layout_with_scrollbars<N>(
     world: &mut crate::LayoutWorld<N>,
     viewport: LayoutViewport,
-) -> NumericLayoutMetrics
+    environment: crate::LayoutEnvironment,
+    retained: Option<&mut crate::retention::RetainedReuse<N>>,
+) -> (NumericLayoutMetrics, Vec<taffy::Layout>)
 where
     N: Copy + std::fmt::Debug + Eq + std::hash::Hash,
 {
@@ -383,7 +503,7 @@ where
 
     let mut metrics = NumericLayoutMetrics::default();
     let phase_started = Instant::now();
-    let mut prepared = prepare_world_layout(world, viewport);
+    let mut prepared = prepare_world_layout(world, viewport, environment, retained);
     let preparation_elapsed = phase_started.elapsed();
     let mut overflow_projection: Option<OverflowProjection> = None;
     let mut pending_feedback_seeds = Vec::new();
@@ -478,7 +598,8 @@ where
             break;
         }
     }
-    metrics
+    let numeric_unrounded = prepared.take_numeric_unrounded();
+    (metrics, numeric_unrounded)
 }
 
 /// Backstop for container-query feedback that neither converges nor repeats.

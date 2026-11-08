@@ -1586,6 +1586,13 @@ impl ResolvedLayoutStyle {
         })
     }
 
+    /// Whether automatic overflow revealed a scrollbar on this box. `scroll`
+    /// always reserves its bar and is not feedback state.
+    pub(crate) fn has_revealed_auto_scrollbars(&self) -> bool {
+        (self.revealed_scrollbar_x && self.overflow_x == LayoutOverflowMode::Auto)
+            || (self.revealed_scrollbar_y && self.overflow_y == LayoutOverflowMode::Auto)
+    }
+
     pub(crate) fn is_floated(&self) -> bool {
         self.taffy.float != taffy::Float::None
     }

@@ -1401,3 +1401,140 @@ document.body.innerHTML = '<div id=pad></div><div id=cb><div id=abs>x</div></div
     .await
     .expect("live computed inset fixture should run");
 }
+
+const INCREMENTAL_DIFFERENTIAL_FIXTURE: &str = r#"
+document.head.innerHTML = `<style>
+html,body{margin:0}
+.row{padding:2px}.tall{padding:9px}.hide{display:none}
+#fl{display:flex;width:300px}#fl>*{flex:1 1 auto}
+#gr{display:grid;grid-template-columns:auto 1fr;width:400px}
+#ta{border-collapse:collapse}td{padding:1px}
+#pc{width:200px}#pc>div{width:50%;height:10px}
+#fw{width:200px}#fl1{float:left;width:50px;height:40px}
+#scr{height:60px;overflow:auto;width:200px}
+#cq{container-type:inline-size;width:320px}.in{height:7px}
+@container (min-width:300px){.in{height:21px}}
+</style>`;
+document.body.innerHTML = `
+<div id=rows></div>
+<div id=fl><span id=fl1a>aa</span><span>bbb</span></div>
+<div id=gr><i id=gcell>cell</i><b>two</b></div>
+<table id=ta><tr><td id=tc>t</td><td>u</td></tr></table>
+<div id=pc><div id=pct></div></div>
+<div id=fw><div id=fl1></div><p id=ftx>wrapped text around float content here</p></div>
+<div id=scr><div id=scc style="height:20px"></div></div>
+<div id=inl><span id=sp1>one</span> <span id=sp2 style="display:inline-block;width:40px">x</span></div>
+<div id=host></div>
+<div id=cq><div class=in id=cqin></div></div>
+<input id=inp value=abc>
+<iframe id=fr srcdoc="<!doctype html><div id=fc style='height:10px'>f</div>"></iframe>
+`;
+const r = document.getElementById('rows');
+for (let i = 0; i < 40; i++) {
+  const d = document.createElement('div'); d.className = 'row'; d.id = 'r' + i;
+  d.innerHTML = '<span>row</span><b> ' + i + '</b>'; r.appendChild(d);
+}
+const host = document.getElementById('host');
+const root = host.attachShadow({mode:'open'});
+root.innerHTML = '<style>:host{display:block}#sh{padding:1px}</style><div id=sh><slot></slot></div>';
+host.innerHTML = '<span id=sl>slotted</span>';
+void document.body.offsetHeight; 'installed'
+"#;
+
+/// Runs one mutation and reads back the whole page's geometry.
+const INCREMENTAL_READ_ALL: &str = r#"(() => { const v=[];
+  for (const e of document.body.querySelectorAll('*')) { const r=e.getBoundingClientRect(); v.push(r.x,r.y,r.width,r.height); }
+  return v.length; })()"#;
+
+const INCREMENTAL_DIFFERENTIAL_MUTATIONS: &[&str] = &[
+    // text and class on one row
+    "document.getElementById('r7').firstChild.textContent = 'changed text that is longer';",
+    "document.getElementById('r8').className = 'row tall';",
+    // style attribute, paint-only and geometry
+    "document.getElementById('r9').setAttribute('style','padding-left:13px');",
+    "document.getElementById('r10').style.color = 'red';",
+    "document.getElementById('sp1').style.fontSize = '20px';",
+    // structure: add, remove, move, display toggle
+    "const a=document.createElement('div');a.id='added';a.textContent='new';document.getElementById('rows').appendChild(a);",
+    "document.getElementById('r3').remove();",
+    "const m=document.getElementById('r4');m.parentNode.insertBefore(m,document.getElementById('r1'));",
+    "document.getElementById('r5').classList.add('hide');",
+    "document.getElementById('r5').classList.remove('hide');",
+    "document.getElementById('sp2').style.display='block';",
+    "document.getElementById('sp2').style.display='inline-block';",
+    // containing block and percentage dependence
+    "document.getElementById('pc').style.width='350px';",
+    // flex, grid, table intrinsic sizing
+    "document.getElementById('fl1a').textContent='a much longer flex item';",
+    "document.getElementById('gcell').textContent='a longer grid auto track';",
+    "document.getElementById('tc').textContent='widen this table column please';",
+    // floats and inline formatting around them
+    "document.getElementById('fl1').style.width='120px';",
+    "document.getElementById('ftx').textContent='other wrapped text beside the float';",
+    // scrollbar appearing and disappearing
+    "document.getElementById('scc').style.height='600px';",
+    "document.getElementById('scc').style.height='10px';",
+    "document.getElementById('scr').scrollTop=4;",
+    // shadow DOM and slotted content
+    "document.getElementById('sl').textContent='slotted longer text content';",
+    "document.getElementById('host').shadowRoot.getElementById('sh').style.padding='7px';",
+    // embedded iframe resize and content
+    "document.getElementById('fr').style.width='420px';",
+    "document.getElementById('fr').contentDocument.body.innerHTML='<div style=\"height:12px\">c</div>';",
+    "document.getElementById('fr').contentDocument.body.firstChild.style.height='30px';",
+    // container query toggle
+    "document.getElementById('cq').style.width='200px';",
+    "document.getElementById('cq').style.width='320px';",
+    // form control value
+    "document.getElementById('inp').value='changed input value';",
+    // no-op read: the layout input key should skip the pass entirely
+    "void 0;",
+];
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_incremental_layout_matches_a_full_rebuild_across_mutations() {
+    run_page_vm_async_test(async move {
+        moli_layout::set_incremental_layout_verify_for_test(true);
+        let result = async {
+            let mut page_vm = live_geometry_page(INCREMENTAL_DIFFERENTIAL_FIXTURE)?;
+            let boxes = page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
+            let mismatches = moli_layout::incremental_verify_mismatch_count();
+            let compared = moli_layout::incremental_verify_comparison_count();
+            let reused = moli_layout::incremental_numeric_reused_total();
+            for mutation in INCREMENTAL_DIFFERENTIAL_MUTATIONS {
+                page_vm.vm_mut().eval(&format!("{mutation} 'ok'"))?;
+                let read = page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
+                assert_ne!(read, "0", "read after {mutation}");
+                assert_eq!(
+                    moli_layout::incremental_verify_mismatch_count(),
+                    mismatches,
+                    "geometry differs from a full rebuild after: {mutation}"
+                );
+            }
+            // Viewport resize, growing then shrinking.
+            for width in [640, 1100, 800] {
+                page_vm.set_viewport_surface(Some(live_viewport(width, 0)))?;
+                page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
+                assert_eq!(
+                    moli_layout::incremental_verify_mismatch_count(),
+                    mismatches,
+                    "geometry differs from a full rebuild after resize to {width}"
+                );
+            }
+            assert!(
+                moli_layout::incremental_verify_comparison_count() > compared,
+                "the differential check never compared an incremental pass (boxes read: {boxes})"
+            );
+            assert!(
+                moli_layout::incremental_numeric_reused_total() > reused,
+                "no numeric results were reused"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        moli_layout::set_incremental_layout_verify_for_test(false);
+        result
+    })
+    .await
+    .expect("incremental differential fixture should run");
+}

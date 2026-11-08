@@ -553,6 +553,9 @@ impl JsContextHost {
                 paint_culled_text_line_count = metrics.paint_culled_text_line_count,
                 paint_operation_count = metrics.paint_operation_count,
                 fallback_count = metrics.fallback_count,
+                retained_reused_box_count = metrics.retained_reused_box_count,
+                retained_reused_inline_count = metrics.retained_reused_inline_count,
+                retained_reused_numeric_count = metrics.retained_reused_numeric_count,
             );
         }
         pass.validate_retention_budget()?;

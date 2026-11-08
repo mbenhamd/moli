@@ -117,6 +117,19 @@ impl<N> FrozenLayoutTree<N>
 where
     N: Copy + Debug + Eq + Hash,
 {
+    /// Whether this tree's geometry matches `other` exactly. Embedded frame
+    /// member trees are not compared; each one checks itself.
+    pub(crate) fn same_geometry(&self, other: &Self) -> bool {
+        self.viewport == other.viewport
+            && self.viewport_scroll == other.viewport_scroll
+            && self.content_size == other.content_size
+            && self.root_box == other.root_box
+            && self.boxes == other.boxes
+            && self.fragments == other.fragments
+            && self.scroll_proxy_links == other.scroll_proxy_links
+            && self.clip_chain == other.clip_chain
+    }
+
     /// Source root whose complete layout projection this member tree owns.
     pub const fn source_root(&self) -> N {
         self.source_root

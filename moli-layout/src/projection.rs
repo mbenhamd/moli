@@ -31,6 +31,9 @@ pub(crate) struct LayoutPassPhaseMetrics {
     pub(crate) numeric_feedback_invalidated_node_count: usize,
     pub(crate) numeric_feedback_overflow_recomputed_node_count: usize,
     pub(crate) container_query_iteration_count: usize,
+    pub(crate) retained_reused_box_count: usize,
+    pub(crate) retained_reused_inline_count: usize,
+    pub(crate) retained_reused_numeric_count: usize,
 }
 
 pub(crate) fn finish_layout_pass<N, S: crate::LayoutSource<NodeId = N>>(
@@ -121,6 +124,9 @@ where
         numeric_feedback_overflow_recomputed_node_count: phase_metrics
             .numeric_feedback_overflow_recomputed_node_count,
         container_query_iteration_count: phase_metrics.container_query_iteration_count,
+        retained_reused_box_count: phase_metrics.retained_reused_box_count,
+        retained_reused_inline_count: phase_metrics.retained_reused_inline_count,
+        retained_reused_numeric_count: phase_metrics.retained_reused_numeric_count,
         box_count: projection.boxes.len(),
         fragment_count: projection.fragments.len(),
         paint_event_count: paint_projection_metrics.event_count,
