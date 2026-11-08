@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::planning::{
-    PreparedScript, SharedScriptSourceLoadCompleter,
+    PreparedScript, PreparedScriptSourceLoadOutcome, SharedScriptSourceLoadCompleter,
     external_script_source_load_outcome_from_result,
     load_prepared_script_source_outcome_with_document_character_set,
 };
@@ -230,11 +230,101 @@ struct DetachedParserScriptFetchContinuationInner {
     completer: SharedScriptSourceLoadCompleter,
 }
 
+/// Delivers one child-frame classic script load outcome to its frame.
+pub(crate) type ChildClassicScriptSourceLoadFinish =
+    Box<dyn FnOnce(PreparedScriptSourceLoadOutcome) + Send>;
+
+/// A child-frame classic `<script src>` paused by CDP `Fetch` interception.
+///
+/// Child frames complete their classic script loads through their own
+/// frame-owned completion route, so the paused fetch keeps the two exits of
+/// that route: starting the frame's network load, or delivering a CDP-supplied
+/// outcome as the frame's load completion.
+///
+/// Dropping a fetch that was never resumed (a paused request the protocol
+/// discards) fails the load, like `SharedScriptSourceLoadCompleter`, so the
+/// child parser does not wait for it forever.
+pub(crate) struct DetachedChildClassicScriptFetch {
+    script: PreparedScript,
+    request_origin: moli_url::WebOrigin,
+    document_character_set: Option<String>,
+    start: Option<ChildClassicScriptSourceLoadStart>,
+    finish: Option<ChildClassicScriptSourceLoadFinish>,
+}
+
+/// Starts one child-frame classic script network load.
+pub(crate) type ChildClassicScriptSourceLoadStart =
+    Box<dyn FnOnce(PreparedScript, ChildClassicScriptSourceLoadFinish) + Send>;
+
+impl DetachedChildClassicScriptFetch {
+    pub(crate) fn new(
+        script: PreparedScript,
+        request_origin: moli_url::WebOrigin,
+        document_character_set: Option<String>,
+        start: ChildClassicScriptSourceLoadStart,
+        finish: ChildClassicScriptSourceLoadFinish,
+    ) -> Self {
+        Self {
+            script,
+            request_origin,
+            document_character_set,
+            start: Some(start),
+            finish: Some(finish),
+        }
+    }
+
+    fn finish_with_result(
+        mut self,
+        result: Result<crate::protocol_types::NavigationResponse, String>,
+    ) {
+        let outcome = external_script_source_load_outcome_from_result(
+            &self.script,
+            &self.request_origin,
+            result,
+            self.document_character_set.as_deref(),
+        );
+        if let Some(finish) = self.finish.take() {
+            finish(outcome);
+        }
+    }
+
+    fn start(mut self, url: Option<Url>) {
+        let (Some(start), Some(finish)) = (self.start.take(), self.finish.take()) else {
+            return;
+        };
+        let mut script = self.script.clone();
+        if let Some(url) = url {
+            script.url = url;
+        }
+        start(script, finish);
+    }
+}
+
+impl Drop for DetachedChildClassicScriptFetch {
+    fn drop(&mut self) {
+        if let Some(finish) = self.finish.take() {
+            finish(crate::planning::failed_external_script_source_load_outcome(
+                "child script fetch interception closed before completion".to_owned(),
+            ));
+        }
+    }
+}
+
+impl std::fmt::Debug for DetachedChildClassicScriptFetch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DetachedChildClassicScriptFetch")
+            .field("url", &self.script.url.as_str())
+            .finish_non_exhaustive()
+    }
+}
+
 /// The renderer-side owner of one CDP-paused script fetch.
 #[derive(Debug)]
 enum DetachedScriptFetch {
-    /// A parser-blocking classic `<script src>`.
+    /// A parser-blocking classic `<script src>` of the top-level Document.
     ParserScript(Box<DetachedParserScriptFetchContinuationInner>),
+    /// A classic `<script src>` of a child frame's Document.
+    ChildClassicScript(Box<DetachedChildClassicScriptFetch>),
     /// One module script graph fetch: a module script, a static or dynamic
     /// import, or a modulepreload.
     ModuleScript(Box<crate::module_runtime::PreparedModuleSourceFetch>),
@@ -242,8 +332,9 @@ enum DetachedScriptFetch {
 
 /// Resumes a script fetch paused by CDP `Fetch` interception.
 ///
-/// Classic parser scripts and module graph fetches share this continuation
-/// so the protocol layer handles every paused script request the same way.
+/// Classic scripts and module graph fetches of every frame share this
+/// continuation so the protocol layer handles every paused script request the
+/// same way.
 #[derive(Clone, Debug)]
 pub struct DetachedParserScriptFetchContinuation {
     inner: Arc<Mutex<Option<DetachedScriptFetch>>>,
@@ -255,6 +346,31 @@ impl PartialEq for DetachedParserScriptFetchContinuation {
     }
 }
 
+fn fulfilled_script_response(
+    script: &PreparedScript,
+    response_code: u16,
+    response_headers: Vec<(String, Vec<u8>)>,
+    response_body: Vec<u8>,
+) -> crate::protocol_types::NavigationResponse {
+    let text = String::from_utf8_lossy(&response_body).into_owned();
+    crate::protocol_types::NavigationResponse::from_head_and_materialized_body(
+        ResponseHead {
+            status_text: None,
+            final_url: script.url.clone(),
+            status: response_code,
+            headers: response_headers,
+            request_cookie_report: None,
+            cookie_set_reports: Vec::new(),
+            redirected: false,
+            redirect_chain: Vec::new(),
+            from_cache: false,
+            cache_state: Default::default(),
+            negotiated_http_version: None,
+        },
+        ResponseBody::materialized_text(text, response_body),
+    )
+}
+
 impl DetachedParserScriptFetchContinuation {
     fn new(
         script: PreparedScript,
@@ -264,25 +380,29 @@ impl DetachedParserScriptFetchContinuation {
         document_character_set: Option<String>,
         completer: SharedScriptSourceLoadCompleter,
     ) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Some(DetachedScriptFetch::ParserScript(
-                Box::new(DetachedParserScriptFetchContinuationInner {
-                    script,
-                    request_origin,
-                    request_client,
-                    task_runner,
-                    document_character_set,
-                    completer,
-                }),
-            )))),
-        }
+        Self::from_fetch(DetachedScriptFetch::ParserScript(Box::new(
+            DetachedParserScriptFetchContinuationInner {
+                script,
+                request_origin,
+                request_client,
+                task_runner,
+                document_character_set,
+                completer,
+            },
+        )))
     }
 
     pub(crate) fn module_script(fetch: crate::module_runtime::PreparedModuleSourceFetch) -> Self {
+        Self::from_fetch(DetachedScriptFetch::ModuleScript(Box::new(fetch)))
+    }
+
+    pub(crate) fn child_classic_script(fetch: DetachedChildClassicScriptFetch) -> Self {
+        Self::from_fetch(DetachedScriptFetch::ChildClassicScript(Box::new(fetch)))
+    }
+
+    fn from_fetch(fetch: DetachedScriptFetch) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Some(DetachedScriptFetch::ModuleScript(
-                Box::new(fetch),
-            )))),
+            inner: Arc::new(Mutex::new(Some(fetch))),
         }
     }
 
@@ -291,22 +411,23 @@ impl DetachedParserScriptFetchContinuation {
     }
 
     pub fn fail(&self, error_text: String) -> bool {
-        let inner = match self.take() {
+        match self.take() {
             None => return false,
-            Some(DetachedScriptFetch::ModuleScript(fetch)) => {
-                fetch.fail(error_text);
-                return true;
+            Some(DetachedScriptFetch::ModuleScript(fetch)) => fetch.fail(error_text),
+            Some(DetachedScriptFetch::ParserScript(inner)) => {
+                inner
+                    .completer
+                    .finish(external_script_source_load_outcome_from_result(
+                        &inner.script,
+                        &inner.request_origin,
+                        Err(error_text),
+                        inner.document_character_set.as_deref(),
+                    ));
             }
-            Some(DetachedScriptFetch::ParserScript(inner)) => *inner,
-        };
-        inner
-            .completer
-            .finish(external_script_source_load_outcome_from_result(
-                &inner.script,
-                &inner.request_origin,
-                Err(error_text),
-                inner.document_character_set.as_deref(),
-            ));
+            Some(DetachedScriptFetch::ChildClassicScript(fetch)) => {
+                fetch.finish_with_result(Err(error_text));
+            }
+        }
         true
     }
 
@@ -316,39 +437,37 @@ impl DetachedParserScriptFetchContinuation {
         response_headers: Vec<(String, Vec<u8>)>,
         response_body: Vec<u8>,
     ) -> bool {
-        let inner = match self.take() {
+        match self.take() {
             None => return false,
             Some(DetachedScriptFetch::ModuleScript(fetch)) => {
                 fetch.fulfill(response_code, response_headers, response_body);
-                return true;
             }
-            Some(DetachedScriptFetch::ParserScript(inner)) => *inner,
-        };
-        let text = String::from_utf8_lossy(&response_body).into_owned();
-        let response = crate::protocol_types::NavigationResponse::from_head_and_materialized_body(
-            ResponseHead {
-                status_text: None,
-                final_url: inner.script.url.clone(),
-                status: response_code,
-                headers: response_headers,
-                request_cookie_report: None,
-                cookie_set_reports: Vec::new(),
-                redirected: false,
-                redirect_chain: Vec::new(),
-                from_cache: false,
-                cache_state: Default::default(),
-                negotiated_http_version: None,
-            },
-            ResponseBody::materialized_text(text, response_body),
-        );
-        inner
-            .completer
-            .finish(external_script_source_load_outcome_from_result(
-                &inner.script,
-                &inner.request_origin,
-                Ok(response),
-                inner.document_character_set.as_deref(),
-            ));
+            Some(DetachedScriptFetch::ParserScript(inner)) => {
+                let response = fulfilled_script_response(
+                    &inner.script,
+                    response_code,
+                    response_headers,
+                    response_body,
+                );
+                inner
+                    .completer
+                    .finish(external_script_source_load_outcome_from_result(
+                        &inner.script,
+                        &inner.request_origin,
+                        Ok(response),
+                        inner.document_character_set.as_deref(),
+                    ));
+            }
+            Some(DetachedScriptFetch::ChildClassicScript(fetch)) => {
+                let response = fulfilled_script_response(
+                    &fetch.script,
+                    response_code,
+                    response_headers,
+                    response_body,
+                );
+                fetch.finish_with_result(Ok(response));
+            }
+        }
         true
     }
 
@@ -357,6 +476,10 @@ impl DetachedParserScriptFetchContinuation {
             None => return false,
             Some(DetachedScriptFetch::ModuleScript(fetch)) => {
                 fetch.continue_request(url);
+                return true;
+            }
+            Some(DetachedScriptFetch::ChildClassicScript(fetch)) => {
+                fetch.start(url);
                 return true;
             }
             Some(DetachedScriptFetch::ParserScript(inner)) => *inner,
@@ -960,6 +1083,27 @@ impl RendererBrowserContextRuntime {
         )
     }
 
+    /// Binds a child-frame classic script fetch to a detached
+    /// Fetch-interception continuation in the shared paused-script id space.
+    pub(crate) fn prepare_detached_child_classic_script_fetch(
+        &self,
+        mut info: crate::protocol_types::PendingSubresourceFetchInfo,
+        fetch: DetachedChildClassicScriptFetch,
+    ) -> (
+        crate::protocol_types::PendingSubresourceFetchInfo,
+        DetachedParserScriptFetchContinuation,
+    ) {
+        info.internal_id = self
+            .inner
+            .next_detached_parser_script_fetch_id
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        (
+            info,
+            DetachedParserScriptFetchContinuation::child_classic_script(fetch),
+        )
+    }
+
     pub fn set_javascript_dialog_handler_enabled(&self, enabled: bool) {
         self.inner
             .javascript_dialog_handler_enabled
@@ -1188,6 +1332,49 @@ mod tests {
             RendererPageReservationToken, renderer_output_transport_channel,
         },
     };
+
+    /// The protocol can discard a paused child-frame classic script without
+    /// resuming it. The frame's load must then fail, so the script fires
+    /// `error` instead of the child parser waiting for it forever.
+    #[test]
+    fn dropping_an_unresumed_child_classic_script_fetch_fails_its_load() {
+        let url = url::Url::parse("https://child.example.test/c.js").expect("test url");
+        let script = crate::planning::PreparedScript {
+            position: 0,
+            node_id: crate::dom::NodeId::new(1),
+            kind: crate::types::ScriptKind::Classic,
+            mode: crate::types::ScriptMode::Normal,
+            source_kind: crate::types::ScriptSourceKind::External,
+            fetch_metadata: crate::planning::ScriptFetchMetadata::default(),
+            source: crate::planning::ScriptSource::External,
+            url: url.clone(),
+            base_url: url.clone(),
+            initiator_url: url.clone(),
+            host_script_handle: None,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let continuation = super::DetachedParserScriptFetchContinuation::child_classic_script(
+            super::DetachedChildClassicScriptFetch::new(
+                script,
+                moli_url::WebOrigin::from_url(&url),
+                None,
+                Box::new(|_, _| panic!("a discarded pause must not start the network load")),
+                Box::new(move |outcome| {
+                    let _ = tx.send(outcome);
+                }),
+            ),
+        );
+
+        drop(continuation);
+
+        let outcome = rx
+            .try_recv()
+            .expect("dropping the paused fetch must finish the frame's load");
+        assert_eq!(
+            outcome.source_result.expect_err("the load must fail"),
+            "child script fetch interception closed before completion"
+        );
+    }
 
     async fn assert_single_page_reservation_release(
         output_rx: &mut crate::runtime::RendererOutputTransportReceiver,

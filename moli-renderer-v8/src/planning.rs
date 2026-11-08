@@ -479,7 +479,9 @@ pub(crate) fn immediate_external_script_source_load_outcome(
     )
 }
 
-fn failed_external_script_source_load_outcome(message: String) -> PreparedScriptSourceLoadOutcome {
+pub(crate) fn failed_external_script_source_load_outcome(
+    message: String,
+) -> PreparedScriptSourceLoadOutcome {
     PreparedScriptSourceLoadOutcome {
         source_result: Err(message.clone()),
         source_bytes: None,

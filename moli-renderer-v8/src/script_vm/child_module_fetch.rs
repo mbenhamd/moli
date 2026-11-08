@@ -504,15 +504,18 @@ impl FrameDocumentModulepreloadStartActionHooks for ScriptVmChildModulepreloadSt
                 .send_child_modulepreload_fetch(completion);
             return;
         };
-        self.vm
-            .resource_scheduler()
-            .schedule_child_modulepreload_graph_fetch(
-                loader,
-                target,
-                load_id,
-                *request,
-                network_attribution,
-            );
+        {
+            let host = self.vm._context_host.borrow();
+            host.resource_scheduler()
+                .schedule_child_modulepreload_graph_fetch(
+                    &host,
+                    loader,
+                    target,
+                    load_id,
+                    *request,
+                    network_attribution,
+                );
+        }
         tracing::debug!(
             ?target,
             link_handle = ?link_handle,

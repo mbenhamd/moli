@@ -864,10 +864,6 @@ impl ScriptVm {
             || self.has_inflight_child_dynamic_module_import_fetch()
     }
 
-    pub(crate) fn resource_scheduler(&self) -> RendererResourceScheduler {
-        self._context_host.borrow().resource_scheduler()
-    }
-
     pub(crate) fn accept_parser_discovered_native_modulepreloads(
         &mut self,
         link_handles: impl IntoIterator<Item = crate::dom::native::NativeNodeId>,

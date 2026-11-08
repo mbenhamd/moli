@@ -1262,3 +1262,110 @@ async fn removing_child_frame_aborts_its_paused_document_request() {
 
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn child_frame_classic_and_module_scripts_pause_as_script_and_use_fulfilled_source() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = Router::new()
+        .route(
+            "/page",
+            get(|| async {
+                (
+                    [(CONTENT_TYPE.as_str(), "text/html")],
+                    "<!doctype html><iframe></iframe>",
+                )
+            }),
+        )
+        .route(
+            "/child",
+            get(|| async {
+                (
+                    [(CONTENT_TYPE.as_str(), "text/html")],
+                    "<!doctype html><script src=\"/c.js\"></script>\
+                     <script type=\"module\">import { v } from '/m.js'; \
+                     parent.__lm_frame_module = v;</script>",
+                )
+            }),
+        )
+        .route(
+            "/c.js",
+            get(|| async {
+                (
+                    [(CONTENT_TYPE.as_str(), "text/javascript")],
+                    "parent.__lm_frame_classic = 'REAL';",
+                )
+            }),
+        )
+        .route(
+            "/m.js",
+            get(|| async {
+                (
+                    [(CONTENT_TYPE.as_str(), "text/javascript")],
+                    "export const v = 'REAL';",
+                )
+            }),
+        );
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let mut ctx = TestContext::new();
+    with_loaded_http_document(&mut ctx, &format!("http://{addr}/page"), "SID-1", "TID-1").await;
+    let frame_id = child_frame_id_for_single_iframe_async(&mut ctx, 37_900).await;
+    ctx.sent.clear();
+    enable_fetch_patterns(&mut ctx, 37_901, json!([{"resourceType": "Script"}])).await;
+    enable_runtime_async(&mut ctx, "SID-1", 37_902).await;
+
+    // Vitest browser mode runs each test file in an iframe, so the frame's
+    // own classic and module scripts must pause like the top-level page's.
+    evaluate_script(
+        &mut ctx,
+        37_903,
+        "document.querySelector('iframe').src = '/child'",
+    )
+    .await;
+    for (id, url, body) in [
+        (
+            37_904,
+            format!("http://{addr}/c.js"),
+            "cGFyZW50Ll9fbG1fZnJhbWVfY2xhc3NpYyA9ICdNT0NLRUQnOw==",
+        ),
+        (
+            37_905,
+            format!("http://{addr}/m.js"),
+            "ZXhwb3J0IGNvbnN0IHYgPSAnTU9DS0VEJzs=",
+        ),
+    ] {
+        let paused = wait_for_request_paused_on_session(
+            &mut ctx,
+            "SID-1",
+            &url,
+            Some("Script"),
+            "child frame script requestPaused event",
+        )
+        .await;
+        assert_eq!(paused["params"]["frameId"], json!(frame_id), "{url}");
+        ctx.process_async(json!({
+            "id": id,
+            "method": "Fetch.fulfillRequest",
+            "sessionId": "SID-1",
+            "params": {
+                "requestId": paused["params"]["requestId"],
+                "responseCode": 200,
+                "responseHeaders": [{ "name": "content-type", "value": "text/javascript" }],
+                "body": body
+            }
+        }))
+        .await;
+        ctx.expect_result(id, json!({}), Some("SID-1"));
+    }
+
+    evaluate_until_value_async(
+        &mut ctx,
+        "SID-1",
+        37_910,
+        "[globalThis.__lm_frame_classic, globalThis.__lm_frame_module].join()",
+        &json!("MOCKED,MOCKED"),
+        "fulfilled child frame script sources",
+    )
+    .await;
+    server.abort();
+}

@@ -877,7 +877,10 @@ impl JsContextHost {
             );
         };
         let start_result = if request.csp_context().is_some() {
-            request.fetch_source_for_document(loader, send_completion)
+            let frame_id = network_attribution.frame_id().map(str::to_owned);
+            request
+                .prepare_source_fetch_for_document(loader, send_completion)
+                .and_then(|fetch| self.start_module_source_fetch(loader, fetch, frame_id))
         } else {
             Err(anyhow::anyhow!(
                 "Child module CSP context unavailable for its Document and realm"
@@ -954,7 +957,10 @@ impl JsContextHost {
             );
         };
         let start_result = if request.csp_context().is_some() {
-            request.fetch_source_for_document(loader, send_completion)
+            let frame_id = network_attribution.frame_id().map(str::to_owned);
+            request
+                .prepare_source_fetch_for_document(loader, send_completion)
+                .and_then(|fetch| self.start_module_source_fetch(loader, fetch, frame_id))
         } else {
             Err(anyhow::anyhow!(
                 "Child module CSP context unavailable for its Document and realm"

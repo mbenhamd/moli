@@ -230,7 +230,7 @@ impl RendererResourceScheduler {
             };
         let started = request
             .prepare_source_fetch_for_document(&loader, send_completion)
-            .and_then(|fetch| host.start_main_module_source_fetch(&loader, fetch));
+            .and_then(|fetch| host.start_module_source_fetch(&loader, fetch, None));
         if let Err(error) = started {
             let error = error.to_string();
             trace_module_graph_fetch_schedule_error(
@@ -251,6 +251,7 @@ impl RendererResourceScheduler {
 
     pub(crate) fn schedule_child_dynamic_module_graph_fetch(
         &self,
+        host: &crate::native_bridge::JsContextHost,
         loader: DocumentResourceLoader,
         target: ChildDocumentModuleFetchTarget,
         load_id: u64,
@@ -286,7 +287,11 @@ impl RendererResourceScheduler {
                     ),
                 );
             };
-        if let Err(error) = request.fetch_source_for_document(&loader, send_completion) {
+        let frame_id = network_attribution.frame_id().map(str::to_owned);
+        let started = request
+            .prepare_source_fetch_for_document(&loader, send_completion)
+            .and_then(|fetch| host.start_module_source_fetch(&loader, fetch, frame_id));
+        if let Err(error) = started {
             let error = error.to_string();
             trace_module_graph_fetch_schedule_error(
                 load_id,
@@ -309,6 +314,7 @@ impl RendererResourceScheduler {
 
     pub(crate) fn schedule_child_modulepreload_graph_fetch(
         &self,
+        host: &crate::native_bridge::JsContextHost,
         loader: DocumentResourceLoader,
         target: ChildDocumentModuleFetchTarget,
         load_id: u64,
@@ -344,7 +350,11 @@ impl RendererResourceScheduler {
                     ),
                 );
             };
-        if let Err(error) = request.fetch_source_for_document(&loader, send_completion) {
+        let frame_id = network_attribution.frame_id().map(str::to_owned);
+        let started = request
+            .prepare_source_fetch_for_document(&loader, send_completion)
+            .and_then(|fetch| host.start_module_source_fetch(&loader, fetch, frame_id));
+        if let Err(error) = started {
             let error = error.to_string();
             trace_module_graph_fetch_schedule_error(
                 load_id,

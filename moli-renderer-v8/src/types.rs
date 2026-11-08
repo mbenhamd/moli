@@ -1196,7 +1196,7 @@ impl DocumentWriteExternalScriptLoadCompletion {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct ChildClassicScriptNetworkAttribution {
     pub(super) frame_id: Option<String>,
     pub(super) document_url: Url,
