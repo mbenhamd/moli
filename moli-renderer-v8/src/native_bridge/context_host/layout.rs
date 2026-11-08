@@ -279,8 +279,8 @@ impl JsContextHost {
     /// Documents consumes at `viewport`: the generations the visual-state
     /// token compares, the viewport and the media environment. Frozen
     /// policies never compare inputs and get `None`, so their publications do
-    /// no extra work. Callers take the key before building a pass, so an input
-    /// that changes during the build makes the next read lay out again.
+    /// no extra work. Callers take the key before building a pass; the
+    /// publication checks that only the pass's own style flush moved it.
     pub(crate) fn live_layout_input_key(
         &self,
         viewport: LayoutViewport,
@@ -290,7 +290,7 @@ impl JsContextHost {
             return None;
         }
         Some(LayoutInputKey {
-            dom: self.dom_host().dom_version(),
+            dom: self.dom_host().dom_version_excluding_hover(),
             styles: self
                 .style_engine
                 .visual_style_input_generations(self.active_layout_document_handles()),
@@ -513,8 +513,10 @@ impl JsContextHost {
         self.publish_layout_pass_for_document_in_environment(document, pass, None, inputs);
     }
 
-    /// Publishes `pass` with the live-geometry `inputs` taken before it was
-    /// built, including the media environment it was built in, so a
+    /// Publishes `pass`. Under the live-geometry policy `inputs` is the key
+    /// taken before the pass was built; the publication records the key of
+    /// the inputs the pass consumed, including the media environment it was
+    /// built in, so a
     /// live-geometry read after a capture in another environment lays out
     /// again.
     pub(crate) fn publish_layout_pass_for_document_in_environment(
@@ -550,11 +552,33 @@ impl JsContextHost {
             .collect::<Vec<_>>();
         let tree = pass.into_tree();
         let frame_viewports_changed = {
-            debug_assert_eq!(
-                inputs,
-                self.live_layout_input_key(pass_viewport, environment_override),
-                "layout inputs changed while the pass was built"
-            );
+            // The pass's own style flush applies deferred invalidations and
+            // advances the style generations it then lays out from, so the
+            // published key is taken after the build. No script runs during a
+            // pass, so every other input must match the key taken before it.
+            let inputs = inputs.map(|before| {
+                let after = self
+                    .live_layout_input_key(pass_viewport, environment_override)
+                    .expect("a live-geometry key was taken before the pass");
+                debug_assert_eq!(
+                    (
+                        before.dom,
+                        before.used_geometry,
+                        before.resources,
+                        before.viewport,
+                        &before.environment,
+                    ),
+                    (
+                        after.dom,
+                        after.used_geometry,
+                        after.resources,
+                        after.viewport,
+                        &after.environment,
+                    ),
+                    "layout inputs changed while the pass was built"
+                );
+                after
+            });
             let mut state = self.document_layout_state.borrow_mut();
             state.retain_live_frame_viewports(|frame| self.child_browsing_context_is_live(frame));
             state.publish_latest_layout(document, inputs, tree);
