@@ -472,7 +472,18 @@ pub(super) fn event_target_dispatch_event_callback<'s>(
         return;
     }
 
-    let event_type = event_type_string(scope, event);
+    // The shared script-dispatch preparation owns clearing isTrusted, so a
+    // saved user-agent event re-dispatched by script is untrusted. Its own
+    // validation repeats the checks above and passes.
+    let Some((event, event_type)) =
+        crate::context_bootstrap::event_target_dispatch::prepare_script_dispatch(
+            scope,
+            event.into(),
+        )
+    else {
+        return;
+    };
+    let event_type = Some(event_type);
     if let Some(handle) = child_window_target {
         let event_type = event_type.as_deref().unwrap_or_default();
         host.dispatch_child_window_event(scope, handle, event_type, event);
@@ -531,16 +542,6 @@ pub(super) fn event_target_dispatch_event_callback<'s>(
         }
         Err(message) => throw_type_error(scope, &message),
     }
-}
-
-fn event_type_string(
-    scope: &mut v8::PinScope<'_, '_>,
-    event: v8::Local<'_, v8::Object>,
-) -> Option<String> {
-    crate::context_bootstrap::event_backing(scope, event)
-        .get(scope, v8str(scope, "type").into())
-        .and_then(|value| value.to_string(scope))
-        .map(|value| value.to_rust_string_lossy(scope))
 }
 
 pub(super) fn window_set_timeout_callback<'s>(
