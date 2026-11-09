@@ -1606,6 +1606,23 @@ impl ResolvedLayoutStyle {
         self.text_align
     }
 
+    /// The line count of a computed `line-clamp`/`-webkit-line-clamp`.
+    ///
+    /// The pinned Servo Stylo build parses neither `display: -webkit-box` nor
+    /// `-webkit-box-orient`, so the clamp cannot be gated on them as Blink
+    /// does. It applies to the block container that owns the lines, which is
+    /// the css-overflow-4 `line-clamp` model.
+    pub(crate) fn line_clamp(&self) -> Option<usize> {
+        let computed = self.computed.as_ref()?;
+        let lines = computed
+            .get_box()
+            .clone_line_clamp()
+            .max_lines
+            .lines_value()?
+            .0;
+        usize::try_from(lines).ok().filter(|lines| *lines > 0)
+    }
+
     pub(crate) fn direction(&self) -> InlineDirection {
         self.direction
     }

@@ -2828,13 +2828,15 @@ where
             },
         );
 
-        let (line_metrics, line_placements) = if inputs.run_mode == RunMode::PerformLayout {
+        let line_clamp = self.boxes[owner.index()].style.line_clamp();
+        let (mut line_metrics, line_placements) = if inputs.run_mode == RunMode::PerformLayout {
             let (placements, metrics) = build_inline_line_placements(
                 context,
                 layout,
                 &atomic_baseline_ascents,
                 &structural_edge_contributions,
                 &float_line_clearances,
+                line_clamp,
             );
             (metrics, Some(placements))
         } else {
@@ -2845,6 +2847,7 @@ where
                     &atomic_baseline_ascents,
                     &structural_edge_contributions,
                     &float_line_clearances,
+                    line_clamp,
                 ),
                 None,
             )
@@ -2852,6 +2855,13 @@ where
         let mut height = layout.height() + line_metrics.line_expansion;
         if let Some(float_height) = float_height {
             height = height.max(float_height);
+        }
+        // Blink ends a clamped block's auto height, and its last baseline, at
+        // the clamp line. Later lines stay laid out as overflow, which the
+        // author's `overflow: hidden` clips.
+        if let Some(clamp) = line_metrics.clamp {
+            height = clamp.block_size;
+            line_metrics.last_baseline = Some(clamp.last_baseline);
         }
         let alignment_block_size = height.max(alignment_float_height);
         InlineMeasurement {

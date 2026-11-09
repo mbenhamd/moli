@@ -76,7 +76,8 @@ pub(super) fn canonical_computed_cssom_query_property_name(property: &str) -> Op
     } else {
         property
     };
-    computed_property_is_queryable(&property).then_some(property)
+    // Stylo's `line-clamp` backs Chromium's `-webkit-line-clamp` only.
+    (property != "line-clamp" && computed_property_is_queryable(&property)).then_some(property)
 }
 
 pub(in crate::native_bridge::element::styles) fn style_css_text_for_computed(
