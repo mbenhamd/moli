@@ -69,7 +69,7 @@ fn named_node_map_access_materializes_only_the_attrs_it_reads() {
     vm.eval(
         r#"window.element = document.createElement('div');
         for (let index = 0; index < 20; index++) element.setAttribute('data-a' + index, String(index));
-        document.body.appendChild(element);
+        document.documentElement.appendChild(element);
         'ready'"#,
     )
     .expect("element setup");
