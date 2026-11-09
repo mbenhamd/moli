@@ -3796,3 +3796,97 @@ fn wrapped_trailing_spaces_do_not_expand_scrollable_overflow() {
         }
     }
 }
+
+#[test]
+fn sticky_offsets_follow_the_current_scroll_position_of_each_scrollport() {
+    fn sticky_top(top: f32, width: f32) -> ResolvedLayoutStyle {
+        resolved(
+            LayoutDisplay::Block,
+            Style {
+                inset: Rect {
+                    left: LengthPercentageAuto::auto(),
+                    right: LengthPercentageAuto::auto(),
+                    top: length(top),
+                    bottom: LengthPercentageAuto::auto(),
+                },
+                size: Size {
+                    width: length(width),
+                    height: length(20.0),
+                },
+                ..Style::default()
+            },
+        )
+        .with_position(LayoutPosition::Sticky)
+    }
+    let mut source = Source(vec![
+        Node::element("root", vec![1, 5, 6, 7]),
+        Node::element("scroller", vec![2, 3, 4]),
+        Node::element("inner-spacer", Vec::new()),
+        Node::element("inner-sticky", Vec::new()),
+        Node::element("inner-tall", Vec::new()),
+        Node::element("document-spacer", Vec::new()),
+        Node::element("document-sticky", Vec::new()),
+        Node::element("document-tall", Vec::new()),
+    ]);
+    source.0[0].scroll = LayoutPoint::new(0.0, 500.0);
+    source.0[1].scroll = LayoutPoint::new(0.0, 200.0);
+    let mut styles = Styles::default();
+    styles.0.insert(
+        0,
+        resolved(
+            LayoutDisplay::Block,
+            Style {
+                size: Size {
+                    width: length(320.0),
+                    height: Dimension::auto(),
+                },
+                ..Style::default()
+            },
+        ),
+    );
+    styles.0.insert(
+        1,
+        resolved(
+            LayoutDisplay::Block,
+            Style {
+                size: Size {
+                    width: length(200.0),
+                    height: length(100.0),
+                },
+                overflow: Point {
+                    x: Overflow::Hidden,
+                    y: Overflow::Hidden,
+                },
+                ..Style::default()
+            },
+        ),
+    );
+    styles
+        .0
+        .insert(2, fixed_size(LayoutDisplay::Block, 200.0, 50.0));
+    styles.0.insert(3, sticky_top(0.0, 200.0));
+    styles
+        .0
+        .insert(4, fixed_size(LayoutDisplay::Block, 200.0, 1000.0));
+    styles
+        .0
+        .insert(5, fixed_size(LayoutDisplay::Block, 320.0, 30.0));
+    styles.0.insert(6, sticky_top(5.0, 100.0));
+    styles
+        .0
+        .insert(7, fixed_size(LayoutDisplay::Block, 320.0, 3000.0));
+
+    let output = build(&source, &mut styles);
+    let top = |node: usize| {
+        output
+            .box_model_for_source(node)
+            .unwrap()
+            .border
+            .bounding_rect()
+            .y
+    };
+    // Chromium docks both boxes at their scrollport's top inset: the inner
+    // box at the scroller's top edge, the document box 5px below the viewport.
+    assert_close(top(3) - top(1), 0.0);
+    assert_close(top(6), 5.0);
+}

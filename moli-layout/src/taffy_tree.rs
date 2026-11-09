@@ -806,12 +806,25 @@ where
     for id in sticky_boxes {
         let layout = world.boxes[id.index()].unrounded_layout;
         let global = unrounded_global_origin(world, id);
-        let scrollport = nearest_scrollport(world, id).unwrap_or(PaintRect::new(
-            0.0,
-            0.0,
-            viewport.css_width as f32,
-            viewport.css_height as f32,
-        ));
+        // The sticky view rectangle is the scrollport at its current scroll
+        // position. Descendant geometry here is unscrolled, so shift the
+        // scrollport by the scroll container's offset (CSS Positioned Layout
+        // 3, sticky positioning).
+        let scroll_container = nearest_scrollport(world, id);
+        let scrollport = scroll_container.map(|(_, rect)| rect).unwrap_or_else(|| {
+            let root = world.root;
+            let offset = if world.viewport_scroll_policy.establishes_scroll_container() {
+                crate::projection::finite_point(world.boxes[root.index()].scroll_offset)
+            } else {
+                crate::LayoutPoint::ZERO
+            };
+            PaintRect::new(
+                offset.x,
+                offset.y,
+                viewport.css_width as f32,
+                viewport.css_height as f32,
+            )
+        });
         let inset = world.boxes[id.index()].style.sticky_inset();
         let left = inset
             .left
@@ -846,16 +859,24 @@ where
             let min_x = containing_origin.x
                 + containing_layout.border.left
                 + containing_layout.padding.left;
-            let max_x = containing_origin.x + containing_layout.size.width
+            let mut content_right = containing_origin.x + containing_layout.size.width
                 - containing_layout.border.right
-                - containing_layout.padding.right
-                - layout.size.width;
+                - containing_layout.padding.right;
+            let mut content_bottom = containing_origin.y + containing_layout.size.height
+                - containing_layout.border.bottom
+                - containing_layout.padding.bottom;
+            // When the containing block is the scroll container itself, its
+            // scrolled content, not its fixed-size box, bounds the sticky
+            // box, as in Blink's sticky constraints.
+            if scroll_container.is_some_and(|(container, _)| container == containing_block) {
+                let (right, bottom) = layout_children_margin_extent(world, containing_block);
+                content_right = content_right.max(right);
+                content_bottom = content_bottom.max(bottom);
+            }
+            let max_x = content_right - layout.size.width;
             let min_y =
                 containing_origin.y + containing_layout.border.top + containing_layout.padding.top;
-            let max_y = containing_origin.y + containing_layout.size.height
-                - containing_layout.border.bottom
-                - containing_layout.padding.bottom
-                - layout.size.height;
+            let max_y = content_bottom - layout.size.height;
             if min_x <= max_x {
                 target_x = target_x.clamp(min_x, max_x);
             }
@@ -868,23 +889,59 @@ where
     }
 }
 
-fn nearest_scrollport<N>(world: &LayoutWorld<N>, id: LayoutBoxId) -> Option<PaintRect>
+/// Returns the far global edges of the margin boxes of `container`'s layout
+/// children.
+fn layout_children_margin_extent<N>(world: &LayoutWorld<N>, container: LayoutBoxId) -> (f32, f32)
+where
+    N: Copy + Debug + Eq + Hash,
+{
+    let origin = unrounded_global_origin(world, container);
+    let mut extent = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for (index, layout_box) in world.boxes.iter().enumerate() {
+        if layout_box.layout_parent != Some(container) || index == container.index() {
+            continue;
+        }
+        let layout = layout_box.unrounded_layout;
+        extent.0 = extent
+            .0
+            .max(origin.x + layout.location.x + layout.size.width + layout.margin.right);
+        extent.1 = extent
+            .1
+            .max(origin.y + layout.location.y + layout.size.height + layout.margin.bottom);
+    }
+    extent
+}
+
+/// Returns the nearest scroll container and its scrollport, shifted by the
+/// container's current scroll offset into unscrolled content coordinates.
+fn nearest_scrollport<N>(
+    world: &LayoutWorld<N>,
+    id: LayoutBoxId,
+) -> Option<(LayoutBoxId, PaintRect)>
 where
     N: Copy + Debug + Eq + Hash,
 {
     let mut ancestor = world.boxes[id.index()].parent;
     while let Some(candidate) = ancestor {
+        // The root's scroll state belongs to the viewport scrollport.
+        if candidate == world.root {
+            return None;
+        }
         let layout_box = &world.boxes[candidate.index()];
         if !world.is_viewport_defining_body(candidate)
             && layout_box.style.establishes_scroll_container()
         {
             let layout = layout_box.unrounded_layout;
             let origin = unrounded_global_origin(world, candidate);
-            return Some(PaintRect::new(
-                origin.x + layout.border.left,
-                origin.y + layout.border.top,
-                (layout.size.width - layout.border.left - layout.border.right).max(0.0),
-                (layout.size.height - layout.border.top - layout.border.bottom).max(0.0),
+            let offset = crate::projection::finite_point(layout_box.scroll_offset);
+            return Some((
+                candidate,
+                PaintRect::new(
+                    origin.x + layout.border.left + offset.x,
+                    origin.y + layout.border.top + offset.y,
+                    (layout.size.width - layout.border.left - layout.border.right).max(0.0),
+                    (layout.size.height - layout.border.top - layout.border.bottom).max(0.0),
+                ),
             ));
         }
         ancestor = layout_box.parent;

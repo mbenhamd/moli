@@ -1230,7 +1230,7 @@ where
     Ok(())
 }
 
-fn finite_point(point: LayoutPoint) -> LayoutPoint {
+pub(crate) fn finite_point(point: LayoutPoint) -> LayoutPoint {
     LayoutPoint::new(
         if point.x.is_finite() { point.x } else { 0.0 },
         if point.y.is_finite() { point.y } else { 0.0 },
