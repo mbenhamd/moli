@@ -351,6 +351,8 @@ impl JsContextHost {
             scrollbars_hidden: false,
             document_layout_state: RefCell::new(super::layout_state::DocumentLayoutState::default()),
             layout_pass_active: Cell::new(false),
+            pending_scroll_offset_sync: Cell::new(false),
+            scroll_offset_generation: Cell::new(0),
             #[cfg(test)]
             fail_live_layout_refresh_for_test: Cell::new(false),
             completed_layout_pass_count: Cell::new(0),

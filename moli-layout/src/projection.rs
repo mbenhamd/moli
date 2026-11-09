@@ -937,6 +937,45 @@ where
                 .next()
                 .expect("a frozen layout tree always owns the viewport coordinate space"),
         );
+        let mut scroll_projection: Vec<crate::layout_tree::ScrollProjectionInput> = self
+            .world
+            .boxes
+            .iter()
+            .zip(&self.resolved_transforms)
+            .map(
+                |(layout_box, transform)| crate::layout_tree::ScrollProjectionInput {
+                    location: LayoutPoint::new(
+                        layout_box.final_layout.location.x,
+                        layout_box.final_layout.location.y,
+                    ),
+                    css_transform: transform.transform,
+                    viewport_anchored_root: layout_box.layout_parent.is_none()
+                        && layout_box.style.is_fixed_positioned(),
+                    sticky: layout_box.style.position() == crate::LayoutPosition::Sticky,
+                    sticky_descendant: false,
+                },
+            )
+            .collect();
+        // Mark every layout ancestor of a sticky box: a scroll offset change
+        // on any of them can move the sticky box relative to its scrollport.
+        for (index, layout_box) in self.world.boxes.iter().enumerate() {
+            if !scroll_projection[index].sticky {
+                continue;
+            }
+            let mut parent = layout_box.layout_parent;
+            let mut steps = 0;
+            while let Some(id) = parent {
+                let Some(input) = scroll_projection.get_mut(id.index()) else {
+                    break;
+                };
+                if input.sticky_descendant || steps > self.world.boxes.len() {
+                    break;
+                }
+                input.sticky_descendant = true;
+                parent = self.world.boxes[id.index()].layout_parent;
+                steps += 1;
+            }
+        }
         let world = self.world;
         let boxes = self
             .boxes
@@ -1004,6 +1043,7 @@ where
             self.clip_chain,
             embedded_frames,
         )
+        .with_scroll_projection(scroll_projection)
     }
 }
 

@@ -110,6 +110,17 @@ impl LatestLayoutTreeCache {
         self.latest = None;
     }
 
+    pub(super) fn sync_scroll_offsets(
+        &mut self,
+        sample: &mut dyn FnMut(DomHandle) -> moli_layout::LayoutPoint,
+    ) -> moli_layout::ScrollOffsetSync {
+        self.latest
+            .as_mut()
+            .map_or(moli_layout::ScrollOffsetSync::Unchanged, |snapshot| {
+                snapshot.tree.sync_scroll_offsets(sample)
+            })
+    }
+
     #[cfg(test)]
     pub(super) fn observability(
         &self,

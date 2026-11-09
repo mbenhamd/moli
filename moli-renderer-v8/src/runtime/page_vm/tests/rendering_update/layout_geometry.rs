@@ -1254,24 +1254,24 @@ $('f').appendChild(document.createElement('div')).style.height = '40px';
             .eval("document.getElementById('s').scrollTop = 50; 'scrolled'")?;
         assert_eq!(layout_passes(&page_vm), passes + 2);
         // The next synchronous read sees the class, inline style, attribute,
-        // subtree and scroll changes. Layout bakes scroll offsets into the
-        // tree, so the scroll costs this read one more pass.
+        // subtree and scroll changes. The scroll moves the published layout
+        // in place, so this read lays out nothing more.
         assert_eq!(
             page_vm.vm_mut().eval(geometry)?,
             "[[200,150,120,0,800],40,-50]"
         );
-        assert_eq!(layout_passes(&page_vm), passes + 3);
+        assert_eq!(layout_passes(&page_vm), passes + 2);
         page_vm.vm_mut().eval(geometry)?;
-        assert_eq!(layout_passes(&page_vm), passes + 3);
+        assert_eq!(layout_passes(&page_vm), passes + 2);
 
         // A resize alone does not lay out; the next read sees the new width.
         page_vm.set_viewport_surface(Some(live_viewport(400, 40)))?;
-        assert_eq!(layout_passes(&page_vm), passes + 3);
+        assert_eq!(layout_passes(&page_vm), passes + 2);
         assert_eq!(
             page_vm.vm_mut().eval(geometry)?,
             "[[200,150,120,0,400],40,-50]"
         );
-        assert_eq!(layout_passes(&page_vm), passes + 4);
+        assert_eq!(layout_passes(&page_vm), passes + 3);
 
         // A node inserted after a read has a box and rendered text at the
         // next read, without a capture.

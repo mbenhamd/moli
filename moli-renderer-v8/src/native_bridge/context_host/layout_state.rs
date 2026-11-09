@@ -238,6 +238,13 @@ impl DocumentLayoutState {
             .is_layout_clean(document, inputs, dirty_mark)
     }
 
+    pub(super) fn sync_latest_layout_scroll_offsets(
+        &mut self,
+        sample: &mut dyn FnMut(DomHandle) -> moli_layout::LayoutPoint,
+    ) -> moli_layout::ScrollOffsetSync {
+        self.latest_layout.sync_scroll_offsets(sample)
+    }
+
     pub(super) fn clear_latest_layout(&mut self) {
         self.latest_layout.clear();
         self.mark_visual_state_dirty();

@@ -64,6 +64,11 @@ impl JsContextHost {
             self.document_layout_state.get_mut().clear_latest_layout();
         }
         self.layout_policy = policy;
+        // A scroll the live policy left for the next read to translate is,
+        // under any other policy, the visual-state change it always was.
+        if !policy.relayouts_stale_reads() && self.pending_scroll_offset_sync.replace(false) {
+            self.invalidate_layout_after_interaction_state_change();
+        }
     }
 
     pub(crate) const fn layout_policy(&self) -> moli_page_types::LayoutPolicy {
@@ -127,7 +132,8 @@ impl JsContextHost {
             self.dom_host().dom_version(),
             self.style_engine
                 .visual_style_input_generations(self.active_layout_document_handles()),
-            self.visual_state_generation(),
+            self.visual_state_generation()
+                .wrapping_add(self.scroll_offset_generation.get()),
             self.visual_resource_generation(),
             viewport,
             base_background_color,
@@ -359,6 +365,7 @@ impl JsContextHost {
             );
             return Ok(());
         }
+        self.sync_pending_scroll_offsets();
         let document = self.document_handle();
         let viewport = self.layout_viewport_for_document(document);
         let inputs = self.live_layout_input_key(viewport, None);
@@ -736,6 +743,7 @@ impl JsContextHost {
         document: DomHandle,
         inspect: impl FnOnce(&FrozenLayoutTree<DomHandle>) -> T,
     ) -> Option<T> {
+        self.sync_pending_scroll_offsets();
         let root = self
             .dom_host()
             .dom()
@@ -826,6 +834,53 @@ impl JsContextHost {
 
     pub(crate) fn invalidate_layout_after_interaction_state_change(&self) {
         self.invalidate_layout_inputs(LayoutInputChange::UsedGeometry);
+    }
+
+    /// A scroll offset changed under the live-geometry policy. Offsets are not
+    /// a layout input there: the next read of the published tree re-projects
+    /// it at the current offsets instead of laying out again, as Blink
+    /// updates scroll translation without layout. Its only caller,
+    /// `queue_scroll_observable_effects`, calls it under that policy alone.
+    pub(crate) fn invalidate_layout_after_scroll_offset_change(&self) {
+        debug_assert!(
+            self.layout_policy.relayouts_stale_reads(),
+            "only the live-geometry policy defers scroll offsets to the next read"
+        );
+        self.clear_layout_rect_cache();
+        self.scroll_offset_generation
+            .set(self.scroll_offset_generation.get().wrapping_add(1));
+        self.pending_scroll_offset_sync.set(true);
+    }
+
+    /// Moves the published tree to the Document's current scroll offsets
+    /// before it is read. A tree that cannot follow them is discarded, so the
+    /// next geometry read lays out again. While a native caller holds the
+    /// layout state the sync stays pending: that holder keeps reading the
+    /// tree it holds, as `ensure_current_layout` lets it keep a stale tree.
+    fn sync_pending_scroll_offsets(&self) {
+        if !self.pending_scroll_offset_sync.get() || !self.layout_policy.relayouts_stale_reads() {
+            return;
+        }
+        let Ok(mut state) = self.document_layout_state.try_borrow_mut() else {
+            return;
+        };
+        self.pending_scroll_offset_sync.set(false);
+        let dom = self.dom_host();
+        let mut sample = |node: DomHandle| {
+            dom.node(node)
+                .and_then(crate::dom::native::Node::as_element)
+                .map_or(moli_layout::LayoutPoint::ZERO, |element| {
+                    moli_layout::LayoutPoint::new(
+                        element.scroll_left() as f32,
+                        element.scroll_top() as f32,
+                    )
+                })
+        };
+        if state.sync_latest_layout_scroll_offsets(&mut sample)
+            == moli_layout::ScrollOffsetSync::NeedsLayout
+        {
+            state.clear_latest_layout();
+        }
     }
 
     pub(crate) fn document_web_font_resources_are_current(

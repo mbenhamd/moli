@@ -7,7 +7,7 @@ use crate::LayoutError;
 use super::model::{
     FrozenCoordinateSpace, LayoutBoxGeometry, LayoutClipNode, LayoutCoordinateSpaceId,
     LayoutFragment, LayoutFragmentId, LayoutOutputBoxId, LayoutPoint, LayoutScrollExtent,
-    LayoutSize, LayoutViewport,
+    LayoutSize, LayoutTransform2D, LayoutViewport,
 };
 use super::source_query::SourceProvenanceIndex;
 
@@ -119,8 +119,28 @@ where
     viewport_coordinate_space: FrozenCoordinateSpace,
     pub clip_chain: Vec<LayoutClipNode>,
     embedded_frames: Vec<FrozenEmbeddedFrame<N>>,
+    /// Per-box projection inputs that a scroll offset change re-projects
+    /// with; empty when the tree was not produced by a layout pass.
+    scroll_projection: Vec<ScrollProjectionInput>,
     /// Lazily derived from `boxes`, `fragments`, and `scroll_proxy_links`.
     source_index: OnceLock<SourceProvenanceIndex<N>>,
+}
+
+/// What [`FrozenLayoutTree::sync_scroll_offsets`] needs to rebuild one box's
+/// coordinate space exactly as the projection built it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ScrollProjectionInput {
+    /// The box's layout location in its layout parent's space.
+    pub(crate) location: LayoutPoint,
+    /// The box's resolved CSS transform.
+    pub(crate) css_transform: LayoutTransform2D,
+    /// A parentless box anchored to the viewport (fixed positioned).
+    pub(crate) viewport_anchored_root: bool,
+    /// The box is `position: sticky`.
+    pub(crate) sticky: bool,
+    /// A sticky box sits somewhere below this box in its layout parent
+    /// chain.
+    pub(crate) sticky_descendant: bool,
 }
 
 impl<N> FrozenLayoutTree<N>
@@ -223,6 +243,9 @@ where
             .saturating_add(allocation::<FrozenEmbeddedFrame<N>>(
                 self.embedded_frames.capacity(),
             ))
+            .saturating_add(allocation::<ScrollProjectionInput>(
+                self.scroll_projection.capacity(),
+            ))
             .saturating_add(box_allocations)
             .saturating_add(SourceProvenanceIndex::retained_bytes_bound(self));
         let embedded = self.embedded_frames.iter().fold(
@@ -320,6 +343,7 @@ where
             viewport_coordinate_space,
             clip_chain,
             embedded_frames,
+            scroll_projection: Vec::new(),
             source_index: OnceLock::new(),
         }
     }
@@ -348,6 +372,283 @@ where
         self.source_index.take();
         &mut self.boxes
     }
+
+    pub(crate) fn with_scroll_projection(mut self, inputs: Vec<ScrollProjectionInput>) -> Self {
+        self.scroll_projection = inputs;
+        self
+    }
+}
+
+/// Result of [`FrozenLayoutTree::sync_scroll_offsets`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScrollOffsetSync {
+    /// Every scroll container already applies its source's offset.
+    Unchanged,
+    /// Applied offsets, scrollbars and coordinate spaces now match the
+    /// sampled offsets.
+    Updated,
+    /// The tree cannot follow the new offsets without a layout pass.
+    NeedsLayout,
+}
+
+impl<N> FrozenLayoutTree<N>
+where
+    N: Copy + Debug + Eq + Hash,
+{
+    /// Re-samples every scroll container's offset and moves the published
+    /// projection to it without a layout pass.
+    ///
+    /// A layout pass reads scroll offsets only when it projects boxes: the
+    /// applied offset is the requested offset clamped to the box's scroll
+    /// range, each child of a non-root scroll container is translated by
+    /// minus that offset in the container's space, and every box that is not
+    /// anchored to the viewport is translated by minus the viewport offset.
+    /// Box sizes, positions, scroll ranges, clips and fragments do not depend
+    /// on them, so moving an offset is exactly a translation of the affected
+    /// coordinate spaces, which this applies.
+    ///
+    /// Sticky positioning is the exception: a sticky box's position follows
+    /// the offset of the scrollport it sticks to. A change that moves a
+    /// scroll container with a sticky descendant, or the viewport while any
+    /// sticky box exists, needs a layout pass instead.
+    ///
+    /// The sync runs in two phases. The first samples every offset and
+    /// resolves every moved coordinate space, in this tree and in every
+    /// embedded frame tree, without changing anything; any check that fails
+    /// returns [`ScrollOffsetSync::NeedsLayout`] with all trees as they were.
+    /// Only then does the second phase write the planned state.
+    ///
+    /// `sample` returns a source's scroll offset in CSSOM (unzoomed) pixels,
+    /// as [`crate::LayoutSource::scroll_offset`] does during a pass.
+    pub fn sync_scroll_offsets(
+        &mut self,
+        sample: &mut dyn FnMut(N) -> LayoutPoint,
+    ) -> ScrollOffsetSync {
+        match self.plan_scroll_offsets(sample) {
+            None => ScrollOffsetSync::NeedsLayout,
+            Some(plan) => {
+                if self.apply_scroll_plan(plan) {
+                    ScrollOffsetSync::Updated
+                } else {
+                    ScrollOffsetSync::Unchanged
+                }
+            }
+        }
+    }
+
+    /// Phase one: samples and resolves without changing anything. `None`
+    /// means a layout pass is needed.
+    fn plan_scroll_offsets(&self, sample: &mut dyn FnMut(N) -> LayoutPoint) -> Option<ScrollPlan> {
+        let mut frames = Vec::with_capacity(self.embedded_frames.len());
+        for frame in &self.embedded_frames {
+            frames.push(frame.tree.plan_scroll_offsets(sample)?);
+        }
+
+        // Sample each scroll container's offset, in the box's own zoomed
+        // coordinate space, as the projection does.
+        let mut moved = Vec::new();
+        for (index, layout_box) in self.boxes.iter().enumerate() {
+            let extent = &layout_box.scroll_extent;
+            if !extent.is_scroll_container {
+                continue;
+            }
+            let Some(source) = layout_box.principal_source else {
+                // Only a principal box imports a source offset; any other
+                // box was projected at the origin.
+                continue;
+            };
+            let zoom = layout_box.geometry.effective_zoom;
+            let offset = sample(source);
+            let requested = LayoutPoint::new(
+                finite_or_zero(offset.x * zoom),
+                finite_or_zero(offset.y * zoom),
+            );
+            let applied = LayoutPoint::new(
+                requested
+                    .x
+                    .clamp(extent.minimum_offset.x, extent.maximum_offset.x),
+                requested
+                    .y
+                    .clamp(extent.minimum_offset.y, extent.maximum_offset.y),
+            );
+            if applied != extent.applied_offset {
+                moved.push((index, applied));
+            }
+        }
+        if moved.is_empty() {
+            return Some(ScrollPlan {
+                frames,
+                update: None,
+            });
+        }
+
+        let root = self.root_box.index();
+        let count = self.boxes.len();
+        if root >= count || self.scroll_projection.len() != count {
+            return None;
+        }
+        let any_sticky = self.scroll_projection.iter().any(|input| input.sticky);
+        if moved.iter().any(|&(index, _)| {
+            self.scroll_projection[index].sticky_descendant || (index == root && any_sticky)
+        }) {
+            return None;
+        }
+
+        let mut applied_offsets: Vec<LayoutPoint> = self
+            .boxes
+            .iter()
+            .map(|layout_box| layout_box.scroll_extent.applied_offset)
+            .collect();
+        for &(index, applied) in &moved {
+            applied_offsets[index] = applied;
+        }
+        let viewport_scroll = applied_offsets[root];
+
+        // Resolve every coordinate space parent first with the projection's
+        // own arithmetic (`resolve_coordinate_space`): the f32 location minus
+        // the parent's applied offset, then the f64 concatenations. Adding an
+        // exact f64 delta instead would round differently than a fresh pass.
+        let mut document: Vec<Option<(LayoutTransform2D, LayoutTransform2D)>> = vec![None; count];
+        let mut chain = Vec::new();
+        for start in 0..count {
+            let mut current = start;
+            while document[current].is_none() {
+                chain.push(current);
+                match self.boxes[current].geometry.layout_parent {
+                    Some(parent) if parent.index() < count => current = parent.index(),
+                    Some(_) => return None,
+                    None => break,
+                }
+                if chain.len() > count {
+                    return None;
+                }
+            }
+            while let Some(index) = chain.pop() {
+                let input = self.scroll_projection[index];
+                let parent = self.boxes[index]
+                    .geometry
+                    .layout_parent
+                    .map(|parent| parent.index());
+                let parent_scroll = parent
+                    .filter(|parent| {
+                        *parent != root && self.boxes[*parent].scroll_extent.is_scroll_container
+                    })
+                    .map_or(LayoutPoint::ZERO, |parent| applied_offsets[parent]);
+                let local_to_parent_ignoring_css_transforms = LayoutTransform2D::translation(
+                    input.location.x - parent_scroll.x,
+                    input.location.y - parent_scroll.y,
+                );
+                let local_to_parent =
+                    local_to_parent_ignoring_css_transforms.concatenate(input.css_transform);
+                let resolved = match parent {
+                    None if input.viewport_anchored_root => {
+                        let anchor =
+                            LayoutTransform2D::translation(viewport_scroll.x, viewport_scroll.y);
+                        (
+                            anchor.concatenate(local_to_parent),
+                            anchor.concatenate(local_to_parent_ignoring_css_transforms),
+                        )
+                    }
+                    None => (
+                        LayoutTransform2D::IDENTITY.concatenate(local_to_parent),
+                        LayoutTransform2D::IDENTITY
+                            .concatenate(local_to_parent_ignoring_css_transforms),
+                    ),
+                    Some(parent) => {
+                        let (exact, plain) = document[parent]?;
+                        (
+                            exact.concatenate(local_to_parent),
+                            plain.concatenate(local_to_parent_ignoring_css_transforms),
+                        )
+                    }
+                };
+                document[index] = Some(resolved);
+            }
+        }
+        let to_viewport = LayoutTransform2D::translation(-viewport_scroll.x, -viewport_scroll.y);
+        let spaces = document
+            .into_iter()
+            .map(|resolved| {
+                resolved.map(|(exact, plain)| {
+                    (
+                        to_viewport.concatenate(exact),
+                        to_viewport.concatenate(plain),
+                    )
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(ScrollPlan {
+            frames,
+            update: Some(ScrollUpdate {
+                moved,
+                viewport_scroll,
+                spaces,
+            }),
+        })
+    }
+
+    /// Phase two: writes a plan from [`Self::plan_scroll_offsets`] on this
+    /// same tree. Returns whether any tree changed.
+    fn apply_scroll_plan(&mut self, plan: ScrollPlan) -> bool {
+        let mut updated = false;
+        for (frame, frame_plan) in self.embedded_frames.iter_mut().zip(plan.frames) {
+            updated |= frame.tree.apply_scroll_plan(frame_plan);
+        }
+        let Some(update) = plan.update else {
+            return updated;
+        };
+        for (index, applied) in update.moved {
+            let extent = &mut self.boxes[index].scroll_extent;
+            extent.applied_offset = applied;
+            extent.horizontal_scrollbar = extent.horizontal_scrollbar.map(|bar| {
+                crate::LayoutScrollbarGeometry::new(
+                    bar.axis,
+                    bar.frame,
+                    bar.minimum_offset,
+                    bar.maximum_offset,
+                    applied.x,
+                    extent.scrollport.width,
+                    extent.scroll_size.width,
+                )
+            });
+            extent.vertical_scrollbar = extent.vertical_scrollbar.map(|bar| {
+                crate::LayoutScrollbarGeometry::new(
+                    bar.axis,
+                    bar.frame,
+                    bar.minimum_offset,
+                    bar.maximum_offset,
+                    applied.y,
+                    extent.scrollport.height,
+                    extent.scroll_size.height,
+                )
+            });
+        }
+        self.viewport_scroll = update.viewport_scroll;
+        for (layout_box, (exact, plain)) in self.boxes.iter_mut().zip(update.spaces) {
+            let space = &mut layout_box.coordinate_space;
+            space.local_to_viewport = exact;
+            space.local_to_viewport_ignoring_css_transforms = plain;
+        }
+        true
+    }
+}
+
+/// Phase-one result of a scroll offset sync for one tree and its frames.
+struct ScrollPlan {
+    frames: Vec<ScrollPlan>,
+    update: Option<ScrollUpdate>,
+}
+
+/// The state one tree takes when its planned scroll offsets apply.
+struct ScrollUpdate {
+    moved: Vec<(usize, LayoutPoint)>,
+    viewport_scroll: LayoutPoint,
+    /// Each box's `local_to_viewport` with and without CSS transforms.
+    spaces: Vec<(LayoutTransform2D, LayoutTransform2D)>,
+}
+
+fn finite_or_zero(value: f32) -> f32 {
+    if value.is_finite() { value } else { 0.0 }
 }
 
 fn validate_retention_metrics(metrics: LayoutTreeRetentionMetrics) -> Result<(), LayoutError> {
