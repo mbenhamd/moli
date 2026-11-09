@@ -1534,10 +1534,13 @@ fn live_geometry_focus_without_focus_styles_reuses_the_published_layout() {
     let width = "String(document.getElementById('b').getBoundingClientRect().width)";
     let before = vm.eval(width).expect("first read");
     let passes = vm.layout_pass_observability_for_test().1;
-    vm.eval("document.getElementById('a').focus(); document.getElementById('b').focus(); 'focused'")
-        .expect("focus");
+    vm.eval(
+        "document.getElementById('a').focus(); document.getElementById('b').focus(); 'focused'",
+    )
+    .expect("focus");
     assert_eq!(
-        vm.eval("String(document.activeElement.id)").expect("active"),
+        vm.eval("String(document.activeElement.id)")
+            .expect("active"),
         "b"
     );
     assert_eq!(vm.eval(width).expect("read after focus"), before);
@@ -1564,10 +1567,12 @@ fn live_geometry_focus_styles_that_change_boxes_lay_out_again() {
     vm.eval("document.getElementById('b').focus(); 'focused b'")
         .expect("focus b");
     let focused_b = vm.eval(geometry).expect("read after focusing b");
-    let [a_height, b_left]: [f64; 2] =
-        serde_json::from_str(&focused_b).expect("geometry json");
+    let [a_height, b_left]: [f64; 2] = serde_json::from_str(&focused_b).expect("geometry json");
     let [unfocused_a_height, _]: [f64; 2] =
         serde_json::from_str(&unfocused).expect("geometry json");
-    assert_eq!(a_height, unfocused_a_height, "blur must drop :focus padding");
+    assert_eq!(
+        a_height, unfocused_a_height,
+        "blur must drop :focus padding"
+    );
     assert_eq!(b_left, 30.0, ":focus-within padding must reach geometry");
 }
