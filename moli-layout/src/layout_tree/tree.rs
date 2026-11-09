@@ -126,6 +126,11 @@ pub(crate) struct ScrollProjectionInput {
     pub(crate) css_transform: LayoutTransform2D,
     /// A parentless box anchored to the viewport (fixed positioned).
     pub(crate) viewport_anchored_root: bool,
+    /// The box is `position: sticky`.
+    pub(crate) sticky: bool,
+    /// A sticky box sits somewhere below this box in its layout parent
+    /// chain.
+    pub(crate) sticky_descendant: bool,
 }
 
 impl<N> FrozenLayoutTree<N>
@@ -197,6 +202,9 @@ where
             .saturating_add(allocation::<LayoutClipNode>(self.clip_chain.capacity()))
             .saturating_add(allocation::<FrozenEmbeddedFrame<N>>(
                 self.embedded_frames.capacity(),
+            ))
+            .saturating_add(allocation::<ScrollProjectionInput>(
+                self.scroll_projection.capacity(),
             ))
             .saturating_add(box_allocations);
         let embedded = self.embedded_frames.iter().fold(
@@ -329,9 +337,14 @@ where
     /// minus that offset in the container's space, and every box that is not
     /// anchored to the viewport is translated by minus the viewport offset.
     /// Box sizes, positions, scroll ranges, clips and fragments do not depend
-    /// on them; sticky positioning resolves against the unscrolled scrollport
-    /// (`finish_sticky_positioning`). Moving an offset is therefore exactly a
-    /// translation of the affected coordinate spaces, which this applies.
+    /// on them, so moving an offset is exactly a translation of the affected
+    /// coordinate spaces, which this applies.
+    ///
+    /// Sticky positioning is the exception: a sticky box's position follows
+    /// the offset of the scrollport it sticks to. A change that moves a
+    /// scroll container with a sticky descendant, or the viewport while any
+    /// sticky box exists, needs a layout pass instead. That is decided
+    /// before any applied offset changes, so the tree stays as it was.
     ///
     /// `sample` returns a source's scroll offset in CSSOM (unzoomed) pixels,
     /// as [`crate::LayoutSource::scroll_offset`] does during a pass.
@@ -348,11 +361,11 @@ where
             }
         }
 
-        // Apply each scroll container's sampled offset, in the box's own
-        // zoomed coordinate space, as the projection does.
-        let mut any_moved = false;
-        for layout_box in &mut self.boxes {
-            let extent = &mut layout_box.scroll_extent;
+        // Sample each scroll container's offset, in the box's own zoomed
+        // coordinate space, as the projection does. Nothing changes yet.
+        let mut moved = Vec::new();
+        for (index, layout_box) in self.boxes.iter().enumerate() {
+            let extent = &layout_box.scroll_extent;
             if !extent.is_scroll_container {
                 continue;
             }
@@ -375,10 +388,28 @@ where
                     .y
                     .clamp(extent.minimum_offset.y, extent.maximum_offset.y),
             );
-            if applied == extent.applied_offset {
-                continue;
+            if applied != extent.applied_offset {
+                moved.push((index, applied));
             }
-            any_moved = true;
+        }
+        if moved.is_empty() {
+            return outcome;
+        }
+
+        let root = self.root_box.index();
+        let count = self.boxes.len();
+        if root >= count || self.scroll_projection.len() != count {
+            return ScrollOffsetSync::NeedsLayout;
+        }
+        let any_sticky = self.scroll_projection.iter().any(|input| input.sticky);
+        if moved.iter().any(|&(index, _)| {
+            self.scroll_projection[index].sticky_descendant || (index == root && any_sticky)
+        }) {
+            return ScrollOffsetSync::NeedsLayout;
+        }
+
+        for (index, applied) in moved {
+            let extent = &mut self.boxes[index].scroll_extent;
             extent.applied_offset = applied;
             extent.horizontal_scrollbar = extent.horizontal_scrollbar.map(|bar| {
                 crate::LayoutScrollbarGeometry::new(
@@ -403,15 +434,7 @@ where
                 )
             });
         }
-        if !any_moved {
-            return outcome;
-        }
 
-        let root = self.root_box.index();
-        let count = self.boxes.len();
-        if root >= count || self.scroll_projection.len() != count {
-            return ScrollOffsetSync::NeedsLayout;
-        }
         let viewport_scroll = self.boxes[root].scroll_extent.applied_offset;
         self.viewport_scroll = viewport_scroll;
 
