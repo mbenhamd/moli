@@ -5506,35 +5506,6 @@ fn tab_key_skips_scroll_host_with_shadow_focusable_descendant() {
     assert_eq!(result, "inner");
 }
 #[test]
-fn blur_on_non_delegates_shadow_host_does_not_clear_inner_focus() {
-    let mut vm = new_streamed_parser_test_vm(
-        "https://shadow-host-blur.test/",
-        r#"<!doctype html>
-<div id="host">
-  <template shadowrootmode="open">
-    <input id="inner">
-  </template>
-</div>
-"#,
-    );
-
-    let result = vm
-        .eval(
-            r#"
-(() => {
-  const host = document.getElementById('host');
-  const inner = host.shadowRoot.getElementById('inner');
-  inner.focus();
-  host.blur();
-  return host.shadowRoot.activeElement && host.shadowRoot.activeElement.id;
-})()
-"#,
-        )
-        .expect("non-delegates host blur should not clear focused shadow child");
-
-    assert_eq!(result, "inner");
-}
-#[test]
 fn tab_key_follows_nested_shadow_focus_pairwise_navigation() {
     let mut vm = new_streamed_parser_test_vm(
         "https://shadow-focus-pairwise-scope.test/",
@@ -6463,10 +6434,11 @@ fn shadow_host_blur_without_delegates_focus_blurs_its_shadow_focus() {
   const focused = document.activeElement === host && shadow.activeElement === inner;
   host.blur();
   const blurred = document.activeElement === document.body && shadow.activeElement === null;
+  const events = seen.join(',');
   document.getElementById('outside').focus();
   host.blur();
   const untouched = document.activeElement.id;
-  return JSON.stringify([focused, blurred, seen.join(','), untouched]);
+  return JSON.stringify([focused, blurred, events, untouched]);
 })()"#,
         )
         .expect("host blur");
