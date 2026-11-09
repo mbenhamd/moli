@@ -226,6 +226,26 @@ pub fn is_point_in_fill_with_rule(
     })
 }
 
+/// Whether `point` lies within `half_width` of the element's rendered outline.
+///
+/// This is the stroke area with round joins and caps; it does not model
+/// butt/square caps, miter joins or dashing.
+pub fn is_point_within_outline_distance(
+    element: &SvgGeometryElement,
+    point: SvgGeometryPoint,
+    half_width: f64,
+) -> bool {
+    if !point.x.is_finite() || !point.y.is_finite() || half_width.is_nan() || half_width <= 0.0 {
+        return false;
+    }
+    let point = Point::new(point.x, point.y);
+    let limit = half_width * half_width;
+    geometry_path(element).is_some_and(|path| {
+        path.segments()
+            .any(|segment| segment.nearest(point, FILL_BOUNDARY_EPSILON).distance_sq <= limit)
+    })
+}
+
 pub fn point_at_length(segments: &[SvgGeometrySegment], distance: f64) -> SvgGeometryPoint {
     let Some(first) = segments.first() else {
         return SvgGeometryPoint::new(0.0, 0.0);

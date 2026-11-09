@@ -1699,14 +1699,14 @@ pub(super) fn svg_bbox_has_non_rendered_ancestor(
     false
 }
 
-fn svg_local_name_is_non_rendered_container(local_name: &str) -> bool {
+pub(super) fn svg_local_name_is_non_rendered_container(local_name: &str) -> bool {
     matches!(
         local_name,
         "clipPath" | "defs" | "marker" | "mask" | "pattern" | "symbol"
     )
 }
 
-fn svg_element_has_display_none(
+pub(super) fn svg_element_has_display_none(
     runtime: &crate::native_bridge::JsContextHost,
     handle: crate::document_runtime::DomHandle,
 ) -> bool {

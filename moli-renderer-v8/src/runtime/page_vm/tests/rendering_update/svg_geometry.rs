@@ -167,3 +167,111 @@ document.body.innerHTML = `<svg id=s width=300 height=150 viewBox="0 0 600 300" 
     .await
     .expect("foreignObject geometry fixture should run");
 }
+
+fn svg_hit_test_page_vm(name: &str, body: &str) -> anyhow::Result<PageVm> {
+    let loader =
+        crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+    let mut page_vm = test_page_vm_with_loader_and_document_url(
+        &loader,
+        Vec::new(),
+        Url::parse(&format!("https://example.com/{name}.html"))?,
+    );
+    page_vm.vm_mut().eval(&format!(
+        r#"
+document.head.innerHTML = '<style>html,body{{margin:0}}</style>';
+document.body.innerHTML = `{body}`;
+globalThis.__hits = points => points.map(([x, y]) => {{
+  const name = element => element ? (element.id || element.localName) : 'null';
+  return name(document.elementFromPoint(x, y)) + '|' +
+    document.elementsFromPoint(x, y).map(name).join(',');
+}}).join(' ');
+'installed'
+"#
+    ))?;
+    page_vm.vm_mut().sync_live_document_style_sources();
+    page_vm.vm_mut().publish_layout_for_test()?;
+    Ok(page_vm)
+}
+
+/// Layout stops at the outer `<svg>` box; the point then resolves against
+/// the SVG geometry below it, foremost shape first.
+#[tokio::test(flavor = "current_thread")]
+async fn elements_from_point_resolve_svg_shapes_below_the_outer_svg_box() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-shape-hit-test",
+            r#"<svg id=s width=200 height=100 viewBox="0 0 100 50" style="display:block">
+  <rect id=r x=5 y=5 width=40 height=40 fill=blue />
+  <circle id=c cx=25 cy=25 r=10 fill=red />
+  <g transform="translate(50,0)"><line id=l x1=0 y1=25 x2=40 y2=25 stroke=black stroke-width=4 /></g>
+  <circle id=ring cx=80 cy=40 r=5 fill=none stroke=green stroke-width=2 />
+</svg>"#,
+        )?;
+        // The viewBox halves user units: client (x, y) is user (x/2, y/2).
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                "__hits([[50, 50], [14, 14], [140, 53], [140, 57], [170, 80], [160, 80], [190, 10]])"
+            )?,
+            [
+                "c|c,r,s,body,html",
+                "r|r,s,body,html",
+                "l|l,s,body,html",
+                "s|s,body,html",
+                "ring|ring,s,body,html",
+                "s|s,body,html",
+                "s|s,body,html",
+            ]
+            .join(" "),
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG shape hit-test fixture should run");
+}
+
+/// CSSOM View: a point inside the viewport always yields the document
+/// element, even over no box; outside the viewport there is no hit.
+#[tokio::test(flavor = "current_thread")]
+async fn element_from_point_falls_back_to_the_root_inside_the_viewport() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "root-fallback-hit-test",
+            r#"<div id=box style="position:absolute;left:0;top:0;width:40px;height:40px"></div>"#,
+        )?;
+        assert_eq!(
+            page_vm
+                .vm_mut()
+                .eval("__hits([[10, 10], [150, 150], [-1, 10]])")?,
+            "box|box,html html|html null|",
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("root fallback hit-test fixture should run");
+}
+
+/// SVG content can re-enable pointer events below an outer `<svg>` that is
+/// transparent to them; content that inherits `none` lets the point through.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_content_pointer_events_override_a_transparent_outer_svg() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-pointer-events-hit-test",
+            r#"<div id=under style="position:absolute;left:0;top:0;width:200px;height:100px"></div>
+<svg id=s width=200 height=100 style="position:absolute;left:0;top:0;pointer-events:none">
+  <circle id=on cx=50 cy=50 r=20 style="pointer-events:auto" />
+  <circle id=off cx=150 cy=50 r=20 />
+</svg>"#,
+        )?;
+        let hits = page_vm.vm_mut().eval(
+            r#"[[50, 50], [150, 50], [5, 5]].map(([x, y]) => {
+  const list = document.elementsFromPoint(x, y);
+  return [document.elementFromPoint(x, y)?.id, list[0]?.id, list[1]?.id, list.includes(document.getElementById('s'))].join(',');
+}).join(' ')"#,
+        )?;
+        assert_eq!(hits, "on,on,under,false under,under,,false under,under,,false");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG pointer-events hit-test fixture should run");
+}

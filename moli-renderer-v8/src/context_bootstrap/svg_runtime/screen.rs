@@ -5,12 +5,13 @@
 //! CTM: element transforms, nested viewports and the outer viewport's viewBox
 //! mapping into the outer box's content area.
 
-use moli_svg::SvgMatrixComponents;
+use moli_svg::{SvgFillRule, SvgGeometryPoint, SvgMatrixComponents};
 
 use super::builders::{
     parse_svg_preserve_aspect_ratio_value, parse_svg_view_box_value, svg_bbox_for_handle,
-    svg_bbox_has_non_rendered_ancestor, svg_computed_pixel_value,
-    svg_geometry_optional_length_attribute_for_handle, svg_transform_for_handle,
+    svg_bbox_has_non_rendered_ancestor, svg_computed_pixel_value, svg_element_has_display_none,
+    svg_geometry_element_for_handle, svg_geometry_optional_length_attribute_for_handle,
+    svg_local_name_is_non_rendered_container, svg_transform_for_handle,
 };
 use super::{
     SVG_MEET_OR_SLICE_SLICE, SVG_PRESERVE_ASPECT_RATIO_NONE, SVG_PRESERVE_ASPECT_RATIO_X_MAX_Y_MAX,
@@ -29,7 +30,7 @@ fn is_svg_element(runtime: &JsContextHost, handle: DomHandle) -> bool {
         .is_some_and(|node| node.namespace() == Some(crate::native_bridge::document::SVG_NS))
 }
 
-fn is_outermost_svg(runtime: &JsContextHost, handle: DomHandle) -> bool {
+pub(crate) fn is_outermost_svg(runtime: &JsContextHost, handle: DomHandle) -> bool {
     let Some(node) = runtime.dom_host().node(handle) else {
         return false;
     };
@@ -276,4 +277,144 @@ fn svg_view_box_transform(
         e: translate_x,
         f: translate_y,
     }
+}
+
+/// SVG content of the outermost `<svg>` `root` under `point`, foremost
+/// (last in document order) first.
+///
+/// `content_box` is `root`'s CSS content box `[x, y, width, height]` and
+/// `point` the query point, both in the coordinate space of `root`'s hit
+/// fragment, so CSS transforms on the outer box are already undone.
+///
+/// Every candidate honours `pointer-events` (`auto` acts as
+/// `visiblePainted`) and `visibility`. Basic shapes and paths test their
+/// exact fill and, for a painted stroke, the area within half the stroke
+/// width of the outline (round joins and caps, no dashing). Text, images,
+/// `use` and `foreignObject` test their SVG bounding box. Nested viewport
+/// clipping, `clip-path` and masks are not applied.
+pub(crate) fn svg_content_hits_at_point(
+    runtime: &JsContextHost,
+    root: DomHandle,
+    content_box: [f64; 4],
+    point: [f64; 2],
+) -> Vec<DomHandle> {
+    let [x, y, width, height] = content_box;
+    let root_ctm = SvgMatrixComponents::translate(x, y)
+        .multiply(svg_view_box_transform(runtime, root, width, height));
+    let mut hits = Vec::new();
+    collect_svg_content_hits(runtime, root, root_ctm, point, &mut hits);
+    hits.reverse();
+    hits
+}
+
+fn collect_svg_content_hits(
+    runtime: &JsContextHost,
+    parent: DomHandle,
+    parent_ctm: SvgMatrixComponents,
+    point: [f64; 2],
+    hits: &mut Vec<DomHandle>,
+) {
+    for child in runtime.dom_host().child_handles(parent) {
+        let Some(node) = runtime.dom_host().node(child) else {
+            continue;
+        };
+        if node.namespace() != Some(crate::native_bridge::document::SVG_NS) {
+            continue;
+        }
+        let Some(local_name) = node.local_name() else {
+            continue;
+        };
+        if svg_local_name_is_non_rendered_container(local_name)
+            || svg_element_has_display_none(runtime, child)
+        {
+            continue;
+        }
+        let local = if local_name == "svg" {
+            svg_nested_viewport_transform(runtime, child)
+        } else {
+            svg_transform_for_handle(runtime, child)
+        };
+        let ctm = parent_ctm.multiply(local);
+        if svg_content_contains_point(runtime, child, local_name, ctm, point) {
+            hits.push(child);
+        }
+        if !matches!(local_name, "use" | "image" | "foreignObject") {
+            collect_svg_content_hits(runtime, child, ctm, point, hits);
+        }
+    }
+}
+
+fn svg_content_contains_point(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+    local_name: &str,
+    ctm: SvgMatrixComponents,
+    [x, y]: [f64; 2],
+) -> bool {
+    use style::values::computed::{FillRule, SVGPaintKind};
+    use style::values::generics::svg::SVGLength;
+    let Some(computed) =
+        crate::native_bridge::element::ComputedStyleRead::new(runtime, handle).computed_values()
+    else {
+        return false;
+    };
+    // Stylo's Servo build parses only `auto | none`; SVG treats `auto` as
+    // `visiblePainted`.
+    if computed.clone_pointer_events() == style::computed_values::pointer_events::T::None
+        || computed.clone_visibility() != style::computed_values::visibility::T::Visible
+        || !ctm.is_invertible()
+    {
+        return false;
+    }
+    let inverse = ctm.inverse();
+    let local = SvgGeometryPoint::new(
+        inverse.a * x + inverse.c * y + inverse.e,
+        inverse.b * x + inverse.d * y + inverse.f,
+    );
+    if let Some(geometry) = svg_geometry_element_for_handle(runtime, handle) {
+        if !matches!(computed.clone_fill().kind, SVGPaintKind::None) {
+            let rule = if computed.clone_fill_rule() == FillRule::Evenodd {
+                SvgFillRule::EvenOdd
+            } else {
+                SvgFillRule::NonZero
+            };
+            if moli_svg::is_point_in_fill_with_rule(&geometry, local, rule) {
+                return true;
+            }
+        }
+        if matches!(computed.clone_stroke().kind, SVGPaintKind::None) {
+            return false;
+        }
+        // Percentages resolve against the viewport diagonal; they fall back
+        // to the initial width here.
+        let width = match computed.clone_stroke_width() {
+            SVGLength::LengthPercentage(width) => width
+                .0
+                .to_length()
+                .map_or(1.0, |length| f64::from(length.px())),
+            SVGLength::ContextValue => 1.0,
+        };
+        return moli_svg::is_point_within_outline_distance(&geometry, local, width / 2.0);
+    }
+    let bbox_target = match local_name {
+        "image" | "use" | "foreignObject" => true,
+        "text" | "tspan" | "textPath" | "a" => {
+            super::text_layout::svg_text_root(runtime, handle).is_some()
+        }
+        _ => false,
+    };
+    bbox_target
+        && svg_bbox_for_handle(
+            runtime,
+            handle,
+            SvgMatrixComponents::identity(),
+            false,
+            &mut Vec::new(),
+        )
+        .is_some_and(|bounds| {
+            local.x >= bounds.x
+                && local.y >= bounds.y
+                && local.x <= bounds.x + bounds.width
+                && local.y <= bounds.y + bounds.height
+        })
 }
