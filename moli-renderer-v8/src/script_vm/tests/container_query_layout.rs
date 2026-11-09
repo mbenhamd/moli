@@ -190,7 +190,35 @@ fn print_pass_does_not_poison_screen_container_sizes() {
 }
 
 #[test]
-fn an_attribute_no_selector_reads_needs_no_pass_but_a_size_change_does() {
+#[ignore = "Stylo records attr() dependencies only in container preludes, so an attribute write never restyles content: attr(); stale on main too"]
+fn an_attribute_read_by_generated_content_resizes_a_sibling_container() {
+    let mut vm = live_vm(
+        r#"<style>
+          body { margin: 0; font: 16px/1 monospace; }
+          #row { display: flex; width: 600px; }
+          #label { flex: none; }
+          #label::before { content: attr(data-l); }
+          #c { flex: 1; container-type: inline-size; }
+          #t { outline-offset: 1px; }
+          @container (min-width: 400px) { #t { outline-offset: 9px; } }
+        </style>
+        <div id="row"><div id="label"></div><div id="c"><div id="t"></div></div></div>"#,
+    );
+    let result = vm
+        .eval(
+            r#"(() => {
+              const t = document.getElementById('t');
+              const wide = getComputedStyle(t).outlineOffset;
+              document.getElementById('label').dataset.l = 'x'.repeat(40);
+              return wide + '|' + getComputedStyle(t).outlineOffset;
+            })()"#,
+        )
+        .expect("eval");
+    assert_eq!(result, "9px|1px");
+}
+
+#[test]
+fn an_attribute_no_selector_reads_needs_no_pass_but_a_selector_read_one_does() {
     let mut vm = live_vm(STYLES);
     vm.eval("getComputedStyle(document.getElementById('dep')).color")
         .expect("eval");
@@ -247,8 +275,8 @@ fn a_pseudo_element_read_flushes_container_sizes() {
     let mut vm = live_vm(
         r#"<style>
           #c { container-type: inline-size; width: 100px; }
-          #k::before { content: ""; display: block; width: 50cqw; height: 1px; }
-          #k::after { content: ""; display: block; width: 20cqi; height: 1px; }
+          #k::before { content: ""; display: block; outline-offset: 5cqw; }
+          #k::after { content: ""; display: block; outline-offset: 2cqi; }
         </style>
         <div id="c"><div id="k" style="display:inline-block"></div></div>"#,
     );
@@ -256,11 +284,11 @@ fn a_pseudo_element_read_flushes_container_sizes() {
         .eval(
             r#"(() => {
               const k = document.getElementById('k');
-              const first = getComputedStyle(k, '::before').width;
+              const first = getComputedStyle(k, '::before').outlineOffset;
               document.getElementById('c').style.width = '400px';
-              return [first, getComputedStyle(k, '::before').width, getComputedStyle(k, '::after').width].join('|');
+              return [first, getComputedStyle(k, '::before').outlineOffset, getComputedStyle(k, '::after').outlineOffset].join('|');
             })()"#,
         )
         .expect("eval");
-    assert_eq!(result, "50px|200px|80px");
+    assert_eq!(result, "5px|20px|8px");
 }

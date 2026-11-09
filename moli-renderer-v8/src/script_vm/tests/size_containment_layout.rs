@@ -55,3 +55,17 @@ fn a_size_contained_image_drops_its_natural_ratio_but_keeps_an_explicit_one() {
     );
     assert_eq!(result, "100x0|100x25");
 }
+
+#[test]
+fn a_size_contained_replaced_element_keeps_a_specified_height_alone() {
+    let svg =
+        "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='100'/%3E";
+    let result = measure(
+        &format!(
+            r#"<img id="image" src="{svg}" style="contain:size;height:50px;display:block">
+            <canvas id="canvas" style="contain:size;height:40px;display:block"></canvas>"#
+        ),
+        r#"['image','canvas'].map((id) => { const r = document.getElementById(id).getBoundingClientRect(); return r.width + 'x' + r.height; }).join('|')"#,
+    );
+    assert_eq!(result, "0x50|0x40");
+}

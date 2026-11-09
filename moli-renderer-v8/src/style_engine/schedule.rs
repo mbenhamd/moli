@@ -30,17 +30,24 @@ pub(super) fn queue_style_invalidation_for_scope(
     let Some(source_scope) = source_scope else {
         return;
     };
-    // A hover change or attribute write is a style input only when some
-    // selector depends on it; one that invalidates no element leaves every
-    // computed style, and so the live-geometry layout inputs, unchanged.
-    // Other causes keep bumping the generation up front.
+    // A hover change, or a write to an attribute that box construction never
+    // reads, is a style input only when some selector depends on it. One that
+    // invalidates no element leaves every computed style, and so the
+    // live-geometry layout inputs, unchanged. Other causes keep bumping the
+    // generation up front.
     let state_change = match &cause {
         PendingStyleInvalidationCause::StateChange { state, .. } => {
             *state == dom::ElementState::HOVER
         }
-        PendingStyleInvalidationCause::Mutation(effects) => effects
-            .iter()
-            .all(|effect| matches!(effect, super::StyleMutationEffect::Attribute { .. })),
+        PendingStyleInvalidationCause::Mutation(effects) => {
+            !effects.is_empty() && effects.iter().all(|effect| {
+                matches!(
+                    effect,
+                    super::StyleMutationEffect::Attribute { name, .. }
+                        if crate::dom::native::attribute_reaches_layout_only_through_selectors(name)
+                )
+            })
+        }
         _ => false,
     };
     if !state_change {

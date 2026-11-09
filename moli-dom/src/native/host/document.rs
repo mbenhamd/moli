@@ -206,21 +206,18 @@ impl DomHost {
         self.dom_version.get() - self.hover_version.get()
     }
 
-    /// The DOM version without hover moves and without changes to attributes
-    /// that reach layout only through the style invalidation of selectors
-    /// reading them.
+    /// The DOM version without hover moves and without writes to attributes
+    /// that box construction never reads (see
+    /// [`attribute_reaches_layout_only_through_selectors`]). Such a write moves
+    /// layout only by restyling some element, which the style engine reports
+    /// separately.
     pub fn layout_relevant_dom_version(&self) -> u64 {
         self.dom_version_excluding_hover() - self.style_only_attribute_version.get()
     }
 
     pub(super) fn record_attribute_mutation(&self, name: &str) {
         self.record_mutation(MutationScope::QueryState);
-        let lower = name.to_ascii_lowercase();
-        if lower == "class"
-            || lower == "id"
-            || lower.starts_with("data-")
-            || lower.starts_with("aria-")
-        {
+        if attribute_reaches_layout_only_through_selectors(name) {
             self.style_only_attribute_version
                 .set(self.style_only_attribute_version.get().saturating_add(1));
         }
@@ -3210,4 +3207,19 @@ fn can_host_shadow_root(element: &Element) -> bool {
             | "section"
             | "span"
     )
+}
+
+/// Whether layout can observe a write to `name` only through a selector that
+/// reads it. Box construction never reads `class`, `id`, `data-*` or `aria-*`;
+/// the one other reader, `content: attr()`, is substituted at compute time and
+/// never invalidated by Stylo, so it is stale with or without this split.
+pub fn attribute_reaches_layout_only_through_selectors(name: &str) -> bool {
+    name.eq_ignore_ascii_case("class")
+        || name.eq_ignore_ascii_case("id")
+        || name
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data-"))
+        || name
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("aria-"))
 }
