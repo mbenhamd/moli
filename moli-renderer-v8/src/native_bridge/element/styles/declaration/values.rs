@@ -23,7 +23,7 @@ use crate::{
     },
 };
 use cssparser::{Parser, Token, serialize_identifier, serialize_string};
-use moli_selector::html_directionality;
+use moli_selector::{html_directionality, html_directionality_lacks_stylo_hint};
 use std::collections::{HashMap, HashSet};
 use style::{properties::ComputedValues, servo_arc::Arc as ServoArc, stylesheets::CssRuleType};
 
