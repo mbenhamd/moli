@@ -63,8 +63,13 @@ fn node_scroll_position_value<'s>(
         f64::from(metrics.minimum_scroll_offset.y),
         f64::from(metrics.maximum_scroll_offset.y),
     );
-    if !is_document_root && (clamped_left != left || clamped_top != top) {
-        set_node_scroll_position(scope, runtime_ptr, handle, clamped_left, clamped_top, false);
+    if !is_document_root
+        && (clamped_left != left || clamped_top != top)
+        && set_node_scroll_position(scope, runtime_ptr, handle, clamped_left, clamped_top, false)
+    {
+        // A layout clamp moves the scroll position, so Chromium fires
+        // `scroll` at the element. Moli applies the clamp when a read lays out.
+        let _ = unsafe { &mut *runtime_ptr }.queue_element_scroll_events(scope, handle);
     }
     if horizontal {
         clamped_left

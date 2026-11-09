@@ -610,6 +610,7 @@ fn live_native_attr_object_from_metadata<'s>(
     element: v8::Local<'s, v8::Object>,
     metadata: &DetachedAttrNodeMetadata,
 ) -> Option<v8::Local<'s, v8::Object>> {
+    let element = canonical_detached_node_object(scope, element)?;
     let cache = live_attr_cache_object(scope, element)?;
     let namespace_key =
         namespace_attr_cache_key(metadata.namespace_uri.as_deref(), &metadata.local_name);

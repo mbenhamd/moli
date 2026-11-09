@@ -3973,10 +3973,18 @@ pub(super) fn svg_text_content_get_number_of_chars_callback<'s>(
 
 pub(super) fn svg_text_content_get_computed_text_length_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    _args: v8::FunctionCallbackArguments<'s>,
+    args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    rv.set(v8::Number::new(scope, 0.0).into());
+    let length = moli_webapi_declare::web_api_object_target(scope, args.this())
+        .and_then(|receiver| {
+            crate::native_bridge::node_runtime_and_handle_from_object_or_detached(scope, receiver)
+                .ok()
+        })
+        .map_or(0.0, |(runtime_ptr, handle)| {
+            super::text_layout::svg_computed_text_length(unsafe { &*runtime_ptr }, handle)
+        });
+    rv.set(v8::Number::new(scope, f64::from(length as f32)).into());
 }
 
 pub(super) fn svg_text_content_get_substring_length_callback<'s>(

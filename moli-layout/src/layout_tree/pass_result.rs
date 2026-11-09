@@ -53,6 +53,15 @@ pub struct LayoutPassMetrics {
     /// Boxes whose local or descendant overflow was recomputed after the
     /// initial linear overflow projection. Unaffected branches are excluded.
     pub numeric_feedback_overflow_recomputed_node_count: usize,
+    /// Style-and-layout iterations this pass ran to converge container
+    /// queries. One when no container size changed.
+    pub container_query_iteration_count: usize,
+    /// Boxes this pass found identical to the retained world.
+    pub retained_reused_box_count: usize,
+    /// Inline formatting contexts moved from the retained world.
+    pub retained_reused_inline_count: usize,
+    /// Boxes whose numeric results moved from the retained world.
+    pub retained_reused_numeric_count: usize,
     pub box_count: usize,
     pub fragment_count: usize,
     /// Paint-order events considered for this capture before viewport culling.
