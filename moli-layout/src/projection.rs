@@ -926,6 +926,23 @@ where
                 .next()
                 .expect("a frozen layout tree always owns the viewport coordinate space"),
         );
+        let scroll_projection = self
+            .world
+            .boxes
+            .iter()
+            .zip(&self.resolved_transforms)
+            .map(
+                |(layout_box, transform)| crate::layout_tree::ScrollProjectionInput {
+                    location: LayoutPoint::new(
+                        layout_box.final_layout.location.x,
+                        layout_box.final_layout.location.y,
+                    ),
+                    css_transform: transform.transform,
+                    viewport_anchored_root: layout_box.layout_parent.is_none()
+                        && layout_box.style.is_fixed_positioned(),
+                },
+            )
+            .collect();
         let world = self.world;
         let boxes = self
             .boxes
@@ -993,6 +1010,7 @@ where
             self.clip_chain,
             embedded_frames,
         )
+        .with_scroll_projection(scroll_projection)
     }
 }
 
