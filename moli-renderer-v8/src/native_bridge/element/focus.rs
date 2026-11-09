@@ -1347,6 +1347,11 @@ fn focus_element_with_options(
         is_focusable(runtime, handle).then_some(handle)
     };
     if let Some(target) = target {
+        // Focusing the element that already has focus does nothing: no
+        // events and no scroll into view (HTML "focusing steps", step 4).
+        if runtime.active_element_handle() == Some(target) {
+            return Ok(());
+        }
         update_focus(scope, runtime_ptr, Some(target));
         if !prevent_scroll {
             scroll_node_into_view_if_needed(scope, runtime_ptr, target, None)?;
@@ -1431,14 +1436,14 @@ pub(in crate::native_bridge) fn node_blur_callback<'s>(
         return;
     };
     let runtime = unsafe { &*runtime_ptr };
-    let delegated_active = runtime
+    // Like Blink's `Element::blur`, a shadow host blurs when the focused
+    // element, retargeted to the host's tree, is the host: focus anywhere in
+    // its shadow tree, with or without `delegatesFocus`.
+    let focus_in_shadow_tree = runtime
         .active_element_handle()
         .zip(runtime.dom_host().shadow_root_handle(handle))
-        .is_some_and(|(active, root)| {
-            runtime.dom_host().shadow_root_delegates_focus(root) == Some(true)
-                && shadow_including_contains(runtime, root, active)
-        });
-    if runtime.active_element_handle() == Some(handle) || delegated_active {
+        .is_some_and(|(active, root)| shadow_including_contains(runtime, root, active));
+    if runtime.active_element_handle() == Some(handle) || focus_in_shadow_tree {
         update_focus(scope, runtime_ptr, None);
     }
     rv.set_undefined();
