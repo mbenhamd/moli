@@ -241,6 +241,9 @@ where
     // scrollbars (or equivalent) oscillate, and the pass keeps the current
     // world rather than alternate forever. Only the last world is published.
     let mut seen_sizes: Vec<Vec<(S::NodeId, crate::LayoutQueryContainerSize)>> = Vec::new();
+    // Container sizes last handed to the style resolver, so the differential
+    // check can put the resolver back after its own full pass.
+    let mut applied_sizes: Option<Vec<(S::NodeId, crate::LayoutQueryContainerSize)>> = None;
     // Web fonts change shaping through registration and per-pass face order,
     // neither of which a box comparison can see, so they keep the full path.
     let can_retain = request.retain_world && services.web_font_count() == 0;
@@ -298,10 +301,13 @@ where
 
         let (sizes, depth) = world.query_container_sizes();
         let hard_cap = (depth + 3).max(MIN_CONTAINER_QUERY_ITERATION_CAP);
-        if seen_sizes.contains(&sizes)
-            || container_query_iteration_count >= hard_cap
-            || !styles.update_query_container_sizes(&sizes)?
-        {
+        let converged =
+            seen_sizes.contains(&sizes) || container_query_iteration_count >= hard_cap || {
+                let changed = styles.update_query_container_sizes(&sizes)?;
+                applied_sizes = Some(sizes.clone());
+                !changed
+            };
+        if converged {
             break (
                 world,
                 numeric_metrics,
@@ -392,7 +398,9 @@ where
             retained_reused_numeric_count: reused_numeric_count,
         },
     )?;
-    if can_retain {
+    // A pass over the retention budget fails its read; it must not leave its
+    // whole world retained behind that failure.
+    if can_retain && result.validate_retention_budget().is_ok() {
         services.store_retained_world(RetainedLayout {
             world,
             numeric_unrounded,
@@ -418,6 +426,19 @@ where
                 &mut NoEmbeddedFrames,
             );
             services.store_retained_world(retained);
+            // The full pass ran its own container-query loop on the shared
+            // resolver. Put back the sizes the incremental pass ended with so
+            // later passes start from the same state as without the check.
+            if let Some(sizes) = &applied_sizes
+                && let Err(error) = styles.update_query_container_sizes(sizes)
+            {
+                record_verify_comparison(false);
+                tracing::error!(
+                    target: "moli_layout_incremental",
+                    %error,
+                    "restoring container sizes after the incremental layout check failed"
+                );
+            }
             // The incremental result stands on its own; a failed check is
             // reported, never turned into a failed read.
             match full {

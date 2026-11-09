@@ -1548,7 +1548,12 @@ const INCREMENTAL_FLOAT_FREE_MUTATIONS: &[&str] = &[
     "document.getElementById('sla').textContent='first slotted text grows';",
     "document.getElementById('slb').slot='a';",
     "document.getElementById('slb').slot='b';",
-    // The viewport-defining body moves between body and root.
+    // The viewport-defining body moves between body and root. Today an
+    // html style change restyles the whole document and a body overflow
+    // change gives body a new computed style, so neither leaves body clean
+    // and the scroll-policy guard in moli-layout's retention is defensive.
+    // The per-mutation check below still compares each toggle with a full
+    // rebuild, and requires that a comparison ran for it.
     "document.documentElement.style.overflow='hidden';",
     "document.documentElement.style.overflow='';",
     "document.body.style.overflow='visible';",
@@ -1567,6 +1572,7 @@ fn run_incremental_differential(fixture: &str, mutations: &[&str]) -> anyhow::Re
         let mismatches = moli_layout::incremental_verify_mismatch_count();
         let compared = moli_layout::incremental_verify_comparison_count();
         let reused = moli_layout::incremental_numeric_reused_total();
+        let mut compared_before = compared;
         for mutation in mutations {
             page_vm.vm_mut().eval(&format!("{mutation} 'ok'"))?;
             let read = page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
@@ -1576,6 +1582,14 @@ fn run_incremental_differential(fixture: &str, mutations: &[&str]) -> anyhow::Re
                 mismatches,
                 "geometry differs from a full rebuild after: {mutation}"
             );
+            let compared_now = moli_layout::incremental_verify_comparison_count();
+            if mutation.contains(".style.overflow") {
+                assert!(
+                    compared_now > compared_before,
+                    "no incremental pass was compared after: {mutation}"
+                );
+            }
+            compared_before = compared_now;
         }
         // Viewport resize, growing then shrinking.
         for width in [640, 1100, 800] {
