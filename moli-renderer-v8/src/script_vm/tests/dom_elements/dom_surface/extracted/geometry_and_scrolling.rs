@@ -1503,14 +1503,16 @@ fn live_geometry_scroll_in_a_batched_action_is_read_back_immediately() {
         .expect("finish batch");
 }
 
-/// Scrolls a live-geometry page and requires the read after it to reuse the
-/// published layout and to equal, bit for bit, a fresh layout at the same
-/// offsets. Returns the probed geometry before and after the scroll.
-fn assert_scroll_reuses_layout_like_a_fresh_pass(
+/// Scrolls a live-geometry page and requires the read after it to cost
+/// exactly `scroll_passes` layout passes (0: the published layout is reused)
+/// and to equal, bit for bit, a fresh layout at the same offsets. Returns the
+/// probed geometry before and after the scroll.
+fn assert_scroll_matches_a_fresh_layout(
     url: &str,
     html: &str,
     ids: &[&str],
     scroll: &str,
+    scroll_passes: u64,
 ) -> (String, String) {
     let mut vm = new_parsed_test_vm(url, html);
     vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
@@ -1530,10 +1532,11 @@ fn assert_scroll_reuses_layout_like_a_fresh_pass(
     let passes = vm.layout_pass_observability_for_test().1;
     vm.eval(&format!("{scroll}; 'scrolled'")).expect("scroll");
     let scrolled = vm.eval(&probe).expect("scrolled geometry");
+    let passes = passes + scroll_passes;
     assert_eq!(
         vm.layout_pass_observability_for_test().1,
         passes,
-        "a scroll offset change must not lay the page out again"
+        "layout passes the scroll costs"
     );
     vm.eval("document.body.setAttribute('data-fresh', '1'); 'mutated'")
         .expect("force a fresh layout");
@@ -1548,22 +1551,22 @@ fn assert_scroll_reuses_layout_like_a_fresh_pass(
 
 #[test]
 fn live_geometry_scroll_moves_the_published_layout_without_laying_out_again() {
-    let (before, after) = assert_scroll_reuses_layout_like_a_fresh_pass(
+    let (before, after) = assert_scroll_matches_a_fresh_layout(
         "https://live-geometry-scroll-projection.test/",
         "<!doctype html><html><body style=margin:0>\
          <div id=f style='position:fixed;top:10px;left:0;width:20px;height:20px'></div>\
-         <div id=st style='position:sticky;top:0;height:20px'></div>\
          <div id=w style='transform:scale(2);transform-origin:0 0;width:200px'>\
          <div id=s style='width:150px;height:100px;overflow:auto'>\
          <div id=c style=height:1000px><div id=t style='width:40px;height:40px;transform:rotate(45deg)'></div></div>\
          </div></div><div style=height:3000px></div></body></html>",
-        &["f", "st", "w", "s", "c", "t"],
+        &["f", "w", "s", "c", "t"],
         "document.documentElement.scrollTop = 40; document.getElementById('s').scrollTop = 30",
+        0,
     );
     // The viewport moves 40px; the inner scroller's 30px are scaled by 2.
     let c_y = |probe: &str| -> f64 {
         let rows: Vec<serde_json::Value> = serde_json::from_str(probe).expect("probe json");
-        rows[4][2].as_f64().expect("c.y")
+        rows[3][2].as_f64().expect("c.y")
     };
     assert_eq!(c_y(&after) - c_y(&before), -100.0);
 }
@@ -1574,7 +1577,7 @@ fn live_geometry_fractional_zoomed_rtl_and_fixed_scrolls_match_a_fresh_layout() 
     // horizontal scroller with a negative scrollLeft, and a fixed box whose
     // transformed ancestor is its containing block all re-project exactly as
     // a fresh pass rounds them.
-    assert_scroll_reuses_layout_like_a_fresh_pass(
+    assert_scroll_matches_a_fresh_layout(
         "https://live-geometry-scroll-rounding.test/",
         "<!doctype html><html><body style=margin:0>\
          <div id=z style='zoom:1.1'><div id=s style='width:150px;height:100px;overflow:auto'>\
@@ -1590,7 +1593,35 @@ fn live_geometry_fractional_zoomed_rtl_and_fixed_scrolls_match_a_fresh_layout() 
          s.scrollTop = 12.3; document.getElementById('r').scrollLeft = -37.5; \
          document.documentElement.scrollTop = 8123.7; document.body.getBoundingClientRect(); \
          document.documentElement.scrollTop = 3.3",
+        0,
     );
+}
+
+#[test]
+fn live_geometry_scroll_that_moves_a_sticky_box_lays_out_again() {
+    // A sticky box's position follows the offset of the scrollport it sticks
+    // to, so moving that scrollport takes a layout pass. A scroller with no
+    // sticky descendant still moves the published layout in place.
+    let page = "<!doctype html><html><body style=margin:0>\
+         <div id=st style='position:sticky;top:0;height:20px'></div>\
+         <div id=p style='width:150px;height:100px;overflow:auto'><div id=pc style=height:1000px></div></div>\
+         <div id=s style='width:150px;height:100px;overflow:auto'><div style=height:50px></div>\
+         <div id=ss style='position:sticky;top:5px;height:10px'></div><div style=height:1000px></div></div>\
+         <div style=height:3000px></div></body></html>";
+    let ids = ["st", "p", "pc", "s", "ss"];
+    for (scroll, passes) in [
+        ("document.getElementById('p').scrollTop = 30", 0),
+        ("document.getElementById('s').scrollTop = 120", 1),
+        ("document.documentElement.scrollTop = 40", 1),
+    ] {
+        assert_scroll_matches_a_fresh_layout(
+            "https://live-geometry-scroll-sticky.test/",
+            page,
+            &ids,
+            scroll,
+            passes,
+        );
+    }
 }
 
 #[test]
