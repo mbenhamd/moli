@@ -1503,9 +1503,52 @@ fn live_geometry_scroll_in_a_batched_action_is_read_back_immediately() {
         .expect("finish batch");
 }
 
+/// Scrolls a live-geometry page and requires the read after it to reuse the
+/// published layout and to equal, bit for bit, a fresh layout at the same
+/// offsets. Returns the probed geometry before and after the scroll.
+fn assert_scroll_reuses_layout_like_a_fresh_pass(
+    url: &str,
+    html: &str,
+    ids: &[&str],
+    scroll: &str,
+) -> (String, String) {
+    let mut vm = new_parsed_test_vm(url, html);
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    let ids = ids
+        .iter()
+        .map(|id| format!("'{id}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let probe = format!(
+        r#"JSON.stringify([{ids}].map(id => {{
+            const e = document.getElementById(id), r = e.getBoundingClientRect();
+            return [id, r.x, r.y, r.width, r.height, e.scrollLeft, e.scrollTop, e.offsetTop];
+          }}).concat([[document.documentElement.scrollLeft, document.documentElement.scrollTop,
+            document.elementFromPoint(5, 15)?.id ?? null]]))"#
+    );
+    let before = vm.eval(&probe).expect("unscrolled geometry");
+    let passes = vm.layout_pass_observability_for_test().1;
+    vm.eval(&format!("{scroll}; 'scrolled'")).expect("scroll");
+    let scrolled = vm.eval(&probe).expect("scrolled geometry");
+    assert_eq!(
+        vm.layout_pass_observability_for_test().1,
+        passes,
+        "a scroll offset change must not lay the page out again"
+    );
+    vm.eval("document.body.setAttribute('data-fresh', '1'); 'mutated'")
+        .expect("force a fresh layout");
+    assert_eq!(
+        vm.eval(&probe).expect("fresh geometry"),
+        scrolled,
+        "re-projected geometry must equal a fresh layout at the same offsets"
+    );
+    assert_eq!(vm.layout_pass_observability_for_test().1, passes + 1);
+    (before, scrolled)
+}
+
 #[test]
 fn live_geometry_scroll_moves_the_published_layout_without_laying_out_again() {
-    let mut vm = new_parsed_test_vm(
+    let (before, after) = assert_scroll_reuses_layout_like_a_fresh_pass(
         "https://live-geometry-scroll-projection.test/",
         "<!doctype html><html><body style=margin:0>\
          <div id=f style='position:fixed;top:10px;left:0;width:20px;height:20px'></div>\
@@ -1514,46 +1557,36 @@ fn live_geometry_scroll_moves_the_published_layout_without_laying_out_again() {
          <div id=s style='width:150px;height:100px;overflow:auto'>\
          <div id=c style=height:1000px><div id=t style='width:40px;height:40px;transform:rotate(45deg)'></div></div>\
          </div></div><div style=height:3000px></div></body></html>",
-    );
-    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
-    let probe = r#"JSON.stringify(['f', 'st', 'w', 's', 'c', 't'].map(id => {
-        const r = document.getElementById(id).getBoundingClientRect();
-        return [id, r.x, r.y, r.width, r.height];
-      }).concat([[document.getElementById('s').scrollTop, document.documentElement.scrollTop,
-        document.elementFromPoint(5, 15).id, document.getElementById('c').offsetTop]]))"#;
-    let c_top = "String(document.getElementById('c').getBoundingClientRect().y)";
-    let top_before: f64 = vm
-        .eval(c_top)
-        .expect("first layout")
-        .parse()
-        .expect("number");
-    vm.eval(probe).expect("unscrolled geometry");
-    let passes = vm.layout_pass_observability_for_test().1;
-
-    vm.eval("document.documentElement.scrollTop = 40; document.getElementById('s').scrollTop = 30; 'scrolled'")
-        .expect("scroll both scrollers");
-    let top_after: f64 = vm
-        .eval(c_top)
-        .expect("scrolled read")
-        .parse()
-        .expect("number");
-    let scrolled = vm.eval(probe).expect("scrolled geometry");
-    assert_eq!(
-        vm.layout_pass_observability_for_test().1,
-        passes,
-        "a scroll offset change must not lay the page out again"
+        &["f", "st", "w", "s", "c", "t"],
+        "document.documentElement.scrollTop = 40; document.getElementById('s').scrollTop = 30",
     );
     // The viewport moves 40px; the inner scroller's 30px are scaled by 2.
-    assert_eq!(top_after - top_before, -100.0);
+    let c_y = |probe: &str| -> f64 {
+        let rows: Vec<serde_json::Value> = serde_json::from_str(probe).expect("probe json");
+        rows[4][2].as_f64().expect("c.y")
+    };
+    assert_eq!(c_y(&after) - c_y(&before), -100.0);
+}
 
-    vm.eval("document.body.setAttribute('data-fresh', '1'); 'mutated'")
-        .expect("force a fresh layout");
-    assert_eq!(
-        vm.eval(probe).expect("fresh geometry"),
-        scrolled,
-        "translated geometry must match a fresh layout at the same offsets"
+#[test]
+fn live_geometry_fractional_zoomed_rtl_and_fixed_scrolls_match_a_fresh_layout() {
+    // Fractional offsets far down a zoomed scroller, a reversed (RTL)
+    // horizontal scroller with a negative scrollLeft, and a fixed box whose
+    // transformed ancestor is its containing block all re-project exactly as
+    // a fresh pass rounds them.
+    assert_scroll_reuses_layout_like_a_fresh_pass(
+        "https://live-geometry-scroll-rounding.test/",
+        "<!doctype html><html><body style=margin:0>\
+         <div id=z style='zoom:1.1'><div id=s style='width:150px;height:100px;overflow:auto'>\
+         <div style=height:10000px></div><div id=deep style='height:30px;transform:rotate(10deg)'></div>\
+         <div style=height:500px></div></div></div>\
+         <div id=r dir=rtl style='width:150px;height:60px;overflow:auto'><div id=wide style='width:900px;height:20px'></div></div>\
+         <div id=ta style='transform:translateX(5px)'><div id=tf style='position:fixed;top:3px;left:2px;width:10px;height:10px'></div></div>\
+         <div style=height:20000px></div></body></html>",
+        &["z", "s", "deep", "r", "wide", "ta", "tf"],
+        "document.getElementById('s').scrollTop = 9912.3; document.getElementById('r').scrollLeft = -37.5; \
+         document.documentElement.scrollTop = 8123.7",
     );
-    assert_eq!(vm.layout_pass_observability_for_test().1, passes + 1);
 }
 
 #[test]
