@@ -307,6 +307,29 @@ impl JsContextHost {
         })
     }
 
+    fn layout_dirty_mark(&self) -> super::layout_snapshot::LayoutDirtyMark {
+        (
+            self.dom_host().layout_relevant_dom_version(),
+            self.style_engine
+                .style_invalidation_generation(self.active_layout_document_handles()),
+        )
+    }
+
+    /// Whether a read that depends on a size container needs a pass: false
+    /// when nothing that can move a container's used size changed since the
+    /// published tree. Call after pending style work has drained.
+    pub(crate) fn size_container_read_needs_layout(&self) -> bool {
+        let document = self.document_handle();
+        let viewport = self.layout_viewport_for_document(document);
+        let Some(inputs) = self.live_layout_input_key(viewport, None) else {
+            return false;
+        };
+        let Ok(state) = self.document_layout_state.try_borrow() else {
+            return false;
+        };
+        !state.latest_layout_is_clean(document, &inputs, self.layout_dirty_mark())
+    }
+
     /// Publishes a screen layout for this main Document before a synchronous
     /// geometry read.
     ///
@@ -436,6 +459,40 @@ impl JsContextHost {
         self.document_layout_state
             .borrow_mut()
             .clear_latest_layout();
+    }
+
+    pub(crate) fn update_container_query_sizes(
+        &self,
+        document: DomHandle,
+        sizes: moli_selector::ContainerQuerySizes,
+    ) -> bool {
+        self.style_engine
+            .update_container_query_sizes(self.dom_host(), document, sizes)
+    }
+
+    pub(crate) fn begin_container_query_store(&self, document: DomHandle) {
+        self.style_engine
+            .begin_container_query_store(self.dom_host(), document);
+    }
+
+    pub(crate) fn container_query_sizes_snapshot(
+        &self,
+        document: DomHandle,
+    ) -> Option<moli_selector::ContainerQuerySizes> {
+        self.style_engine.container_query_sizes_snapshot(document)
+    }
+
+    pub(crate) fn restore_container_query_sizes(
+        &self,
+        document: DomHandle,
+        snapshot: Option<moli_selector::ContainerQuerySizes>,
+    ) {
+        self.style_engine
+            .restore_container_query_sizes(self.dom_host(), document, snapshot);
+    }
+
+    pub(crate) fn layout_pass_is_active(&self) -> bool {
+        self.layout_pass_active.get()
     }
 
     pub(crate) fn build_layout_pass_for_document(
@@ -607,7 +664,7 @@ impl JsContextHost {
             });
             let mut state = self.document_layout_state.borrow_mut();
             state.retain_live_frame_viewports(|frame| self.child_browsing_context_is_live(frame));
-            state.publish_latest_layout(document, inputs, tree);
+            state.publish_latest_layout(document, inputs, self.layout_dirty_mark(), tree);
             state.update_frame_viewports(frame_viewports)
         };
         if frame_viewports_changed {

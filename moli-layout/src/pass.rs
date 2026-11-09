@@ -213,30 +213,55 @@ where
     F: EmbeddedFrameRenderer<S::NodeId>,
 {
     let started = Instant::now();
-    let phase_started = Instant::now();
-    let mut world = build_layout_world(source, styles)?;
-    world.environment = request.environment;
-    let box_tree_elapsed = phase_started.elapsed();
-    debug_assert!(
-        world
-            .viewport_scroll_policy
-            .defining_body()
-            .is_none_or(|body| world.box_by_id(body).is_some()),
-        "viewport policy must retain only a live pass-local body box identity"
-    );
-    let phase_started = Instant::now();
-    prepare_list_markers(&mut world)?;
-    let list_marker_elapsed = phase_started.elapsed();
-    let phase_started = Instant::now();
-    prepare_form_controls(&mut world, styles)?;
-    let form_control_elapsed = phase_started.elapsed();
-    let phase_started = Instant::now();
-    prepare_inline_contexts(&mut world, services);
-    let inline_preparation_elapsed = phase_started.elapsed();
-    world.validate_invariants()?;
-    let phase_started = Instant::now();
-    let numeric_metrics = compute_world_layout_with_scrollbars(&mut world, request.viewport);
-    let numeric_layout_elapsed = phase_started.elapsed();
+    let mut box_tree_elapsed = Duration::ZERO;
+    let mut list_marker_elapsed = Duration::ZERO;
+    let mut form_control_elapsed = Duration::ZERO;
+    let mut inline_preparation_elapsed = Duration::ZERO;
+    let mut numeric_layout_elapsed = Duration::ZERO;
+    let mut container_query_iteration_count = 0usize;
+    // Container query sizes feed back into style, so a changed size rebuilds
+    // the world from restyled elements. `seen` holds every vector applied so
+    // far in this pass: reaching one again without converging means auto
+    // scrollbars (or equivalent) oscillate, and the pass keeps the current
+    // world rather than alternate forever. Only the last world is published.
+    let mut seen_sizes: Vec<Vec<(S::NodeId, crate::LayoutQueryContainerSize)>> = Vec::new();
+    let (world, numeric_metrics) = loop {
+        container_query_iteration_count += 1;
+        let phase_started = Instant::now();
+        let mut world = build_layout_world(source, styles)?;
+        world.environment = request.environment;
+        box_tree_elapsed += phase_started.elapsed();
+        debug_assert!(
+            world
+                .viewport_scroll_policy
+                .defining_body()
+                .is_none_or(|body| world.box_by_id(body).is_some()),
+            "viewport policy must retain only a live pass-local body box identity"
+        );
+        let phase_started = Instant::now();
+        prepare_list_markers(&mut world)?;
+        list_marker_elapsed += phase_started.elapsed();
+        let phase_started = Instant::now();
+        prepare_form_controls(&mut world, styles)?;
+        form_control_elapsed += phase_started.elapsed();
+        let phase_started = Instant::now();
+        prepare_inline_contexts(&mut world, services);
+        inline_preparation_elapsed += phase_started.elapsed();
+        world.validate_invariants()?;
+        let phase_started = Instant::now();
+        let numeric_metrics = compute_world_layout_with_scrollbars(&mut world, request.viewport);
+        numeric_layout_elapsed += phase_started.elapsed();
+
+        let (sizes, depth) = world.query_container_sizes();
+        let hard_cap = (depth + 3).max(MIN_CONTAINER_QUERY_ITERATION_CAP);
+        if seen_sizes.contains(&sizes)
+            || container_query_iteration_count >= hard_cap
+            || !styles.update_query_container_sizes(&sizes)?
+        {
+            break (world, numeric_metrics);
+        }
+        seen_sizes.push(sizes);
+    };
     let phase_started = Instant::now();
     let mut embedded_frames = HashMap::new();
     for (index, layout_box) in world.boxes.iter().enumerate() {
@@ -299,6 +324,7 @@ where
                 .feedback_invalidated_node_count,
             numeric_feedback_overflow_recomputed_node_count: numeric_metrics
                 .feedback_overflow_recomputed_node_count,
+            container_query_iteration_count,
         },
     )
 }
@@ -454,6 +480,9 @@ where
     }
     metrics
 }
+
+/// Backstop for container-query feedback that neither converges nor repeats.
+const MIN_CONTAINER_QUERY_ITERATION_CAP: usize = 8;
 
 fn css_viewport_dimension(value: f32) -> u32 {
     if !value.is_finite() {

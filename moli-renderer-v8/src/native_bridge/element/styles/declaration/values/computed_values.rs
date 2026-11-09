@@ -307,6 +307,7 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_for_pseudo
     if !computed_style_applies(runtime, handle) {
         return String::new();
     }
+    super::computed_properties::flush_layout_for_size_container_read(runtime, handle, context);
     let property = canonical_style_property_name(property);
     let value = normalized_stylo_computed_pseudo_style_value(
         runtime,

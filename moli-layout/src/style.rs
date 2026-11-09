@@ -513,6 +513,7 @@ pub struct ResolvedLayoutStyle {
     will_change_position: bool,
     will_change_stacking_context: bool,
     size_containment: LogicalSizeContainment,
+    query_container_axes: LogicalSizeContainment,
     contain_intrinsic_width: Option<f32>,
     contain_intrinsic_height: Option<f32>,
     list_marker_type: LayoutListMarkerType,
@@ -758,6 +759,13 @@ impl ResolvedLayoutStyle {
             block: contain.contains(style::values::computed::Contain::BLOCK_SIZE)
                 || container_type.intersects(style::values::computed::ContainerType::SIZE),
         };
+        let query_container_axes = LogicalSizeContainment {
+            inline: container_type.intersects(
+                style::values::computed::ContainerType::SIZE
+                    | style::values::computed::ContainerType::INLINE_SIZE,
+            ),
+            block: container_type.intersects(style::values::computed::ContainerType::SIZE),
+        };
         let contain_intrinsic_width =
             contain_intrinsic_px(&computed.clone_contain_intrinsic_width());
         let contain_intrinsic_height =
@@ -903,6 +911,7 @@ impl ResolvedLayoutStyle {
             will_change_position,
             will_change_stacking_context,
             size_containment,
+            query_container_axes,
             contain_intrinsic_width,
             contain_intrinsic_height,
             list_marker_type,
@@ -985,6 +994,10 @@ impl ResolvedLayoutStyle {
             will_change_position: false,
             will_change_stacking_context: false,
             size_containment: LogicalSizeContainment {
+                inline: false,
+                block: false,
+            },
+            query_container_axes: LogicalSizeContainment {
                 inline: false,
                 block: false,
             },
@@ -1124,6 +1137,12 @@ impl ResolvedLayoutStyle {
     }
 
     /// Applies an exact group opacity in DOM-free paint-order tests.
+    /// Test builder: a `container-type` on logical axes.
+    pub fn with_query_container(mut self, inline: bool, block: bool) -> Self {
+        self.query_container_axes = LogicalSizeContainment { inline, block };
+        self
+    }
+
     /// Test builder: size containment on logical axes (`contain`/`container-type`).
     pub fn with_size_containment(mut self, inline: bool, block: bool) -> Self {
         self.size_containment = LogicalSizeContainment { inline, block };
@@ -1363,6 +1382,21 @@ impl ResolvedLayoutStyle {
                 && (self.layout_containment
                     || self.paint_containment
                     || self.will_change_containment))
+    }
+
+    /// Physical axes this box answers container queries on.
+    pub(crate) const fn query_container_physical_axes(&self) -> Size<bool> {
+        if self.uses_horizontal_writing_mode() {
+            Size {
+                width: self.query_container_axes.inline,
+                height: self.query_container_axes.block,
+            }
+        } else {
+            Size {
+                width: self.query_container_axes.block,
+                height: self.query_container_axes.inline,
+            }
+        }
     }
 
     /// Size containment axes in physical terms, before per-box eligibility.
@@ -1621,6 +1655,7 @@ impl ResolvedLayoutStyle {
         placeholder.paint_containment = false;
         placeholder.will_change_containment = false;
         placeholder.size_containment = LogicalSizeContainment::default();
+        placeholder.query_container_axes = LogicalSizeContainment::default();
         placeholder.will_change_position = false;
         placeholder.will_change_stacking_context = false;
         placeholder.visible = false;
@@ -2108,6 +2143,7 @@ impl ResolvedLayoutStyle {
             will_change_position: false,
             will_change_stacking_context: false,
             size_containment: LogicalSizeContainment::default(),
+            query_container_axes: LogicalSizeContainment::default(),
             contain_intrinsic_width: None,
             contain_intrinsic_height: None,
             list_marker_type: parent.list_marker_type.clone(),
@@ -2179,6 +2215,7 @@ impl ResolvedLayoutStyle {
             will_change_position: false,
             will_change_stacking_context: false,
             size_containment: LogicalSizeContainment::default(),
+            query_container_axes: LogicalSizeContainment::default(),
             contain_intrinsic_width: None,
             contain_intrinsic_height: None,
             list_marker_type: parent.list_marker_type.clone(),

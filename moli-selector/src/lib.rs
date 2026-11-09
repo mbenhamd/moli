@@ -20,8 +20,8 @@ pub use detached_stylo::{
 pub use error::{SelectorError, SelectorErrorKind};
 pub use moli_dom as dom;
 pub use stylo::{
-    MoliInvalidationResult, MoliInvalidationResultBuilder, MoliInvalidationSourceResultsSink,
-    MoliStyleMutationElementSnapshot, MoliStyleMutationSnapshot,
+    ContainerQuerySizes, MoliInvalidationResult, MoliInvalidationResultBuilder,
+    MoliInvalidationSourceResultsSink, MoliStyleMutationElementSnapshot, MoliStyleMutationSnapshot,
     StyloDependencyInvalidationFallbackContext, StyloDocument, StyloDomHostBinding,
     StyloDomStyleAdapter, StyloElement, StyloElementDependencySnapshot, StyloNode,
     StyloPlannedFallbackRootInvalidationTarget,

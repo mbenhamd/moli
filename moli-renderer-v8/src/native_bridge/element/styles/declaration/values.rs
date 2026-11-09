@@ -291,6 +291,12 @@ impl<'a> ComputedStyleRead<'a> {
             .map(|snapshot| snapshot.computed_values())
     }
 
+    pub(in crate::native_bridge::element::styles) fn depends_on_size_container(&self) -> bool {
+        self.stylo_style
+            .as_ref()
+            .is_some_and(StyloComputedStyleSnapshot::depends_on_size_container)
+    }
+
     pub(crate) fn prepare_anonymous_style_context(
         &self,
     ) -> Option<PreparedAnonymousStyleContext<'a>> {
