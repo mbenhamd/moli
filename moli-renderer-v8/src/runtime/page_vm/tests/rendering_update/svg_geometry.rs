@@ -153,12 +153,12 @@ document.body.innerHTML = `<svg id=s width=300 height=150 viewBox="0 0 600 300" 
         let geometry: serde_json::Value = serde_json::from_str(&geometry)?;
         // viewBox halves user units; the content origin is the
         // <foreignObject>'s (10,20) after translate(50,40): client (30,30).
-        // "XXXX" is 4 x 0.6em = 48px wide on a 30px line; the span's 20px
-        // content area sits below 5px of half-leading.
+        // "XXXX" is 4 x 0.6em = 48px wide; the `font` shorthand resets
+        // line-height to normal, a 20px line. Values match Chromium.
         let expected = serde_json::json!({
             "fo": { "rect": [30, 30, 100, 30], "count": 1 },
-            "d": { "rect": [30, 30, 24, 15], "count": 1, "offset": [48, 30] },
-            "l": { "rect": [30, 32.5, 24, 10], "count": 1, "offset": [48, 20] },
+            "d": { "rect": [30, 30, 24, 10], "count": 1, "offset": [48, 20] },
+            "l": { "rect": [30, 30, 24, 10], "count": 1, "offset": [48, 20] },
             "hidden": { "rect": [0, 0, 0, 0], "count": 0, "offset": [0, 0] },
         });
         assert_eq!(geometry, expected, "geometry={geometry}");
