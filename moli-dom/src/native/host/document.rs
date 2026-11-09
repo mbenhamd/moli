@@ -627,20 +627,7 @@ impl DomHost {
     fn is_text_control(&self, handle: DomHandle) -> bool {
         self.node(handle)
             .and_then(Node::as_element)
-            .is_some_and(|element| {
-                element.is_html_textarea()
-                    || (element.is_html_input()
-                        && !matches!(
-                            element.input_type(),
-                            crate::forms::InputType::Hidden
-                                | crate::forms::InputType::Checkbox
-                                | crate::forms::InputType::Radio
-                                | crate::forms::InputType::Button
-                                | crate::forms::InputType::Submit
-                                | crate::forms::InputType::Reset
-                                | crate::forms::InputType::Image
-                        ))
-            })
+            .is_some_and(crate::native::Element::is_text_control)
     }
 
     pub fn element_matches_focus(&self, handle: DomHandle) -> bool {
