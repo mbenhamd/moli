@@ -148,6 +148,10 @@ impl std::iter::FusedIterator for NativeDomNodes<'_> {}
 #[derive(Debug, Clone)]
 pub struct NativeDom {
     nodes: NativeNodeStorage,
+    // HTML `iframe`/`frame` elements in `nodes`. The arena never frees a node
+    // and an element's namespace and local name never change, so counting at
+    // allocation equals a full arena scan.
+    html_frame_element_count: usize,
     document_node_id: NativeNodeId,
     stylesheet_candidate_registries: StylesheetCandidateRegistries,
     parse_errors: Vec<String>,
@@ -175,6 +179,7 @@ impl NativeDom {
         );
         Self {
             nodes: NativeNodeStorage::from_node(document_node),
+            html_frame_element_count: 0,
             document_node_id,
             stylesheet_candidate_registries: StylesheetCandidateRegistries::default(),
             parse_errors: Vec::new(),
@@ -192,6 +197,7 @@ impl NativeDom {
         );
         Self {
             nodes: NativeNodeStorage::from_node(document_node),
+            html_frame_element_count: 0,
             document_node_id,
             stylesheet_candidate_registries: StylesheetCandidateRegistries::default(),
             parse_errors: Vec::new(),
@@ -204,6 +210,12 @@ impl NativeDom {
 
     pub fn nodes(&self) -> NativeDomNodes<'_> {
         self.nodes.iter()
+    }
+
+    /// Number of HTML `iframe` and `frame` elements in [`Self::nodes`],
+    /// connected or not, in O(1).
+    pub fn html_frame_element_count(&self) -> usize {
+        self.html_frame_element_count
     }
 
     pub fn is_empty(&self) -> bool {
@@ -346,6 +358,11 @@ impl NativeDom {
         in_document_tree: bool,
     ) -> NativeNodeId {
         let node_id = NativeNodeId::new(self.nodes.len());
+        if let NodeData::Element(element) = &data
+            && (element.is_html_element("iframe") || element.is_html_element("frame"))
+        {
+            self.html_frame_element_count += 1;
+        }
         let mut flags = NodeFlags::new(in_document_tree);
         flags.set_connected(connected);
         self.nodes
