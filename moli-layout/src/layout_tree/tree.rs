@@ -108,17 +108,18 @@ where
     pub viewport_scroll: LayoutPoint,
     pub content_size: LayoutSize,
     pub root_box: LayoutOutputBoxId,
-    pub boxes: Vec<FrozenLayoutBox<N>>,
-    pub fragments: Vec<LayoutFragment>,
+    // Box provenance, fragments, and proxy links feed the lazily derived
+    // source index, so they are readable through accessors and changed only
+    // through methods that drop that index.
+    pub(super) boxes: Vec<FrozenLayoutBox<N>>,
+    pub(super) fragments: Vec<LayoutFragment>,
     /// Source/box relationships for `display: contents` nodes, which own no
     /// principal box but can still nominate rendered descendants for scroll.
-    pub scroll_proxy_links: Vec<(N, LayoutOutputBoxId)>,
+    pub(super) scroll_proxy_links: Vec<(N, LayoutOutputBoxId)>,
     viewport_coordinate_space: FrozenCoordinateSpace,
     pub clip_chain: Vec<LayoutClipNode>,
     embedded_frames: Vec<FrozenEmbeddedFrame<N>>,
     /// Lazily derived from `boxes`, `fragments`, and `scroll_proxy_links`.
-    /// Code that patches those vectors in place after a source query must call
-    /// [`Self::invalidate_source_index`].
     source_index: OnceLock<SourceProvenanceIndex<N>>,
 }
 
@@ -192,7 +193,8 @@ where
             .saturating_add(allocation::<FrozenEmbeddedFrame<N>>(
                 self.embedded_frames.capacity(),
             ))
-            .saturating_add(box_allocations);
+            .saturating_add(box_allocations)
+            .saturating_add(SourceProvenanceIndex::retained_bytes_bound(self));
         let embedded = self.embedded_frames.iter().fold(
             LayoutTreeRetentionMetrics::default(),
             |total, frame| {
@@ -296,12 +298,25 @@ where
         &self.source_index
     }
 
-    /// Drops the lazily derived source-provenance index. Required after any
-    /// in-place change to box provenance, box fragments, fragment kinds, or
-    /// scroll-proxy links on a tree that may already have answered a source
-    /// query; the next source query rebuilds it from the canonical vectors.
-    pub fn invalidate_source_index(&mut self) {
+    /// Boxes in canonical order; a box's ID is its index.
+    pub fn boxes(&self) -> &[FrozenLayoutBox<N>] {
+        &self.boxes
+    }
+
+    /// Fragments in canonical order; a fragment's ID is its index.
+    pub fn fragments(&self) -> &[LayoutFragment] {
+        &self.fragments
+    }
+
+    pub fn scroll_proxy_links(&self) -> &[(N, LayoutOutputBoxId)] {
+        &self.scroll_proxy_links
+    }
+
+    /// Edits boxes in place. Any edit may change source provenance, so this
+    /// drops the derived source index; the next source query rebuilds it.
+    pub fn boxes_mut(&mut self) -> &mut [FrozenLayoutBox<N>] {
         self.source_index.take();
+        &mut self.boxes
     }
 }
 

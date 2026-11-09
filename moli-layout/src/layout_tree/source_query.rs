@@ -6,9 +6,9 @@ use crate::LayoutPosition;
 
 use super::{
     model::{
-        LayoutBoxModel, LayoutCoordinateSpaceId, LayoutFragmentBoxModel, LayoutFragmentKind,
-        LayoutOutputBoxId, LayoutPoint, LayoutQuad, LayoutRect, LayoutResolvedGridTracks,
-        LayoutSize, LayoutTransform2D, LayoutUsedSize,
+        LayoutBoxModel, LayoutCoordinateSpaceId, LayoutFragmentBoxModel, LayoutFragmentId,
+        LayoutFragmentKind, LayoutOutputBoxId, LayoutPoint, LayoutQuad, LayoutRect,
+        LayoutResolvedGridTracks, LayoutSize, LayoutTransform2D, LayoutUsedSize,
     },
     query::{
         LayoutElementMetrics, LayoutNodeOutput, LayoutResizeObserverMetrics,
@@ -71,7 +71,72 @@ where
                 .scroll_proxy_boxes
                 .push(*box_id);
         }
+        // Exact-size storage keeps the retained index within its bound.
+        for output in outputs.values_mut() {
+            output.fragments.shrink_to_fit();
+            output.scroll_proxy_boxes.shrink_to_fit();
+        }
+        outputs.shrink_to_fit();
         Self { outputs }
+    }
+
+    /// Upper bound on [`Self::estimated_bytes`] for an index built from
+    /// `tree`, derived from the canonical vectors alone. The tree's retained
+    /// footprint counts this bound whether or not the index exists, so the
+    /// publish-time budget covers it and source queries never change the
+    /// reported footprint.
+    pub(super) fn retained_bytes_bound(tree: &FrozenLayoutTree<N>) -> usize {
+        let (keys, fragment_ids) =
+            tree.boxes
+                .iter()
+                .fold((0usize, 0usize), |(keys, fragment_ids), layout_box| {
+                    let principal = usize::from(layout_box.principal_source.is_some());
+                    let geometry = usize::from(layout_box.geometry_source.is_some());
+                    (
+                        keys.saturating_add(principal).saturating_add(geometry),
+                        fragment_ids
+                            .saturating_add(geometry.saturating_mul(layout_box.fragments.len())),
+                    )
+                });
+        let keys = keys.saturating_add(tree.scroll_proxy_links.len());
+        // A shrunk table holds at most twice its entries, and never fewer
+        // than seven.
+        let table = keys
+            .saturating_mul(2)
+            .saturating_add(8)
+            .saturating_mul(std::mem::size_of::<(N, LayoutNodeOutput)>().saturating_add(1));
+        table
+            .saturating_add(fragment_ids.saturating_mul(std::mem::size_of::<LayoutFragmentId>()))
+            .saturating_add(
+                tree.scroll_proxy_links
+                    .len()
+                    .saturating_mul(std::mem::size_of::<LayoutOutputBoxId>()),
+            )
+    }
+
+    /// Allocation-capacity estimate of this index.
+    #[cfg(test)]
+    fn estimated_bytes(&self) -> usize {
+        // One control byte per hash-table bucket, plus the entries.
+        let table = self
+            .outputs
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(N, LayoutNodeOutput)>().saturating_add(1));
+        self.outputs.values().fold(table, |bytes, output| {
+            bytes
+                .saturating_add(
+                    output
+                        .fragments
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<LayoutFragmentId>()),
+                )
+                .saturating_add(
+                    output
+                        .scroll_proxy_boxes
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<LayoutOutputBoxId>()),
+                )
+        })
     }
 }
 
@@ -1198,6 +1263,7 @@ mod tests {
         tree.answer_query(&crate::LayoutQuery::DocumentMetrics);
         assert!(tree.source_index_cell().get().is_none());
         assert_eq!(SOURCE_OUTPUT_BOX_VISITS.with(std::cell::Cell::get), 0);
+        let retained = tree.retention_metrics();
 
         for source in 0..=8 {
             tree.source_output(source);
@@ -1209,9 +1275,14 @@ mod tests {
             tree.boxes.len()
         );
 
-        tree.boxes[4].geometry_source = Some(7);
-        tree.scroll_proxy_links.clear();
-        tree.invalidate_source_index();
+        // The retained footprint already counts the index's bound, so source
+        // queries never change it.
+        assert_eq!(tree.retention_metrics(), retained);
+        let index_bytes = tree.source_index().estimated_bytes();
+        assert!(index_bytes > 0);
+        assert!(index_bytes <= SourceProvenanceIndex::retained_bytes_bound(&tree));
+        tree.boxes_mut()[4].geometry_source = Some(7);
+        assert!(tree.source_index_cell().get().is_none());
         for source in 0..=8 {
             assert_eq!(
                 tree.source_output(source),
