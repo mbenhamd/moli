@@ -474,8 +474,8 @@ where
         tracing::error!(
             target: "moli_layout_incremental",
             difference,
-            incremental_boxes = incremental.tree.boxes.len(),
-            full_boxes = full.tree.boxes.len(),
+            incremental_boxes = incremental.tree.boxes().len(),
+            full_boxes = full.tree.boxes().len(),
             "incremental layout geometry differs from a full rebuild"
         );
     }
