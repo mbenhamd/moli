@@ -61,9 +61,9 @@ body.innerHTML = `<div id="scroller" style="height:10px;overflow:auto"><div styl
 const scroller = document.getElementById("scroller");
 globalThis.__elementScrollLog = [];
 scroller.addEventListener("scroll", (event) =>
-  __elementScrollLog.push("scroll:" + scroller.scrollTop + ":" + event.bubbles));
+  __elementScrollLog.push("scroll:" + scroller.scrollTop + ":" + event.bubbles + ":" + event.isTrusted));
 scroller.addEventListener("scrollend", (event) =>
-  __elementScrollLog.push("scrollend:" + event.bubbles));
+  __elementScrollLog.push("scrollend:" + event.bubbles + ":" + event.isTrusted));
 document.addEventListener("scroll", () => __elementScrollLog.push("document-scroll"));
 window.addEventListener("scrollend", () => __elementScrollLog.push("window-scrollend"));
 scroller.scrollTop = 10;
@@ -89,13 +89,37 @@ scroller.scrollTop = 20;
     assert_eq!(
         vm.eval("__elementScrollLog.join('|')")
             .expect("post-turn log should be readable"),
-        "scroll:20:false|scrollend:false"
+        "scroll:20:false:true|scrollend:false:true"
     );
     assert!(
         !vm.run_one_rendering_update_executor_turn(&loader)
             .await
             .expect("empty rendering source should remain usable"),
         "repeated scrolls of one element must coalesce to one update"
+    );
+
+    // Chromium still fires at an element removed after it scrolled. Its
+    // handler reads 0 because a disconnected element has no scroll box.
+    vm.eval("scroller.scrollTop = 30; scroller.remove(); 'removed'")
+        .expect("removed scroller producer should run");
+    assert!(
+        vm.run_one_rendering_update_executor_turn(&loader)
+            .await
+            .expect("rendering update should run"),
+        "a scroll before removal must keep its update"
+    );
+    vm.eval("scroller.scrollTop = 40; 'scrolled while disconnected'")
+        .expect("disconnected scroll should run");
+    assert!(
+        !vm.run_one_rendering_update_executor_turn(&loader)
+            .await
+            .expect("empty rendering source should remain usable"),
+        "a scroll change while disconnected must not queue another update"
+    );
+    assert_eq!(
+        vm.eval("__elementScrollLog.join('|')")
+            .expect("final log should be readable"),
+        "scroll:20:false:true|scrollend:false:true|scroll:0:false:true|scrollend:false:true"
     );
 }
 
