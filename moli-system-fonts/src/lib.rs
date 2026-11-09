@@ -79,6 +79,29 @@ impl SystemFontFamilyResolver {
         self.resolve_missing_family(family)
     }
 
+    /// On Linux, points the `serif` and `sans-serif` generics at the families
+    /// Chromium uses by default there ("Times New Roman" and "Arial").
+    ///
+    /// Each named default goes through the same exact or metric-compatible
+    /// substitution as a CSS family, so Liberation Serif and Liberation Sans
+    /// stand in when the Microsoft fonts are absent. Without an acceptable
+    /// match the generic keeps the platform's own fontconfig choice. The platform
+    /// families stay behind the default as per-glyph fallback. Call this before
+    /// registering downloadable fonts.
+    pub fn apply_browser_generic_defaults(&mut self, collection: &mut Collection) {
+        for &(generic, default_family) in BROWSER_GENERIC_DEFAULTS {
+            let family = self
+                .substitute_family(collection, default_family)
+                .unwrap_or_else(|| default_family.to_owned());
+            let Some(default_id) = collection.family_id(&family) else {
+                continue;
+            };
+            // Fontique lists collection-owned generic families before the
+            // platform's, so the platform list remains the fallback tail.
+            collection.set_generic_families(generic, std::iter::once(default_id));
+        }
+    }
+
     fn resolve_missing_family(&mut self, family: &str) -> Option<String> {
         let key = normalized_family_name(family);
         if let Some(cached) = self.substitutions.get(&key) {
@@ -89,6 +112,17 @@ impl SystemFontFamilyResolver {
         substitution
     }
 }
+
+/// Chromium's Linux default generic font preferences
+/// (`IDS_SERIF_FONT_FAMILY` and `IDS_SANS_SERIF_FONT_FAMILY`). Other platforms
+/// keep their native generic families.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+const BROWSER_GENERIC_DEFAULTS: &[(fontique::GenericFamily, &str)] = &[
+    (fontique::GenericFamily::Serif, "Times New Roman"),
+    (fontique::GenericFamily::SansSerif, "Arial"),
+];
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+const BROWSER_GENERIC_DEFAULTS: &[(fontique::GenericFamily, &str)] = &[];
 
 fn normalized_family_name(name: &str) -> String {
     name.chars().flat_map(char::to_lowercase).collect()
@@ -181,6 +215,42 @@ mod tests {
             assert_eq!(
                 resolver.resolve_missing_family("Arial").as_deref(),
                 Some("Liberation Sans")
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn serif_and_sans_serif_generics_start_with_chromium_default_families() {
+        let mut collection = Collection::new(fontique::CollectionOptions {
+            shared: false,
+            system_fonts: true,
+        });
+        let mut resolver = SystemFontFamilyResolver::new(&mut collection);
+        resolver.apply_browser_generic_defaults(&mut collection);
+
+        for (generic, default_family, metric_compatible) in [
+            (
+                fontique::GenericFamily::Serif,
+                "Times New Roman",
+                "Liberation Serif",
+            ),
+            (
+                fontique::GenericFamily::SansSerif,
+                "Arial",
+                "Liberation Sans",
+            ),
+        ] {
+            let expected = [default_family, metric_compatible]
+                .into_iter()
+                .find_map(|name| collection.family_id(name));
+            let Some(expected) = expected else {
+                continue;
+            };
+            assert_eq!(
+                collection.generic_families(generic).next(),
+                Some(expected),
+                "{default_family} or {metric_compatible} must lead {generic:?}"
             );
         }
     }

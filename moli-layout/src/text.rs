@@ -1378,9 +1378,11 @@ fn build_parley_services(
         shared: false,
         system_fonts: system_font_policy.is_enabled(),
     });
-    let system_font_family_resolver = system_font_policy
-        .is_enabled()
-        .then(|| SystemFontFamilyResolver::new(&mut collection));
+    let system_font_family_resolver = system_font_policy.is_enabled().then(|| {
+        let mut resolver = SystemFontFamilyResolver::new(&mut collection);
+        resolver.apply_browser_generic_defaults(&mut collection);
+        resolver
+    });
     let font_context = FontContext {
         collection,
         source_cache: Default::default(),
