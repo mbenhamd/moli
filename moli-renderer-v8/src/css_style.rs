@@ -15,7 +15,28 @@ pub(crate) use moli_css_parse::{
 pub(crate) fn stylo_property_is_chromium_exposed(name: &str) -> bool {
     !name.starts_with("-moz-")
         && !name.starts_with("-x-")
-        && !matches!(name, "mask-position-x" | "mask-position-y")
+        // Chromium 147 has no standard `line-clamp`; Stylo stores the legacy
+        // `-webkit-line-clamp` shorthand in that longhand.
+        && !matches!(name, "mask-position-x" | "mask-position-y" | "line-clamp")
+}
+
+/// Serializes a Stylo `line-clamp` value as Chromium's `-webkit-line-clamp`
+/// longhand (`none | <integer>`), keeping CSS-wide keywords.
+///
+/// `None` means the value has no legacy form, such as `line-clamp: auto`.
+pub(crate) fn webkit_line_clamp_value(line_clamp: &str) -> Option<String> {
+    let line_clamp = line_clamp.trim();
+    if line_clamp.eq_ignore_ascii_case("none")
+        || parse_css_style_shell_keyword(line_clamp).is_some()
+    {
+        return Some(line_clamp.to_ascii_lowercase());
+    }
+    let lines = line_clamp.split_ascii_whitespace().next()?;
+    lines
+        .parse::<u32>()
+        .ok()
+        .filter(|lines| *lines > 0)
+        .map(|lines| lines.to_string())
 }
 
 pub(crate) fn parse_css_style_shell_keyword(value: &str) -> Option<&'static str> {

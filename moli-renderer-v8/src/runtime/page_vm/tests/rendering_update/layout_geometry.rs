@@ -1802,3 +1802,93 @@ document.body.innerHTML = '<div id=host></div><div id=other></div>';
     .await
     .expect("shadow and root scroll reset fixture should run");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn webkit_line_clamp_ends_block_height_at_the_clamp_line() {
+    run_page_vm_async_test(async move {
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let mut page_vm = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/line-clamp.html")?,
+        );
+        page_vm.vm_mut().eval(
+            r#"
+document.head.innerHTML = `<style>
+html,body{margin:0;padding:0}
+.t{width:100px;font:16px/20px monospace;margin:0;padding:0;border:0;overflow:hidden}
+.clamp{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+#both{line-clamp:2}
+#none{-webkit-line-clamp:none}
+#after{height:10px}
+</style>`;
+document.body.innerHTML = `<div class="t clamp" id=clamped>aaaa bbbb cccc dddd eeee ffff gggg hhhh</div><div id=after></div><div class="t clamp" id=both>aaaa bbbb cccc dddd eeee ffff gggg hhhh</div><button class="t clamp" id=button>aaaa bbbb cccc dddd eeee ffff gggg hhhh</button><div class="t clamp" id=short>aaaa</div><div class="t clamp" id=none>aaaa bbbb cccc dddd eeee ffff gggg hhhh</div>`;
+"#,
+        )?;
+        page_vm.vm_mut().sync_live_document_style_sources();
+        page_vm.vm_mut().publish_layout_for_test()?;
+        let geometry = page_vm.vm_mut().eval(
+            r#"JSON.stringify([
+...['clamped','both','button','short','none'].map(id=>document.getElementById(id).getBoundingClientRect().height),
+document.getElementById('after').getBoundingClientRect().top,
+document.getElementById('clamped').scrollHeight])"#,
+        )?;
+        let geometry: Vec<f32> = serde_json::from_str(&geometry)?;
+        // Chromium 147: four 20px lines clamp to two; a block that has fewer
+        // lines and `-webkit-line-clamp: none` keep their natural height. The
+        // clamped lines remain scrollable overflow.
+        let expected = [40.0, 40.0, 40.0, 20.0, 80.0, 40.0, 80.0];
+        assert_eq!(geometry.len(), expected.len(), "geometry={geometry:?}");
+        for (actual, expected) in geometry.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() <= 0.05,
+                "expected {expected}, got {actual}; geometry={geometry:?}"
+            );
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("line clamp fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn webkit_line_clamp_cssom_matches_chromium_longhand_surface() {
+    run_page_vm_async_test(async move {
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let mut page_vm = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/line-clamp-cssom.html")?,
+        );
+        let result = page_vm.vm_mut().eval(
+            r#"(() => {
+document.head.innerHTML = '<style>#a{-webkit-line-clamp:2}</style>';
+document.body.innerHTML = '<div id=a></div><div id=b></div>';
+const a = document.getElementById('a'), b = document.getElementById('b');
+const out = [];
+const cs = getComputedStyle(a);
+out.push(cs.webkitLineClamp, cs.getPropertyValue('-webkit-line-clamp'));
+out.push(getComputedStyle(b).webkitLineClamp);
+out.push(String(cs.lineClamp), cs.getPropertyValue('line-clamp'));
+out.push(String('lineClamp' in b.style), String('webkitLineClamp' in b.style));
+out.push(String(CSS.supports('line-clamp', '2')), String(CSS.supports('-webkit-line-clamp', '2')));
+b.style.webkitLineClamp = '3';
+out.push(b.style.webkitLineClamp, b.style.getPropertyValue('-webkit-line-clamp'));
+out.push(getComputedStyle(b).webkitLineClamp);
+b.style.webkitLineClamp = 'none';
+out.push(b.style.webkitLineClamp);
+out.push(String([...cs].includes('-webkit-line-clamp')), String([...cs].includes('line-clamp')));
+return out.join('|');
+})()"#,
+        )?;
+        assert_eq!(
+            result,
+            "2|2|none|undefined||false|true|false|true|3|3|3|none|true|false"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("line clamp CSSOM fixture should run");
+}

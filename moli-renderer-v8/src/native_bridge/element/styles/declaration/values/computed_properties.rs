@@ -196,6 +196,11 @@ pub(super) fn computed_style_property_value_after_style_update(
     if property == "-webkit-text-stroke" {
         return computed_webkit_text_stroke_shorthand_value(runtime, handle, context);
     }
+    if property == "-webkit-line-clamp" {
+        let line_clamp = resolution.raw_property(runtime, handle, "line-clamp");
+        return crate::css_style::webkit_line_clamp_value(&line_clamp)
+            .unwrap_or_else(|| "none".to_owned());
+    }
     if let Some(value) = shorthands::computed_shorthand_value(runtime, handle, property, resolution)
     {
         return value;

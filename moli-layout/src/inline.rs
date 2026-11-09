@@ -408,6 +408,16 @@ pub(crate) struct InlineLineMetrics {
     pub(crate) first_baseline: Option<f32>,
     pub(crate) last_baseline: Option<f32>,
     pub(crate) has_non_phantom_line: bool,
+    /// Set when `line-clamp` hides at least one later line box.
+    pub(crate) clamp: Option<InlineLineClamp>,
+}
+
+/// The block-end edge and baseline of the last line kept by `line-clamp`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct InlineLineClamp {
+    /// Content block size ending at the clamp line's bottom edge.
+    pub(crate) block_size: f32,
+    pub(crate) last_baseline: f32,
 }
 
 impl InlineLinePlacement {
@@ -1008,6 +1018,7 @@ pub(crate) fn measure_inline_lines(
     atomic_baseline_ascents: &[Option<f32>],
     structural_edge_contributions: &[InlineEdgeContribution],
     float_line_clearances: &[f32],
+    line_clamp: Option<usize>,
 ) -> InlineLineMetrics {
     resolve_inline_lines(
         context,
@@ -1015,6 +1026,7 @@ pub(crate) fn measure_inline_lines(
         atomic_baseline_ascents,
         structural_edge_contributions,
         float_line_clearances,
+        line_clamp,
         None,
     )
 }
@@ -1025,6 +1037,7 @@ pub(crate) fn build_inline_line_placements(
     atomic_baseline_ascents: &[Option<f32>],
     structural_edge_contributions: &[InlineEdgeContribution],
     float_line_clearances: &[f32],
+    line_clamp: Option<usize>,
 ) -> (Vec<InlineLinePlacement>, InlineLineMetrics) {
     let mut placements = Vec::with_capacity(layout.lines().len());
     let metrics = resolve_inline_lines(
@@ -1033,6 +1046,7 @@ pub(crate) fn build_inline_line_placements(
         atomic_baseline_ascents,
         structural_edge_contributions,
         float_line_clearances,
+        line_clamp,
         Some(&mut placements),
     );
     (placements, metrics)
@@ -1044,9 +1058,12 @@ fn resolve_inline_lines(
     atomic_baseline_ascents: &[Option<f32>],
     structural_edge_contributions: &[InlineEdgeContribution],
     float_line_clearances: &[f32],
+    line_clamp: Option<usize>,
     mut placements: Option<&mut Vec<InlineLinePlacement>>,
 ) -> InlineLineMetrics {
     let mut result = InlineLineMetrics::default();
+    let mut content_lines = 0_usize;
+    let mut clamp_line = None;
     let mut preceding_adjustment = 0.0;
     let mut unadjusted_line_top = 0.0;
 
@@ -1371,6 +1388,17 @@ fn resolve_inline_lines(
             result.has_non_phantom_line = true;
             result.first_baseline.get_or_insert(root_baseline);
             result.last_baseline = Some(root_baseline);
+            content_lines += 1;
+            if let Some(clamp) = clamp_line.filter(|_| result.clamp.is_none()) {
+                // A later content line exists, so the clamp hides something.
+                result.clamp = Some(clamp);
+            }
+            if line_clamp == Some(content_lines) {
+                clamp_line = Some(InlineLineClamp {
+                    block_size: raw_top + preceding_adjustment + line_height,
+                    last_baseline: root_baseline,
+                });
+            }
         }
 
         // Intrinsic and flex/grid probes need only the resolved line height
@@ -3512,9 +3540,9 @@ mod tests {
             line_placements: Vec::new(),
             fragments: InlineFragments::default(),
         };
-        let summary = measure_inline_lines(&context, &layout, &[], &[], &[]);
+        let summary = measure_inline_lines(&context, &layout, &[], &[], &[], None);
         let (placements, materialized_summary) =
-            build_inline_line_placements(&context, &layout, &[], &[], &[]);
+            build_inline_line_placements(&context, &layout, &[], &[], &[], None);
 
         assert_eq!(summary, materialized_summary);
         assert_eq!(placements.len(), layout.lines().len());
