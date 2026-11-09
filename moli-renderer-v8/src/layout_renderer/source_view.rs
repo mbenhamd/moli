@@ -47,6 +47,11 @@ impl<'a> NativeLayoutSourceView<'a> {
     fn host(&self) -> &DomHost {
         self.runtime.dom_host()
     }
+
+    fn is_closed_details(&self, node: DomHandle) -> bool {
+        self.host().is_html_element_named(node, "details")
+            && self.host().get_attribute(node, "open").is_none()
+    }
 }
 
 impl LayoutSource for NativeLayoutSourceView<'_> {
@@ -139,7 +144,18 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
     }
 
     fn flat_children(&self, node: Self::NodeId) -> Self::ChildIter<'_> {
-        flat_children(self.host(), self.root, node).into_iter()
+        let mut children = flat_children(self.host(), self.root, node);
+        if self.is_closed_details(node) {
+            // A closed <details> renders only its summary slot. Blink assigns
+            // every other child to the `::details-content` slot, which is
+            // `content-visibility: hidden` and so contributes no size, paint
+            // or hit target. Moli generates no box for that slot content.
+            let summary = children.iter().copied().find(|child| {
+                self.host().is_html_element_named(*child, "summary")
+            });
+            children.retain(|child| Some(*child) == summary);
+        }
+        children.into_iter()
     }
 
     fn node_kind(&self, node: Self::NodeId) -> LayoutSourceKind {

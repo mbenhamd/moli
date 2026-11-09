@@ -1804,6 +1804,51 @@ document.body.innerHTML = '<div id=host></div><div id=other></div>';
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn closed_details_lays_out_only_its_first_summary() {
+    run_page_vm_async_test(async move {
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let mut page_vm = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/details.html")?,
+        );
+        page_vm.vm_mut().eval(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0;padding:0}body{font:16px/20px monospace}p{margin:0}</style>';
+document.body.innerHTML = '<details id=d><summary id=s>Head</summary><p>a</p><summary>second</summary><p>b</p></details><div id=after>x</div>';
+"#,
+        )?;
+        page_vm.vm_mut().sync_live_document_style_sources();
+        page_vm.vm_mut().publish_layout_for_test()?;
+        let closed = page_vm.vm_mut().eval(
+            r#"JSON.stringify([
+document.getElementById('d').getBoundingClientRect().height,
+document.getElementById('after').getBoundingClientRect().top,
+document.getElementById('s').getBoundingClientRect().height])"#,
+        )?;
+        page_vm
+            .vm_mut()
+            .eval("document.getElementById('d').open = true")?;
+        page_vm.vm_mut().sync_live_document_style_sources();
+        page_vm.vm_mut().publish_layout_for_test()?;
+        let open = page_vm.vm_mut().eval(
+            r#"JSON.stringify([
+document.getElementById('d').getBoundingClientRect().height,
+document.getElementById('after').getBoundingClientRect().top])"#,
+        )?;
+        // Chromium 147: the closed details keeps only its first summary (one
+        // 20px line); the other children, including a second summary, sit in
+        // the hidden `::details-content` slot. Opening it shows all four.
+        assert_eq!(closed, "[20,20,20]");
+        assert_eq!(open, "[80,80]");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("closed details fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn webkit_line_clamp_ends_block_height_at_the_clamp_line() {
     run_page_vm_async_test(async move {
         let loader =
