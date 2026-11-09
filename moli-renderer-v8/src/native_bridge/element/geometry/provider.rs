@@ -87,7 +87,55 @@ pub(crate) fn observable_document_metrics(
     }
 }
 
+/// SVG content below an outermost `<svg>` has no CSS box. It reports its
+/// SVG bounding box mapped through the screen CTM onto the outer box.
+/// `None` means `source` is not such content and layout answers directly.
+fn read_svg_content_client_rects(
+    runtime: &JsContextHost,
+    source: DomHandle,
+) -> Result<Option<Vec<ClientRect>>, LayoutError> {
+    use crate::context_bootstrap::svg_runtime::screen;
+    let Some(root) = screen::svg_layout_viewport_root(runtime, source) else {
+        return Ok(None);
+    };
+    let Some(root_box) = read_layout_client_rects(runtime, root)?
+        .into_iter()
+        .reduce(union_client_rect)
+    else {
+        return Ok(Some(Vec::new()));
+    };
+    let bounds = screen::svg_client_bounds(
+        runtime,
+        source,
+        root,
+        [root_box.left, root_box.top, root_box.width, root_box.height],
+    );
+    Ok(Some(
+        bounds
+            .into_iter()
+            .map(|[left, top, width, height]| ClientRect {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height,
+                width,
+                height,
+            })
+            .collect(),
+    ))
+}
+
 pub(crate) fn read_client_rects(
+    runtime: &JsContextHost,
+    source: DomHandle,
+) -> Result<Vec<ClientRect>, LayoutError> {
+    if let Some(rects) = read_svg_content_client_rects(runtime, source)? {
+        return Ok(rects);
+    }
+    read_layout_client_rects(runtime, source)
+}
+
+fn read_layout_client_rects(
     runtime: &JsContextHost,
     source: DomHandle,
 ) -> Result<Vec<ClientRect>, LayoutError> {
@@ -172,6 +220,15 @@ pub(crate) fn observable_bounding_client_rects(
         .copied()
         .map(|source| LayoutQuery::ClientRects { source })
         .collect();
+    if sources.iter().any(|source| {
+        crate::context_bootstrap::svg_runtime::screen::svg_layout_viewport_root(runtime, *source)
+            .is_some()
+    }) {
+        return sources
+            .iter()
+            .map(|source| read_bounding_client_rect(runtime, *source))
+            .collect();
+    }
     let answers =
         match observable_geometry_batch(runtime, document, &LayoutQueryBatch::new(queries)) {
             Ok(answers) => answers,

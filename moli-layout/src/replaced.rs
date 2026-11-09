@@ -32,6 +32,14 @@ pub(crate) struct ReplacedContext {
 }
 
 impl ReplacedContext {
+    /// Whether two contexts size the replaced box identically across passes.
+    pub(crate) fn retained_layout_inputs_equal(&self, other: &Self) -> bool {
+        self.inherent_size == other.inherent_size
+            && self.attribute_size == other.attribute_size
+            && self.inherent_ratio == other.inherent_ratio
+            && self.svg_without_intrinsic_size == other.svg_without_intrinsic_size
+    }
+
     pub(crate) fn for_element(kind: LayoutReplacedKind, metrics: Option<ReplacedMetrics>) -> Self {
         let mut metrics = metrics.unwrap_or_default();
         metrics.intrinsic_width = valid_dimension(metrics.intrinsic_width);

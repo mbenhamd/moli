@@ -9,6 +9,7 @@ use moli_layout::{
     LayoutSource, LayoutSourceKind, LayoutStyleResolver, LayoutTransform2D, LayoutViewport,
     PaintBrush, PaintCaptureRequest, PaintColor, PaintFragment, PaintShape,
     ResolvedLayoutElementStyles, ResolvedLayoutStyle, build_layout_pass,
+    build_layout_pass_with_embedded_frames,
 };
 use style::Atom;
 use taffy::{
@@ -91,7 +92,8 @@ impl LayoutSource for Source {
                 LayoutNamespace::Html,
                 self.0[node].local_name,
                 LayoutElementCategory::Generic,
-                None,
+                (self.0[node].local_name == "iframe")
+                    .then_some(moli_layout::LayoutReplacedKind::Frame),
             )
         })
     }
@@ -2419,7 +2421,7 @@ fn pass_result_owns_complete_box_models_and_answers_a_batch_from_one_pass() {
         assert_eq!(&output.tree.answer_query(query), answer);
     }
     assert_eq!(answers.metrics.reason, LayoutFlushReason::Test);
-    assert_eq!(answers.metrics.box_count, output.boxes.len());
+    assert_eq!(answers.metrics.box_count, output.boxes().len());
     assert!(matches!(
         answers.answers[0],
         LayoutQueryAnswer::DocumentMetrics(_)
@@ -2625,7 +2627,7 @@ fn inline_output_preserves_line_text_and_utf16_source_fragments() {
         .insert(2, resolved(LayoutDisplay::Inline, Style::default()));
 
     let output = build(&source, &mut styles);
-    assert!(output.fragments.iter().any(|fragment| matches!(
+    assert!(output.fragments().iter().any(|fragment| matches!(
         fragment.kind,
         LayoutFragmentKind::Line {
             owner: _,
@@ -2777,7 +2779,7 @@ fn inline_and_range_rects_use_font_bounds_instead_of_the_css_line_height() {
 
     let output = build(&source, &mut styles);
     let line_rect = output
-        .fragments
+        .fragments()
         .iter()
         .find_map(|fragment| {
             matches!(fragment.kind, LayoutFragmentKind::Line { .. }).then_some(fragment.rect)
@@ -3286,8 +3288,8 @@ fn transforms_and_semantic_paint_order_share_the_hit_test_projection() {
             .all(|diagnostic| diagnostic.code != "transform-paint-deferred")
     );
     let retention = output.retention_metrics();
-    assert_eq!(retention.box_count, output.boxes.len());
-    assert_eq!(retention.fragment_count, output.fragments.len());
+    assert_eq!(retention.box_count, output.boxes().len());
+    assert_eq!(retention.fragment_count, output.fragments().len());
     assert!(retention.estimated_geometry_bytes > 0);
     let _paint = output
         .take_paint_snapshot()
@@ -3349,7 +3351,7 @@ fn point_hits_select_paint_order_before_deduplicating_sources() {
     // stored first, but deduplication must retain the foremost fragment.
     output
         .tree
-        .boxes
+        .boxes_mut()
         .iter_mut()
         .find(|layout_box| layout_box.hit_source == Some(2))
         .unwrap()
@@ -3368,7 +3370,7 @@ fn point_hits_select_paint_order_before_deduplicating_sources() {
             .all(|pair| pair[0].paint_order() >= pair[1].paint_order())
     );
 
-    for layout_box in &mut output.tree.boxes {
+    for layout_box in output.tree.boxes_mut() {
         if layout_box.hit_source == Some(1) {
             layout_box.geometry.pointer_events = false;
         }
@@ -3460,6 +3462,108 @@ fn transformed_hit_retains_exact_local_content_box_and_inverse_mapping() {
         .bounding_rect();
     assert_close(projected_content.width, 50.0);
     assert_close(projected_content.height, 30.0);
+}
+
+struct ScrollingFrame;
+
+impl moli_layout::EmbeddedFrameRenderer<usize> for ScrollingFrame {
+    fn render_embedded_frame(
+        &mut self,
+        _frame: usize,
+        viewport: LayoutViewport,
+    ) -> Result<Option<moli_layout::EmbeddedFrameSnapshot<usize>>, LayoutError> {
+        let source = Source(vec![
+            Node::element("frame-root", vec![1]),
+            Node::element("frame-content", Vec::new()),
+        ]);
+        let mut styles = Styles(HashMap::from([
+            (0, fixed_size(LayoutDisplay::Block, 100.0, 80.0)),
+            (1, fixed_size(LayoutDisplay::Block, 100.0, 400.0)),
+        ]));
+        let (tree, paint, images) = build_layout_pass(
+            &source,
+            &mut styles,
+            &mut DocumentLayoutServices::new(),
+            LayoutPassRequest::new(viewport, LayoutFlushReason::Test),
+        )?
+        .into_embedded_parts();
+        Ok(Some(moli_layout::EmbeddedFrameSnapshot::new(
+            tree, paint, images,
+        )))
+    }
+}
+
+#[test]
+fn scroll_sync_that_needs_layout_leaves_embedded_frames_unchanged() {
+    let source = Source(vec![
+        Node::element("root", vec![1, 2, 3]),
+        Node::element("sticky", Vec::new()),
+        Node::html_element("frame", "iframe", Vec::new()),
+        Node::element("document-flow", Vec::new()),
+    ]);
+    let mut styles = Styles::default();
+    styles
+        .0
+        .insert(0, fixed_size(LayoutDisplay::Block, 200.0, 120.0));
+    styles.0.insert(
+        1,
+        resolved(
+            LayoutDisplay::Block,
+            Style {
+                inset: Rect {
+                    left: LengthPercentageAuto::auto(),
+                    right: LengthPercentageAuto::auto(),
+                    top: length(0.0),
+                    bottom: LengthPercentageAuto::auto(),
+                },
+                size: Size {
+                    width: length(200.0),
+                    height: length(10.0),
+                },
+                ..Style::default()
+            },
+        )
+        .with_position(moli_layout::LayoutPosition::Sticky),
+    );
+    styles
+        .0
+        .insert(2, fixed_size(LayoutDisplay::Block, 100.0, 80.0));
+    styles
+        .0
+        .insert(3, fixed_size(LayoutDisplay::Block, 200.0, 400.0));
+    let mut output = build_layout_pass_with_embedded_frames(
+        &source,
+        &mut styles,
+        &mut DocumentLayoutServices::new(),
+        LayoutPassRequest::new(LayoutViewport::new(320, 240, 1.0), LayoutFlushReason::Test),
+        &mut ScrollingFrame,
+    )
+    .unwrap();
+    let frame_root = |output: &LayoutPassResult<usize>| {
+        let frame = output
+            .tree
+            .embedded_frame_tree(2)
+            .expect("the iframe has an embedded tree");
+        frame.boxes()[frame.root_box.index()].scroll_extent.clone()
+    };
+    let before = frame_root(&output);
+    assert!(before.is_scroll_container && before.maximum_offset.y >= 50.0);
+
+    // Both documents' roots (source 0 in each) scroll by 50px. The parent's
+    // viewport cannot move in place while a sticky box exists, so the sync
+    // must leave the frame's tree untouched too.
+    let mut sample = |node: usize| {
+        if node == 0 {
+            LayoutPoint::new(0.0, 50.0)
+        } else {
+            LayoutPoint::ZERO
+        }
+    };
+    assert_eq!(
+        output.tree.sync_scroll_offsets(&mut sample),
+        moli_layout::ScrollOffsetSync::NeedsLayout
+    );
+    assert_eq!(frame_root(&output), before);
 }
 
 #[test]
@@ -3585,7 +3689,7 @@ fn viewport_fixed_box_escapes_intermediate_overflow_clip_for_paint_and_hit_test(
         .source_output(2)
         .and_then(|source| source.principal_box)
         .expect("fixed principal box");
-    let fixed_clip = output.boxes[fixed_box.index()]
+    let fixed_clip = output.boxes()[fixed_box.index()]
         .clip_chain
         .expect("viewport clip");
     assert_eq!(output.clip_chain[fixed_clip.index()].owner, None);
@@ -3662,7 +3766,7 @@ fn absolute_box_escapes_overflow_clip_between_it_and_its_containing_block() {
         .source_output(2)
         .and_then(|source| source.principal_box)
         .expect("absolute principal box");
-    let absolute_clip = output.boxes[absolute_box.index()]
+    let absolute_clip = output.boxes()[absolute_box.index()]
         .clip_chain
         .expect("root clip");
     assert_eq!(output.clip_chain[absolute_clip.index()].owner, None);
@@ -3736,7 +3840,11 @@ fn transformed_fixed_containing_block_still_clips_its_fixed_descendant() {
         .and_then(|source| source.principal_box)
         .expect("fixed principal box");
     assert_eq!(
-        output.clip_chain[output.boxes[fixed_box.index()].clip_chain.unwrap().index()].owner,
+        output.clip_chain[output.boxes()[fixed_box.index()]
+            .clip_chain
+            .unwrap()
+            .index()]
+        .owner,
         Some(containing_block)
     );
     assert_eq!(

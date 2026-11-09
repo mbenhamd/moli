@@ -305,3 +305,34 @@ fn tab_key_stops_on_scroller_whose_only_focusable_descendant_is_hidden() {
 
     assert_eq!(path.join("|"), "pre|scroller|post|scroller");
 }
+
+#[test]
+fn redispatching_a_saved_focus_event_makes_it_untrusted() {
+    let mut vm = new_storage_test_vm("https://focus-redispatch-untrusted.test/");
+
+    // dispatchEvent initializes isTrusted to false, so a page cannot replay
+    // a user-agent event as trusted.
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const root = document.documentElement ||
+    document.appendChild(document.createElement('html'));
+  const body = document.body || root.appendChild(document.createElement('body'));
+  body.innerHTML = '<button id="a">a</button><button id="b">b</button>';
+  const a = document.getElementById('a');
+  const b = document.getElementById('b');
+  const log = [];
+  let saved = null;
+  a.addEventListener('focus', (event) => { saved = event; log.push('ua:' + event.isTrusted); });
+  b.addEventListener('focus', (event) => log.push('replayed:' + event.isTrusted));
+  a.focus();
+  b.dispatchEvent(saved);
+  log.push('after:' + saved.isTrusted);
+  return log.join('|');
+})()
+"#,
+        )
+        .expect("focus redispatch probe should evaluate");
+    assert_eq!(result, "ua:true|replayed:false|after:false");
+}

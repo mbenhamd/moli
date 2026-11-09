@@ -20,7 +20,7 @@ fn node_scroll_position_value<'s>(
     object: v8::Local<'s, v8::Object>,
     horizontal: bool,
 ) -> f64 {
-    let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, object) else {
+    let Some((runtime_ptr, handle)) = geometry_receiver(scope, object) else {
         return 0.0;
     };
     let runtime = unsafe { &*runtime_ptr };
@@ -36,18 +36,6 @@ fn node_scroll_position_value<'s>(
     if !runtime.layout_policy().relayouts_stale_reads() {
         return if horizontal { left } else { top };
     }
-    // The getter has no error channel; a failed layout reads the stored offset.
-    let Ok(Some(metrics)) = read_element_metrics(runtime, handle) else {
-        return if horizontal { left } else { top };
-    };
-    let clamped_left = left.clamp(
-        f64::from(metrics.minimum_scroll_offset.x),
-        f64::from(metrics.maximum_scroll_offset.x),
-    );
-    let clamped_top = top.clamp(
-        f64::from(metrics.minimum_scroll_offset.y),
-        f64::from(metrics.maximum_scroll_offset.y),
-    );
     let is_document_root = runtime
         .dom_host()
         .owner_document_handle(handle)
@@ -58,8 +46,30 @@ fn node_scroll_position_value<'s>(
                 .document_element_handle_for_document(document)
         })
         == Some(handle);
-    if !is_document_root && (clamped_left != left || clamped_top != top) {
-        set_node_scroll_position(scope, runtime_ptr, handle, clamped_left, clamped_top, false);
+    let metrics = match read_element_metrics(runtime, handle) {
+        Ok(Some(metrics)) => metrics,
+        // An element without a box (display:none) has no scroll container and
+        // reads 0 like Chromium. It keeps the stored offset, which shows again
+        // once the element is rendered.
+        Ok(None) if !is_document_root => return 0.0,
+        // The getter has no error channel; a failed layout reads the stored offset.
+        Ok(None) | Err(_) => return if horizontal { left } else { top },
+    };
+    let clamped_left = left.clamp(
+        f64::from(metrics.minimum_scroll_offset.x),
+        f64::from(metrics.maximum_scroll_offset.x),
+    );
+    let clamped_top = top.clamp(
+        f64::from(metrics.minimum_scroll_offset.y),
+        f64::from(metrics.maximum_scroll_offset.y),
+    );
+    if !is_document_root
+        && (clamped_left != left || clamped_top != top)
+        && set_node_scroll_position(scope, runtime_ptr, handle, clamped_left, clamped_top, false)
+    {
+        // A layout clamp moves the scroll position, so Chromium fires
+        // `scroll` at the element. Moli applies the clamp when a read lays out.
+        let _ = unsafe { &mut *runtime_ptr }.queue_element_scroll_events(scope, handle);
     }
     if horizontal {
         clamped_left
@@ -101,6 +111,48 @@ fn set_observable_node_scroll_position(
     }
 }
 
+/// Resolve the node whose layout a geometry member reads.
+///
+/// A wrapper created while its node belonged to a Document without a browsing
+/// context (`document.implementation.createHTMLDocument`, `DOMParser`, or a
+/// clone made there) keeps only its detached native identity after the
+/// rendered Document adopts the node. Once connected to a rendered Document it
+/// reads the same layout as a wrapper the rendered Document created; outside
+/// one it keeps the detached fallbacks.
+fn geometry_receiver(
+    scope: &mut v8::PinScope<'_, '_>,
+    object: v8::Local<'_, v8::Object>,
+) -> Option<(*mut JsContextHost, DomHandle)> {
+    let object = v8::Local::new(scope, object);
+    if let Ok(node) = node_runtime_and_handle_from_object(scope, object) {
+        return Some(node);
+    }
+    let (runtime_ptr, handle) =
+        node_runtime_and_handle_from_object_or_detached(scope, object).ok()?;
+    node_is_in_rendered_document(unsafe { &*runtime_ptr }, handle).then_some((runtime_ptr, handle))
+}
+
+fn node_is_in_rendered_document(runtime: &JsContextHost, handle: DomHandle) -> bool {
+    runtime.dom_host().is_connected(handle)
+        && runtime
+            .dom_host()
+            .owner_document_handle(handle)
+            .is_some_and(|document| runtime.document_has_browsing_context(document))
+}
+
+/// A node object keeps its detached-object identity after another Document
+/// adopts it back, so that identity alone does not make scrolling inert. Only a
+/// node outside a connected, rendered Document ignores scroll requests.
+fn scroll_receiver_is_detached<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    runtime_ptr: *mut JsContextHost,
+    object: v8::Local<'s, v8::Object>,
+    handle: DomHandle,
+) -> bool {
+    document::detached_native_handle_for_runtime(scope, runtime_ptr, object).is_some()
+        && !node_is_in_rendered_document(unsafe { &*runtime_ptr }, handle)
+}
+
 fn node_scroll_position_setter_for_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
@@ -115,9 +167,7 @@ fn node_scroll_position_setter_for_object<'s>(
         .number_value(scope)
         .filter(|value| value.is_finite())
         .unwrap_or(0.0);
-    let receiver_is_detached =
-        document::detached_native_handle_for_runtime(scope, runtime_ptr, object).is_some();
-    if receiver_is_detached {
+    if scroll_receiver_is_detached(scope, runtime_ptr, object, handle) {
         return Ok(());
     }
     let runtime = unsafe { &*runtime_ptr };
@@ -172,9 +222,7 @@ fn scroll_node_to<'s>(
     else {
         return Ok(());
     };
-    let receiver_is_detached =
-        document::detached_native_handle_for_runtime(scope, runtime_ptr, args.this()).is_some();
-    if receiver_is_detached {
+    if scroll_receiver_is_detached(scope, runtime_ptr, args.this(), handle) {
         return Ok(());
     }
     let (current_left, current_top) = node_scroll_position(unsafe { &*runtime_ptr }, handle);
@@ -200,7 +248,7 @@ fn node_box_metric_from_object<'s>(
     object: v8::Local<'s, v8::Object>,
     metric: &str,
 ) -> Result<i32, moli_layout::LayoutError> {
-    if let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, object) {
+    if let Some((runtime_ptr, handle)) = geometry_receiver(scope, object) {
         let metrics = read_element_metrics(unsafe { &*runtime_ptr }, handle)?;
         return Ok(metrics
             .as_ref()
@@ -463,7 +511,7 @@ pub(in crate::native_bridge) fn node_offset_parent_getter_function<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, args.this()) else {
+    let Some((runtime_ptr, handle)) = geometry_receiver(scope, args.this()) else {
         rv.set_null();
         return;
     };
@@ -508,7 +556,7 @@ pub(in crate::native_bridge) fn node_scroll_into_view_if_needed_callback(
     args: v8::FunctionCallbackArguments<'_>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, args.this())
+    if let Some((runtime_ptr, handle)) = geometry_receiver(scope, args.this())
         && let Err(error) = scroll_node_into_view_if_needed(scope, runtime_ptr, handle, None)
     {
         throw_scroll_layout_error(scope, "scrollIntoViewIfNeeded", error);
@@ -528,7 +576,7 @@ pub(in crate::native_bridge) fn node_scroll_into_view_callback<'s>(
     let Some((horizontal, vertical)) = scroll_options::into_view_alignments(scope, &args) else {
         return;
     };
-    if let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, args.this())
+    if let Some((runtime_ptr, handle)) = geometry_receiver(scope, args.this())
         && let Err(error) =
             scroll_node_into_view(scope, runtime_ptr, handle, None, horizontal, vertical)
     {
@@ -554,7 +602,7 @@ fn reveal_lazy_images_for_scroll(
     scope: &mut v8::PinScope<'_, '_>,
     object: v8::Local<'_, v8::Object>,
 ) {
-    let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, object) else {
+    let Some((runtime_ptr, handle)) = geometry_receiver(scope, object) else {
         return;
     };
     let document = unsafe { &*runtime_ptr }

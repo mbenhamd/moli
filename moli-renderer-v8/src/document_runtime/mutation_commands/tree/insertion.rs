@@ -366,6 +366,12 @@ impl DocumentRuntime {
                 was_connected,
             );
         }
+        // Removal resets scroll offsets; a state-preserving move keeps them.
+        let preserved_scroll_offsets = if dispatch_atomic_move_callbacks {
+            self.scroll_offsets_in_subtrees(insertion_plan.insertion_roots)
+        } else {
+            Vec::new()
+        };
         let (effects, prepublished_removals) = match self.tree_insertion_effects_with_dom_debugger(
             host_ptr,
             parent,
@@ -417,6 +423,7 @@ impl DocumentRuntime {
                 insertion_plan.insertion_roots,
             );
         }
+        self.restore_scroll_offsets_after_atomic_move(preserved_scroll_offsets);
         if dispatch_atomic_move_callbacks && let Some(active) = self.active_element_handle() {
             crate::native_bridge::element::schedule_focus_blur_if_needed(scope, host_ptr, active);
         }
@@ -430,6 +437,43 @@ impl DocumentRuntime {
             started,
         );
         changed
+    }
+
+    fn scroll_offsets_in_subtrees(&self, roots: &[DomHandle]) -> Vec<(DomHandle, f64, f64)> {
+        let mut offsets = Vec::new();
+        let mut stack = roots.to_vec();
+        while let Some(handle) = stack.pop() {
+            if !self.dom_host.is_connected(handle) {
+                continue;
+            }
+            if let Some(element) = self.dom_host.node(handle).and_then(Node::as_element) {
+                let (left, top) = (element.scroll_left(), element.scroll_top());
+                if left != 0.0 || top != 0.0 {
+                    offsets.push((handle, left, top));
+                }
+            }
+            stack.extend(self.dom_host.child_handles(handle));
+            if let Some(shadow_root) = self.dom_host.shadow_root_handle(handle) {
+                stack.push(shadow_root);
+            }
+        }
+        offsets
+    }
+
+    fn restore_scroll_offsets_after_atomic_move(&mut self, offsets: Vec<(DomHandle, f64, f64)>) {
+        for (handle, left, top) in offsets {
+            if !self.dom_host.is_connected(handle) {
+                continue;
+            }
+            if let Some(element) = self
+                .dom_host
+                .node_mut(handle)
+                .and_then(|node| node.data_mut().as_element_mut())
+            {
+                element.set_scroll_left(left);
+                element.set_scroll_top(top);
+            }
+        }
     }
 
     /// Returns the fragment's children when `child` is a DocumentFragment (the

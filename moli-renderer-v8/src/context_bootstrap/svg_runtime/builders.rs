@@ -1499,7 +1499,7 @@ fn svg_geometry_rect_radius_attribute_for_handle(
         .unwrap_or(0.0)
 }
 
-fn svg_geometry_optional_length_attribute_for_handle(
+pub(super) fn svg_geometry_optional_length_attribute_for_handle(
     runtime: &crate::native_bridge::JsContextHost,
     handle: crate::document_runtime::DomHandle,
     attribute: &str,
@@ -1534,7 +1534,7 @@ pub(super) fn svg_graphics_bounding_box<'s>(
     )
 }
 
-fn svg_bbox_for_handle(
+pub(super) fn svg_bbox_for_handle(
     runtime: &crate::native_bridge::JsContextHost,
     handle: crate::document_runtime::DomHandle,
     transform: SvgMatrixComponents,
@@ -1553,8 +1553,9 @@ fn svg_bbox_for_handle(
     }
 
     match local_name {
-        "text" => None,
-        "tspan" => svg_text_bounding_box(runtime, handle, transform),
+        "text" | "tspan" | "a" if super::text_layout::svg_text_root(runtime, handle).is_some() => {
+            super::text_layout::svg_text_bounding_box(runtime, handle, transform)
+        }
         "image" => {
             let (width, height) = svg_image_dimensions(runtime, handle);
             let geometry = SvgGeometryElement::Rect {
@@ -1591,10 +1592,8 @@ fn svg_bbox_for_handle(
                 };
                 let child_transform = transform.multiply(svg_transform_for_handle(runtime, child));
                 let child_transform = if child_name == "svg" {
-                    child_transform.multiply(SvgMatrixComponents::translate(
-                        svg_geometry_length_attribute_for_handle(runtime, child, "x"),
-                        svg_geometry_length_attribute_for_handle(runtime, child, "y"),
-                    ))
+                    child_transform
+                        .multiply(super::screen::svg_nested_viewport_transform(runtime, child))
                 } else {
                     child_transform
                 };
@@ -1637,147 +1636,6 @@ fn svg_image_dimensions(
     }
 }
 
-fn svg_text_bounding_box(
-    runtime: &crate::native_bridge::JsContextHost,
-    handle: crate::document_runtime::DomHandle,
-    transform: SvgMatrixComponents,
-) -> Option<SvgGeometryBox> {
-    let text_root = svg_text_root(runtime, handle)?;
-    let text = runtime.dom_host().text_content(handle)?;
-    let character_count = svg_rendered_text_character_count(&text);
-    if character_count == 0 {
-        return None;
-    }
-
-    let font_size = crate::native_bridge::element::computed_style_property_for_handle(
-        runtime,
-        handle,
-        "font-size",
-    );
-    let font_size = parse_svg_length_value(font_size.trim())
-        .map(|length| length.value)
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(16.0);
-    let font_family = crate::native_bridge::element::computed_style_property_for_handle(
-        runtime,
-        handle,
-        "font-family",
-    );
-    let is_ahem = font_family.split(',').any(|family| {
-        family
-            .trim_matches([' ', '\'', '"'])
-            .eq_ignore_ascii_case("Ahem")
-    });
-    let glyph_advance = if is_ahem { font_size } else { font_size * 0.6 };
-
-    let explicit_x = svg_geometry_optional_length_attribute_for_handle(runtime, handle, "x");
-    let preceding_characters = if handle == text_root || explicit_x.is_some() {
-        0
-    } else {
-        svg_text_characters_before(runtime, text_root, handle).unwrap_or(0)
-    };
-    let x = explicit_x
-        .or_else(|| svg_inherited_text_position(runtime, handle, text_root, "x"))
-        .unwrap_or(0.0)
-        + svg_geometry_optional_length_attribute_for_handle(runtime, handle, "dx")
-            .or_else(|| svg_inherited_text_position(runtime, handle, text_root, "dx"))
-            .unwrap_or(0.0)
-        + preceding_characters as f64 * glyph_advance;
-    let baseline = svg_geometry_optional_length_attribute_for_handle(runtime, handle, "y")
-        .or_else(|| svg_inherited_text_position(runtime, handle, text_root, "y"))
-        .unwrap_or(0.0)
-        + svg_geometry_optional_length_attribute_for_handle(runtime, handle, "dy")
-            .or_else(|| svg_inherited_text_position(runtime, handle, text_root, "dy"))
-            .unwrap_or(0.0);
-
-    let geometry = SvgGeometryElement::Rect {
-        x,
-        y: baseline - font_size * 0.8,
-        width: character_count as f64 * glyph_advance,
-        height: font_size,
-        rx: 0.0,
-        ry: 0.0,
-    };
-    svg_geometry::bounding_box_for_transformed_element(&geometry, transform)
-}
-
-fn svg_text_root(
-    runtime: &crate::native_bridge::JsContextHost,
-    handle: crate::document_runtime::DomHandle,
-) -> Option<crate::document_runtime::DomHandle> {
-    let mut current = Some(handle);
-    while let Some(candidate) = current {
-        let node = runtime.dom_host().node(candidate)?;
-        if node.local_name() == Some("text") {
-            return Some(candidate);
-        }
-        current = node.parent_node_id();
-    }
-    None
-}
-
-fn svg_inherited_text_position(
-    runtime: &crate::native_bridge::JsContextHost,
-    handle: crate::document_runtime::DomHandle,
-    text_root: crate::document_runtime::DomHandle,
-    attribute: &str,
-) -> Option<f64> {
-    let mut current = runtime.dom_host().node(handle)?.parent_node_id();
-    while let Some(candidate) = current {
-        if let Some(value) =
-            svg_geometry_optional_length_attribute_for_handle(runtime, candidate, attribute)
-        {
-            return Some(value);
-        }
-        if candidate == text_root {
-            break;
-        }
-        current = runtime.dom_host().node(candidate)?.parent_node_id();
-    }
-    None
-}
-
-fn svg_text_characters_before(
-    runtime: &crate::native_bridge::JsContextHost,
-    root: crate::document_runtime::DomHandle,
-    target: crate::document_runtime::DomHandle,
-) -> Option<usize> {
-    fn visit(
-        runtime: &crate::native_bridge::JsContextHost,
-        current: crate::document_runtime::DomHandle,
-        target: crate::document_runtime::DomHandle,
-        count: &mut usize,
-    ) -> bool {
-        for child in runtime.dom_host().child_handles(current) {
-            if child == target {
-                return true;
-            }
-            let Some(node) = runtime.dom_host().node(child) else {
-                continue;
-            };
-            if let Some(value) = node.data_value()
-                && node.is_text()
-            {
-                *count += svg_rendered_text_character_count(value);
-                continue;
-            }
-            if visit(runtime, child, target, count) {
-                return true;
-            }
-        }
-        false
-    }
-
-    let mut count = 0;
-    visit(runtime, root, target, &mut count).then_some(count)
-}
-
-fn svg_rendered_text_character_count(text: &str) -> usize {
-    text.split_whitespace()
-        .map(|chunk| chunk.chars().count())
-        .sum()
-}
-
 fn svg_use_bounding_box(
     runtime: &crate::native_bridge::JsContextHost,
     handle: crate::document_runtime::DomHandle,
@@ -1803,7 +1661,7 @@ fn svg_use_bounding_box(
     result
 }
 
-fn svg_transform_for_handle(
+pub(super) fn svg_transform_for_handle(
     runtime: &crate::native_bridge::JsContextHost,
     handle: crate::document_runtime::DomHandle,
 ) -> SvgMatrixComponents {
@@ -1820,7 +1678,7 @@ fn svg_transform_for_handle(
         .unwrap_or_else(SvgMatrixComponents::identity)
 }
 
-fn svg_bbox_has_non_rendered_ancestor(
+pub(super) fn svg_bbox_has_non_rendered_ancestor(
     runtime: &crate::native_bridge::JsContextHost,
     handle: crate::document_runtime::DomHandle,
 ) -> bool {
@@ -3260,7 +3118,7 @@ fn svg_view_box_attribute_value<'s>(
         .unwrap_or([0.0; 4])
 }
 
-fn parse_svg_view_box_value(raw: &str) -> Option<[f64; 4]> {
+pub(super) fn parse_svg_view_box_value(raw: &str) -> Option<[f64; 4]> {
     let values = svg_geometry::parse_number_list(raw)?;
     let [x, y, width, height] = values.as_slice() else {
         return None;
@@ -3376,7 +3234,7 @@ fn svg_preserve_aspect_ratio_attribute_value<'s>(
         ])
 }
 
-fn parse_svg_preserve_aspect_ratio_value(raw: &str) -> Option<[u32; 2]> {
+pub(super) fn parse_svg_preserve_aspect_ratio_value(raw: &str) -> Option<[u32; 2]> {
     let mut tokens = raw.split_ascii_whitespace();
     let mut align = tokens.next()?;
     if align == "defer" {
@@ -3968,6 +3826,21 @@ fn resolve_svg_length_user_value_for_unit<'s>(
     resolve_svg_length_in_context(value, unit, basis, context)
 }
 
+/// Resolves one SVG length token from `handle`'s `attribute` to user units,
+/// using the element's computed font and nearest viewport.
+pub(super) fn svg_attribute_length_to_user_units(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
+    attribute: &str,
+    token: &str,
+) -> Option<f64> {
+    let length = svg_geometry::parse_length(token)?;
+    let basis = svg_length_percentage_basis(runtime, handle, attribute);
+    let context = svg_length_numeric_context(runtime, handle, length.unit, true);
+    resolve_svg_length_in_context(length.value, length.unit, basis, context)
+        .filter(|value| value.is_finite())
+}
+
 fn resolve_svg_length_in_context(
     value: f64,
     unit: SvgLengthUnit,
@@ -4091,7 +3964,7 @@ fn svg_length_numeric_context(
     }
 }
 
-fn svg_computed_pixel_value(
+pub(super) fn svg_computed_pixel_value(
     runtime: &crate::native_bridge::JsContextHost,
     handle: crate::document_runtime::DomHandle,
     property: &str,

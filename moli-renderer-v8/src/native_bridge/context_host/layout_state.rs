@@ -221,9 +221,28 @@ impl DocumentLayoutState {
         &mut self,
         document: DomHandle,
         inputs: Option<LayoutInputKey>,
+        dirty_mark: super::layout_snapshot::LayoutDirtyMark,
         tree: FrozenLayoutTree<DomHandle>,
     ) {
-        self.latest_layout.publish(document, inputs, tree);
+        self.latest_layout
+            .publish(document, inputs, dirty_mark, tree);
+    }
+
+    pub(super) fn latest_layout_is_clean(
+        &self,
+        document: DomHandle,
+        inputs: &LayoutInputKey,
+        dirty_mark: super::layout_snapshot::LayoutDirtyMark,
+    ) -> bool {
+        self.latest_layout
+            .is_layout_clean(document, inputs, dirty_mark)
+    }
+
+    pub(super) fn sync_latest_layout_scroll_offsets(
+        &mut self,
+        sample: &mut dyn FnMut(DomHandle) -> moli_layout::LayoutPoint,
+    ) -> moli_layout::ScrollOffsetSync {
+        self.latest_layout.sync_scroll_offsets(sample)
     }
 
     pub(super) fn clear_latest_layout(&mut self) {

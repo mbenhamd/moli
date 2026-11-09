@@ -20,8 +20,8 @@ pub use detached_stylo::{
 pub use error::{SelectorError, SelectorErrorKind};
 pub use moli_dom as dom;
 pub use stylo::{
-    MoliInvalidationResult, MoliInvalidationResultBuilder, MoliInvalidationSourceResultsSink,
-    MoliStyleMutationElementSnapshot, MoliStyleMutationSnapshot,
+    ContainerQuerySizes, MoliInvalidationResult, MoliInvalidationResultBuilder,
+    MoliInvalidationSourceResultsSink, MoliStyleMutationElementSnapshot, MoliStyleMutationSnapshot,
     StyloDependencyInvalidationFallbackContext, StyloDocument, StyloDomHostBinding,
     StyloDomStyleAdapter, StyloElement, StyloElementDependencySnapshot, StyloNode,
     StyloPlannedFallbackRootInvalidationTarget,
@@ -276,6 +276,10 @@ impl QueryEngine {
 
 pub fn html_directionality(host: &DomHost, handle: NodeId) -> CssDirection {
     stylo::html_directionality(host, handle)
+}
+
+pub fn html_directionality_lacks_stylo_hint(host: &DomHost, handle: NodeId) -> bool {
+    stylo::html_directionality_lacks_stylo_hint(host, handle)
 }
 
 pub fn validate_supports_selector_condition_argument(selector: &str) -> Result<(), SelectorError> {

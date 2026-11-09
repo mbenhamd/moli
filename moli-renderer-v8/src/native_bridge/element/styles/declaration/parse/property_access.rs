@@ -231,6 +231,14 @@ pub(crate) fn pdb_property_value_for_cssom_query_with_side_entries(
     if matches!(property, "overflow" | "overflow-x" | "overflow-y") {
         return pdb_overflow_property_value(block, property, side_entries);
     }
+    if property == "-webkit-line-clamp" {
+        // Chromium's longhand is stored in Stylo's `line-clamp`, whose legacy
+        // shorthand serializes empty in a Servo declaration block.
+        if !pdb_property_is_declared_for_cssom_query(block, "line-clamp") {
+            return None;
+        }
+        return crate::css_style::webkit_line_clamp_value(&block.property_value("line-clamp")?);
+    }
     if !pdb_property_is_declared_for_cssom_query(block, property) {
         return None;
     }

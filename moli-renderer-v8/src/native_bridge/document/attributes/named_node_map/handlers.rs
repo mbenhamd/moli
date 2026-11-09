@@ -1,6 +1,6 @@
 use super::helpers::{
-    attribute_node_for_index, attribute_node_for_name, named_node_map_attribute_names,
-    named_node_map_element, reserved_named_node_map_key,
+    attribute_node_for_index, attribute_node_for_name, named_node_map_attribute_count,
+    named_node_map_attribute_names, named_node_map_element, reserved_named_node_map_key,
 };
 use super::*;
 use indexmap::IndexSet;
@@ -190,7 +190,7 @@ pub(in crate::native_bridge::document) fn named_node_map_length_getter_callback<
         rv.set(v8::Integer::new(scope, 0).into());
         return;
     };
-    let length = named_node_map_attribute_names(scope, element).len() as i32;
+    let length = named_node_map_attribute_count(scope, element) as i32;
     rv.set(v8::Integer::new(scope, length).into());
 }
 
@@ -219,7 +219,7 @@ pub(super) fn named_node_map_indexed_query<'a>(
     let Some(element) = named_node_map_element(scope, args.holder()) else {
         return v8::Intercepted::kNo;
     };
-    if named_node_map_attribute_names(scope, element).len() <= index as usize {
+    if named_node_map_attribute_count(scope, element) <= index as usize {
         return v8::Intercepted::kNo;
     }
     rv.set_int32(v8::PropertyAttribute::READ_ONLY.as_u32() as i32);
@@ -246,7 +246,7 @@ pub(super) fn named_node_map_indexed_deleter<'s>(
     let Some(element) = named_node_map_element(scope, args.holder()) else {
         return v8::Intercepted::kNo;
     };
-    if named_node_map_attribute_names(scope, element).len() <= index as usize {
+    if named_node_map_attribute_count(scope, element) <= index as usize {
         return v8::Intercepted::kNo;
     }
     rv.set_bool(false);
@@ -273,7 +273,7 @@ pub(super) fn named_node_map_indexed_enumerator<'a>(
         rv.set(v8::Array::new(scope, 0));
         return;
     };
-    let keys = (0..named_node_map_attribute_names(scope, element).len())
+    let keys = (0..named_node_map_attribute_count(scope, element))
         .map(|index| v8::Integer::new(scope, index as i32).into())
         .collect::<Vec<_>>();
     rv.set(v8::Array::new_with_elements(scope, &keys));

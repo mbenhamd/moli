@@ -77,8 +77,8 @@ pub use invalidation::{
     stylo_stylesheet_source_scope_fallback_roots,
 };
 pub use presentation::is_svg_presentation_attribute_name;
-pub(crate) use query::html_directionality;
 use query::{QueryDocument, QueryElement, QueryNode};
+pub(crate) use query::{html_directionality, html_directionality_lacks_stylo_hint};
 #[cfg(test)]
 pub(crate) use selector_parse::validate_supports_selector_list;
 pub(crate) use selector_parse::{
@@ -90,8 +90,8 @@ pub(crate) use selector_parse::{
     validate_supports_selector_condition_argument,
 };
 pub use style_traversal::{
-    StyloDocument, StyloDomHostBinding, StyloDomStyleAdapter, StyloElement, StyloElementDataStore,
-    StyloNode, StyloShadowRoot,
+    ContainerQuerySizes, StyloDocument, StyloDomHostBinding, StyloDomStyleAdapter, StyloElement,
+    StyloElementDataStore, StyloNode, StyloShadowRoot,
 };
 
 /// Query-only `DomHost` wrapper around Stylo `dom_apis`.

@@ -909,6 +909,9 @@ pub struct DocumentLayoutServices {
     web_font_order: WebFontOrder,
     has_font_face_set_order: bool,
     pub(crate) text_layout_passes: u64,
+    /// Type-erased world from the previous live pass. Single owner, cleared
+    /// whenever fonts or the layout policy change what shaping would produce.
+    retained_world: Option<Box<dyn std::any::Any>>,
     #[cfg(test)]
     font_collection_rebuilds: usize,
 }
@@ -947,6 +950,7 @@ impl DocumentLayoutServices {
             web_font_order: BTreeMap::new(),
             has_font_face_set_order: false,
             text_layout_passes: 0,
+            retained_world: None,
             #[cfg(test)]
             font_collection_rebuilds: 0,
         }
@@ -962,6 +966,7 @@ impl DocumentLayoutServices {
             web_font_order: BTreeMap::new(),
             has_font_face_set_order: false,
             text_layout_passes: 0,
+            retained_world: None,
             #[cfg(test)]
             font_collection_rebuilds: 0,
         }
@@ -979,6 +984,22 @@ impl DocumentLayoutServices {
     /// Counts text-bearing one-shot passes served by these reused contexts.
     pub const fn text_layout_passes(&self) -> u64 {
         self.text_layout_passes
+    }
+
+    /// Takes the retained world, if one exists and matches this source type.
+    pub(crate) fn take_retained_world<T: 'static>(&mut self) -> Option<T> {
+        self.retained_world
+            .take()
+            .and_then(|value| value.downcast::<T>().ok())
+            .map(|value| *value)
+    }
+
+    pub(crate) fn store_retained_world<T: 'static>(&mut self, value: T) {
+        self.retained_world = Some(Box::new(value));
+    }
+
+    pub(crate) fn clear_retained_world(&mut self) {
+        self.retained_world = None;
     }
 
     pub fn web_font_count(&self) -> usize {
@@ -1328,6 +1349,7 @@ impl DocumentLayoutServices {
             web_font_order: order,
             has_font_face_set_order: self.has_font_face_set_order,
             text_layout_passes: 0,
+            retained_world: None,
             #[cfg(test)]
             font_collection_rebuilds: 0,
         };
@@ -1380,9 +1402,11 @@ fn build_parley_services(
         shared: false,
         system_fonts: system_font_policy.is_enabled(),
     });
-    let system_font_family_resolver = system_font_policy
-        .is_enabled()
-        .then(|| SystemFontFamilyResolver::new(&mut collection));
+    let system_font_family_resolver = system_font_policy.is_enabled().then(|| {
+        let mut resolver = SystemFontFamilyResolver::new(&mut collection);
+        resolver.apply_browser_generic_defaults(&mut collection);
+        resolver
+    });
     let font_context = FontContext {
         collection,
         source_cache: Default::default(),

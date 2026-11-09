@@ -1503,6 +1503,127 @@ fn live_geometry_scroll_in_a_batched_action_is_read_back_immediately() {
         .expect("finish batch");
 }
 
+/// Scrolls a live-geometry page and requires the read after it to cost
+/// exactly `scroll_passes` layout passes (0: the published layout is reused)
+/// and to equal, bit for bit, a fresh layout at the same offsets. Returns the
+/// probed geometry before and after the scroll.
+fn assert_scroll_matches_a_fresh_layout(
+    url: &str,
+    html: &str,
+    ids: &[&str],
+    scroll: &str,
+    scroll_passes: u64,
+) -> (String, String) {
+    let mut vm = new_parsed_test_vm(url, html);
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    let ids = ids
+        .iter()
+        .map(|id| format!("'{id}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let probe = format!(
+        r#"JSON.stringify([{ids}].map(id => {{
+            const e = document.getElementById(id), r = e.getBoundingClientRect();
+            return [id, r.x, r.y, r.width, r.height, e.scrollLeft, e.scrollTop, e.offsetTop];
+          }}).concat([[document.documentElement.scrollLeft, document.documentElement.scrollTop,
+            document.elementFromPoint(5, 15)?.id ?? null]]))"#
+    );
+    let before = vm.eval(&probe).expect("unscrolled geometry");
+    let passes = vm.layout_pass_observability_for_test().1;
+    vm.eval(&format!("{scroll}; 'scrolled'")).expect("scroll");
+    let scrolled = vm.eval(&probe).expect("scrolled geometry");
+    let passes = passes + scroll_passes;
+    assert_eq!(
+        vm.layout_pass_observability_for_test().1,
+        passes,
+        "layout passes the scroll costs"
+    );
+    vm.eval("document.body.setAttribute('data-fresh', '1'); 'mutated'")
+        .expect("force a fresh layout");
+    assert_eq!(
+        vm.eval(&probe).expect("fresh geometry"),
+        scrolled,
+        "re-projected geometry must equal a fresh layout at the same offsets"
+    );
+    assert_eq!(vm.layout_pass_observability_for_test().1, passes + 1);
+    (before, scrolled)
+}
+
+#[test]
+fn live_geometry_scroll_moves_the_published_layout_without_laying_out_again() {
+    let (before, after) = assert_scroll_matches_a_fresh_layout(
+        "https://live-geometry-scroll-projection.test/",
+        "<!doctype html><html><body style=margin:0>\
+         <div id=f style='position:fixed;top:10px;left:0;width:20px;height:20px'></div>\
+         <div id=w style='transform:scale(2);transform-origin:0 0;width:200px'>\
+         <div id=s style='width:150px;height:100px;overflow:auto'>\
+         <div id=c style=height:1000px><div id=t style='width:40px;height:40px;transform:rotate(45deg)'></div></div>\
+         </div></div><div style=height:3000px></div></body></html>",
+        &["f", "w", "s", "c", "t"],
+        "document.documentElement.scrollTop = 40; document.getElementById('s').scrollTop = 30",
+        0,
+    );
+    // The viewport moves 40px; the inner scroller's 30px are scaled by 2.
+    let c_y = |probe: &str| -> f64 {
+        let rows: Vec<serde_json::Value> = serde_json::from_str(probe).expect("probe json");
+        rows[3][2].as_f64().expect("c.y")
+    };
+    assert_eq!(c_y(&after) - c_y(&before), -100.0);
+}
+
+#[test]
+fn live_geometry_fractional_zoomed_rtl_and_fixed_scrolls_match_a_fresh_layout() {
+    // Fractional offsets far down a zoomed scroller, a reversed (RTL)
+    // horizontal scroller with a negative scrollLeft, and a fixed box whose
+    // transformed ancestor is its containing block all re-project exactly as
+    // a fresh pass rounds them.
+    assert_scroll_matches_a_fresh_layout(
+        "https://live-geometry-scroll-rounding.test/",
+        "<!doctype html><html><body style=margin:0>\
+         <div id=z style='zoom:1.1'><div id=s style='width:150px;height:100px;overflow:auto'>\
+         <div style=height:10000px></div><div id=deep style='height:30px;transform:rotate(10deg)'></div>\
+         <div style=height:500px></div></div></div>\
+         <div id=r dir=rtl style='width:150px;height:60px;overflow:auto'><div id=wide style='width:900px;height:20px'></div></div>\
+         <div id=ta style='transform:translateX(5px)'><div id=tf style='position:fixed;top:3px;left:2px;width:10px;height:10px'></div></div>\
+         <div style=height:20000px></div></body></html>",
+        &["z", "s", "deep", "r", "wide", "ta", "tf"],
+        // A small fractional offset over a box ~1e4px down does not subtract
+        // exactly in f32; an intermediate read re-projects twice.
+        "const s = document.getElementById('s'); s.scrollTop = 5000.5; s.getBoundingClientRect(); \
+         s.scrollTop = 12.3; document.getElementById('r').scrollLeft = -37.5; \
+         document.documentElement.scrollTop = 8123.7; document.body.getBoundingClientRect(); \
+         document.documentElement.scrollTop = 3.3",
+        0,
+    );
+}
+
+#[test]
+fn live_geometry_scroll_that_moves_a_sticky_box_lays_out_again() {
+    // A sticky box's position follows the offset of the scrollport it sticks
+    // to, so moving that scrollport takes a layout pass. A scroller with no
+    // sticky descendant still moves the published layout in place.
+    let page = "<!doctype html><html><body style=margin:0>\
+         <div id=st style='position:sticky;top:0;height:20px'></div>\
+         <div id=p style='width:150px;height:100px;overflow:auto'><div id=pc style=height:1000px></div></div>\
+         <div id=s style='width:150px;height:100px;overflow:auto'><div style=height:50px></div>\
+         <div id=ss style='position:sticky;top:5px;height:10px'></div><div style=height:1000px></div></div>\
+         <div style=height:3000px></div></body></html>";
+    let ids = ["st", "p", "pc", "s", "ss"];
+    for (scroll, passes) in [
+        ("document.getElementById('p').scrollTop = 30", 0),
+        ("document.getElementById('s').scrollTop = 120", 1),
+        ("document.documentElement.scrollTop = 40", 1),
+    ] {
+        assert_scroll_matches_a_fresh_layout(
+            "https://live-geometry-scroll-sticky.test/",
+            page,
+            &ids,
+            scroll,
+            passes,
+        );
+    }
+}
+
 #[test]
 fn live_geometry_scroll_top_reconciles_after_content_shrinks() {
     let mut vm = new_parsed_test_vm(
@@ -1521,5 +1642,118 @@ fn live_geometry_scroll_top_reconciles_after_content_shrinks() {
         vm.eval("c.style.height = '1000px'; String(s.scrollTop)")
             .expect("grow"),
         "50"
+    );
+}
+
+#[test]
+fn live_geometry_focus_without_focus_styles_reuses_the_published_layout() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-focus-reuse.test/",
+        "<!doctype html><html><body style=margin:0><button id=a>a</button><button id=b>b</button></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    let width = "String(document.getElementById('b').getBoundingClientRect().width)";
+    let before = vm.eval(width).expect("first read");
+    let passes = vm.layout_pass_observability_for_test().1;
+    vm.eval(
+        "document.getElementById('a').focus(); document.getElementById('b').focus(); 'focused'",
+    )
+    .expect("focus");
+    assert_eq!(
+        vm.eval("String(document.activeElement.id)")
+            .expect("active"),
+        "b"
+    );
+    assert_eq!(vm.eval(width).expect("read after focus"), before);
+    assert_eq!(
+        vm.layout_pass_observability_for_test().1,
+        passes,
+        "a focus move that no style reads must not lay out again"
+    );
+}
+
+#[test]
+fn live_geometry_focus_styles_that_change_boxes_lay_out_again() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-focus-style.test/",
+        "<!doctype html><html><head><style>button{padding:0;border:0}#a:focus{padding:20px}#w:focus-within{padding-left:30px}</style></head><body style=margin:0><button id=a>a</button><div id=w><button id=b>b</button></div></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    let geometry = "(() => { const a = document.getElementById('a').getBoundingClientRect(), b = document.getElementById('b').getBoundingClientRect(); return JSON.stringify([a.height, b.left]); })()";
+    let unfocused = vm.eval(geometry).expect("first read");
+    vm.eval("document.getElementById('a').focus(); 'focused a'")
+        .expect("focus a");
+    let focused_a = vm.eval(geometry).expect("read after focusing a");
+    assert_ne!(focused_a, unfocused, ":focus padding must reach geometry");
+    vm.eval("document.getElementById('b').focus(); 'focused b'")
+        .expect("focus b");
+    let focused_b = vm.eval(geometry).expect("read after focusing b");
+    let [a_height, b_left]: [f64; 2] = serde_json::from_str(&focused_b).expect("geometry json");
+    let [unfocused_a_height, _]: [f64; 2] =
+        serde_json::from_str(&unfocused).expect("geometry json");
+    assert_eq!(
+        a_height, unfocused_a_height,
+        "blur must drop :focus padding"
+    );
+    assert_eq!(b_left, 30.0, ":focus-within padding must reach geometry");
+}
+
+#[test]
+fn live_geometry_focus_inside_a_shadow_host_reaches_host_focus_styles_and_window_scroll() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-focus-shadow.test/",
+        "<!doctype html><html><head><style>#h{display:block}#h:focus{padding-top:20px}</style></head><body style=margin:0><div id=h></div><div style=height:3000px></div><button id=far>far</button></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.eval(
+        "document.getElementById('h').attachShadow({mode:'open'}).innerHTML = '<button id=inner>in</button>'; 'attached'",
+    )
+    .expect("shadow setup");
+    let host_height = "String(document.getElementById('h').getBoundingClientRect().height)";
+    let unfocused: f64 = vm.eval(host_height).expect("first read").parse().unwrap();
+    vm.eval("document.getElementById('h').shadowRoot.getElementById('inner').focus(); 'focused'")
+        .expect("focus inner");
+    let focused: f64 = vm.eval(host_height).expect("focused read").parse().unwrap();
+    assert_eq!(
+        focused,
+        unfocused + 20.0,
+        "host :focus padding must reach geometry"
+    );
+    assert_eq!(
+        vm.eval(
+            "const far = document.getElementById('far'); far.focus(); JSON.stringify([scrollY > 0, far.getBoundingClientRect().bottom <= innerHeight])"
+        )
+        .expect("focus far"),
+        "[true,true]",
+        "focus() scrolls the window and the next read sees the scrolled geometry"
+    );
+    let blurred: f64 = vm.eval(host_height).expect("blurred read").parse().unwrap();
+    assert_eq!(
+        blurred, unfocused,
+        "moving focus out drops host :focus padding"
+    );
+}
+
+#[test]
+fn focusing_the_focused_element_neither_scrolls_nor_fires_events() {
+    let mut vm = new_parsed_test_vm(
+        "https://refocus-noop.test/",
+        "<!doctype html><html><body style=margin:0><button id=a>a</button><div style=height:3000px></div></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+  const a = document.getElementById('a');
+  a.focus();
+  scrollTo(0, 943);
+  const seen = [];
+  for (const type of ['focus', 'focusin', 'blur', 'focusout']) a.addEventListener(type, () => seen.push(type));
+  a.focus();
+  return JSON.stringify([scrollY, seen.join(','), document.activeElement.id]);
+})()"#
+        )
+        .expect("refocus"),
+        r#"[943,"","a"]"#
     );
 }
