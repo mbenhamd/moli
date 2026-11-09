@@ -3829,7 +3829,8 @@ fn sticky_offsets_follow_the_current_scroll_position_of_each_scrollport() {
         Node::element("document-tall", Vec::new()),
     ]);
     source.0[0].scroll = LayoutPoint::new(0.0, 500.0);
-    source.0[1].scroll = LayoutPoint::new(0.0, 200.0);
+    // Beyond the scroller's 970px range: sticky uses the clamped offset.
+    source.0[1].scroll = LayoutPoint::new(0.0, 5000.0);
     let mut styles = Styles::default();
     styles.0.insert(
         0,
@@ -3889,4 +3890,156 @@ fn sticky_offsets_follow_the_current_scroll_position_of_each_scrollport() {
     // box at the scroller's top edge, the document box 5px below the viewport.
     assert_close(top(3) - top(1), 0.0);
     assert_close(top(6), 5.0);
+}
+
+#[test]
+fn sticky_view_rect_follows_the_containing_block_chain() {
+    fn block(width: f32, height: f32, position: LayoutPosition, left: f32) -> ResolvedLayoutStyle {
+        let positioned = matches!(position, LayoutPosition::Absolute | LayoutPosition::Fixed);
+        resolved(
+            LayoutDisplay::Block,
+            Style {
+                position: if positioned {
+                    Position::Absolute
+                } else {
+                    Position::Relative
+                },
+                inset: Rect {
+                    left: if positioned {
+                        length(left)
+                    } else {
+                        LengthPercentageAuto::auto()
+                    },
+                    right: LengthPercentageAuto::auto(),
+                    top: if positioned {
+                        length(0.0)
+                    } else {
+                        LengthPercentageAuto::auto()
+                    },
+                    bottom: LengthPercentageAuto::auto(),
+                },
+                size: Size {
+                    width: length(width),
+                    height: length(height),
+                },
+                ..Style::default()
+            },
+        )
+        .with_position(position)
+    }
+    let sticky = resolved(
+        LayoutDisplay::Block,
+        Style {
+            inset: Rect {
+                left: LengthPercentageAuto::auto(),
+                right: LengthPercentageAuto::auto(),
+                top: length(0.0),
+                bottom: LengthPercentageAuto::auto(),
+            },
+            size: Size {
+                width: length(50.0),
+                height: length(20.0),
+            },
+            ..Style::default()
+        },
+    )
+    .with_position(LayoutPosition::Sticky);
+    let mut source = Source(vec![
+        Node::element("root", vec![1, 5, 13]),
+        Node::element("fixed-sidebar", vec![2, 3, 4]),
+        Node::element("sidebar-spacer", Vec::new()),
+        Node::element("sidebar-sticky", Vec::new()),
+        Node::element("sidebar-tall", Vec::new()),
+        Node::element("relative-wrapper", vec![6]),
+        Node::element("scroller", vec![7, 8, 9]),
+        Node::element("scroller-spacer", Vec::new()),
+        Node::element("abspos", vec![10, 11, 12]),
+        Node::element("scroller-tall", Vec::new()),
+        Node::element("abspos-spacer", Vec::new()),
+        Node::element("abspos-sticky", Vec::new()),
+        Node::element("abspos-tall", Vec::new()),
+        Node::element("document-tall", Vec::new()),
+    ]);
+    source.0[0].scroll = LayoutPoint::new(0.0, 500.0);
+    source.0[6].scroll = LayoutPoint::new(0.0, 200.0);
+    let mut styles = Styles::default();
+    styles.0.insert(
+        0,
+        resolved(
+            LayoutDisplay::Block,
+            Style {
+                size: Size {
+                    width: length(320.0),
+                    height: Dimension::auto(),
+                },
+                ..Style::default()
+            },
+        ),
+    );
+    styles
+        .0
+        .insert(1, block(100.0, 240.0, LayoutPosition::Fixed, 200.0));
+    styles
+        .0
+        .insert(2, fixed_size(LayoutDisplay::Block, 100.0, 40.0));
+    styles.0.insert(3, sticky.clone());
+    styles
+        .0
+        .insert(4, fixed_size(LayoutDisplay::Block, 100.0, 2000.0));
+    styles
+        .0
+        .insert(5, block(300.0, 300.0, LayoutPosition::Relative, 0.0));
+    styles.0.insert(
+        6,
+        resolved(
+            LayoutDisplay::Block,
+            Style {
+                size: Size {
+                    width: length(150.0),
+                    height: length(100.0),
+                },
+                overflow: Point {
+                    x: Overflow::Hidden,
+                    y: Overflow::Hidden,
+                },
+                ..Style::default()
+            },
+        ),
+    );
+    styles
+        .0
+        .insert(7, fixed_size(LayoutDisplay::Block, 150.0, 50.0));
+    styles
+        .0
+        .insert(8, block(50.0, 250.0, LayoutPosition::Absolute, 200.0));
+    styles
+        .0
+        .insert(9, fixed_size(LayoutDisplay::Block, 150.0, 1000.0));
+    styles
+        .0
+        .insert(10, fixed_size(LayoutDisplay::Block, 50.0, 30.0));
+    styles.0.insert(11, sticky);
+    styles
+        .0
+        .insert(12, fixed_size(LayoutDisplay::Block, 50.0, 500.0));
+    styles
+        .0
+        .insert(13, fixed_size(LayoutDisplay::Block, 320.0, 3000.0));
+
+    let output = build(&source, &mut styles);
+    let top = |node: usize| {
+        output
+            .box_model_for_source(node)
+            .unwrap()
+            .border
+            .bounding_rect()
+            .y
+    };
+    // A viewport-fixed sidebar never scrolls with the document, so its
+    // sticky box keeps its 40px static position.
+    assert_close(top(3), 40.0);
+    // The abspos box's containing block is outside the scrolled overflow
+    // element, so the document scrollport (at 500) governs its sticky box,
+    // clamped to the 250px abspos box: 230 - 500.
+    assert_close(top(11), -270.0);
 }

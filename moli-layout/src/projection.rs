@@ -497,30 +497,9 @@ where
             let horizontal_range = (scroll_size.width - scrollport.width).max(0.0);
             let vertical_range = (scroll_size.height - scrollport.height).max(0.0);
             let is_scroll_container = self.establishes_scroll_container(id);
-            let requested = finite_point(self.world.boxes[index].scroll_offset);
-            let (minimum_offset, maximum_offset) = if is_scroll_container {
-                let reversed = self.world.boxes[index].style.reversed_scroll_axes();
-                (
-                    LayoutPoint::new(
-                        if reversed.x { -horizontal_range } else { 0.0 },
-                        if reversed.y { -vertical_range } else { 0.0 },
-                    ),
-                    LayoutPoint::new(
-                        if reversed.x { 0.0 } else { horizontal_range },
-                        if reversed.y { 0.0 } else { vertical_range },
-                    ),
-                )
-            } else {
-                (LayoutPoint::ZERO, LayoutPoint::ZERO)
-            };
-            let applied = if is_scroll_container {
-                LayoutPoint::new(
-                    requested.x.clamp(minimum_offset.x, maximum_offset.x),
-                    requested.y.clamp(minimum_offset.y, maximum_offset.y),
-                )
-            } else {
-                LayoutPoint::ZERO
-            };
+            let (minimum_offset, maximum_offset) =
+                overflow_projection.scroll_offset_range(self.world, id);
+            let applied = overflow_projection.applied_scroll_offset(self.world, id);
             let horizontal_scrollbar = self
                 .has_scrollbar(
                     id,

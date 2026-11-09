@@ -106,6 +106,54 @@ impl OverflowProjection {
         LayoutSize::new(scrollport.width.max(width), scrollport.height.max(height))
     }
 
+    /// Returns the minimum and maximum scroll offsets of a scroll container
+    /// (zero for any other box), honoring reversed (RTL, bottom-up) axes.
+    pub(crate) fn scroll_offset_range<N>(
+        &self,
+        world: &LayoutWorld<N>,
+        id: LayoutBoxId,
+    ) -> (LayoutPoint, LayoutPoint)
+    where
+        N: Copy + Debug + Eq + Hash,
+    {
+        if !establishes_scroll_container(world, id) {
+            return (LayoutPoint::ZERO, LayoutPoint::ZERO);
+        }
+        let scrollport = self.geometry(id).local_scrollport;
+        let size = self.scroll_size(world, id);
+        let horizontal_range = (size.width - scrollport.width).max(0.0);
+        let vertical_range = (size.height - scrollport.height).max(0.0);
+        let reversed = world.boxes[id.index()].style.reversed_scroll_axes();
+        (
+            LayoutPoint::new(
+                if reversed.x { -horizontal_range } else { 0.0 },
+                if reversed.y { -vertical_range } else { 0.0 },
+            ),
+            LayoutPoint::new(
+                if reversed.x { 0.0 } else { horizontal_range },
+                if reversed.y { 0.0 } else { vertical_range },
+            ),
+        )
+    }
+
+    /// Returns the sampled scroll offset clamped to the box's current scroll
+    /// range: the offset projection applies to its scrolled contents.
+    pub(crate) fn applied_scroll_offset<N>(
+        &self,
+        world: &LayoutWorld<N>,
+        id: LayoutBoxId,
+    ) -> LayoutPoint
+    where
+        N: Copy + Debug + Eq + Hash,
+    {
+        let (minimum, maximum) = self.scroll_offset_range(world, id);
+        let requested = crate::projection::finite_point(world.boxes[id.index()].scroll_offset);
+        LayoutPoint::new(
+            requested.x.clamp(minimum.x, maximum.x),
+            requested.y.clamp(minimum.y, maximum.y),
+        )
+    }
+
     pub(crate) fn overflowing_axes<N>(
         &self,
         world: &LayoutWorld<N>,
