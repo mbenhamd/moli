@@ -27,7 +27,9 @@ use thiserror::Error;
 use crate::stylo_to_parley::TextBrush;
 
 mod font_source;
+mod measure;
 pub use font_source::FontFaceData;
+pub use measure::{TextMeasureFont, TextMeasureFontStyle, TextMeasurement};
 
 pub(crate) struct ParleyDocumentServices {
     pub(crate) font_context: FontContext,
