@@ -1,7 +1,7 @@
 use super::super::*;
 use super::request::PreparedWindowFetchRequest;
 use moli_fetch::{
-    BrowserRequestMetadata, FetchCancelHandle, RequestCacheMode, ScriptFetchRequestMetadata,
+    BrowserRequestMetadata, FetchCancelHandle, ScriptFetchRequestMetadata,
     should_request_be_blocked_due_to_bad_port,
 };
 
@@ -11,6 +11,7 @@ pub(super) fn record_intercepted_fetch(
     resolver: v8::Local<'_, v8::PromiseResolver>,
     prepared: PreparedWindowFetchRequest,
 ) {
+    let cache_mode = prepared.cache_mode();
     let request_cookie_report = observe_subresource_request_cookie_report(
         prepared.resource_loader.request_client(),
         &prepared.document_url,
@@ -27,6 +28,7 @@ pub(super) fn record_intercepted_fetch(
         prepared.csp_report_context,
         prepared.credentials_mode,
         prepared.request_mode,
+        cache_mode,
         prepared.request_origin.clone(),
         prepared.network_partition_key,
         prepared.policy_context,
@@ -83,7 +85,7 @@ pub(super) fn reject_blocked_fetch(
     message
 }
 
-pub(super) fn reject_csp_fetch(
+pub(super) fn reject_policy_blocked_fetch(
     host: &mut JsContextHost,
     prepared: PreparedWindowFetchRequest,
     message: String,
@@ -101,23 +103,9 @@ pub(super) fn reject_csp_fetch(
     message
 }
 
-pub(super) fn reject_url_policy_fetch(
-    host: &mut JsContextHost,
-    prepared: PreparedWindowFetchRequest,
-    message: String,
-) -> String {
-    host.record_subresource_network(SubresourceNetworkRecord::failure(
-        prepared.frame_id,
-        prepared.document_url,
-        prepared.resolved_url,
-        prepared.method,
-        prepared.request_headers,
-        request_body_text(&prepared.body),
-        SubresourceResourceType::Fetch,
-        message.clone(),
-    ));
-    message
-}
+pub(super) use self::reject_policy_blocked_fetch as reject_csp_fetch;
+
+pub(super) use self::reject_policy_blocked_fetch as reject_url_policy_fetch;
 
 pub(super) fn reject_bad_port_fetch(
     host: &mut JsContextHost,
@@ -200,6 +188,7 @@ pub(super) fn spawn_network_fetch(
     resolver: v8::Local<'_, v8::PromiseResolver>,
     prepared: PreparedWindowFetchRequest,
 ) -> Result<u64, String> {
+    let cache_mode = prepared.cache_mode();
     let loader = prepared.resource_loader.request_client().clone();
     let mut request = Request::new_browser(
         &prepared.method,
@@ -213,12 +202,7 @@ pub(super) fn spawn_network_fetch(
     .with_credentials_mode(prepared.credentials_mode)
     .with_network_partition_key(prepared.network_partition_key.clone())
     .with_redirect_mode(prepared.redirect_mode)
-    .with_cache_mode(
-        prepared
-            .cache
-            .parse::<RequestCacheMode>()
-            .unwrap_or_default(),
-    )
+    .with_cache_mode(cache_mode)
     .with_fetch_priority_hint(prepared.priority)
     .with_fetch_referrer(&prepared.referrer)
     .map_err(|error| error.to_string())?;
@@ -265,6 +249,7 @@ pub(super) fn spawn_network_fetch(
         Some(cancel_handle.clone()),
         prepared.credentials_mode,
         prepared.request_mode,
+        cache_mode,
         prepared.request_origin.clone(),
         prepared.network_partition_key.clone(),
         prepared.policy_context,

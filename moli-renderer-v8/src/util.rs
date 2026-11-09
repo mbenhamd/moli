@@ -861,6 +861,20 @@ pub(super) fn context_host_ptr_from_window_object(
     if ptr.is_null() { None } else { Some(ptr) }
 }
 
+pub(crate) fn context_host_ptr_for_navigation_owner(
+    scope: &mut v8::PinScope<'_, '_>,
+    owner: v8::Local<'_, v8::Object>,
+) -> Option<*mut JsContextHost> {
+    context_host_ptr_from_global_bridge(scope)
+        .or_else(|| context_host_ptr_from_window_object(scope, owner))
+        .or_else(|| {
+            owner
+                .get(scope, v8str(scope, "parent").into())
+                .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+                .and_then(|parent| context_host_ptr_from_window_object(scope, parent))
+        })
+}
+
 pub(super) fn node_wrapper_from_handle<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     handle: DomHandle,
@@ -1077,6 +1091,18 @@ pub(crate) fn utf16_units_contain_unpaired_surrogate(units: &[u16]) -> bool {
 #[cfg(test)]
 #[path = "util_codegen_tests.rs"]
 mod generated_code_tests;
+
+pub(crate) fn private_string_property<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    slot: &'static str,
+) -> Option<String> {
+    get_private_value(scope, object, slot).and_then(|value| {
+        value
+            .to_string(scope)
+            .map(|value| value.to_rust_string_lossy(scope))
+    })
+}
 
 #[cfg(test)]
 mod tests {

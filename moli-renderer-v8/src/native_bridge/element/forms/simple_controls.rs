@@ -624,16 +624,7 @@ pub(in crate::native_bridge) fn output_default_value_setter_function<'s>(
     rv.set_undefined();
 }
 
-fn node_contains(runtime: &JsContextHost, ancestor: DomHandle, node: DomHandle) -> bool {
-    let mut current = Some(node);
-    while let Some(handle) = current {
-        if handle == ancestor {
-            return true;
-        }
-        current = runtime.dom_host().parent_node(handle);
-    }
-    false
-}
+use super::owner::node_contains;
 
 fn legend_fieldset_ancestor(runtime: &JsContextHost, handle: DomHandle) -> Option<DomHandle> {
     let mut current = runtime.dom_host().parent_node(handle);
@@ -707,21 +698,7 @@ fn set_finite_double_attribute_on_receiver<'s>(
     set_numeric_attribute(scope, runtime_ptr, handle, name, number);
 }
 
-fn finite_double_from_value<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    value: v8::Local<'s, v8::Value>,
-    owner: &'static str,
-    property: &'static str,
-) -> Option<f64> {
-    match webidl::convert::<webidl::Double>(scope, value, webidl::Context::member(owner, property))
-    {
-        Ok(value) => Some(value.0),
-        Err(error) => {
-            webidl::throw_error(scope, &error);
-            None
-        }
-    }
-}
+use crate::webidl::finite_double_property_value as finite_double_from_value;
 
 fn set_numeric_attribute<'s>(
     scope: &mut v8::PinScope<'s, '_>,

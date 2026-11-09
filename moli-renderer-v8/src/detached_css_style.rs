@@ -1,3 +1,4 @@
+use crate::css_style::compress_box_components;
 use crate::web_api_interfaces;
 use std::{
     cell::RefCell,
@@ -749,16 +750,7 @@ fn uppercase_ascii_head(input: &str) -> String {
     out
 }
 
-fn lowercase_ascii_head(input: &str) -> String {
-    let mut chars = input.chars();
-    let Some(first) = chars.next() else {
-        return String::new();
-    };
-    let mut out = String::new();
-    out.push(first.to_ascii_lowercase());
-    out.extend(chars);
-    out
-}
+use moli_css_parse::decapitalize_ascii_head as lowercase_ascii_head;
 
 fn all_shorthand_applies_to(property: &str) -> bool {
     !property.starts_with("--")
@@ -767,14 +759,7 @@ fn all_shorthand_applies_to(property: &str) -> bool {
             || css_style_declaration_is_shell_property(property))
 }
 
-fn css_wide_keyword(value: &str) -> Option<String> {
-    let lowered = value.trim().to_ascii_lowercase();
-    matches!(
-        lowered.as_str(),
-        "initial" | "inherit" | "unset" | "revert" | "revert-layer" | "revert-rule"
-    )
-    .then_some(lowered)
-}
+use crate::css_style::css_wide_keyword;
 
 pub(crate) fn build_lightweight_css_style_declaration<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -1931,22 +1916,6 @@ fn box_shorthand_property_value<'s>(
         return keyword;
     }
     compress_box_components(&values).unwrap_or_default()
-}
-
-fn compress_box_components(values: &[String]) -> Option<String> {
-    match values {
-        [start, end] if start == end => Some(start.clone()),
-        [start, end] => Some(format!("{start} {end}")),
-        [top, right, bottom, left] if top == right && top == bottom && top == left => {
-            Some(top.clone())
-        }
-        [top, right, bottom, left] if top == bottom && right == left => {
-            Some(format!("{top} {right}"))
-        }
-        [top, right, bottom, left] if right == left => Some(format!("{top} {right} {bottom}")),
-        [top, right, bottom, left] => Some(format!("{top} {right} {bottom} {left}")),
-        _ => None,
-    }
 }
 
 fn raw_style_property_value<'s>(

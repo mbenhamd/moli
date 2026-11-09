@@ -659,7 +659,9 @@ fn normalized_pdb_entries_for_style_entry(entry: &CssStyleEntry) -> Option<Vec<C
     (!normalized.is_empty()).then_some(normalized)
 }
 
-fn pdb_mutation_value_for_style_entry(entry: &CssStyleEntry) -> std::borrow::Cow<'_, str> {
+pub(crate) fn pdb_mutation_value_for_style_entry(
+    entry: &CssStyleEntry,
+) -> std::borrow::Cow<'_, str> {
     if entry.value.is_empty()
         && moli_css_parse::is_cssom_custom_property_name(&canonical_style_property_name(
             &entry.name,
@@ -1507,7 +1509,7 @@ fn overriding_later_flex_longhands<'a>(
         .collect()
 }
 
-fn css_wide_keyword(value: &str) -> Option<String> {
+pub(crate) fn css_wide_keyword(value: &str) -> Option<String> {
     let lowered = value.trim().to_ascii_lowercase();
     matches!(
         lowered.as_str(),
@@ -1780,7 +1782,7 @@ fn collect_box_shorthand_entry(
     ))
 }
 
-fn compress_box_components(values: &[String]) -> Option<String> {
+pub(crate) fn compress_box_components(values: &[String]) -> Option<String> {
     match values {
         [start, end] if start == end => Some(start.clone()),
         [start, end] => Some(format!("{start} {end}")),
@@ -2494,7 +2496,7 @@ fn serialize_text_decoration_shorthand_entries(entries: &[CssStyleEntry]) -> Vec
     )
 }
 
-fn serialize_text_decoration_shorthand_value(
+pub(crate) fn serialize_text_decoration_shorthand_value(
     line: &str,
     thickness: &str,
     style: &str,

@@ -12,6 +12,11 @@ pub mod domains;
 pub mod frame_index;
 #[cfg(feature = "test-support")]
 pub mod test_support;
+
+pub use domains::command_output::client_window_info_json;
+
+pub use domains::storage::cdp_cookie_same_site_wire_name;
+
 #[cfg(test)]
 pub mod testing;
 pub mod version;
