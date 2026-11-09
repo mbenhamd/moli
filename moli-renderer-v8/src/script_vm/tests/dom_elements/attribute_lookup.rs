@@ -65,11 +65,11 @@ fn attribute_node_lookup_uses_native_metadata_and_namespace_identity() {
 #[test]
 fn named_node_map_access_materializes_only_the_attrs_it_reads() {
     use crate::native_bridge::document::take_named_node_map_attr_materializations_for_test;
-    let mut vm = new_storage_test_vm("https://attribute-map-cost.test/");
+    let mut vm = new_storage_html_test_vm("https://attribute-map-cost.test/");
     vm.eval(
         r#"window.element = document.createElement('div');
         for (let index = 0; index < 20; index++) element.setAttribute('data-a' + index, String(index));
-        document.documentElement.appendChild(element);
+        document.body.appendChild(element);
         'ready'"#,
     )
     .expect("element setup");
