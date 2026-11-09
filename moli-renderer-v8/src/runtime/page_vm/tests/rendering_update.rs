@@ -58,6 +58,7 @@ mod layout_geometry;
 mod optical_sizing;
 mod painting_tables;
 mod scrollbars;
+mod svg_geometry;
 mod text_stroke;
 mod text_styles;
 mod update_lifecycle;

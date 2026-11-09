@@ -406,7 +406,15 @@ fn svg_geometry_queries_use_computed_paths_live_tree_and_kurbo_bounds() {
                 use: box("use_box"),
                 ellipseRxInvalid: box("ellipse_rx_invalid"),
                 ellipseRyInvalid: box("ellipse_ry_invalid"),
-                tspan: box("span"),
+                // Font-dependent: the tspan starts after the first glyph.
+                tspanFollowsText: (() => {
+                  const text = byId("span").parentNode;
+                  const span = byId("span").getBBox();
+                  const whole = text.getBBox();
+                  const first = text.getComputedTextLength() - byId("span").getComputedTextLength();
+                  return Math.abs(span.x - (whole.x + first)) < 1e-6 && span.height === whole.height
+                    && span.width > 0;
+                })(),
                 foreignInterface: byId("foreign_box") instanceof SVGForeignObjectElement,
                 tspanInterface: byId("span") instanceof SVGTSpanElement,
                 tspanHasBBox: typeof byId("span").getBBox === "function"
@@ -418,7 +426,7 @@ fn svg_geometry_queries_use_computed_paths_live_tree_and_kurbo_bounds() {
 
     assert_eq!(
         result,
-        r#"{"cssLength":100,"circleRadius":5,"circleLength":31,"move":[40,20,0,0],"aggregate":[40,20,60,80],"afterRemove":[40,20,0,0],"afterAppend":[40,20,60,80],"childTransform":[11,22,3,4],"ownTransform":[1,2,3,4],"hidden":[0,0,0,0],"hiddenChild":[0,0,0,0],"definition":[0,0,0,0],"image":[2,3,4,5],"foreign":[6,7,8,9],"use":[15,27,30,40],"ellipseRxInvalid":[-9,2,20,20],"ellipseRyInvalid":[1,-3,10,10],"tspan":[100,100,100,100],"foreignInterface":true,"tspanInterface":true,"tspanHasBBox":true}"#,
+        r#"{"cssLength":100,"circleRadius":5,"circleLength":31,"move":[40,20,0,0],"aggregate":[40,20,60,80],"afterRemove":[40,20,0,0],"afterAppend":[40,20,60,80],"childTransform":[11,22,3,4],"ownTransform":[1,2,3,4],"hidden":[0,0,0,0],"hiddenChild":[0,0,0,0],"definition":[0,0,0,0],"image":[2,3,4,5],"foreign":[6,7,8,9],"use":[15,27,30,40],"ellipseRxInvalid":[-9,2,20,20],"ellipseRyInvalid":[1,-3,10,10],"tspanFollowsText":true,"foreignInterface":true,"tspanInterface":true,"tspanHasBBox":true}"#,
     );
 }
 
