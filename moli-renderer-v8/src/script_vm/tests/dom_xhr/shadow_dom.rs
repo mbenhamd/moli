@@ -6440,3 +6440,38 @@ const rect = span.getBoundingClientRect();
         r#"{"size":1,"returned":true,"has":true,"order":"fourth,third,replacement,first"}"#
     );
 }
+
+#[test]
+fn shadow_host_blur_without_delegates_focus_blurs_its_shadow_focus() {
+    let mut vm = new_parsed_test_vm(
+        "https://shadow-host-blur.test/",
+        "<!doctype html><html><body><button id=outside>o</button><div id=host></div></body></html>",
+    );
+    let result = vm
+        .eval(
+            r#"(() => {
+  const host = document.getElementById('host');
+  const shadow = host.attachShadow({ mode: 'open' });
+  shadow.innerHTML = '<button id=inner>in</button>';
+  const inner = shadow.getElementById('inner');
+  const seen = [];
+  for (const type of ['blur', 'focusout']) {
+    inner.addEventListener(type, () => seen.push('inner:' + type));
+    host.addEventListener(type, () => seen.push('host:' + type));
+  }
+  inner.focus();
+  const focused = document.activeElement === host && shadow.activeElement === inner;
+  host.blur();
+  const blurred = document.activeElement === document.body && shadow.activeElement === null;
+  document.getElementById('outside').focus();
+  host.blur();
+  const untouched = document.activeElement.id;
+  return JSON.stringify([focused, blurred, seen.join(','), untouched]);
+})()"#,
+        )
+        .expect("host blur");
+    assert_eq!(
+        result,
+        r#"[true,true,"inner:blur,host:blur,inner:focusout,host:focusout","outside"]"#
+    );
+}
