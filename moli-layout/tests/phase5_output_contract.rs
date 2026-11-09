@@ -2419,7 +2419,7 @@ fn pass_result_owns_complete_box_models_and_answers_a_batch_from_one_pass() {
         assert_eq!(&output.tree.answer_query(query), answer);
     }
     assert_eq!(answers.metrics.reason, LayoutFlushReason::Test);
-    assert_eq!(answers.metrics.box_count, output.boxes.len());
+    assert_eq!(answers.metrics.box_count, output.boxes().len());
     assert!(matches!(
         answers.answers[0],
         LayoutQueryAnswer::DocumentMetrics(_)
@@ -2625,7 +2625,7 @@ fn inline_output_preserves_line_text_and_utf16_source_fragments() {
         .insert(2, resolved(LayoutDisplay::Inline, Style::default()));
 
     let output = build(&source, &mut styles);
-    assert!(output.fragments.iter().any(|fragment| matches!(
+    assert!(output.fragments().iter().any(|fragment| matches!(
         fragment.kind,
         LayoutFragmentKind::Line {
             owner: _,
@@ -2777,7 +2777,7 @@ fn inline_and_range_rects_use_font_bounds_instead_of_the_css_line_height() {
 
     let output = build(&source, &mut styles);
     let line_rect = output
-        .fragments
+        .fragments()
         .iter()
         .find_map(|fragment| {
             matches!(fragment.kind, LayoutFragmentKind::Line { .. }).then_some(fragment.rect)
@@ -3286,8 +3286,8 @@ fn transforms_and_semantic_paint_order_share_the_hit_test_projection() {
             .all(|diagnostic| diagnostic.code != "transform-paint-deferred")
     );
     let retention = output.retention_metrics();
-    assert_eq!(retention.box_count, output.boxes.len());
-    assert_eq!(retention.fragment_count, output.fragments.len());
+    assert_eq!(retention.box_count, output.boxes().len());
+    assert_eq!(retention.fragment_count, output.fragments().len());
     assert!(retention.estimated_geometry_bytes > 0);
     let _paint = output
         .take_paint_snapshot()
@@ -3349,7 +3349,7 @@ fn point_hits_select_paint_order_before_deduplicating_sources() {
     // stored first, but deduplication must retain the foremost fragment.
     output
         .tree
-        .boxes
+        .boxes_mut()
         .iter_mut()
         .find(|layout_box| layout_box.hit_source == Some(2))
         .unwrap()
@@ -3368,7 +3368,7 @@ fn point_hits_select_paint_order_before_deduplicating_sources() {
             .all(|pair| pair[0].paint_order() >= pair[1].paint_order())
     );
 
-    for layout_box in &mut output.tree.boxes {
+    for layout_box in output.tree.boxes_mut() {
         if layout_box.hit_source == Some(1) {
             layout_box.geometry.pointer_events = false;
         }
@@ -3585,7 +3585,7 @@ fn viewport_fixed_box_escapes_intermediate_overflow_clip_for_paint_and_hit_test(
         .source_output(2)
         .and_then(|source| source.principal_box)
         .expect("fixed principal box");
-    let fixed_clip = output.boxes[fixed_box.index()]
+    let fixed_clip = output.boxes()[fixed_box.index()]
         .clip_chain
         .expect("viewport clip");
     assert_eq!(output.clip_chain[fixed_clip.index()].owner, None);
@@ -3662,7 +3662,7 @@ fn absolute_box_escapes_overflow_clip_between_it_and_its_containing_block() {
         .source_output(2)
         .and_then(|source| source.principal_box)
         .expect("absolute principal box");
-    let absolute_clip = output.boxes[absolute_box.index()]
+    let absolute_clip = output.boxes()[absolute_box.index()]
         .clip_chain
         .expect("root clip");
     assert_eq!(output.clip_chain[absolute_clip.index()].owner, None);
@@ -3736,7 +3736,11 @@ fn transformed_fixed_containing_block_still_clips_its_fixed_descendant() {
         .and_then(|source| source.principal_box)
         .expect("fixed principal box");
     assert_eq!(
-        output.clip_chain[output.boxes[fixed_box.index()].clip_chain.unwrap().index()].owner,
+        output.clip_chain[output.boxes()[fixed_box.index()]
+            .clip_chain
+            .unwrap()
+            .index()]
+        .owner,
         Some(containing_block)
     );
     assert_eq!(

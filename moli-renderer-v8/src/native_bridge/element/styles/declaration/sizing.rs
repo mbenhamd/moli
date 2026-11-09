@@ -48,7 +48,7 @@ impl LayoutSizeReads {
                     runtime
                         .with_latest_layout_tree_for_document(document, |tree| {
                             #[cfg(test)]
-                            note_index_build(tree.boxes.len());
+                            note_index_build(tree.boxes().len());
                             tree.used_sizes().collect()
                         })
                         .unwrap_or_default()

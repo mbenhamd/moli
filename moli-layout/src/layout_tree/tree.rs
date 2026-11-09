@@ -1,6 +1,6 @@
 //! The immutable retained tree and its memory-retention boundary.
 
-use std::{fmt::Debug, hash::Hash, ops::Deref};
+use std::{fmt::Debug, hash::Hash, ops::Deref, sync::OnceLock};
 
 use crate::LayoutError;
 
@@ -9,6 +9,7 @@ use super::model::{
     LayoutFragment, LayoutFragmentId, LayoutOutputBoxId, LayoutPoint, LayoutScrollExtent,
     LayoutSize, LayoutViewport,
 };
+use super::source_query::SourceProvenanceIndex;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CssSizingBox {
@@ -94,6 +95,10 @@ pub const MAX_RETAINED_LAYOUT_TREE_BYTES: usize = 256 * 1024 * 1024;
 /// they preserve results that cannot be reconstructed after the working tree,
 /// Taffy caches, Parley state, and computed styles are dropped. Source and
 /// hit-test indexes are derived from the box provenance and fragments.
+///
+/// The source-provenance index is derived lazily by the first source query,
+/// owned by this tree, and dropped with it. A tree that is never queried by
+/// source never builds it, and no index survives into the next pass.
 pub struct FrozenLayoutTree<N>
 where
     N: Copy + Debug + Eq + Hash,
@@ -103,14 +108,19 @@ where
     pub viewport_scroll: LayoutPoint,
     pub content_size: LayoutSize,
     pub root_box: LayoutOutputBoxId,
-    pub boxes: Vec<FrozenLayoutBox<N>>,
-    pub fragments: Vec<LayoutFragment>,
+    // Box provenance, fragments, and proxy links feed the lazily derived
+    // source index, so they are readable through accessors and changed only
+    // through methods that drop that index.
+    pub(super) boxes: Vec<FrozenLayoutBox<N>>,
+    pub(super) fragments: Vec<LayoutFragment>,
     /// Source/box relationships for `display: contents` nodes, which own no
     /// principal box but can still nominate rendered descendants for scroll.
-    pub scroll_proxy_links: Vec<(N, LayoutOutputBoxId)>,
+    pub(super) scroll_proxy_links: Vec<(N, LayoutOutputBoxId)>,
     viewport_coordinate_space: FrozenCoordinateSpace,
     pub clip_chain: Vec<LayoutClipNode>,
     embedded_frames: Vec<FrozenEmbeddedFrame<N>>,
+    /// Lazily derived from `boxes`, `fragments`, and `scroll_proxy_links`.
+    source_index: OnceLock<SourceProvenanceIndex<N>>,
 }
 
 impl<N> FrozenLayoutTree<N>
@@ -213,7 +223,8 @@ where
             .saturating_add(allocation::<FrozenEmbeddedFrame<N>>(
                 self.embedded_frames.capacity(),
             ))
-            .saturating_add(box_allocations);
+            .saturating_add(box_allocations)
+            .saturating_add(SourceProvenanceIndex::retained_bytes_bound(self));
         let embedded = self.embedded_frames.iter().fold(
             LayoutTreeRetentionMetrics::default(),
             |total, frame| {
@@ -309,7 +320,33 @@ where
             viewport_coordinate_space,
             clip_chain,
             embedded_frames,
+            source_index: OnceLock::new(),
         }
+    }
+
+    pub(super) fn source_index_cell(&self) -> &OnceLock<SourceProvenanceIndex<N>> {
+        &self.source_index
+    }
+
+    /// Boxes in canonical order; a box's ID is its index.
+    pub fn boxes(&self) -> &[FrozenLayoutBox<N>] {
+        &self.boxes
+    }
+
+    /// Fragments in canonical order; a fragment's ID is its index.
+    pub fn fragments(&self) -> &[LayoutFragment] {
+        &self.fragments
+    }
+
+    pub fn scroll_proxy_links(&self) -> &[(N, LayoutOutputBoxId)] {
+        &self.scroll_proxy_links
+    }
+
+    /// Edits boxes in place. Any edit may change source provenance, so this
+    /// drops the derived source index; the next source query rebuilds it.
+    pub fn boxes_mut(&mut self) -> &mut [FrozenLayoutBox<N>] {
+        self.source_index.take();
+        &mut self.boxes
     }
 }
 

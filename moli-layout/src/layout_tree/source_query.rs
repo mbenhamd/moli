@@ -6,9 +6,9 @@ use crate::LayoutPosition;
 
 use super::{
     model::{
-        LayoutBoxModel, LayoutCoordinateSpaceId, LayoutFragmentBoxModel, LayoutFragmentKind,
-        LayoutOutputBoxId, LayoutPoint, LayoutQuad, LayoutRect, LayoutResolvedGridTracks,
-        LayoutSize, LayoutTransform2D, LayoutUsedSize,
+        LayoutBoxModel, LayoutCoordinateSpaceId, LayoutFragmentBoxModel, LayoutFragmentId,
+        LayoutFragmentKind, LayoutOutputBoxId, LayoutPoint, LayoutQuad, LayoutRect,
+        LayoutResolvedGridTracks, LayoutSize, LayoutTransform2D, LayoutUsedSize,
     },
     query::{
         LayoutElementMetrics, LayoutNodeOutput, LayoutResizeObserverMetrics,
@@ -29,78 +29,152 @@ struct InlineOffsetGeometry {
     size: LayoutSize,
 }
 
-impl<N> FrozenLayoutTree<N>
+/// Source provenance derived from one frozen tree's canonical vectors.
+///
+/// Built at most once per tree, on its first source query, by the same walk
+/// the per-query scan used to perform: boxes in order (principal box, then
+/// non-line geometry fragments), then scroll-proxy links in order. Every
+/// lookup therefore returns exactly what that scan returned, including the
+/// last principal box when several name one source. Projection derives each
+/// principal source from a source-to-box map, so that case does not arise in
+/// a real pass.
+pub(super) struct SourceProvenanceIndex<N> {
+    outputs: HashMap<N, LayoutNodeOutput>,
+}
+
+impl<N> SourceProvenanceIndex<N>
 where
     N: Copy + Debug + Eq + Hash,
 {
-    /// Derives the source view from canonical box provenance.
-    ///
-    /// No source hash table survives the pass. The returned IDs are copied
-    /// into one short-lived query value.
-    pub fn source_output(&self, source: N) -> Option<LayoutNodeOutput> {
-        let mut found = false;
-        let mut output = LayoutNodeOutput::default();
-        for layout_box in &self.boxes {
+    fn build(tree: &FrozenLayoutTree<N>) -> Self {
+        let mut outputs = HashMap::<N, LayoutNodeOutput>::new();
+        for layout_box in &tree.boxes {
             #[cfg(test)]
             SOURCE_OUTPUT_BOX_VISITS.with(|count| count.set(count.get() + 1));
-            if layout_box.principal_source == Some(source) {
-                output.principal_box = Some(layout_box.id);
-                found = true;
+            if let Some(source) = layout_box.principal_source {
+                outputs.entry(source).or_default().principal_box = Some(layout_box.id);
             }
-            if layout_box.geometry_source == Some(source) {
-                output
-                    .fragments
-                    .extend(layout_box.fragments.iter().copied().filter(|id| {
-                        self.fragment(*id).is_some_and(|fragment| {
-                            !matches!(fragment.kind, LayoutFragmentKind::Line { .. })
-                        })
-                    }));
-                found = true;
-            }
-        }
-        for (proxy_source, box_id) in &self.scroll_proxy_links {
-            if *proxy_source == source {
-                output.scroll_proxy_boxes.push(*box_id);
-                found = true;
-            }
-        }
-        found.then_some(output)
-    }
-
-    /// Builds provenance only for this operation's requested sources. Absent
-    /// sources remain explicit None entries; fragment and proxy order follow
-    /// the canonical vectors exactly as in the direct source query.
-    pub(super) fn source_outputs(&self, outputs: &mut HashMap<N, Option<LayoutNodeOutput>>) {
-        for layout_box in &self.boxes {
-            #[cfg(test)]
-            SOURCE_OUTPUT_BOX_VISITS.with(|count| count.set(count.get() + 1));
-            if let Some(output) = layout_box
-                .principal_source
-                .and_then(|source| outputs.get_mut(&source))
-            {
-                output.get_or_insert_default().principal_box = Some(layout_box.id);
-            }
-            if let Some(output) = layout_box
-                .geometry_source
-                .and_then(|source| outputs.get_mut(&source))
-            {
-                output.get_or_insert_default().fragments.extend(
+            if let Some(source) = layout_box.geometry_source {
+                outputs.entry(source).or_default().fragments.extend(
                     layout_box.fragments.iter().copied().filter(|id| {
-                        self.fragment(*id).is_some_and(|fragment| {
+                        tree.fragment(*id).is_some_and(|fragment| {
                             !matches!(fragment.kind, LayoutFragmentKind::Line { .. })
                         })
                     }),
                 );
             }
         }
-        for (source, box_id) in &self.scroll_proxy_links {
-            if let Some(output) = outputs.get_mut(source) {
-                output
-                    .get_or_insert_default()
-                    .scroll_proxy_boxes
-                    .push(*box_id);
-            }
+        for (source, box_id) in &tree.scroll_proxy_links {
+            outputs
+                .entry(*source)
+                .or_default()
+                .scroll_proxy_boxes
+                .push(*box_id);
         }
+        // Exact-size storage keeps the retained index within its bound.
+        for output in outputs.values_mut() {
+            output.fragments.shrink_to_fit();
+            output.scroll_proxy_boxes.shrink_to_fit();
+        }
+        outputs.shrink_to_fit();
+        Self { outputs }
+    }
+
+    /// Upper bound on [`Self::estimated_bytes`] for an index built from
+    /// `tree`, derived from the canonical vectors alone. The tree's retained
+    /// footprint counts this bound whether or not the index exists, so the
+    /// publish-time budget covers it and source queries never change the
+    /// reported footprint.
+    pub(super) fn retained_bytes_bound(tree: &FrozenLayoutTree<N>) -> usize {
+        let (keys, fragment_ids) =
+            tree.boxes
+                .iter()
+                .fold((0usize, 0usize), |(keys, fragment_ids), layout_box| {
+                    let principal = usize::from(layout_box.principal_source.is_some());
+                    let geometry = usize::from(layout_box.geometry_source.is_some());
+                    (
+                        keys.saturating_add(principal).saturating_add(geometry),
+                        fragment_ids
+                            .saturating_add(geometry.saturating_mul(layout_box.fragments.len())),
+                    )
+                });
+        let keys = keys.saturating_add(tree.scroll_proxy_links.len());
+        // A shrunk table holds at most twice its entries, and never fewer
+        // than seven.
+        let table = keys
+            .saturating_mul(2)
+            .saturating_add(8)
+            .saturating_mul(std::mem::size_of::<(N, LayoutNodeOutput)>().saturating_add(1));
+        table
+            .saturating_add(fragment_ids.saturating_mul(std::mem::size_of::<LayoutFragmentId>()))
+            .saturating_add(
+                tree.scroll_proxy_links
+                    .len()
+                    .saturating_mul(std::mem::size_of::<LayoutOutputBoxId>()),
+            )
+    }
+
+    /// Allocation-capacity estimate of this index.
+    #[cfg(test)]
+    fn estimated_bytes(&self) -> usize {
+        // One control byte per hash-table bucket, plus the entries.
+        let table = self
+            .outputs
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(N, LayoutNodeOutput)>().saturating_add(1));
+        self.outputs.values().fold(table, |bytes, output| {
+            bytes
+                .saturating_add(
+                    output
+                        .fragments
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<LayoutFragmentId>()),
+                )
+                .saturating_add(
+                    output
+                        .scroll_proxy_boxes
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<LayoutOutputBoxId>()),
+                )
+        })
+    }
+}
+
+impl<N> FrozenLayoutTree<N>
+where
+    N: Copy + Debug + Eq + Hash,
+{
+    /// Derives the source view from canonical box provenance.
+    ///
+    /// The first source query on this tree derives one provenance index in a
+    /// single walk over the boxes and scroll-proxy links; later queries look
+    /// the source up directly. The index is owned by this tree and dropped
+    /// with it, so no source table survives into the next pass, and a tree
+    /// that is never queried by source never builds one. The returned IDs are
+    /// copied into one short-lived query value.
+    pub fn source_output(&self, source: N) -> Option<LayoutNodeOutput> {
+        self.source_index().outputs.get(&source).cloned()
+    }
+
+    /// Answers this operation's requested sources from the tree's provenance
+    /// index. Absent sources remain explicit None entries; fragment and proxy
+    /// order follow the canonical vectors exactly as in the direct source query.
+    pub(super) fn source_outputs(&self, outputs: &mut HashMap<N, Option<LayoutNodeOutput>>) {
+        let index = self.source_index();
+        for (source, output) in outputs.iter_mut() {
+            *output = index.outputs.get(source).cloned();
+        }
+    }
+
+    fn source_index(&self) -> &SourceProvenanceIndex<N> {
+        self.source_index_cell()
+            .get_or_init(|| SourceProvenanceIndex::build(self))
+    }
+
+    /// The principal box whose provenance names this source.
+    fn principal_box_for_source(&self, source: N) -> Option<&FrozenLayoutBox<N>> {
+        let box_id = self.source_index().outputs.get(&source)?.principal_box?;
+        self.boxes.get(box_id.index())
     }
 
     pub fn element_metrics_for_source(&self, source: N) -> Option<LayoutElementMetrics<N>> {
@@ -114,9 +188,7 @@ where
         &self,
         source: N,
     ) -> Option<LayoutResizeObserverMetrics> {
-        self.boxes
-            .iter()
-            .find(|layout_box| layout_box.principal_source == Some(source))?
+        self.principal_box_for_source(source)?
             .resize_observer_metrics()
     }
 
@@ -124,16 +196,12 @@ where
     /// without transforms, integer rounding, or absolute CSS zoom. A source
     /// without an applicable principal box keeps its computed value.
     pub fn used_size_for_source(&self, source: N) -> Option<LayoutUsedSize> {
-        let layout_box = self
-            .boxes
-            .iter()
-            .find(|layout_box| layout_box.principal_source == Some(source))?;
-        layout_box.used_size()
+        self.principal_box_for_source(source)?.used_size()
     }
 
     /// Derives all applicable sizing boxes in one pass. A batch consumer may
-    /// collect this into an operation-local lookup; no index is retained by
-    /// the frozen tree, and no DOM or style input is consulted.
+    /// collect this into an operation-local lookup; no DOM or style input is
+    /// consulted.
     pub fn used_sizes(&self) -> impl Iterator<Item = (N, LayoutUsedSize)> + '_ {
         self.boxes
             .iter()
@@ -1003,9 +1071,11 @@ mod tests {
             .iter()
             .map(|query| tree.answer_query(query))
             .collect::<Vec<_>>();
+        // The first source query derives the index in one walk; the remaining
+        // individual queries look sources up without rescanning.
         assert_eq!(
             SOURCE_OUTPUT_BOX_VISITS.with(std::cell::Cell::get),
-            tree.boxes.len() * queries.queries.len()
+            tree.boxes.len()
         );
         SOURCE_OUTPUT_BOX_VISITS.with(|count| count.set(0));
         // The metrics are pass diagnostics, copied unchanged by query batches.
@@ -1041,17 +1111,192 @@ mod tests {
         };
         let answers = tree.answer_queries(&queries, metrics);
         assert_eq!(answers.answers, expected);
-        assert_eq!(
-            SOURCE_OUTPUT_BOX_VISITS.with(std::cell::Cell::get),
-            tree.boxes.len()
-        );
+        assert_eq!(SOURCE_OUTPUT_BOX_VISITS.with(std::cell::Cell::get), 0);
         assert_eq!(answers.metrics, metrics);
         SOURCE_OUTPUT_BOX_VISITS.with(|count| count.set(0));
         let one = LayoutQueryBatch::new(vec![LayoutQuery::ClientRects { source: 1 }]);
         tree.answer_queries(&one, metrics);
+        assert_eq!(SOURCE_OUTPUT_BOX_VISITS.with(std::cell::Cell::get), 0);
+    }
+
+    /// The per-query provenance scan the index replaces, kept as the oracle.
+    fn scanned_source_output(tree: &FrozenLayoutTree<u8>, source: u8) -> Option<LayoutNodeOutput> {
+        let mut found = false;
+        let mut output = LayoutNodeOutput::default();
+        for layout_box in &tree.boxes {
+            if layout_box.principal_source == Some(source) {
+                output.principal_box = Some(layout_box.id);
+                found = true;
+            }
+            if layout_box.geometry_source == Some(source) {
+                output
+                    .fragments
+                    .extend(layout_box.fragments.iter().copied().filter(|id| {
+                        tree.fragment(*id).is_some_and(|fragment| {
+                            !matches!(fragment.kind, LayoutFragmentKind::Line { .. })
+                        })
+                    }));
+                found = true;
+            }
+        }
+        for (proxy_source, box_id) in &tree.scroll_proxy_links {
+            if *proxy_source == source {
+                output.scroll_proxy_boxes.push(*box_id);
+                found = true;
+            }
+        }
+        found.then_some(output)
+    }
+
+    /// Boxes 0..=5 with mixed provenance: a source that is principal for one
+    /// box and geometry for others, split continuations, an anonymous box, a
+    /// geometry-only source, line and dangling fragment ids, and proxies.
+    fn varied_provenance_tree() -> FrozenLayoutTree<u8> {
+        let mut tree = inline_fragment_tree();
+        let template = tree.boxes[0].clone();
+        let fragment_template = tree.fragments[1].clone();
+        let add_fragment = |tree: &mut FrozenLayoutTree<u8>, kind| {
+            let id = LayoutFragmentId::from_index(tree.fragments.len());
+            tree.fragments.push(LayoutFragment {
+                id,
+                kind,
+                ..fragment_template.clone()
+            });
+            id
+        };
+        let id = LayoutOutputBoxId::from_index;
+        let line = add_fragment(
+            &mut tree,
+            LayoutFragmentKind::Line {
+                owner: id(0),
+                line_index: 0,
+            },
+        );
+        let text = add_fragment(
+            &mut tree,
+            LayoutFragmentKind::Text {
+                box_id: id(1),
+                line_index: 0,
+                source_utf16_range: 0..3,
+                rtl: false,
+            },
+        );
+        let block = add_fragment(&mut tree, LayoutFragmentKind::Box { box_id: id(2) });
+        let continuation = add_fragment(
+            &mut tree,
+            LayoutFragmentKind::InlineBox {
+                box_id: id(3),
+                line_index: 1,
+                has_start_edge: false,
+                has_end_edge: true,
+            },
+        );
+        let dangling = LayoutFragmentId::from_index(1_000);
+        tree.boxes[0].geometry.fragments.extend([line, dangling]);
+        // (geometry_source, principal_source, fragments)
+        let boxes: [(Option<u8>, Option<u8>, Vec<LayoutFragmentId>); 5] = [
+            (Some(1), Some(2), vec![text, line]),
+            (Some(3), None, vec![block]),
+            (Some(1), None, vec![continuation, text]),
+            (None, None, vec![block]),
+            (Some(2), Some(3), Vec::new()),
+        ];
+        for (geometry_source, principal_source, fragments) in boxes {
+            let mut layout_box = template.clone();
+            layout_box.geometry.id = id(tree.boxes.len());
+            layout_box.geometry.fragments = fragments;
+            layout_box.geometry_source = geometry_source;
+            layout_box.principal_source = principal_source;
+            tree.boxes.push(layout_box);
+        }
+        tree.scroll_proxy_links
+            .extend([(4, id(3)), (1, id(2)), (4, id(0)), (5, id(4))]);
+        tree
+    }
+
+    #[test]
+    fn indexed_source_queries_match_the_provenance_scan() {
+        let tree = varied_provenance_tree();
+        for source in 0..=8 {
+            let scanned = scanned_source_output(&tree, source);
+            assert_eq!(tree.source_output(source), scanned, "source {source}");
+            let scanned_principal = tree
+                .boxes
+                .iter()
+                .find(|layout_box| layout_box.principal_source == Some(source));
+            assert_eq!(
+                tree.used_size_for_source(source),
+                scanned_principal.and_then(FrozenLayoutBox::used_size),
+                "used size for source {source}"
+            );
+            assert_eq!(
+                tree.resize_observer_metrics_for_source(source),
+                scanned_principal.and_then(FrozenLayoutBox::resize_observer_metrics),
+                "resize observer metrics for source {source}"
+            );
+        }
+        let mut batch = (0..=8)
+            .map(|source| (source, None))
+            .collect::<HashMap<_, _>>();
+        tree.source_outputs(&mut batch);
+        for (source, output) in batch {
+            assert_eq!(
+                output,
+                scanned_source_output(&tree, source),
+                "batch {source}"
+            );
+        }
+        // Spot-check the scan's order contract independently of the oracle.
+        assert_eq!(
+            tree.source_output(1),
+            Some(LayoutNodeOutput {
+                principal_box: Some(LayoutOutputBoxId::from_index(0)),
+                fragments: [0, 1, 3, 5, 3].map(LayoutFragmentId::from_index).to_vec(),
+                scroll_proxy_boxes: vec![LayoutOutputBoxId::from_index(2)],
+            })
+        );
+        assert_eq!(tree.source_output(0), None);
+        assert_eq!(tree.source_output(8), None);
+    }
+
+    #[test]
+    fn source_index_is_built_once_on_demand_and_rebuilt_after_invalidation() {
+        let mut tree = varied_provenance_tree();
+        SOURCE_OUTPUT_BOX_VISITS.with(|count| count.set(0));
+        tree.hit_test(LayoutPoint::new(1.0, 1.0), false);
+        tree.answer_query(&crate::LayoutQuery::DocumentMetrics);
+        assert!(tree.source_index_cell().get().is_none());
+        assert_eq!(SOURCE_OUTPUT_BOX_VISITS.with(std::cell::Cell::get), 0);
+        let retained = tree.retention_metrics();
+
+        for source in 0..=8 {
+            tree.source_output(source);
+            tree.element_metrics_for_source(source);
+            tree.used_size_for_source(source);
+        }
         assert_eq!(
             SOURCE_OUTPUT_BOX_VISITS.with(std::cell::Cell::get),
             tree.boxes.len()
+        );
+
+        // The retained footprint already counts the index's bound, so source
+        // queries never change it.
+        assert_eq!(tree.retention_metrics(), retained);
+        let index_bytes = tree.source_index().estimated_bytes();
+        assert!(index_bytes > 0);
+        assert!(index_bytes <= SourceProvenanceIndex::retained_bytes_bound(&tree));
+        tree.boxes_mut()[4].geometry_source = Some(7);
+        assert!(tree.source_index_cell().get().is_none());
+        for source in 0..=8 {
+            assert_eq!(
+                tree.source_output(source),
+                scanned_source_output(&tree, source),
+                "source {source} after invalidation"
+            );
+        }
+        assert_eq!(
+            SOURCE_OUTPUT_BOX_VISITS.with(std::cell::Cell::get),
+            tree.boxes.len() * 2
         );
     }
 }
