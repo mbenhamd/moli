@@ -9,6 +9,7 @@ use moli_layout::{
     LayoutSource, LayoutSourceKind, LayoutStyleResolver, LayoutTransform2D, LayoutViewport,
     PaintBrush, PaintCaptureRequest, PaintColor, PaintFragment, PaintShape,
     ResolvedLayoutElementStyles, ResolvedLayoutStyle, build_layout_pass,
+    build_layout_pass_with_embedded_frames,
 };
 use style::Atom;
 use taffy::{
@@ -91,7 +92,8 @@ impl LayoutSource for Source {
                 LayoutNamespace::Html,
                 self.0[node].local_name,
                 LayoutElementCategory::Generic,
-                None,
+                (self.0[node].local_name == "iframe")
+                    .then_some(moli_layout::LayoutReplacedKind::Frame),
             )
         })
     }
@@ -3460,6 +3462,108 @@ fn transformed_hit_retains_exact_local_content_box_and_inverse_mapping() {
         .bounding_rect();
     assert_close(projected_content.width, 50.0);
     assert_close(projected_content.height, 30.0);
+}
+
+struct ScrollingFrame;
+
+impl moli_layout::EmbeddedFrameRenderer<usize> for ScrollingFrame {
+    fn render_embedded_frame(
+        &mut self,
+        _frame: usize,
+        viewport: LayoutViewport,
+    ) -> Result<Option<moli_layout::EmbeddedFrameSnapshot<usize>>, LayoutError> {
+        let source = Source(vec![
+            Node::element("frame-root", vec![1]),
+            Node::element("frame-content", Vec::new()),
+        ]);
+        let mut styles = Styles(HashMap::from([
+            (0, fixed_size(LayoutDisplay::Block, 100.0, 80.0)),
+            (1, fixed_size(LayoutDisplay::Block, 100.0, 400.0)),
+        ]));
+        let (tree, paint, images) = build_layout_pass(
+            &source,
+            &mut styles,
+            &mut DocumentLayoutServices::new(),
+            LayoutPassRequest::new(viewport, LayoutFlushReason::Test),
+        )?
+        .into_embedded_parts();
+        Ok(Some(moli_layout::EmbeddedFrameSnapshot::new(
+            tree, paint, images,
+        )))
+    }
+}
+
+#[test]
+fn scroll_sync_that_needs_layout_leaves_embedded_frames_unchanged() {
+    let source = Source(vec![
+        Node::element("root", vec![1, 2, 3]),
+        Node::element("sticky", Vec::new()),
+        Node::html_element("frame", "iframe", Vec::new()),
+        Node::element("document-flow", Vec::new()),
+    ]);
+    let mut styles = Styles::default();
+    styles
+        .0
+        .insert(0, fixed_size(LayoutDisplay::Block, 200.0, 120.0));
+    styles.0.insert(
+        1,
+        resolved(
+            LayoutDisplay::Block,
+            Style {
+                inset: Rect {
+                    left: LengthPercentageAuto::auto(),
+                    right: LengthPercentageAuto::auto(),
+                    top: length(0.0),
+                    bottom: LengthPercentageAuto::auto(),
+                },
+                size: Size {
+                    width: length(200.0),
+                    height: length(10.0),
+                },
+                ..Style::default()
+            },
+        )
+        .with_position(moli_layout::LayoutPosition::Sticky),
+    );
+    styles
+        .0
+        .insert(2, fixed_size(LayoutDisplay::Block, 100.0, 80.0));
+    styles
+        .0
+        .insert(3, fixed_size(LayoutDisplay::Block, 200.0, 400.0));
+    let mut output = build_layout_pass_with_embedded_frames(
+        &source,
+        &mut styles,
+        &mut DocumentLayoutServices::new(),
+        LayoutPassRequest::new(LayoutViewport::new(320, 240, 1.0), LayoutFlushReason::Test),
+        &mut ScrollingFrame,
+    )
+    .unwrap();
+    let frame_root = |output: &LayoutPassResult<usize>| {
+        let frame = output
+            .tree
+            .embedded_frame_tree(2)
+            .expect("the iframe has an embedded tree");
+        frame.boxes[frame.root_box.index()].scroll_extent.clone()
+    };
+    let before = frame_root(&output);
+    assert!(before.is_scroll_container && before.maximum_offset.y >= 50.0);
+
+    // Both documents' roots (source 0 in each) scroll by 50px. The parent's
+    // viewport cannot move in place while a sticky box exists, so the sync
+    // must leave the frame's tree untouched too.
+    let mut sample = |node: usize| {
+        if node == 0 {
+            LayoutPoint::new(0.0, 50.0)
+        } else {
+            LayoutPoint::ZERO
+        }
+    };
+    assert_eq!(
+        output.tree.sync_scroll_offsets(&mut sample),
+        moli_layout::ScrollOffsetSync::NeedsLayout
+    );
+    assert_eq!(frame_root(&output), before);
 }
 
 #[test]
