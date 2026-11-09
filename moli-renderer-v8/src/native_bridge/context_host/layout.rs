@@ -698,6 +698,46 @@ impl JsContextHost {
         })
     }
 
+    /// Answers `query` from a one-shot layout of `foreign_object`'s content
+    /// (see `layout_renderer::build_foreign_object_layout_pass`). Geometry is
+    /// in the `<foreignObject>`'s local CSS pixel space; the caller maps it
+    /// through the SVG screen CTM. `None` without real layout or a Document.
+    pub(crate) fn answer_foreign_object_layout_query(
+        &self,
+        foreign_object: DomHandle,
+        query: &LayoutQuery<DomHandle>,
+    ) -> Result<Option<LayoutQueryAnswer<DomHandle>>, LayoutError> {
+        if !self.layout_policy.uses_real_layout() {
+            return Ok(None);
+        }
+        let Some(document) = self.layout_document_for_source(foreign_object) else {
+            return Ok(None);
+        };
+        self.ensure_current_layout()?;
+        let request = LayoutPassRequest::new(
+            self.layout_viewport_for_document(document),
+            moli_layout::LayoutFlushReason::SynchronousGeometry,
+        );
+        let pass = {
+            let _active = ActiveLayoutPass::enter(&self.layout_pass_active)?;
+            let mut state = self.document_layout_state.borrow_mut();
+            state.with_services_for_document(
+                document,
+                self.document_handle(),
+                |services, embedded_document_services| {
+                    crate::layout_renderer::build_foreign_object_layout_pass(
+                        self,
+                        foreign_object,
+                        services,
+                        embedded_document_services,
+                        request,
+                    )
+                },
+            )?
+        };
+        Ok(Some(self.answer_layout_query(&pass.tree, query)))
+    }
+
     pub(crate) fn answer_layout_query_for_document(
         &self,
         document: DomHandle,

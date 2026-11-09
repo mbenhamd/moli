@@ -27,6 +27,10 @@ pub(super) struct NativeLayoutStyleResolver<'a> {
     /// The screen store to restore after an environment-override pass, whose
     /// print-sized containers must not answer later screen styles.
     screen_container_sizes: Option<Option<moli_selector::ContainerQuerySizes>>,
+    /// `root` is a `<foreignObject>` laid out as its own block root (see
+    /// `build_foreign_object_layout_pass`). Such a pass reads the Document's
+    /// container-query sizes but never replaces them.
+    foreign_object_root: bool,
 }
 
 #[derive(Default)]
@@ -57,6 +61,46 @@ impl<'a> NativeLayoutStyleResolver<'a> {
             .is_some()
             .then(|| runtime.container_query_sizes_snapshot(document));
         runtime.begin_container_query_store(document);
+        Self::with_prepared_store(
+            runtime,
+            root,
+            document,
+            viewport,
+            environment_override,
+            screen_container_sizes,
+            false,
+        )
+    }
+
+    /// Resolves the styles of one `<foreignObject>`'s content in the
+    /// Document's current screen style world, with the element itself as a
+    /// block root.
+    pub(super) fn for_foreign_object_content(
+        runtime: &'a JsContextHost,
+        foreign_object: DomHandle,
+        document: DomHandle,
+        viewport: LayoutViewport,
+    ) -> Self {
+        Self::with_prepared_store(
+            runtime,
+            foreign_object,
+            document,
+            viewport,
+            None,
+            None,
+            true,
+        )
+    }
+
+    fn with_prepared_store(
+        runtime: &'a JsContextHost,
+        root: DomHandle,
+        document: DomHandle,
+        viewport: LayoutViewport,
+        environment_override: Option<StyloStyleEnvironment>,
+        screen_container_sizes: Option<Option<moli_selector::ContainerQuerySizes>>,
+        foreign_object_root: bool,
+    ) -> Self {
         let mut reads = layout_style_read_scope(runtime, document, viewport, environment_override);
         // Drain pending invalidations and update the retained world before
         // freezing the anonymous-style context for this synchronous pass.
@@ -73,6 +117,7 @@ impl<'a> NativeLayoutStyleResolver<'a> {
             viewport,
             environment_override,
             screen_container_sizes,
+            foreign_object_root,
         }
     }
 
@@ -156,6 +201,9 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
         &mut self,
         sizes: &[(DomHandle, LayoutQueryContainerSize)],
     ) -> Result<bool, LayoutError> {
+        if self.foreign_object_root {
+            return Ok(false);
+        }
         let store = sizes
             .iter()
             .map(|(node, size)| {
@@ -246,6 +294,14 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
             // overrides, but no layout object is generated while this exact
             // Document can execute scripts.
             resolved.force_display_none();
+        }
+        if self.foreign_object_root
+            && node == self.root
+            && !matches!(resolved.display(), LayoutDisplay::None)
+        {
+            // Blink lays out a <foreignObject> as a block box: the root of
+            // the CSS content it embeds in the SVG.
+            resolved.force_layout_display(LayoutDisplay::Block);
         }
         if let Some(profile) = self.profile.as_mut() {
             profile.primary_policy_ns = profile.primary_policy_ns.saturating_add(

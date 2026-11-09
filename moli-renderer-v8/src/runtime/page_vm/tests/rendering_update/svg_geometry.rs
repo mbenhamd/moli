@@ -90,3 +90,80 @@ document.body.innerHTML = `<svg id=s width=300 height=150 viewBox="0 0 600 300"
     .await
     .expect("SVG client geometry fixture should run");
 }
+
+/// HTML in a `<foreignObject>` gets CSS boxes of its own: box metrics are
+/// untransformed CSS sizes, and client rects map them through the SVG screen
+/// CTM, so a scaled diagram reports scaled label rects (Blink behaviour).
+#[tokio::test(flavor = "current_thread")]
+async fn foreign_object_content_has_css_boxes_mapped_through_screen_ctm() {
+    run_page_vm_async_test(async move {
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        loader.set_optional_resource_fetch_mask(
+            crate::protocol_types::OptionalResourceFetchMask::FONT,
+        );
+        let mut page_vm = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/svg-foreign-object-geometry.html")?,
+        );
+        let encoded_font = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../moli-layout/tests/fixtures/moli-ahem.woff2"
+        ));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(encoded_font);
+        page_vm.vm_mut().eval(&format!(
+            r#"
+document.head.innerHTML = `<style>
+@font-face {{ font-family:MoliAhem; src:url(data:font/woff2;base64,{encoded}) format('woff2') }}
+html,body {{ margin:0 }}
+.label {{ display:table-cell; white-space:nowrap; line-height:1.5; font:20px MoliAhem }}
+</style>`;
+document.body.innerHTML = `<svg id=s width=300 height=150 viewBox="0 0 600 300" style="display:block">
+  <g transform="translate(50,40)">
+    <foreignObject id=fo x=10 y=20 width=200 height=60>
+      <div id=d class=label><span id=l>XXXX</span></div>
+    </foreignObject>
+  </g>
+</svg>
+<svg style="display:none"><foreignObject width=10 height=10><div id=hidden class=label>X</div></foreignObject></svg>`;
+'installed'
+"#
+        ))?;
+        page_vm
+            .vm_mut()
+            .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+        page_vm.vm_mut().publish_layout_for_test()?;
+
+        let geometry = page_vm.vm_mut().eval(
+            r#"(() => {
+  const out = {};
+  const box = r => [r.x, r.y, r.width, r.height].map(v => Math.round(v * 100) / 100);
+  for (const id of ['fo', 'd', 'l', 'hidden']) {
+    const element = document.getElementById(id);
+    out[id] = {
+      rect: box(element.getBoundingClientRect()),
+      count: element.getClientRects().length,
+    };
+    if (id !== 'fo') out[id].offset = [element.offsetWidth, element.offsetHeight];
+  }
+  return JSON.stringify(out);
+})()"#,
+        )?;
+        let geometry: serde_json::Value = serde_json::from_str(&geometry)?;
+        // viewBox halves user units; the content origin is the
+        // <foreignObject>'s (10,20) after translate(50,40): client (30,30).
+        // "XXXX" is 4 x 0.6em = 48px wide on a 30px line; the span's 20px
+        // content area sits below 5px of half-leading.
+        let expected = serde_json::json!({
+            "fo": { "rect": [30, 30, 100, 30], "count": 1 },
+            "d": { "rect": [30, 30, 24, 15], "count": 1, "offset": [48, 30] },
+            "l": { "rect": [30, 32.5, 24, 10], "count": 1, "offset": [48, 20] },
+            "hidden": { "rect": [0, 0, 0, 0], "count": 0, "offset": [0, 0] },
+        });
+        assert_eq!(geometry, expected, "geometry={geometry}");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("foreignObject geometry fixture should run");
+}

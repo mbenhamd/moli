@@ -1002,6 +1002,16 @@ impl DocumentLayoutServices {
         self.retained_world = None;
     }
 
+    /// Lends these services (fonts and shaping contexts) to a one-shot pass
+    /// over another root of the same Document, such as `<foreignObject>`
+    /// content, and keeps the Document's retained world for its next pass.
+    pub fn with_retained_world_set_aside<R>(&mut self, consume: impl FnOnce(&mut Self) -> R) -> R {
+        let retained = self.retained_world.take();
+        let output = consume(self);
+        self.retained_world = retained;
+        output
+    }
+
     pub fn web_font_count(&self) -> usize {
         self.web_fonts.len()
     }
