@@ -43,20 +43,34 @@ where
                 .clip_form_control_contents();
         }
         let owner_label = world.boxes[control.index()].source_label.clone();
+        let single_line = world.boxes[control.index()]
+            .element_semantics
+            .as_ref()
+            .is_some_and(is_single_line_text_control);
         let placeholder_style = if placeholder {
             styles.placeholder_style(owner)?.map(|style| {
                 let mut style = style.into_style();
                 style.force_layout_display(LayoutDisplay::Block);
+                if single_line {
+                    // The UA `input::placeholder` rule also sets
+                    // `overflow: hidden`: a long placeholder never widens the
+                    // control's scroll range.
+                    style.force_single_line_text_control();
+                    style.clip_form_control_contents();
+                }
                 style
             })
         } else {
             None
         };
-        let editor_style = styles.anonymous_style(
+        let mut editor_style = styles.anonymous_style(
             LayoutAnonymousStyleContext::from_parent(&world.boxes[control.index()])
                 .expect("form control has a source owner"),
             LayoutDisplay::Block,
         )?;
+        if single_line {
+            editor_style.force_single_line_text_control();
+        }
         let selection = world.boxes[control.index()].text_selection;
         if texts.is_empty() && selection.is_some() {
             texts.push(Arc::from(""));
@@ -110,6 +124,24 @@ where
         }
     }
     Ok(())
+}
+
+/// Single-line text inputs whose inner editor and placeholder Blink lays out
+/// as `white-space: pre` (`TextControlInnerEditorElement` and the UA
+/// `input::placeholder` rule); textareas and selects keep their own wrapping.
+fn is_single_line_text_control(semantics: &LayoutElementSemantics) -> bool {
+    matches!(
+        semantics.category,
+        LayoutElementCategory::FormControl(LayoutFormControlKind::Input(
+            LayoutInputControlKind::Text
+                | LayoutInputControlKind::Search
+                | LayoutInputControlKind::Email
+                | LayoutInputControlKind::Telephone
+                | LayoutInputControlKind::Password
+                | LayoutInputControlKind::Url
+                | LayoutInputControlKind::Number
+        ))
+    )
 }
 
 fn form_control_texts(semantics: &Option<LayoutElementSemantics>) -> Option<(Vec<Arc<str>>, bool)> {
