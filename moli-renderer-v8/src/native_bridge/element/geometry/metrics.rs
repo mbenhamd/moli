@@ -36,18 +36,6 @@ fn node_scroll_position_value<'s>(
     if !runtime.layout_policy().relayouts_stale_reads() {
         return if horizontal { left } else { top };
     }
-    // The getter has no error channel; a failed layout reads the stored offset.
-    let Ok(Some(metrics)) = read_element_metrics(runtime, handle) else {
-        return if horizontal { left } else { top };
-    };
-    let clamped_left = left.clamp(
-        f64::from(metrics.minimum_scroll_offset.x),
-        f64::from(metrics.maximum_scroll_offset.x),
-    );
-    let clamped_top = top.clamp(
-        f64::from(metrics.minimum_scroll_offset.y),
-        f64::from(metrics.maximum_scroll_offset.y),
-    );
     let is_document_root = runtime
         .dom_host()
         .owner_document_handle(handle)
@@ -58,6 +46,23 @@ fn node_scroll_position_value<'s>(
                 .document_element_handle_for_document(document)
         })
         == Some(handle);
+    let metrics = match read_element_metrics(runtime, handle) {
+        Ok(Some(metrics)) => metrics,
+        // An element without a box (display:none) has no scroll container and
+        // reads 0 like Chromium. It keeps the stored offset, which shows again
+        // once the element is rendered.
+        Ok(None) if !is_document_root => return 0.0,
+        // The getter has no error channel; a failed layout reads the stored offset.
+        Ok(None) | Err(_) => return if horizontal { left } else { top },
+    };
+    let clamped_left = left.clamp(
+        f64::from(metrics.minimum_scroll_offset.x),
+        f64::from(metrics.maximum_scroll_offset.x),
+    );
+    let clamped_top = top.clamp(
+        f64::from(metrics.minimum_scroll_offset.y),
+        f64::from(metrics.maximum_scroll_offset.y),
+    );
     if !is_document_root && (clamped_left != left || clamped_top != top) {
         set_node_scroll_position(scope, runtime_ptr, handle, clamped_left, clamped_top, false);
     }

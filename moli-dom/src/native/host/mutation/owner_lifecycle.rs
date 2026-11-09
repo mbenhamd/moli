@@ -29,7 +29,9 @@ struct OwnerLifecycleTraversal {
     candidate_tree_scope: Option<NativeNodeId>,
     collect_stylesheet_owners: bool,
     detect_base_state_owner: bool,
-    reset_scroll_offsets_on_disconnect: bool,
+    /// A Document's own child (the root element) keeps its scroll offsets:
+    /// they belong to the viewport, not to an element scroll container.
+    preserve_scroll_offsets_of: Option<NativeNodeId>,
     changes: OwnerLifecycleChanges,
 }
 
@@ -45,7 +47,7 @@ impl OwnerLifecycleTraversal {
             candidate_tree_scope,
             collect_stylesheet_owners,
             detect_base_state_owner,
-            reset_scroll_offsets_on_disconnect: false,
+            preserve_scroll_offsets_of: None,
             changes: OwnerLifecycleChanges::default(),
         }
     }
@@ -308,7 +310,7 @@ impl NativeDom {
             false,
             old_tree_scope,
             base_document.is_some(),
-            !parent_is_document,
+            parent_is_document.then_some(child),
         );
         if changes.contains_base_state_owner
             && let Some(document) = base_document
@@ -402,14 +404,14 @@ impl NativeDom {
         in_document_tree: bool,
         old_tree_scope: Option<NativeNodeId>,
         detect_base_state_owner: bool,
-        reset_scroll_offsets_on_disconnect: bool,
+        preserve_scroll_offsets_of: Option<NativeNodeId>,
     ) -> OwnerLifecycleChanges {
         let mutation = old_tree_scope
             .map(|_| StylesheetCandidateRegistryMutation::Unregister)
             .unwrap_or(StylesheetCandidateRegistryMutation::None);
         let mut traversal =
             OwnerLifecycleTraversal::new(mutation, old_tree_scope, false, detect_base_state_owner);
-        traversal.reset_scroll_offsets_on_disconnect = reset_scroll_offsets_on_disconnect;
+        traversal.preserve_scroll_offsets_of = preserve_scroll_offsets_of;
         self.retarget_owner_lifecycle_subtree(
             root,
             owner_document,
@@ -482,9 +484,11 @@ impl NativeDom {
                 .flatten();
             let node = self.node_mut(handle).expect("node must exist");
             // Leaving a connected tree destroys the element's scroll container,
-            // so a later insertion starts at offset 0 like Chromium. An atomic
-            // move (moveBefore) restores the offsets it captured.
-            if traversal.reset_scroll_offsets_on_disconnect
+            // so a later insertion starts at offset 0 like Chromium. Every
+            // tree-scope walk applies this, including the shadow-tree walks a
+            // host's removal triggers. An atomic move (moveBefore) restores
+            // the offsets it captured.
+            if traversal.preserve_scroll_offsets_of != Some(handle)
                 && !connected
                 && node.is_connected()
                 && let Some(element) = node.data_mut().as_element_mut()
