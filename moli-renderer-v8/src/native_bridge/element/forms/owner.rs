@@ -48,13 +48,7 @@ fn custom_element_form_owner(
     None
 }
 
-fn has_reflected_builtin_form_owner(element: &crate::dom::native::Element) -> bool {
-    element.namespace() == "http://www.w3.org/1999/xhtml"
-        && matches!(
-            element.local_name(),
-            "button" | "fieldset" | "input" | "object" | "output" | "select" | "textarea"
-        )
-}
+use moli_dom::native::is_builtin_reassociateable_form_associated_element as has_reflected_builtin_form_owner;
 
 fn form_associated_reflected_form_owner(
     runtime: &JsContextHost,
@@ -194,7 +188,7 @@ fn control_is_in_first_legend(
     false
 }
 
-fn node_contains(runtime: &JsContextHost, ancestor: DomHandle, node: DomHandle) -> bool {
+pub(super) fn node_contains(runtime: &JsContextHost, ancestor: DomHandle, node: DomHandle) -> bool {
     let mut current = Some(node);
     while let Some(handle) = current {
         if handle == ancestor {
