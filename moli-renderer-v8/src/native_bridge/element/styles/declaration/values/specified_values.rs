@@ -1279,6 +1279,15 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_with_viewp
     if let Some(value) = style_entries_property_value_with_pdb(&entries, &property) {
         return normalize_specified_cssom_value(&property, value);
     }
+    if property == "-webkit-line-clamp" {
+        // The PDB query does not cover Stylo's legacy shorthand, so read the
+        // stored entry under either name and project it to the longhand value.
+        return ["-webkit-line-clamp", "line-clamp"]
+            .into_iter()
+            .find_map(|name| inline_style_entry_for_inline_style(runtime, handle, name))
+            .and_then(|entry| crate::css_style::webkit_line_clamp_value(&entry.value))
+            .unwrap_or_default();
+    }
     if property == "overflow" {
         if let Some(entry) = inline_style_entry_for_inline_style(runtime, handle, &property) {
             return entry.value;
