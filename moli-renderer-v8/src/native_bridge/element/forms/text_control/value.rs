@@ -49,20 +49,7 @@ pub(crate) fn is_text_control(runtime: &JsContextHost, handle: DomHandle) -> boo
         .dom_host()
         .node(handle)
         .and_then(Node::as_element)
-        .is_some_and(|element| {
-            element.is_html_textarea()
-                || (element.is_html_input()
-                    && !matches!(
-                        element.input_type(),
-                        InputType::Hidden
-                            | InputType::Checkbox
-                            | InputType::Radio
-                            | InputType::Button
-                            | InputType::Submit
-                            | InputType::Reset
-                            | InputType::Image
-                    ))
-        })
+        .is_some_and(crate::dom::native::Element::is_text_control)
 }
 
 pub(super) fn supports_variable_length_selection(

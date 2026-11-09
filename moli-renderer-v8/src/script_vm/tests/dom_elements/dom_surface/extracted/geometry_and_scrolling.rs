@@ -1525,6 +1525,95 @@ fn live_geometry_scroll_top_reconciles_after_content_shrinks() {
 }
 
 #[test]
+fn live_geometry_focus_without_focus_styles_reuses_the_published_layout() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-focus-reuse.test/",
+        "<!doctype html><html><body style=margin:0><button id=a>a</button><button id=b>b</button></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    let width = "String(document.getElementById('b').getBoundingClientRect().width)";
+    let before = vm.eval(width).expect("first read");
+    let passes = vm.layout_pass_observability_for_test().1;
+    vm.eval(
+        "document.getElementById('a').focus(); document.getElementById('b').focus(); 'focused'",
+    )
+    .expect("focus");
+    assert_eq!(
+        vm.eval("String(document.activeElement.id)")
+            .expect("active"),
+        "b"
+    );
+    assert_eq!(vm.eval(width).expect("read after focus"), before);
+    assert_eq!(
+        vm.layout_pass_observability_for_test().1,
+        passes,
+        "a focus move that no style reads must not lay out again"
+    );
+}
+
+#[test]
+fn live_geometry_focus_styles_that_change_boxes_lay_out_again() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-focus-style.test/",
+        "<!doctype html><html><head><style>button{padding:0;border:0}#a:focus{padding:20px}#w:focus-within{padding-left:30px}</style></head><body style=margin:0><button id=a>a</button><div id=w><button id=b>b</button></div></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    let geometry = "(() => { const a = document.getElementById('a').getBoundingClientRect(), b = document.getElementById('b').getBoundingClientRect(); return JSON.stringify([a.height, b.left]); })()";
+    let unfocused = vm.eval(geometry).expect("first read");
+    vm.eval("document.getElementById('a').focus(); 'focused a'")
+        .expect("focus a");
+    let focused_a = vm.eval(geometry).expect("read after focusing a");
+    assert_ne!(focused_a, unfocused, ":focus padding must reach geometry");
+    vm.eval("document.getElementById('b').focus(); 'focused b'")
+        .expect("focus b");
+    let focused_b = vm.eval(geometry).expect("read after focusing b");
+    let [a_height, b_left]: [f64; 2] = serde_json::from_str(&focused_b).expect("geometry json");
+    let [unfocused_a_height, _]: [f64; 2] =
+        serde_json::from_str(&unfocused).expect("geometry json");
+    assert_eq!(
+        a_height, unfocused_a_height,
+        "blur must drop :focus padding"
+    );
+    assert_eq!(b_left, 30.0, ":focus-within padding must reach geometry");
+}
+
+#[test]
+fn live_geometry_focus_inside_a_shadow_host_reaches_host_focus_styles_and_window_scroll() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-focus-shadow.test/",
+        "<!doctype html><html><head><style>#h{display:block}#h:focus{padding-top:20px}</style></head><body style=margin:0><div id=h></div><div style=height:3000px></div><button id=far>far</button></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.eval(
+        "document.getElementById('h').attachShadow({mode:'open'}).innerHTML = '<button id=inner>in</button>'; 'attached'",
+    )
+    .expect("shadow setup");
+    let host_height = "String(document.getElementById('h').getBoundingClientRect().height)";
+    let unfocused: f64 = vm.eval(host_height).expect("first read").parse().unwrap();
+    vm.eval("document.getElementById('h').shadowRoot.getElementById('inner').focus(); 'focused'")
+        .expect("focus inner");
+    let focused: f64 = vm.eval(host_height).expect("focused read").parse().unwrap();
+    assert_eq!(
+        focused,
+        unfocused + 20.0,
+        "host :focus padding must reach geometry"
+    );
+    assert_eq!(
+        vm.eval(
+            "const far = document.getElementById('far'); far.focus(); JSON.stringify([scrollY > 0, far.getBoundingClientRect().bottom <= innerHeight])"
+        )
+        .expect("focus far"),
+        "[true,true]",
+        "focus() scrolls the window and the next read sees the scrolled geometry"
+    );
+    let blurred: f64 = vm.eval(host_height).expect("blurred read").parse().unwrap();
+    assert_eq!(
+        blurred, unfocused,
+        "moving focus out drops host :focus padding"
+    );
+}
+
+#[test]
 fn focusing_the_focused_element_neither_scrolls_nor_fires_events() {
     let mut vm = new_parsed_test_vm(
         "https://refocus-noop.test/",
