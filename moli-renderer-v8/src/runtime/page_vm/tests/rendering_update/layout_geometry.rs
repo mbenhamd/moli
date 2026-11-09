@@ -1515,3 +1515,53 @@ document.body.innerHTML = '<div id=host></div><div id=other></div>';
     .await
     .expect("scroll reset fixture should run");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_geometry_resets_shadow_and_root_subtree_scroll_offsets_and_hides_boxless_offsets() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}.s{height:100px;overflow:auto}.s>div{height:300px}</style>';
+document.body.innerHTML = '<div id=host></div><div id=other></div>';
+'installed'
+"#,
+        )?;
+        // Chromium: a shadow-tree scroller resets when its host leaves the
+        // document and keeps its offset across moveBefore; removing the root
+        // element resets the scrollers inside it; a display:none scroller
+        // reads 0 and shows its offset again once rendered.
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                r#"(() => { const host = document.getElementById('host');
+                    const other = document.getElementById('other');
+                    const scroller = (parent) => { const s = document.createElement('div');
+                        s.className = 's'; s.appendChild(document.createElement('div'));
+                        parent.appendChild(s); s.scrollTop = 50; return s; };
+                    const shadowed = () => { const h = document.createElement('div');
+                        host.replaceChildren(h); const root = h.attachShadow({ mode: 'open' });
+                        const style = document.createElement('style');
+                        style.textContent = '.s{height:100px;overflow:auto}.s>div{height:300px}';
+                        root.appendChild(style); return [h, scroller(root)]; };
+                    let [h, s] = shadowed();
+                    h.remove(); host.appendChild(h);
+                    const shadowReinserted = s.scrollTop;
+                    [h, s] = shadowed();
+                    other.moveBefore(h, null);
+                    const shadowMoved = s.scrollTop;
+                    s = scroller(other);
+                    s.style.display = 'none';
+                    const hidden = s.scrollTop;
+                    s.style.display = '';
+                    const shown = s.scrollTop;
+                    const html = document.documentElement;
+                    s.scrollTop = 50;
+                    document.removeChild(html); document.appendChild(html);
+                    return JSON.stringify([shadowReinserted, shadowMoved, hidden, shown, s.scrollTop]); })()"#,
+            )?,
+            "[0,50,0,50,0]"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("shadow and root scroll reset fixture should run");
+}
