@@ -54,8 +54,10 @@ fn flush_layout_for_layout_dependent_property(
 }
 
 /// Any property, on an element or its pseudo-element, can depend on layout
-/// through `@container` or `cq*` units. A read pays for a pass only when the
-/// DOM or some style changed since the published tree.
+/// through `@container` or `cq*` units. The read restyles first; it pays for a
+/// pass only when the DOM changed or some element was restyled since the
+/// published tree. A write to an attribute no selector reads restyles nothing
+/// and so leaves the store valid.
 pub(super) fn flush_layout_for_size_container_read(
     runtime: &JsContextHost,
     handle: DomHandle,

@@ -218,6 +218,34 @@ fn an_attribute_read_by_generated_content_resizes_a_sibling_container() {
 }
 
 #[test]
+fn an_attribute_no_selector_reads_needs_no_pass_but_a_selector_read_one_does() {
+    let mut vm = live_vm(STYLES);
+    vm.eval("getComputedStyle(document.getElementById('dep')).color")
+        .expect("eval");
+    let before = passes(&vm);
+    let result = vm
+        .eval(
+            r#"(() => {
+              const dep = document.getElementById('dep');
+              for (let i = 0; i < 5; i++) { dep.setAttribute('data-x', String(i)); getComputedStyle(dep).color; }
+              return getComputedStyle(dep).color;
+            })()"#,
+        )
+        .expect("eval");
+    assert_eq!(result, "rgb(0, 0, 0)");
+    assert_eq!(passes(&vm), before);
+    let grown = vm
+        .eval(
+            r#"(() => {
+              document.getElementById('toggle').classList.add('wide');
+              return getComputedStyle(document.getElementById('dep')).color;
+            })()"#,
+        )
+        .expect("eval");
+    assert_eq!(grown, "rgb(70, 70, 70)");
+}
+
+#[test]
 fn slotted_content_queries_and_follows_its_shadow_tree_container() {
     let mut vm = live_vm(
         r#"<style>

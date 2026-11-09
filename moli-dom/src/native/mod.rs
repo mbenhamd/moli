@@ -30,6 +30,7 @@ pub use host::{
     DomStyleInvalidationInputs, DomStylesheetOwnerChange, DomStylesheetOwnerChangeKind,
     DomStylesheetOwnerTransitions, DomStylesheetOwnerTreeScopes, DomTreeMutationEffects,
     ScriptPrepareTrigger, ScriptPrepareTriggerKind, StylesheetCandidateTreeScopeSnapshots,
+    attribute_reaches_layout_only_through_selectors,
 };
 pub use host::{
     HostElementSnapshot, ShadowRootBindingSnapshot, ShadowRootInclusion, ShadowRootInit,
