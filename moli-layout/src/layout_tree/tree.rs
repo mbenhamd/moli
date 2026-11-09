@@ -343,8 +343,13 @@ where
     /// Sticky positioning is the exception: a sticky box's position follows
     /// the offset of the scrollport it sticks to. A change that moves a
     /// scroll container with a sticky descendant, or the viewport while any
-    /// sticky box exists, needs a layout pass instead. That is decided
-    /// before any applied offset changes, so the tree stays as it was.
+    /// sticky box exists, needs a layout pass instead.
+    ///
+    /// The sync runs in two phases. The first samples every offset and
+    /// resolves every moved coordinate space, in this tree and in every
+    /// embedded frame tree, without changing anything; any check that fails
+    /// returns [`ScrollOffsetSync::NeedsLayout`] with all trees as they were.
+    /// Only then does the second phase write the planned state.
     ///
     /// `sample` returns a source's scroll offset in CSSOM (unzoomed) pixels,
     /// as [`crate::LayoutSource::scroll_offset`] does during a pass.
@@ -352,17 +357,28 @@ where
         &mut self,
         sample: &mut dyn FnMut(N) -> LayoutPoint,
     ) -> ScrollOffsetSync {
-        let mut outcome = ScrollOffsetSync::Unchanged;
-        for frame in &mut self.embedded_frames {
-            match frame.tree.sync_scroll_offsets(sample) {
-                ScrollOffsetSync::NeedsLayout => return ScrollOffsetSync::NeedsLayout,
-                ScrollOffsetSync::Updated => outcome = ScrollOffsetSync::Updated,
-                ScrollOffsetSync::Unchanged => {}
+        match self.plan_scroll_offsets(sample) {
+            None => ScrollOffsetSync::NeedsLayout,
+            Some(plan) => {
+                if self.apply_scroll_plan(plan) {
+                    ScrollOffsetSync::Updated
+                } else {
+                    ScrollOffsetSync::Unchanged
+                }
             }
+        }
+    }
+
+    /// Phase one: samples and resolves without changing anything. `None`
+    /// means a layout pass is needed.
+    fn plan_scroll_offsets(&self, sample: &mut dyn FnMut(N) -> LayoutPoint) -> Option<ScrollPlan> {
+        let mut frames = Vec::with_capacity(self.embedded_frames.len());
+        for frame in &self.embedded_frames {
+            frames.push(frame.tree.plan_scroll_offsets(sample)?);
         }
 
         // Sample each scroll container's offset, in the box's own zoomed
-        // coordinate space, as the projection does. Nothing changes yet.
+        // coordinate space, as the projection does.
         let mut moved = Vec::new();
         for (index, layout_box) in self.boxes.iter().enumerate() {
             let extent = &layout_box.scroll_extent;
@@ -393,22 +409,128 @@ where
             }
         }
         if moved.is_empty() {
-            return outcome;
+            return Some(ScrollPlan {
+                frames,
+                update: None,
+            });
         }
 
         let root = self.root_box.index();
         let count = self.boxes.len();
         if root >= count || self.scroll_projection.len() != count {
-            return ScrollOffsetSync::NeedsLayout;
+            return None;
         }
         let any_sticky = self.scroll_projection.iter().any(|input| input.sticky);
         if moved.iter().any(|&(index, _)| {
             self.scroll_projection[index].sticky_descendant || (index == root && any_sticky)
         }) {
-            return ScrollOffsetSync::NeedsLayout;
+            return None;
         }
 
-        for (index, applied) in moved {
+        let mut applied_offsets: Vec<LayoutPoint> = self
+            .boxes
+            .iter()
+            .map(|layout_box| layout_box.scroll_extent.applied_offset)
+            .collect();
+        for &(index, applied) in &moved {
+            applied_offsets[index] = applied;
+        }
+        let viewport_scroll = applied_offsets[root];
+
+        // Resolve every coordinate space parent first with the projection's
+        // own arithmetic (`resolve_coordinate_space`): the f32 location minus
+        // the parent's applied offset, then the f64 concatenations. Adding an
+        // exact f64 delta instead would round differently than a fresh pass.
+        let mut document: Vec<Option<(LayoutTransform2D, LayoutTransform2D)>> = vec![None; count];
+        let mut chain = Vec::new();
+        for start in 0..count {
+            let mut current = start;
+            while document[current].is_none() {
+                chain.push(current);
+                match self.boxes[current].geometry.layout_parent {
+                    Some(parent) if parent.index() < count => current = parent.index(),
+                    Some(_) => return None,
+                    None => break,
+                }
+                if chain.len() > count {
+                    return None;
+                }
+            }
+            while let Some(index) = chain.pop() {
+                let input = self.scroll_projection[index];
+                let parent = self.boxes[index]
+                    .geometry
+                    .layout_parent
+                    .map(|parent| parent.index());
+                let parent_scroll = parent
+                    .filter(|parent| {
+                        *parent != root && self.boxes[*parent].scroll_extent.is_scroll_container
+                    })
+                    .map_or(LayoutPoint::ZERO, |parent| applied_offsets[parent]);
+                let local_to_parent_ignoring_css_transforms = LayoutTransform2D::translation(
+                    input.location.x - parent_scroll.x,
+                    input.location.y - parent_scroll.y,
+                );
+                let local_to_parent =
+                    local_to_parent_ignoring_css_transforms.concatenate(input.css_transform);
+                let resolved = match parent {
+                    None if input.viewport_anchored_root => {
+                        let anchor =
+                            LayoutTransform2D::translation(viewport_scroll.x, viewport_scroll.y);
+                        (
+                            anchor.concatenate(local_to_parent),
+                            anchor.concatenate(local_to_parent_ignoring_css_transforms),
+                        )
+                    }
+                    None => (
+                        LayoutTransform2D::IDENTITY.concatenate(local_to_parent),
+                        LayoutTransform2D::IDENTITY
+                            .concatenate(local_to_parent_ignoring_css_transforms),
+                    ),
+                    Some(parent) => {
+                        let (exact, plain) = document[parent]?;
+                        (
+                            exact.concatenate(local_to_parent),
+                            plain.concatenate(local_to_parent_ignoring_css_transforms),
+                        )
+                    }
+                };
+                document[index] = Some(resolved);
+            }
+        }
+        let to_viewport = LayoutTransform2D::translation(-viewport_scroll.x, -viewport_scroll.y);
+        let spaces = document
+            .into_iter()
+            .map(|resolved| {
+                resolved.map(|(exact, plain)| {
+                    (
+                        to_viewport.concatenate(exact),
+                        to_viewport.concatenate(plain),
+                    )
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(ScrollPlan {
+            frames,
+            update: Some(ScrollUpdate {
+                moved,
+                viewport_scroll,
+                spaces,
+            }),
+        })
+    }
+
+    /// Phase two: writes a plan from [`Self::plan_scroll_offsets`] on this
+    /// same tree. Returns whether any tree changed.
+    fn apply_scroll_plan(&mut self, plan: ScrollPlan) -> bool {
+        let mut updated = false;
+        for (frame, frame_plan) in self.embedded_frames.iter_mut().zip(plan.frames) {
+            updated |= frame.tree.apply_scroll_plan(frame_plan);
+        }
+        let Some(update) = plan.update else {
+            return updated;
+        };
+        for (index, applied) in update.moved {
             let extent = &mut self.boxes[index].scroll_extent;
             extent.applied_offset = applied;
             extent.horizontal_scrollbar = extent.horizontal_scrollbar.map(|bar| {
@@ -434,83 +556,28 @@ where
                 )
             });
         }
-
-        let viewport_scroll = self.boxes[root].scroll_extent.applied_offset;
-        self.viewport_scroll = viewport_scroll;
-
-        // Rebuild every coordinate space parent first with the projection's
-        // own arithmetic (`resolve_coordinate_space`): the f32 location minus
-        // the parent's applied offset, then the f64 concatenations. Adding an
-        // exact f64 delta instead would round differently than a fresh pass.
-        let mut document: Vec<Option<(LayoutTransform2D, LayoutTransform2D)>> = vec![None; count];
-        let mut chain = Vec::new();
-        for start in 0..count {
-            let mut current = start;
-            while document[current].is_none() {
-                chain.push(current);
-                match self.boxes[current].geometry.layout_parent {
-                    Some(parent) if parent.index() < count => current = parent.index(),
-                    Some(_) => return ScrollOffsetSync::NeedsLayout,
-                    None => break,
-                }
-                if chain.len() > count {
-                    return ScrollOffsetSync::NeedsLayout;
-                }
-            }
-            while let Some(index) = chain.pop() {
-                let input = self.scroll_projection[index];
-                let parent = self.boxes[index]
-                    .geometry
-                    .layout_parent
-                    .map(|parent| parent.index());
-                let parent_scroll = parent
-                    .filter(|parent| {
-                        *parent != root && self.boxes[*parent].scroll_extent.is_scroll_container
-                    })
-                    .map_or(LayoutPoint::ZERO, |parent| {
-                        self.boxes[parent].scroll_extent.applied_offset
-                    });
-                let local_to_parent_ignoring_css_transforms = LayoutTransform2D::translation(
-                    input.location.x - parent_scroll.x,
-                    input.location.y - parent_scroll.y,
-                );
-                let local_to_parent =
-                    local_to_parent_ignoring_css_transforms.concatenate(input.css_transform);
-                let resolved = match parent {
-                    None if input.viewport_anchored_root => {
-                        let anchor =
-                            LayoutTransform2D::translation(viewport_scroll.x, viewport_scroll.y);
-                        (
-                            anchor.concatenate(local_to_parent),
-                            anchor.concatenate(local_to_parent_ignoring_css_transforms),
-                        )
-                    }
-                    None => (
-                        LayoutTransform2D::IDENTITY.concatenate(local_to_parent),
-                        LayoutTransform2D::IDENTITY
-                            .concatenate(local_to_parent_ignoring_css_transforms),
-                    ),
-                    Some(parent) => {
-                        let (exact, plain) =
-                            document[parent].expect("a parent resolves before its child");
-                        (
-                            exact.concatenate(local_to_parent),
-                            plain.concatenate(local_to_parent_ignoring_css_transforms),
-                        )
-                    }
-                };
-                document[index] = Some(resolved);
-            }
-        }
-        let to_viewport = LayoutTransform2D::translation(-viewport_scroll.x, -viewport_scroll.y);
-        for (layout_box, resolved) in self.boxes.iter_mut().zip(document) {
-            let (exact, plain) = resolved.expect("every box resolves its space");
+        self.viewport_scroll = update.viewport_scroll;
+        for (layout_box, (exact, plain)) in self.boxes.iter_mut().zip(update.spaces) {
             let space = &mut layout_box.coordinate_space;
-            space.local_to_viewport = to_viewport.concatenate(exact);
-            space.local_to_viewport_ignoring_css_transforms = to_viewport.concatenate(plain);
+            space.local_to_viewport = exact;
+            space.local_to_viewport_ignoring_css_transforms = plain;
         }
-        ScrollOffsetSync::Updated
+        true
     }
+}
+
+/// Phase-one result of a scroll offset sync for one tree and its frames.
+struct ScrollPlan {
+    frames: Vec<ScrollPlan>,
+    update: Option<ScrollUpdate>,
+}
+
+/// The state one tree takes when its planned scroll offsets apply.
+struct ScrollUpdate {
+    moved: Vec<(usize, LayoutPoint)>,
+    viewport_scroll: LayoutPoint,
+    /// Each box's `local_to_viewport` with and without CSS transforms.
+    spaces: Vec<(LayoutTransform2D, LayoutTransform2D)>,
 }
 
 fn finite_or_zero(value: f32) -> f32 {
