@@ -65,6 +65,10 @@ impl PreparedWorldLayout {
         world.viewport_layout.unrounded_layout = self.numeric_viewport_layout;
     }
 
+    pub(crate) fn take_numeric_unrounded(&mut self) -> Vec<Layout> {
+        std::mem::take(&mut self.numeric_unrounded_layouts)
+    }
+
     fn capture_numeric_geometry<N>(&mut self, world: &LayoutWorld<N>)
     where
         N: Copy + Debug + Eq + Hash,
@@ -134,6 +138,8 @@ impl PreparedWorldLayout {
 pub(crate) fn prepare_world_layout<N>(
     world: &mut LayoutWorld<N>,
     viewport: PaintViewport,
+    environment: crate::LayoutEnvironment,
+    retained: Option<&mut crate::retention::RetainedReuse<N>>,
 ) -> PreparedWorldLayout
 where
     N: Copy + Debug + Eq + Hash,
@@ -158,6 +164,16 @@ where
     update_viewport_layout_style(world, viewport);
     let positioned_static_sources = prepare_layout_tree(world);
     prepare_table_layout_trees(world);
+    if let Some(reuse) = retained {
+        // Floats wrap siblings across the formatting context, so a cached
+        // block's result can depend on a float outside it. Check both worlds:
+        // a float removed by this mutation shaped the retained results too.
+        let numeric_allowed = reuse.prior.viewport == viewport
+            && reuse.prior.environment == environment
+            && !crate::retention::world_has_floats(world)
+            && !crate::retention::world_has_floats(&reuse.prior.world);
+        reuse.transfer_numeric(world, numeric_allowed);
+    }
     let mut prepared = PreparedWorldLayout {
         positioned_static_sources,
         numeric_unrounded_layouts: Vec::with_capacity(world.boxes.len()),
@@ -3588,7 +3604,12 @@ mod tests {
         ));
         world.boxes[parent.index()].children.push(leaf);
         world.boxes[leaf.index()].parent = Some(parent);
-        let _prepared = prepare_world_layout(&mut world, crate::PaintViewport::new(800, 600, 1.0));
+        let _prepared = prepare_world_layout(
+            &mut world,
+            crate::PaintViewport::new(800, 600, 1.0),
+            crate::LayoutEnvironment::default(),
+            None,
+        );
 
         let output = world.measure_complete_layout(
             root.to_taffy(),

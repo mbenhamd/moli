@@ -117,6 +117,36 @@ impl<N> FrozenLayoutTree<N>
 where
     N: Copy + Debug + Eq + Hash,
 {
+    /// The first part of this tree's geometry that differs from `other`, or
+    /// `None` when they match exactly. Embedded frame member trees are not
+    /// compared; each one checks itself.
+    pub(crate) fn geometry_difference(&self, other: &Self) -> Option<&'static str> {
+        let parts = [
+            ("viewport", self.viewport == other.viewport),
+            (
+                "viewport_scroll",
+                self.viewport_scroll == other.viewport_scroll,
+            ),
+            ("content_size", self.content_size == other.content_size),
+            ("root_box", self.root_box == other.root_box),
+            ("boxes", self.boxes == other.boxes),
+            ("fragments", self.fragments == other.fragments),
+            (
+                "scroll_proxy_links",
+                self.scroll_proxy_links == other.scroll_proxy_links,
+            ),
+            (
+                "viewport_coordinate_space",
+                self.viewport_coordinate_space == other.viewport_coordinate_space,
+            ),
+            ("clip_chain", self.clip_chain == other.clip_chain),
+        ];
+        parts
+            .into_iter()
+            .find(|(_, same)| !same)
+            .map(|(name, _)| name)
+    }
+
     /// Source root whose complete layout projection this member tree owns.
     pub const fn source_root(&self) -> N {
         self.source_root

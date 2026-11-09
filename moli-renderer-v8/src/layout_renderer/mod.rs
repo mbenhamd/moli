@@ -11,6 +11,14 @@ use moli_layout::{
 
 use crate::{document_runtime::DomHandle, native_bridge::JsContextHost};
 
+/// Kill switch for retained-world relayout under the live-geometry policy.
+fn incremental_layout_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("MOLI_LAYOUT_INCREMENTAL").is_none_or(|value| value != "0")
+    })
+}
+
 pub(crate) fn build_native_layout_pass(
     runtime: &JsContextHost,
     root: DomHandle,
@@ -45,9 +53,17 @@ fn build_native_layout_pass_recursive(
         .dom_host()
         .owner_document_handle(root)
         .unwrap_or_else(|| runtime.document_handle());
-    let request = request.with_environment(moli_layout::LayoutEnvironment {
+    let mut request = request.with_environment(moli_layout::LayoutEnvironment {
         scrollbars_hidden: runtime.scrollbars_hidden(),
     });
+    // Only live relayout retains a world; print and media overrides resolve a
+    // different style world, and the frozen policies stay one-shot.
+    if runtime.layout_policy().relayouts_stale_reads()
+        && environment_override.is_none()
+        && incremental_layout_enabled()
+    {
+        request = request.with_retained_world();
+    }
     document_stack.push(document);
     let source = source_view::NativeLayoutSourceView::with_paint_resources(
         runtime,
