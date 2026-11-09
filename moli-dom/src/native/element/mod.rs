@@ -1045,6 +1045,16 @@ impl Element {
         self.control_state_mut().set_scroll_top(scroll_top)
     }
 
+    /// Forget the scroll offset, as when the element's scroll container is
+    /// destroyed by removal from its Document.
+    pub fn reset_scroll_offsets(&mut self) {
+        if self.control_state().scroll_top().is_some()
+            || self.control_state().scroll_left().is_some()
+        {
+            self.control_state_mut().clear_scroll_offsets();
+        }
+    }
+
     pub fn scroll_left(&self) -> f64 {
         self.control_state().scroll_left().unwrap_or(0.0)
     }
