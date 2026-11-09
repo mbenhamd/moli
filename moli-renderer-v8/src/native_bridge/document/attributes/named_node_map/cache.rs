@@ -1,6 +1,5 @@
-use super::helpers::{attribute_node_for_index, named_node_map_attribute_names};
 use super::*;
-use crate::util::{get_private_value, set_private_value};
+use crate::util::{get_private_object, get_private_value, set_private_value};
 
 const NAMED_NODE_MAP_CACHE_SLOT: &str = "__moliNamedNodeMapCache";
 pub(super) const NAMED_NODE_MAP_ELEMENT_SLOT: &str = "__moliNamedNodeMapElement";
@@ -32,7 +31,14 @@ pub(crate) fn live_named_node_map_wrapper<'s>(
     let element = crate::native_bridge::document::canonical_detached_node_object(scope, element)
         .expect("validated attributes receiver must have a backing");
     if let Some(wrapper) = live_named_node_map_cache(scope, element) {
-        refresh_named_node_map_wrapper(scope, wrapper, element);
+        // The map is live: its interceptors read the element's current
+        // attributes on every access, so a cached wrapper only needs to
+        // follow its canonical owner.
+        let owner_is_current = get_private_object(scope, wrapper, NAMED_NODE_MAP_ELEMENT_SLOT)
+            .is_some_and(|owner| owner.strict_equals(element.into()));
+        if !owner_is_current {
+            set_private_value(scope, wrapper, NAMED_NODE_MAP_ELEMENT_SLOT, element.into());
+        }
         return wrapper;
     }
     // The attributes getter already resolved this host from the receiver.
@@ -55,22 +61,7 @@ pub(crate) fn live_named_node_map_wrapper<'s>(
         wrapper,
         "NamedNodeMap",
     );
-    refresh_named_node_map_wrapper(scope, wrapper, element);
+    set_private_value(scope, wrapper, NAMED_NODE_MAP_ELEMENT_SLOT, element.into());
     set_live_named_node_map_cache(scope, element, wrapper);
     wrapper
-}
-
-fn refresh_named_node_map_wrapper<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    wrapper: v8::Local<'s, v8::Object>,
-    element: v8::Local<'s, v8::Object>,
-) {
-    set_private_value(scope, wrapper, NAMED_NODE_MAP_ELEMENT_SLOT, element.into());
-    let names = named_node_map_attribute_names(scope, element);
-    for index in 0..names.len() {
-        let Some(attr) = attribute_node_for_index(scope, element, index) else {
-            continue;
-        };
-        let _ = wrapper.set_index(scope, index as u32, attr);
-    }
 }

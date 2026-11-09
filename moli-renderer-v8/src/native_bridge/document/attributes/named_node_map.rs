@@ -9,6 +9,8 @@ mod methods;
 
 pub(crate) use cache::live_named_node_map_wrapper;
 pub(in crate::native_bridge::document) use handlers::named_node_map_length_getter_callback;
+#[cfg(test)]
+pub(crate) use helpers::take_named_node_map_attr_materializations_for_test;
 pub(in crate::native_bridge::document) use methods::{
     named_node_map_get_named_item_method_callback,
     named_node_map_get_named_item_ns_method_callback, named_node_map_item_method_callback,
