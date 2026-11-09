@@ -62,7 +62,8 @@ pub struct TextMeasurement {
 }
 
 /// Glyph outline extent relative to the start of the line (x) and the
-/// alphabetic baseline (y), in CSS pixels. All values grow outward.
+/// alphabetic baseline (y), in CSS pixels. All values grow outward; each
+/// glyph's outline box is rounded out to whole pixels at its pen position.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TextInkBounds {
     /// Distance from the line start to the leftmost ink (positive = left).
@@ -209,12 +210,14 @@ fn ink_bounds(layout: &parley::Layout<TextBrush>) -> Option<TextInkBounds> {
                 let Some(outline) = loca.get_glyf(GlyphId::new(glyph.id), &glyf).ok()? else {
                     continue;
                 };
+                // Like Skia's glyph bounds, each glyph's box is rounded out
+                // to whole pixels before it is placed at its pen position.
                 let rise = baseline - glyph.y;
                 let glyph_bounds = TextInkBounds {
-                    left: -(glyph.x + f32::from(outline.x_min()) * scale),
-                    right: glyph.x + f32::from(outline.x_max()) * scale,
-                    ascent: rise + f32::from(outline.y_max()) * scale,
-                    descent: -rise - f32::from(outline.y_min()) * scale,
+                    left: -(glyph.x + (f32::from(outline.x_min()) * scale).floor()),
+                    right: glyph.x + (f32::from(outline.x_max()) * scale).ceil(),
+                    ascent: rise + (f32::from(outline.y_max()) * scale).ceil(),
+                    descent: -rise - (f32::from(outline.y_min()) * scale).floor(),
                 };
                 bounds = Some(bounds.map_or(glyph_bounds, |current| TextInkBounds {
                     left: current.left.max(glyph_bounds.left),
