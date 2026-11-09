@@ -45,7 +45,8 @@ where
     source: &'a S,
     styles: &'a mut R,
     active_sources: HashSet<S::NodeId>,
-    seen_sources: HashMap<S::NodeId, String>,
+    /// First flat parent seen for each source node; the root maps to itself.
+    seen_sources: HashMap<S::NodeId, S::NodeId>,
     seen_css_images: HashSet<(S::NodeId, String)>,
     css_image_references: Vec<crate::LayoutCssImageReference<S::NodeId>>,
     source_root: Option<S::NodeId>,
@@ -160,8 +161,7 @@ where
         if root_generates_principal_box {
             world.map_source(source_root, root_box);
         }
-        self.seen_sources
-            .insert(source_root, self.source.label(source_root));
+        self.seen_sources.insert(source_root, source_root);
 
         if !matches!(
             root_style.display(),
@@ -1292,13 +1292,13 @@ where
     }
 
     fn checked_flat_children(&mut self, parent: S::NodeId) -> Result<Vec<S::NodeId>, LayoutError> {
-        let parent_label = self.source.label(parent);
+        // Labels are only for contract-violation errors. Formatting them per
+        // edge would dominate the walk, so build them on the failure paths.
         let children = self.source.flat_children(parent).collect::<Vec<_>>();
         for child in &children {
-            let child_label = self.source.label(*child);
             if self.active_sources.contains(child) {
                 return Err(LayoutError::SourceCycle {
-                    source_label: child_label,
+                    source_label: self.source.label(*child),
                 });
             }
             let actual_parent = self.source.flat_parent(*child);
@@ -1307,21 +1307,24 @@ where
                     .map(|node| self.source.label(node))
                     .unwrap_or_else(|| "<none>".to_owned());
                 return Err(LayoutError::source_contract(
-                    child_label,
+                    self.source.label(*child),
                     format!(
-                        "flat_children({parent_label}) disagrees with flat_parent; got {actual}"
+                        "flat_children({}) disagrees with flat_parent; got {actual}",
+                        self.source.label(parent)
                     ),
                 ));
             }
             if let Some(first_parent) = self.seen_sources.get(child) {
                 return Err(LayoutError::source_contract(
-                    child_label,
+                    self.source.label(*child),
                     format!(
-                        "flat-tree node appears more than once; first parent was {first_parent}, second parent is {parent_label}"
+                        "flat-tree node appears more than once; first parent was {}, second parent is {}",
+                        self.source.label(*first_parent),
+                        self.source.label(parent)
                     ),
                 ));
             }
-            self.seen_sources.insert(*child, parent_label.clone());
+            self.seen_sources.insert(*child, parent);
         }
         Ok(children)
     }
@@ -1331,28 +1334,27 @@ where
         node: S::NodeId,
         kind: LayoutSourceKind,
     ) -> Result<LayoutElementSemantics, LayoutError> {
-        let source = self.source.label(node);
         if kind != LayoutSourceKind::Element {
             return Err(LayoutError::source_contract(
-                source,
+                self.source.label(node),
                 format!("element semantics requested for {kind:?} source"),
             ));
         }
         let Some(semantics) = self.source.element_semantics(node) else {
             return Err(LayoutError::source_contract(
-                source,
+                self.source.label(node),
                 "element source has no element semantics",
             ));
         };
         if semantics.local_name.is_empty() {
             return Err(LayoutError::source_contract(
-                source,
+                self.source.label(node),
                 "element local name must not be empty",
             ));
         }
         if semantics.replaced.is_none() && self.source.replaced_metrics(node).is_some() {
             return Err(LayoutError::source_contract(
-                source,
+                self.source.label(node),
                 "non-replaced element exposed replaced metrics",
             ));
         }

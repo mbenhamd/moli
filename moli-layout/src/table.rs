@@ -1579,6 +1579,10 @@ fn set_box_layout<N>(
     };
 }
 
+pub(crate) fn is_table_root_kind(kind: LayoutBoxKind) -> bool {
+    is_table_root(kind)
+}
+
 fn is_table_root(kind: LayoutBoxKind) -> bool {
     matches!(
         kind,
@@ -1818,6 +1822,8 @@ mod tests {
         let mut prepared = crate::taffy_tree::prepare_world_layout(
             &mut world,
             crate::PaintViewport::new(800, 600, 1.0),
+            crate::LayoutEnvironment::default(),
+            None,
         );
         let inputs = LayoutInput {
             known_dimensions: Size {
@@ -2028,6 +2034,8 @@ mod tests {
             crate::taffy_tree::prepare_world_layout(
                 &mut world,
                 crate::PaintViewport::new(800, 600, 1.0),
+                crate::LayoutEnvironment::default(),
+                None,
             );
             let inputs = LayoutInput {
                 run_mode: RunMode::ComputeSize,

@@ -53,7 +53,9 @@ impl DomHost {
             dom,
             dom_version: Cell::new(0),
             hover_version: Cell::new(0),
+            style_only_attribute_version: Cell::new(0),
             query_version: Cell::new(0),
+            focus_version: Cell::new(0),
             shadow_root_binding_version: Cell::new(0),
             connected_shadow_roots_version: Cell::new(0),
             document_tree_scope_versions: RefCell::new(HashMap::new()),
@@ -198,11 +200,30 @@ impl DomHost {
         self.dom_version.get()
     }
 
-    /// The DOM version without the bumps that only moved the hover chain.
-    /// Layout never reads the hover chain; hover reaches layout only through
-    /// the style invalidation of selectors that depend on it.
-    pub fn dom_version_excluding_hover(&self) -> u64 {
-        self.dom_version.get() - self.hover_version.get()
+    /// The DOM version without the bumps that only moved the hover chain or
+    /// moved focus between elements whose boxes do not read focus. Layout
+    /// never reads the hover chain, and reads focus only for the selection of
+    /// a focused text control; otherwise hover and focus reach layout only
+    /// through the style invalidation of selectors that depend on them.
+    pub fn dom_version_excluding_interaction_state(&self) -> u64 {
+        self.dom_version.get() - self.hover_version.get() - self.focus_version.get()
+    }
+
+    /// The DOM version without hover moves and without writes to attributes
+    /// that box construction never reads (see
+    /// [`attribute_reaches_layout_only_through_selectors`]). Such a write moves
+    /// layout only by restyling some element, which the style engine reports
+    /// separately.
+    pub fn layout_relevant_dom_version(&self) -> u64 {
+        self.dom_version_excluding_hover() - self.style_only_attribute_version.get()
+    }
+
+    pub(super) fn record_attribute_mutation(&self, name: &str) {
+        self.record_mutation(MutationScope::QueryState);
+        if attribute_reaches_layout_only_through_selectors(name) {
+            self.style_only_attribute_version
+                .set(self.style_only_attribute_version.get().saturating_add(1));
+        }
     }
 
     fn record_hover_mutation(&self) {
@@ -607,8 +628,24 @@ impl DomHost {
         if self.active_element.get() == handle {
             return;
         }
-        self.active_element.set(handle);
+        let previous = self.active_element.replace(handle);
         self.record_mutation(MutationScope::QueryState);
+        let layout_reads_focus = [previous, handle]
+            .into_iter()
+            .flatten()
+            .any(|handle| self.is_text_control(handle));
+        if !layout_reads_focus {
+            self.focus_version
+                .set(self.focus_version.get().saturating_add(1));
+        }
+    }
+
+    /// Whether layout reads focus for `handle`: a focused text control lays
+    /// out its selection.
+    fn is_text_control(&self, handle: DomHandle) -> bool {
+        self.node(handle)
+            .and_then(Node::as_element)
+            .is_some_and(crate::native::Element::is_text_control)
     }
 
     pub fn element_matches_focus(&self, handle: DomHandle) -> bool {
@@ -3189,4 +3226,19 @@ fn can_host_shadow_root(element: &Element) -> bool {
             | "section"
             | "span"
     )
+}
+
+/// Whether layout can observe a write to `name` only through a selector that
+/// reads it. Box construction never reads `class`, `id`, `data-*` or `aria-*`;
+/// the one other reader, `content: attr()`, is substituted at compute time and
+/// never invalidated by Stylo, so it is stale with or without this split.
+pub fn attribute_reaches_layout_only_through_selectors(name: &str) -> bool {
+    name.eq_ignore_ascii_case("class")
+        || name.eq_ignore_ascii_case("id")
+        || name
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data-"))
+        || name
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("aria-"))
 }

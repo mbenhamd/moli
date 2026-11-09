@@ -30,6 +30,10 @@ pub(crate) struct LayoutPassPhaseMetrics {
     pub(crate) numeric_layout_pass_count: usize,
     pub(crate) numeric_feedback_invalidated_node_count: usize,
     pub(crate) numeric_feedback_overflow_recomputed_node_count: usize,
+    pub(crate) container_query_iteration_count: usize,
+    pub(crate) retained_reused_box_count: usize,
+    pub(crate) retained_reused_inline_count: usize,
+    pub(crate) retained_reused_numeric_count: usize,
 }
 
 pub(crate) fn finish_layout_pass<N, S: crate::LayoutSource<NodeId = N>>(
@@ -119,6 +123,10 @@ where
             .numeric_feedback_invalidated_node_count,
         numeric_feedback_overflow_recomputed_node_count: phase_metrics
             .numeric_feedback_overflow_recomputed_node_count,
+        container_query_iteration_count: phase_metrics.container_query_iteration_count,
+        retained_reused_box_count: phase_metrics.retained_reused_box_count,
+        retained_reused_inline_count: phase_metrics.retained_reused_inline_count,
+        retained_reused_numeric_count: phase_metrics.retained_reused_numeric_count,
         box_count: projection.boxes.len(),
         fragment_count: projection.fragments.len(),
         paint_event_count: paint_projection_metrics.event_count,
@@ -256,9 +264,12 @@ where
         for (source, box_id) in &world.source_mapping {
             principal_sources[box_id.index()] = Some(*source);
         }
-        let scroll_proxy_links = world
-            .display_contents_mapping
-            .iter()
+        // The mapping is a hash map; order its sources by their first box so
+        // the projected vector is the same on every pass for the same tree.
+        let mut proxy_sources: Vec<_> = world.display_contents_mapping.iter().collect();
+        proxy_sources.sort_by_key(|(_, boxes)| boxes.first().map(|id| id.index()));
+        let scroll_proxy_links = proxy_sources
+            .into_iter()
             .flat_map(|(source, boxes)| {
                 boxes
                     .iter()

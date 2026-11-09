@@ -30,15 +30,27 @@ pub(super) fn queue_style_invalidation_for_scope(
     let Some(source_scope) = source_scope else {
         return;
     };
-    // A hover change is a style input only when some selector depends on the
-    // hovered state; one that invalidates no element leaves every computed
+    // A hover or focus change, or a write to an attribute that box
+    // construction never reads, is a style input only when some selector
+    // depends on it. One that invalidates no element leaves every computed
     // style, and so the live-geometry layout inputs, unchanged. Other causes
     // keep bumping the generation up front.
-    let state_change = matches!(
-        &cause,
-        PendingStyleInvalidationCause::StateChange { state, .. }
-            if *state == dom::ElementState::HOVER
-    );
+    let state_change = match &cause {
+        PendingStyleInvalidationCause::StateChange { state, .. } => {
+            *state == dom::ElementState::HOVER
+        }
+        PendingStyleInvalidationCause::FocusChange { .. } => true,
+        PendingStyleInvalidationCause::Mutation(effects) => {
+            !effects.is_empty() && effects.iter().all(|effect| {
+                matches!(
+                    effect,
+                    super::StyleMutationEffect::Attribute { name, .. }
+                        if crate::dom::native::attribute_reaches_layout_only_through_selectors(name)
+                )
+            })
+        }
+        _ => false,
+    };
     if !state_change {
         document_state.note_style_input_change();
     }

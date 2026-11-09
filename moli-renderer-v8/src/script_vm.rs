@@ -892,6 +892,8 @@ fn input_dispatch_outcome(handled: bool) -> RendererInputDispatchOutcome {
 mod detached_document_native_handle_tests;
 #[cfg(test)]
 mod dom_heavy_regression_tests;
+#[cfg(test)]
+mod page_metric_dom_count_tests;
 pub(crate) mod runtime_work;
 #[cfg(test)]
 mod standalone_test_harness;

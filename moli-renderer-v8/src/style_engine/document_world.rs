@@ -169,6 +169,24 @@ impl DocumentStyleWorlds {
             .collect()
     }
 
+    /// Sum of each document's style invalidation counters: it moves whenever
+    /// a change invalidated some element's style.
+    pub(super) fn style_invalidation_generation(
+        &self,
+        documents: impl IntoIterator<Item = DomHandle>,
+    ) -> u64 {
+        documents
+            .into_iter()
+            .map(|document| {
+                let state = &self.for_document(document).document_state;
+                state
+                    .lazy_invalidation_roots
+                    .generation()
+                    .saturating_add(state.computed_cache_generation())
+            })
+            .fold(0, u64::saturating_add)
+    }
+
     pub(super) fn visual_input_generations(
         &self,
         documents: impl IntoIterator<Item = DomHandle>,

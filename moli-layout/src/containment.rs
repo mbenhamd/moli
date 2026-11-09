@@ -7,7 +7,12 @@
 
 use std::{fmt::Debug, hash::Hash};
 
-use crate::world::{LayoutBox, LayoutBoxId, LayoutBoxKind, LayoutWorld};
+use taffy::Size;
+
+use crate::{
+    LayoutQueryContainerSize,
+    world::{LayoutBox, LayoutBoxId, LayoutBoxKind, LayoutWorld},
+};
 
 impl<N> LayoutBox<N> {
     /// Mirrors Blink's `LayoutObject::IsBox()` boundary.
@@ -47,6 +52,64 @@ impl<N> LayoutBox<N> {
             )
     }
 
+    /// Mirrors Blink's `LayoutObject::IsEligibleForSizeContainment()`.
+    ///
+    /// Size containment skips every box whose size the table algorithm owns,
+    /// which is narrower than paint/layout containment: wrappers and cells are
+    /// ineligible too, while captions stay eligible.
+    pub(crate) fn is_eligible_for_size_containment(&self) -> bool {
+        self.is_css_box()
+            && !matches!(
+                self.kind,
+                LayoutBoxKind::TableWrapper
+                    | LayoutBoxKind::InlineTableWrapper
+                    | LayoutBoxKind::AnonymousTableWrapper
+                    | LayoutBoxKind::TableRowGroup
+                    | LayoutBoxKind::TableHeaderGroup
+                    | LayoutBoxKind::TableFooterGroup
+                    | LayoutBoxKind::TableColumnGroup
+                    | LayoutBoxKind::TableColumn
+                    | LayoutBoxKind::TableRow
+                    | LayoutBoxKind::TableCell
+                    | LayoutBoxKind::AnonymousTableRowGroup
+                    | LayoutBoxKind::AnonymousTableRow
+                    | LayoutBoxKind::AnonymousTableCell
+            )
+    }
+
+    pub(crate) fn is_pseudo_box(&self) -> bool {
+        matches!(
+            self.kind,
+            LayoutBoxKind::PseudoMarker | LayoutBoxKind::PseudoBefore | LayoutBoxKind::PseudoAfter
+        )
+    }
+
+    /// Physical axes under size containment on this box.
+    ///
+    /// Native text controls and selects keep their control-sized box, as
+    /// measured against Chromium for `input`, `textarea` and `select`
+    /// (`select` matches main rather than Chromium's arrow-only width).
+    /// Moli has no rendered-legend layout, so a contained fieldset would lose
+    /// its legend too; it keeps main's size instead.
+    pub(crate) fn size_contained_axes(&self) -> Size<bool> {
+        let is_fieldset = self.element_semantics.as_ref().is_some_and(|semantics| {
+            matches!(
+                semantics.category,
+                crate::LayoutElementCategory::FormControl(crate::LayoutFormControlKind::FieldSet)
+            )
+        });
+        if !self.is_eligible_for_size_containment()
+            || self.style.taffy.item_is_compressible_replaced
+            || is_fieldset
+        {
+            return Size {
+                width: false,
+                height: false,
+            };
+        }
+        self.style.size_containment_axes()
+    }
+
     pub(crate) fn creates_stacking_context(
         &self,
         is_root: bool,
@@ -70,6 +133,79 @@ impl<N> LayoutWorld<N>
 where
     N: Copy + Debug + Eq + Hash,
 {
+    /// Tree-ordered content-box sizes of this pass's query containers, plus
+    /// their maximum nesting depth (0 with no containers, 1 for an unnested
+    /// one).
+    pub(crate) fn query_container_sizes(&self) -> (Vec<(N, LayoutQueryContainerSize)>, usize) {
+        let mut sizes = Vec::new();
+        let mut depth = 0;
+        for layout_box in &self.boxes {
+            let axes = layout_box.style.query_container_physical_axes();
+            if (!axes.width && !axes.height)
+                || !layout_box.is_eligible_for_size_containment()
+                || layout_box.is_pseudo_box()
+            {
+                continue;
+            }
+            let Some(source) = layout_box.source() else {
+                continue;
+            };
+            let layout = layout_box.final_layout();
+            let insets = layout_box.style.scrollbar_layout_insets(false);
+            let content_width = (layout.size.width
+                - layout.border.left
+                - layout.border.right
+                - layout.padding.left
+                - layout.padding.right
+                - insets.left
+                - insets.right)
+                .max(0.0);
+            let content_height = (layout.size.height
+                - layout.border.top
+                - layout.border.bottom
+                - layout.padding.top
+                - layout.padding.bottom
+                - insets.top
+                - insets.bottom)
+                .max(0.0);
+            // Blink answers from the size known before the box's contents
+            // are laid out, so an auto block size with a block-flow parent
+            // reads as zero even when intrinsic or minimum sizes grow it.
+            let block_size_was_unknown = layout_box.style.taffy.size.height.is_auto()
+                && layout_box.style.taffy.position != taffy::Position::Absolute
+                && !layout_box.layout_parent.is_some_and(|parent| {
+                    matches!(
+                        self.boxes[parent.index()].style.taffy.display,
+                        taffy::Display::Flex | taffy::Display::Grid
+                    )
+                });
+            let content_height = if axes.height && block_size_was_unknown {
+                0.0
+            } else {
+                content_height
+            };
+            sizes.push((
+                source,
+                LayoutQueryContainerSize {
+                    width: axes.width.then_some(content_width),
+                    height: axes.height.then_some(content_height),
+                },
+            ));
+            let mut nesting = 1;
+            let mut ancestor = layout_box.layout_parent;
+            while let Some(id) = ancestor {
+                let parent = &self.boxes[id.index()];
+                let parent_axes = parent.style.query_container_physical_axes();
+                if parent_axes.width || parent_axes.height {
+                    nesting += 1;
+                }
+                ancestor = parent.layout_parent;
+            }
+            depth = depth.max(nesting);
+        }
+        (sizes, depth)
+    }
+
     /// Resolves containing-block capability from both computed style and the
     /// box's identity in this layout tree.
     ///

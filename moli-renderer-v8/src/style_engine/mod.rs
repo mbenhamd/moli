@@ -273,6 +273,14 @@ impl MoliStyleEngine {
         self.document_worlds.visual_input_generations(documents)
     }
 
+    pub(crate) fn style_invalidation_generation(
+        &self,
+        documents: impl IntoIterator<Item = DomHandle>,
+    ) -> u64 {
+        self.document_worlds
+            .style_invalidation_generation(documents)
+    }
+
     pub(crate) fn stylesheet_resource_snapshot_for_document(
         &self,
         document: DomHandle,
@@ -703,6 +711,66 @@ impl MoliStyleEngine {
             &world.pseudo_style_cache,
             &world.document_state,
         )
+    }
+
+    /// Publishes a document's used query-container sizes. Each changed
+    /// container's subtree restyles on the next read, and the visual
+    /// generation advances so screencast and live-geometry keys see the
+    /// change. Returns whether anything changed.
+    pub(crate) fn update_container_query_sizes(
+        &self,
+        host: &DomHost,
+        document: DomHandle,
+        sizes: moli_selector::ContainerQuerySizes,
+    ) -> bool {
+        let changed = self
+            .dom_adapter
+            .update_container_query_sizes(document, sizes);
+        self.invalidate_changed_query_containers(host, document, changed)
+    }
+
+    /// Opens a document's size store for its first layout. Styles computed
+    /// from a pre-layout `style=` estimate then restyle against used sizes.
+    pub(crate) fn begin_container_query_store(&self, host: &DomHost, document: DomHandle) {
+        if self.dom_adapter.begin_container_query_store(document) {
+            self.invalidate_changed_query_containers(host, document, vec![document]);
+        }
+    }
+
+    pub(crate) fn container_query_sizes_snapshot(
+        &self,
+        document: DomHandle,
+    ) -> Option<moli_selector::ContainerQuerySizes> {
+        self.dom_adapter.container_query_sizes_snapshot(document)
+    }
+
+    pub(crate) fn restore_container_query_sizes(
+        &self,
+        host: &DomHost,
+        document: DomHandle,
+        snapshot: Option<moli_selector::ContainerQuerySizes>,
+    ) {
+        let changed = self
+            .dom_adapter
+            .restore_container_query_sizes(document, snapshot);
+        self.invalidate_changed_query_containers(host, document, changed);
+    }
+
+    fn invalidate_changed_query_containers(
+        &self,
+        host: &DomHost,
+        document: DomHandle,
+        changed: Vec<DomHandle>,
+    ) -> bool {
+        if changed.is_empty() {
+            return false;
+        }
+        let changed = with_slotted_flat_tree_descendants(host, changed);
+        let world = self.world_for_document(document);
+        self.invalidation_cleanup_for_world(&world)
+            .invalidate_subtrees(host, changed);
+        world.document_state.note_visual_input_change();
+        true
     }
 
     pub(crate) fn clear_for_document_replacement(&mut self, document: DomHandle) {
@@ -1193,4 +1261,37 @@ fn retain_owner_documents_except_document(
     document: DomHandle,
 ) {
     owner_documents.retain(|_, owner_document| *owner_document != document);
+}
+
+/// Adds the nodes assigned to any slot under `roots`: their flat-tree parent
+/// is the slot, but `parent_node` does not reach it, so a subtree invalidation
+/// would miss them. Only a root inside a shadow tree can have such a slot.
+fn with_slotted_flat_tree_descendants(host: &DomHost, roots: Vec<DomHandle>) -> Vec<DomHandle> {
+    let mut seen = roots
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    let mut roots = roots;
+    let mut index = 0;
+    while index < roots.len() {
+        let root = roots[index];
+        index += 1;
+        let in_shadow_tree = std::iter::successors(Some(root), |node| host.parent_node(*node))
+            .any(|node| host.is_shadow_root(node));
+        if !in_shadow_tree {
+            continue;
+        }
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            stack.extend(host.child_handles(node));
+            if host.is_html_element_named(node, "slot") {
+                for assigned in host.assigned_nodes_for_slot_with_options(node, false) {
+                    if seen.insert(assigned) {
+                        roots.push(assigned);
+                    }
+                }
+            }
+        }
+    }
+    roots
 }

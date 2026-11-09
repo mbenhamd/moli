@@ -106,7 +106,14 @@ struct StyleDomState {
     slotted_node_data: RefCell<HashMap<NodeId, Box<[StyleNode<'static>]>>>,
     shadow_cascade_data: ShadowCascadeDataStore,
     snapshot_handles: RefCell<HashSet<NodeId>>,
+    container_query_sizes: RefCell<HashMap<NodeId, ContainerQuerySizes>>,
+    /// Documents whose styles used the pre-layout `style=` estimate.
+    container_size_estimates_used: RefCell<HashSet<NodeId>>,
 }
+
+/// Used sizes of one document's query containers, from its latest layout.
+/// A document with no entry has not been laid out yet.
+pub type ContainerQuerySizes = HashMap<NodeId, Size2D<Option<Au>>>;
 
 #[derive(Clone, Copy)]
 pub struct StyleNode<'a>(NonNull<StyleNodeData>, PhantomData<&'a ()>);
@@ -155,6 +162,8 @@ impl StyloDomStyleAdapter {
                 slotted_node_data: RefCell::default(),
                 shadow_cascade_data: ShadowCascadeDataStore::default(),
                 snapshot_handles: RefCell::default(),
+                container_query_sizes: RefCell::default(),
+                container_size_estimates_used: RefCell::default(),
             }),
         }
     }
@@ -191,6 +200,97 @@ impl StyloDomStyleAdapter {
 
     pub fn clear_element_data_for_document(&self, document: NodeId) {
         self.state.clear_element_data_for_document(document);
+        self.state
+            .container_query_sizes
+            .borrow_mut()
+            .remove(&document);
+        self.state
+            .container_size_estimates_used
+            .borrow_mut()
+            .remove(&document);
+    }
+
+    /// Marks a document as laid out, so containers without a box answer
+    /// unknown. Returns whether styles already computed from a `style=`
+    /// estimate now need recomputing.
+    pub fn begin_container_query_store(&self, document: NodeId) -> bool {
+        let mut stores = self.state.container_query_sizes.borrow_mut();
+        if stores.contains_key(&document) {
+            return false;
+        }
+        stores.insert(document, ContainerQuerySizes::default());
+        self.state
+            .container_size_estimates_used
+            .borrow_mut()
+            .remove(&document)
+    }
+
+    /// Replaces one document's container sizes and returns the containers
+    /// whose answer changed: added, removed, or resized.
+    pub fn update_container_query_sizes(
+        &self,
+        document: NodeId,
+        sizes: ContainerQuerySizes,
+    ) -> Vec<NodeId> {
+        let mut stores = self.state.container_query_sizes.borrow_mut();
+        let previous = stores.entry(document).or_default();
+        let changed = sizes
+            .iter()
+            .filter(|(node, size)| previous.get(*node) != Some(*size))
+            .map(|(node, _)| *node)
+            .chain(
+                previous
+                    .keys()
+                    .filter(|node| !sizes.contains_key(*node))
+                    .copied(),
+            )
+            .collect::<Vec<_>>();
+        if !changed.is_empty() {
+            *previous = sizes;
+        }
+        changed
+    }
+
+    pub fn container_query_sizes_snapshot(&self, document: NodeId) -> Option<ContainerQuerySizes> {
+        self.state
+            .container_query_sizes
+            .borrow()
+            .get(&document)
+            .cloned()
+    }
+
+    /// Restores a snapshot from `container_query_sizes_snapshot`, returning
+    /// the containers whose answer differs from the replaced store.
+    pub fn restore_container_query_sizes(
+        &self,
+        document: NodeId,
+        snapshot: Option<ContainerQuerySizes>,
+    ) -> Vec<NodeId> {
+        let mut stores = self.state.container_query_sizes.borrow_mut();
+        let current = stores.remove(&document);
+        let mut changed = Vec::new();
+        match (&current, &snapshot) {
+            (Some(current), Some(previous)) => {
+                changed.extend(
+                    current
+                        .iter()
+                        .filter(|(node, size)| previous.get(*node) != Some(*size))
+                        .map(|(node, _)| *node),
+                );
+                changed.extend(
+                    previous
+                        .iter()
+                        .filter(|(node, _)| !current.contains_key(*node))
+                        .map(|(node, _)| *node),
+                );
+            }
+            (Some(only), None) | (None, Some(only)) => changed.extend(only.keys().copied()),
+            (None, None) => {}
+        }
+        if let Some(snapshot) = snapshot {
+            stores.insert(document, snapshot);
+        }
+        changed
     }
 
     /// Returns whether the canonical Stylo side table still contains any
@@ -1502,6 +1602,14 @@ impl Drop for SnapshotHandlesReset<'_> {
 }
 
 impl<'a> StyleNode<'a> {
+    fn light_tree_parent_or_shadow_host(self) -> Option<StyleElement<'a>> {
+        let parent = self.parent_node()?;
+        if let Some(element) = parent.as_element() {
+            return Some(element);
+        }
+        parent.as_shadow_root().map(|root| root.host())
+    }
+
     fn data(self) -> &'a StyleNodeData {
         // SAFETY: Style node data is owned by the style adapter's per-resolution
         // arena and remains stable until the adapter is rebound for the next
@@ -1821,11 +1929,16 @@ impl<'a> TNode for StyleNode<'a> {
     }
 
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {
-        let parent = self.parent_node()?;
-        if let Some(element) = parent.as_element() {
-            return Some(element);
+        // The flat-tree parent, so a slotted element's container lookup
+        // walks through its slot into the shadow tree.
+        if let Some(slot) = self.host().assigned_slot_for_node(self.handle()) {
+            return StyleElement::from_handle_in_document(
+                self.style_state(),
+                self.document(),
+                slot,
+            );
         }
-        parent.as_shadow_root().map(|root| root.host())
+        self.light_tree_parent_or_shadow_host()
     }
 
     fn opaque(&self) -> OpaqueNode {
@@ -1894,7 +2007,7 @@ impl<'a> TElement for StyleElement<'a> {
     fn inheritance_parent(&self) -> Option<Self> {
         // Shadow-tree roots inherit from their host. Keep this separate from
         // the selector parent, which must not cross a ShadowRoot boundary.
-        self.traversal_parent()
+        self.as_node().light_tree_parent_or_shadow_host()
     }
 
     fn traversal_children(&self) -> LayoutIterator<Self::TraversalChildrenIterator> {
@@ -2151,7 +2264,30 @@ impl<'a> TElement for StyleElement<'a> {
     }
 
     fn query_container_size(&self, _: &Display) -> Size2D<Option<Au>> {
-        inline_container_size(self.host(), self.handle())
+        // A laid-out document answers from used sizes only; an element it has
+        // no box for (`display:none`, `contents`, a non-atomic inline) answers
+        // unknown. The `style=` read serves only documents with no layout.
+        match self
+            .style_state()
+            .container_query_sizes
+            .borrow()
+            .get(&self.document())
+        {
+            Some(sizes) => sizes
+                .get(&self.handle())
+                .copied()
+                .unwrap_or(Size2D::new(None, None)),
+            None => {
+                let estimate = inline_container_size(self.host(), self.handle());
+                if estimate.width.is_some() || estimate.height.is_some() {
+                    self.style_state()
+                        .container_size_estimates_used
+                        .borrow_mut()
+                        .insert(self.document());
+                }
+                estimate
+            }
+        }
     }
 
     fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool {

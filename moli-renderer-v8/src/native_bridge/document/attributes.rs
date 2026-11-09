@@ -30,3 +30,5 @@ pub(in crate::native_bridge) use attribute_node::{
 pub(in crate::native_bridge) use named_node_map::build_named_node_map_wrapper_template;
 pub(crate) use named_node_map::install_named_node_map_template_bindings;
 pub(crate) use named_node_map::live_named_node_map_wrapper;
+#[cfg(test)]
+pub(crate) use named_node_map::take_named_node_map_attr_materializations_for_test;

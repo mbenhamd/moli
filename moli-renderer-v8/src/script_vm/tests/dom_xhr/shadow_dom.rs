@@ -4584,6 +4584,101 @@ fn labels_follow_shadow_root_reference_target_chain() {
         "true|direct-label|true|nested-label|true|0;true|0;true|direct-label"
     );
 }
+#[tokio::test(flavor = "current_thread")]
+async fn child_document_controls_resolve_labels_in_their_own_document() {
+    let mut vm = new_storage_test_vm("https://child-document-labels.test/");
+    vm.eval(
+        r#"
+globalThis.frame = document.createElement('iframe');
+frame.srcdoc = `<!doctype html><body>
+  <label id="for-label" for="plain">Plain</label><input id="plain">
+  <label id="implicit-label">Implicit<select id="implicit"></select></label>
+  <div id="shadow-host"></div>
+  <label id="reference-label" for="reference-host">Reference</label>
+  <div id="reference-host"></div>
+</body>`;
+(document.body || document.documentElement || document).appendChild(frame);
+"#,
+    )
+    .expect("child frame should be inserted");
+    crate::script_vm::tests::run_child_navigation_commit_and_host_load_for_test(
+        &mut vm,
+        "child document labels",
+    )
+    .await;
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const child = frame.contentDocument;
+  const ids = list => Array.from(list).map(element => element.id).join(',');
+  const shadow = child.getElementById('shadow-host').attachShadow({ mode: 'open' });
+  shadow.innerHTML = '<label id="shadow-label" for="shadow-input">S</label><input id="shadow-input">';
+  const reference = child.getElementById('reference-host').attachShadow({ mode: 'open' });
+  reference.innerHTML = '<input id="reference-input">';
+  reference.referenceTarget = 'reference-input';
+  const liveList = child.getElementById('plain').labels;
+  const before = liveList.length;
+  const added = child.createElement('label');
+  added.id = 'added-label';
+  added.htmlFor = 'plain';
+  child.body.appendChild(added);
+  return JSON.stringify({
+    plain: ids(liveList),
+    before,
+    implicit: ids(child.getElementById('implicit').labels),
+    shadow: ids(shadow.getElementById('shadow-input').labels),
+    reference: ids(reference.getElementById('reference-input').labels),
+  });
+})()
+"#,
+        )
+        .expect("child document labels should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"plain":"for-label,added-label","before":1,"implicit":"implicit-label","shadow":"shadow-label","reference":"reference-label"}"#
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn child_document_label_for_targets_first_element_with_duplicate_id() {
+    let mut vm = new_storage_test_vm("https://child-document-duplicate-label-ids.test/");
+    vm.eval(
+        r#"
+globalThis.frame = document.createElement('iframe');
+frame.srcdoc = `<!doctype html><body>
+  <label id="dup-label" for="dup">Duplicate</label>
+  <input id="dup" class="first"><input id="dup" class="second">
+  <label id="mixed-label" for="mixed">Mixed</label>
+  <div id="mixed"></div><input id="mixed" class="control">
+</body>`;
+(document.body || document.documentElement || document).appendChild(frame);
+"#,
+    )
+    .expect("child frame should be inserted");
+    crate::script_vm::tests::run_child_navigation_commit_and_host_load_for_test(
+        &mut vm,
+        "child document duplicate label ids",
+    )
+    .await;
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const child = frame.contentDocument;
+  const ids = selector => Array.from(child.querySelector(selector).labels).map(l => l.id).join(',');
+  return [ids('.first'), ids('.second'), ids('.control')].join('|');
+})()
+"#,
+        )
+        .expect("duplicate label ids should evaluate");
+
+    assert_eq!(result, "dup-label||");
+}
+
 #[test]
 fn labels_include_shadow_tree_and_implicit_reference_targets() {
     let mut vm = new_streamed_parser_test_vm(
@@ -5506,35 +5601,6 @@ fn tab_key_skips_scroll_host_with_shadow_focusable_descendant() {
     assert_eq!(result, "inner");
 }
 #[test]
-fn blur_on_non_delegates_shadow_host_does_not_clear_inner_focus() {
-    let mut vm = new_streamed_parser_test_vm(
-        "https://shadow-host-blur.test/",
-        r#"<!doctype html>
-<div id="host">
-  <template shadowrootmode="open">
-    <input id="inner">
-  </template>
-</div>
-"#,
-    );
-
-    let result = vm
-        .eval(
-            r#"
-(() => {
-  const host = document.getElementById('host');
-  const inner = host.shadowRoot.getElementById('inner');
-  inner.focus();
-  host.blur();
-  return host.shadowRoot.activeElement && host.shadowRoot.activeElement.id;
-})()
-"#,
-        )
-        .expect("non-delegates host blur should not clear focused shadow child");
-
-    assert_eq!(result, "inner");
-}
-#[test]
 fn tab_key_follows_nested_shadow_focus_pairwise_navigation() {
     let mut vm = new_streamed_parser_test_vm(
         "https://shadow-focus-pairwise-scope.test/",
@@ -6438,5 +6504,58 @@ const rect = span.getBoundingClientRect();
     assert_eq!(
         result,
         r#"{"size":1,"returned":true,"has":true,"order":"fourth,third,replacement,first"}"#
+    );
+}
+
+#[test]
+fn shadow_host_blur_without_delegates_focus_blurs_its_shadow_focus() {
+    let probe = r#"(() => {
+  const host = document.getElementById('host');
+  const shadow = host.shadowRoot || host.attachShadow({ mode: 'open' });
+  if (!shadow.getElementById('inner')) shadow.innerHTML = '<button id=inner>in</button>';
+  const inner = shadow.getElementById('inner');
+  const seen = [];
+  for (const type of ['blur', 'focusout']) {
+    inner.addEventListener(type, () => seen.push('inner:' + type));
+    host.addEventListener(type, () => seen.push('host:' + type));
+  }
+  inner.focus();
+  const focused = document.activeElement === host && shadow.activeElement === inner;
+  host.blur();
+  const blurred = document.activeElement === document.body && shadow.activeElement === null;
+  const events = seen.join(',');
+  document.getElementById('outside').focus();
+  host.blur();
+  const untouched = document.activeElement.id;
+  return JSON.stringify([inner.localName, focused, blurred, events, untouched]);
+})()"#;
+    let expected = |tag: &str| {
+        format!(
+            r#"["{tag}",true,true,"inner:blur,host:blur,inner:focusout,host:focusout","outside"]"#
+        )
+    };
+
+    // Imperative shadow root around a button.
+    let mut vm = new_parsed_test_vm(
+        "https://shadow-host-blur.test/",
+        "<!doctype html><html><body><button id=outside>o</button><div id=host></div></body></html>",
+    );
+    assert_eq!(vm.eval(probe).expect("host blur"), expected("button"));
+
+    // Declarative shadow root around an input.
+    let mut vm = new_streamed_parser_test_vm(
+        "https://shadow-host-blur-declarative.test/",
+        r#"<!doctype html>
+<button id="outside">o</button>
+<div id="host">
+  <template shadowrootmode="open">
+    <input id="inner">
+  </template>
+</div>
+"#,
+    );
+    assert_eq!(
+        vm.eval(probe).expect("declarative host blur"),
+        expected("input")
     );
 }

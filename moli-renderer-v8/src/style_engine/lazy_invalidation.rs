@@ -214,7 +214,6 @@ impl LazyStyleInvalidationRoots {
         self.roots.borrow().len()
     }
 
-    #[cfg(test)]
     pub(super) fn generation(&self) -> u64 {
         self.generation.get()
     }

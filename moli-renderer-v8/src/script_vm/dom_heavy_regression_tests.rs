@@ -15,7 +15,7 @@ use super::ScriptVmDefaultWorldBootstrap;
 use super::StandaloneScriptVmHarness;
 use crate::dom::native::{DomHost, NativeDom};
 
-fn new_dom_regression_vm() -> StandaloneScriptVmHarness {
+pub(super) fn new_dom_regression_vm() -> StandaloneScriptVmHarness {
     let _js_runtime = crate::JsRuntime::initialize();
     let page_task_queue = crate::page_task_queue::PageTaskQueueTestHarness::new();
     let post_domcontentloaded_page_task_sender =

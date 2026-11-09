@@ -302,6 +302,14 @@ impl StyloComputedStyleSnapshot {
         style_traits::ToCss::to_css_string(&self.primary.get_box().original_display)
     }
 
+    /// Whether a size query container is this element or an ancestor, so its
+    /// style can depend on layout through `@container` or `cq*` units.
+    pub(crate) fn depends_on_size_container(&self) -> bool {
+        self.primary
+            .flags
+            .contains(ComputedValueFlags::SELF_OR_ANCESTOR_HAS_SIZE_CONTAINER_TYPE)
+    }
+
     pub(crate) fn has_own_visibility_value(&self) -> bool {
         self.primary
             .flags
