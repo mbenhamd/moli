@@ -209,13 +209,14 @@ impl DomHost {
         self.dom_version.get() - self.hover_version.get() - self.focus_version.get()
     }
 
-    /// The DOM version without hover moves and without writes to attributes
-    /// that box construction never reads (see
-    /// [`attribute_reaches_layout_only_through_selectors`]). Such a write moves
-    /// layout only by restyling some element, which the style engine reports
-    /// separately.
+    /// The DOM version without hover and focus moves (see
+    /// [`Self::dom_version_excluding_interaction_state`]) and without writes
+    /// to attributes that box construction never reads (see
+    /// [`attribute_reaches_layout_only_through_selectors`]). Such a write
+    /// moves layout only by restyling some element, which the style engine
+    /// reports separately.
     pub fn layout_relevant_dom_version(&self) -> u64 {
-        self.dom_version_excluding_hover() - self.style_only_attribute_version.get()
+        self.dom_version_excluding_interaction_state() - self.style_only_attribute_version.get()
     }
 
     pub(super) fn record_attribute_mutation(&self, name: &str) {
