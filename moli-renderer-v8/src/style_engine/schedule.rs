@@ -40,14 +40,13 @@ pub(super) fn queue_style_invalidation_for_scope(
             *state == dom::ElementState::HOVER
         }
         PendingStyleInvalidationCause::Mutation(effects) => {
-            !effects.is_empty()
-                && effects.iter().all(|effect| {
-                    matches!(
-                        effect,
-                        super::StyleMutationEffect::Attribute { name, .. }
-                            if crate::dom::native::attribute_reaches_layout_only_through_selectors(name)
-                    )
-                })
+            !effects.is_empty() && effects.iter().all(|effect| {
+                matches!(
+                    effect,
+                    super::StyleMutationEffect::Attribute { name, .. }
+                        if crate::dom::native::attribute_reaches_layout_only_through_selectors(name)
+                )
+            })
         }
         _ => false,
     };
