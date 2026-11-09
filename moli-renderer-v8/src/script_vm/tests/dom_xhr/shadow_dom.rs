@@ -5601,35 +5601,6 @@ fn tab_key_skips_scroll_host_with_shadow_focusable_descendant() {
     assert_eq!(result, "inner");
 }
 #[test]
-fn blur_on_non_delegates_shadow_host_does_not_clear_inner_focus() {
-    let mut vm = new_streamed_parser_test_vm(
-        "https://shadow-host-blur.test/",
-        r#"<!doctype html>
-<div id="host">
-  <template shadowrootmode="open">
-    <input id="inner">
-  </template>
-</div>
-"#,
-    );
-
-    let result = vm
-        .eval(
-            r#"
-(() => {
-  const host = document.getElementById('host');
-  const inner = host.shadowRoot.getElementById('inner');
-  inner.focus();
-  host.blur();
-  return host.shadowRoot.activeElement && host.shadowRoot.activeElement.id;
-})()
-"#,
-        )
-        .expect("non-delegates host blur should not clear focused shadow child");
-
-    assert_eq!(result, "inner");
-}
-#[test]
 fn tab_key_follows_nested_shadow_focus_pairwise_navigation() {
     let mut vm = new_streamed_parser_test_vm(
         "https://shadow-focus-pairwise-scope.test/",
@@ -6533,5 +6504,58 @@ const rect = span.getBoundingClientRect();
     assert_eq!(
         result,
         r#"{"size":1,"returned":true,"has":true,"order":"fourth,third,replacement,first"}"#
+    );
+}
+
+#[test]
+fn shadow_host_blur_without_delegates_focus_blurs_its_shadow_focus() {
+    let probe = r#"(() => {
+  const host = document.getElementById('host');
+  const shadow = host.shadowRoot || host.attachShadow({ mode: 'open' });
+  if (!shadow.getElementById('inner')) shadow.innerHTML = '<button id=inner>in</button>';
+  const inner = shadow.getElementById('inner');
+  const seen = [];
+  for (const type of ['blur', 'focusout']) {
+    inner.addEventListener(type, () => seen.push('inner:' + type));
+    host.addEventListener(type, () => seen.push('host:' + type));
+  }
+  inner.focus();
+  const focused = document.activeElement === host && shadow.activeElement === inner;
+  host.blur();
+  const blurred = document.activeElement === document.body && shadow.activeElement === null;
+  const events = seen.join(',');
+  document.getElementById('outside').focus();
+  host.blur();
+  const untouched = document.activeElement.id;
+  return JSON.stringify([inner.localName, focused, blurred, events, untouched]);
+})()"#;
+    let expected = |tag: &str| {
+        format!(
+            r#"["{tag}",true,true,"inner:blur,host:blur,inner:focusout,host:focusout","outside"]"#
+        )
+    };
+
+    // Imperative shadow root around a button.
+    let mut vm = new_parsed_test_vm(
+        "https://shadow-host-blur.test/",
+        "<!doctype html><html><body><button id=outside>o</button><div id=host></div></body></html>",
+    );
+    assert_eq!(vm.eval(probe).expect("host blur"), expected("button"));
+
+    // Declarative shadow root around an input.
+    let mut vm = new_streamed_parser_test_vm(
+        "https://shadow-host-blur-declarative.test/",
+        r#"<!doctype html>
+<button id="outside">o</button>
+<div id="host">
+  <template shadowrootmode="open">
+    <input id="inner">
+  </template>
+</div>
+"#,
+    );
+    assert_eq!(
+        vm.eval(probe).expect("declarative host blur"),
+        expected("input")
     );
 }
