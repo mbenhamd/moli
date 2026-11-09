@@ -1438,7 +1438,10 @@ pub(in crate::native_bridge) fn node_blur_callback<'s>(
     let runtime = unsafe { &*runtime_ptr };
     // Like Blink's `Element::blur`, a shadow host blurs when the focused
     // element, retargeted to the host's tree, is the host: focus anywhere in
-    // its shadow tree, with or without `delegatesFocus`.
+    // its shadow tree, with or without `delegatesFocus`. Blink checks this
+    // through `AdjustedFocusedElementInTreeScope`. This deliberately goes
+    // beyond the HTML unfocusing steps, which only reach into a shadow host's
+    // tree when the host has `delegatesFocus`; keep the Chromium behavior.
     let focus_in_shadow_tree = runtime
         .active_element_handle()
         .zip(runtime.dom_host().shadow_root_handle(handle))

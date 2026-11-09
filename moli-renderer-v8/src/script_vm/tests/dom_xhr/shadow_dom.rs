@@ -6414,16 +6414,10 @@ const rect = span.getBoundingClientRect();
 
 #[test]
 fn shadow_host_blur_without_delegates_focus_blurs_its_shadow_focus() {
-    let mut vm = new_parsed_test_vm(
-        "https://shadow-host-blur.test/",
-        "<!doctype html><html><body><button id=outside>o</button><div id=host></div></body></html>",
-    );
-    let result = vm
-        .eval(
-            r#"(() => {
+    let probe = r#"(() => {
   const host = document.getElementById('host');
-  const shadow = host.attachShadow({ mode: 'open' });
-  shadow.innerHTML = '<button id=inner>in</button>';
+  const shadow = host.shadowRoot || host.attachShadow({ mode: 'open' });
+  if (!shadow.getElementById('inner')) shadow.innerHTML = '<button id=inner>in</button>';
   const inner = shadow.getElementById('inner');
   const seen = [];
   for (const type of ['blur', 'focusout']) {
@@ -6438,12 +6432,35 @@ fn shadow_host_blur_without_delegates_focus_blurs_its_shadow_focus() {
   document.getElementById('outside').focus();
   host.blur();
   const untouched = document.activeElement.id;
-  return JSON.stringify([focused, blurred, events, untouched]);
-})()"#,
+  return JSON.stringify([inner.localName, focused, blurred, events, untouched]);
+})()"#;
+    let expected = |tag: &str| {
+        format!(
+            r#"["{tag}",true,true,"inner:blur,host:blur,inner:focusout,host:focusout","outside"]"#
         )
-        .expect("host blur");
+    };
+
+    // Imperative shadow root around a button.
+    let mut vm = new_parsed_test_vm(
+        "https://shadow-host-blur.test/",
+        "<!doctype html><html><body><button id=outside>o</button><div id=host></div></body></html>",
+    );
+    assert_eq!(vm.eval(probe).expect("host blur"), expected("button"));
+
+    // Declarative shadow root around an input.
+    let mut vm = new_streamed_parser_test_vm(
+        "https://shadow-host-blur-declarative.test/",
+        r#"<!doctype html>
+<button id="outside">o</button>
+<div id="host">
+  <template shadowrootmode="open">
+    <input id="inner">
+  </template>
+</div>
+"#,
+    );
     assert_eq!(
-        result,
-        r#"[true,true,"inner:blur,host:blur,inner:focusout,host:focusout","outside"]"#
+        vm.eval(probe).expect("declarative host blur"),
+        expected("input")
     );
 }
