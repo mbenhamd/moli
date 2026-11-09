@@ -1584,8 +1584,12 @@ fn live_geometry_fractional_zoomed_rtl_and_fixed_scrolls_match_a_fresh_layout() 
          <div id=ta style='transform:translateX(5px)'><div id=tf style='position:fixed;top:3px;left:2px;width:10px;height:10px'></div></div>\
          <div style=height:20000px></div></body></html>",
         &["z", "s", "deep", "r", "wide", "ta", "tf"],
-        "document.getElementById('s').scrollTop = 9912.3; document.getElementById('r').scrollLeft = -37.5; \
-         document.documentElement.scrollTop = 8123.7",
+        // A small fractional offset over a box ~1e4px down does not subtract
+        // exactly in f32; an intermediate read re-projects twice.
+        "const s = document.getElementById('s'); s.scrollTop = 5000.5; s.getBoundingClientRect(); \
+         s.scrollTop = 12.3; document.getElementById('r').scrollLeft = -37.5; \
+         document.documentElement.scrollTop = 8123.7; document.body.getBoundingClientRect(); \
+         document.documentElement.scrollTop = 3.3",
     );
 }
 
