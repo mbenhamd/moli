@@ -23,7 +23,7 @@ use crate::{
     },
 };
 use cssparser::{Parser, Token, serialize_identifier, serialize_string};
-use moli_selector::html_directionality;
+use moli_selector::{html_directionality, html_directionality_lacks_stylo_hint};
 use std::collections::{HashMap, HashSet};
 use style::{properties::ComputedValues, servo_arc::Arc as ServoArc, stylesheets::CssRuleType};
 
@@ -289,6 +289,12 @@ impl<'a> ComputedStyleRead<'a> {
                 read_document,
             )
             .map(|snapshot| snapshot.computed_values())
+    }
+
+    pub(in crate::native_bridge::element::styles) fn depends_on_size_container(&self) -> bool {
+        self.stylo_style
+            .as_ref()
+            .is_some_and(StyloComputedStyleSnapshot::depends_on_size_container)
     }
 
     pub(crate) fn prepare_anonymous_style_context(

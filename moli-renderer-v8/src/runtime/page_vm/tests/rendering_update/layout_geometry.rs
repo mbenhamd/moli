@@ -1254,24 +1254,24 @@ $('f').appendChild(document.createElement('div')).style.height = '40px';
             .eval("document.getElementById('s').scrollTop = 50; 'scrolled'")?;
         assert_eq!(layout_passes(&page_vm), passes + 2);
         // The next synchronous read sees the class, inline style, attribute,
-        // subtree and scroll changes. Layout bakes scroll offsets into the
-        // tree, so the scroll costs this read one more pass.
+        // subtree and scroll changes. The scroll moves the published layout
+        // in place, so this read lays out nothing more.
         assert_eq!(
             page_vm.vm_mut().eval(geometry)?,
             "[[200,150,120,0,800],40,-50]"
         );
-        assert_eq!(layout_passes(&page_vm), passes + 3);
+        assert_eq!(layout_passes(&page_vm), passes + 2);
         page_vm.vm_mut().eval(geometry)?;
-        assert_eq!(layout_passes(&page_vm), passes + 3);
+        assert_eq!(layout_passes(&page_vm), passes + 2);
 
         // A resize alone does not lay out; the next read sees the new width.
         page_vm.set_viewport_surface(Some(live_viewport(400, 40)))?;
-        assert_eq!(layout_passes(&page_vm), passes + 3);
+        assert_eq!(layout_passes(&page_vm), passes + 2);
         assert_eq!(
             page_vm.vm_mut().eval(geometry)?,
             "[[200,150,120,0,400],40,-50]"
         );
-        assert_eq!(layout_passes(&page_vm), passes + 4);
+        assert_eq!(layout_passes(&page_vm), passes + 3);
 
         // A node inserted after a read has a box and rendered text at the
         // next read, without a capture.
@@ -1400,6 +1400,407 @@ document.body.innerHTML = '<div id=pad></div><div id=cb><div id=abs>x</div></div
     })
     .await
     .expect("live computed inset fixture should run");
+}
+
+const INCREMENTAL_DIFFERENTIAL_FIXTURE: &str = r#"
+document.head.innerHTML = `<style>
+html,body{margin:0}
+.row{padding:2px}.tall{padding:9px}.hide{display:none}
+#fl{display:flex;width:300px}#fl>*{flex:1 1 auto}
+#gr{display:grid;grid-template-columns:auto 1fr;width:400px}
+#ta{border-collapse:collapse}td{padding:1px}
+#pc{width:200px}#pc>div{width:50%;height:10px}
+#fw{width:200px}#fl1{float:left;width:50px;height:40px}
+#scr{height:60px;overflow:auto;width:200px}
+#cq{container-type:inline-size;width:320px}.in{height:7px}
+@container (min-width:300px){.in{height:21px}}
+</style>`;
+document.body.innerHTML = `
+<div id=rows></div>
+<div id=fl><span id=fl1a>aa</span><span>bbb</span></div>
+<div id=gr><i id=gcell>cell</i><b>two</b></div>
+<table id=ta><tr><td id=tc>t</td><td>u</td></tr></table>
+<div id=pc><div id=pct></div></div>
+<div id=fw><div id=fl1></div><p id=ftx>wrapped text around float content here</p></div>
+<div id=scr><div id=scc style="height:20px"></div></div>
+<div id=inl><span id=sp1>one</span> <span id=sp2 style="display:inline-block;width:40px">x</span></div>
+<div id=host></div>
+<div id=cq><div class=in id=cqin></div></div>
+<input id=inp value=abc>
+<iframe id=fr srcdoc="<!doctype html><div id=fc style='height:10px'>f</div>"></iframe>
+`;
+const r = document.getElementById('rows');
+for (let i = 0; i < 40; i++) {
+  const d = document.createElement('div'); d.className = 'row'; d.id = 'r' + i;
+  d.innerHTML = '<span>row</span><b> ' + i + '</b>'; r.appendChild(d);
+}
+const host = document.getElementById('host');
+const root = host.attachShadow({mode:'open'});
+root.innerHTML = '<style>:host{display:block}#sh{padding:1px}</style><div id=sh><slot></slot></div>';
+host.innerHTML = '<span id=sl>slotted</span>';
+void document.body.offsetHeight; 'installed'
+"#;
+
+/// Runs one mutation and reads back the whole page's geometry.
+const INCREMENTAL_READ_ALL: &str = r#"(() => { const v=[];
+  for (const e of document.body.querySelectorAll('*')) { const r=e.getBoundingClientRect(); v.push(r.x,r.y,r.width,r.height); }
+  return v.length; })()"#;
+
+const INCREMENTAL_DIFFERENTIAL_MUTATIONS: &[&str] = &[
+    // text and class on one row
+    "document.getElementById('r7').firstChild.textContent = 'changed text that is longer';",
+    "document.getElementById('r8').className = 'row tall';",
+    // style attribute, paint-only and geometry
+    "document.getElementById('r9').setAttribute('style','padding-left:13px');",
+    "document.getElementById('r10').style.color = 'red';",
+    "document.getElementById('sp1').style.fontSize = '20px';",
+    // structure: add, remove, move, display toggle
+    "const a=document.createElement('div');a.id='added';a.textContent='new';document.getElementById('rows').appendChild(a);",
+    "document.getElementById('r3').remove();",
+    "const m=document.getElementById('r4');m.parentNode.insertBefore(m,document.getElementById('r1'));",
+    "document.getElementById('r5').classList.add('hide');",
+    "document.getElementById('r5').classList.remove('hide');",
+    "document.getElementById('sp2').style.display='block';",
+    "document.getElementById('sp2').style.display='inline-block';",
+    // containing block and percentage dependence
+    "document.getElementById('pc').style.width='350px';",
+    // flex, grid, table intrinsic sizing
+    "document.getElementById('fl1a').textContent='a much longer flex item';",
+    "document.getElementById('gcell').textContent='a longer grid auto track';",
+    "document.getElementById('tc').textContent='widen this table column please';",
+    // floats and inline formatting around them
+    "document.getElementById('fl1').style.width='120px';",
+    "document.getElementById('ftx').textContent='other wrapped text beside the float';",
+    // scrollbar appearing and disappearing
+    "document.getElementById('scc').style.height='600px';",
+    "document.getElementById('scc').style.height='10px';",
+    "document.getElementById('scr').scrollTop=4;",
+    // shadow DOM and slotted content
+    "document.getElementById('sl').textContent='slotted longer text content';",
+    "document.getElementById('host').shadowRoot.getElementById('sh').style.padding='7px';",
+    // embedded iframe resize and content
+    "document.getElementById('fr').style.width='420px';",
+    "document.getElementById('fr').contentDocument.body.innerHTML='<div style=\"height:12px\">c</div>';",
+    "document.getElementById('fr').contentDocument.body.firstChild.style.height='30px';",
+    // container query toggle
+    "document.getElementById('cq').style.width='200px';",
+    "document.getElementById('cq').style.width='320px';",
+    // form control value
+    "document.getElementById('inp').value='changed input value';",
+    // no-op read: the layout input key should skip the pass entirely
+    "void 0;",
+];
+
+/// Main-document numeric reuse is disabled while any float exists, so this
+/// fixture has none and no embedded frame: every reused box counted here
+/// belongs to the main document.
+const INCREMENTAL_FLOAT_FREE_FIXTURE: &str = r#"
+document.head.innerHTML = `<style>
+html{overflow:visible}body{margin:0;overflow:hidden}
+#lead{margin-top:30px;height:5px}
+.row{padding:2px}
+#fx{display:flex;width:300px}#fx>*{flex:1 1 auto}
+#gd{display:grid;grid-template-columns:auto 1fr;width:400px}
+#tb{border-collapse:collapse}td{padding:1px}
+#pw{width:200px}#pw>div{width:50%;padding-left:10%;height:10px}
+#sc{height:60px;overflow:auto;width:200px}
+#cq{container-type:inline-size;width:320px}.in{height:7px}
+@container (min-width:300px){.in{height:21px}}
+</style>`;
+document.body.innerHTML = `
+<div id=lead></div>
+<div id=rows></div>
+<div id=fx><span id=fxa>aa</span><span>bbb</span></div>
+<div id=gd><i id=gc>cell</i><b>two</b></div>
+<table id=tb><tr><td id=td1>t</td><td>u</td></tr></table>
+<div id=pw><div id=pwc></div></div>
+<div id=sc><div id=scx style="height:20px"></div></div>
+<div id=cq><div class=in></div></div>
+<input id=in1 value=abc><textarea id=ta1>x</textarea>
+<div id=host2></div>
+`;
+const r = document.getElementById('rows');
+for (let i = 0; i < 40; i++) {
+  const d = document.createElement('div'); d.className = 'row'; d.id = 'q' + i;
+  d.innerHTML = '<span>row</span><b> ' + i + '</b>'; r.appendChild(d);
+}
+const host = document.getElementById('host2');
+const root = host.attachShadow({mode:'open'});
+root.innerHTML = '<div id=sa><slot name=a></slot></div><div id=sb><slot name=b></slot></div>';
+host.innerHTML = '<span slot=a id=sla>first</span><span slot=b id=slb>second</span>';
+void document.body.offsetHeight; 'installed'
+"#;
+
+const INCREMENTAL_FLOAT_FREE_MUTATIONS: &[&str] = &[
+    "document.getElementById('q7').firstChild.textContent = 'changed text that is longer';",
+    "document.getElementById('fxa').textContent='a much longer flex item';",
+    "document.getElementById('gc').textContent='a longer grid auto track';",
+    "document.getElementById('td1').textContent='widen this table column please';",
+    "document.getElementById('pw').style.width='350px';",
+    "document.getElementById('scx').style.height='600px';",
+    "document.getElementById('scx').style.height='10px';",
+    "document.getElementById('cq').style.width='200px';",
+    "document.getElementById('cq').style.width='320px';",
+    "document.getElementById('cq').style.containerType='normal';",
+    "document.getElementById('cq').style.containerType='';",
+    "document.getElementById('in1').value='changed input value';",
+    "document.getElementById('ta1').value='two\\nlines';",
+    "document.getElementById('sla').textContent='first slotted text grows';",
+    "document.getElementById('slb').slot='a';",
+    "document.getElementById('slb').slot='b';",
+    // The viewport-defining body moves between body and root. Today an
+    // html style change restyles the whole document and a body overflow
+    // change gives body a new computed style, so neither leaves body clean
+    // and the scroll-policy guard in moli-layout's retention is defensive.
+    // The per-mutation check below still compares each toggle with a full
+    // rebuild, and requires that a comparison ran for it.
+    "document.documentElement.style.overflow='hidden';",
+    "document.documentElement.style.overflow='';",
+    "document.body.style.overflow='visible';",
+    "document.body.style.overflow='';",
+    "document.getElementById('q9').style.color='red';",
+];
+
+/// Drives `mutations` (then three viewport resizes) with the differential
+/// check on, failing on the first geometry that differs from a full rebuild.
+/// Returns how many boxes had numeric results reused.
+fn run_incremental_differential(fixture: &str, mutations: &[&str]) -> anyhow::Result<u64> {
+    moli_layout::set_incremental_layout_verify_for_test(true);
+    let result = (|| {
+        let mut page_vm = live_geometry_page(fixture)?;
+        let boxes = page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
+        let mismatches = moli_layout::incremental_verify_mismatch_count();
+        let compared = moli_layout::incremental_verify_comparison_count();
+        let reused = moli_layout::incremental_numeric_reused_total();
+        let mut compared_before = compared;
+        for mutation in mutations {
+            page_vm.vm_mut().eval(&format!("{mutation} 'ok'"))?;
+            let read = page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
+            assert_ne!(read, "0", "read after {mutation}");
+            assert_eq!(
+                moli_layout::incremental_verify_mismatch_count(),
+                mismatches,
+                "geometry differs from a full rebuild after: {mutation}"
+            );
+            let compared_now = moli_layout::incremental_verify_comparison_count();
+            if mutation.contains(".style.overflow") {
+                assert!(
+                    compared_now > compared_before,
+                    "no incremental pass was compared after: {mutation}"
+                );
+            }
+            compared_before = compared_now;
+        }
+        // Viewport resize, growing then shrinking.
+        for width in [640, 1100, 800] {
+            page_vm.set_viewport_surface(Some(live_viewport(width, 0)))?;
+            page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
+            assert_eq!(
+                moli_layout::incremental_verify_mismatch_count(),
+                mismatches,
+                "geometry differs from a full rebuild after resize to {width}"
+            );
+        }
+        assert!(
+            moli_layout::incremental_verify_comparison_count() > compared,
+            "the differential check never compared an incremental pass (boxes read: {boxes})"
+        );
+        Ok(moli_layout::incremental_numeric_reused_total() - reused)
+    })();
+    moli_layout::set_incremental_layout_verify_for_test(false);
+    result
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_incremental_layout_matches_a_full_rebuild_across_mutations() {
+    run_page_vm_async_test(async move {
+        let reused = run_incremental_differential(
+            INCREMENTAL_DIFFERENTIAL_FIXTURE,
+            INCREMENTAL_DIFFERENTIAL_MUTATIONS,
+        )?;
+        assert!(reused > 0, "no numeric results were reused");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("incremental differential fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_incremental_layout_reuses_main_document_numeric_results_exactly() {
+    run_page_vm_async_test(async move {
+        let reused = run_incremental_differential(
+            INCREMENTAL_FLOAT_FREE_FIXTURE,
+            INCREMENTAL_FLOAT_FREE_MUTATIONS,
+        )?;
+        assert!(reused > 0, "the main document reused no numeric results");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("float-free incremental differential fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_geometry_scrolls_a_node_adopted_back_from_a_foreign_document() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}.s{height:100px;overflow:auto}.s>div{height:300px}</style>';
+document.body.innerHTML = '<div id=s class=s><div></div></div>';
+'installed'
+"#,
+        )?;
+        // Moving a rendered scroller through another Document and back keeps
+        // it a live scroller: Chromium honors scrollTop and scrollTo again.
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                r#"(() => { const s = document.getElementById('s');
+                    const foreign = document.implementation.createHTMLDocument('');
+                    foreign.body.appendChild(s);
+                    s.scrollTop = 40;
+                    const whileForeign = s.scrollTop;
+                    document.body.appendChild(s);
+                    s.scrollTop = 1e9;
+                    const max = s.scrollTop;
+                    s.scrollTo(0, 50);
+                    const scrolledTo = s.scrollTop;
+                    s.scrollBy(0, 10);
+                    return JSON.stringify([whileForeign, s.scrollHeight, s.clientHeight, max, scrolledTo, s.scrollTop,
+                        s.firstElementChild.getBoundingClientRect().top]); })()"#,
+            )?,
+            "[0,300,100,200,50,60,-60]"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("adopted scroller fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_geometry_reads_a_node_born_in_a_foreign_document() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}.s{height:100px;width:200px;overflow:auto}.s>div{height:300px}</style>';
+document.body.innerHTML = '<div id=host></div>';
+'installed'
+"#,
+        )?;
+        // An element created (or cloned) by a Document without a browsing
+        // context reads the same live geometry as a page-created element once
+        // the page inserts it, and its scroll getters agree with its setters.
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                r#"(() => { const host = document.getElementById('host');
+                    const foreign = document.implementation.createHTMLDocument('');
+                    const born = foreign.createElement('div');
+                    born.className = 's';
+                    born.appendChild(foreign.createElement('div'));
+                    const cloned = born.cloneNode(true);
+                    return JSON.stringify([born, cloned].map((s) => {
+                        host.replaceChildren(s);
+                        const child = s.firstElementChild;
+                        s.scrollTop = 50;
+                        const set = s.scrollTop;
+                        s.scrollTo(0, 70);
+                        return [set, s.scrollTop, s.scrollHeight, s.clientHeight, s.offsetHeight,
+                            child.offsetHeight, s.offsetParent === document.body,
+                            child.getBoundingClientRect().top - s.getBoundingClientRect().top];
+                    })); })()"#,
+            )?,
+            "[[50,70,300,100,100,300,true,-70],[50,70,300,100,100,300,true,-70]]"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("foreign-born scroller fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_geometry_resets_scroll_offsets_when_a_node_leaves_the_document() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}.s{height:100px;overflow:auto}.s>div{height:300px}</style>';
+document.body.innerHTML = '<div id=host></div><div id=other></div>';
+'installed'
+"#,
+        )?;
+        // Chromium destroys the scroll container on removal: moving to another
+        // Document and back, or reinserting, starts at 0. moveBefore keeps it.
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                r#"(() => { const host = document.getElementById('host');
+                    const other = document.getElementById('other');
+                    const scrolled = () => { const s = document.createElement('div');
+                        s.className = 's'; s.appendChild(document.createElement('div'));
+                        host.replaceChildren(s); s.scrollTop = 50; return s; };
+                    let s = scrolled();
+                    document.implementation.createHTMLDocument('').body.appendChild(s);
+                    host.appendChild(s);
+                    const foreignTrip = s.scrollTop;
+                    s = scrolled();
+                    other.appendChild(s);
+                    const moved = s.scrollTop;
+                    s = scrolled();
+                    other.moveBefore(s, null);
+                    return JSON.stringify([foreignTrip, moved, s.scrollTop]); })()"#,
+            )?,
+            "[0,0,50]"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("scroll reset fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_geometry_resets_shadow_and_root_subtree_scroll_offsets_and_hides_boxless_offsets() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}.s{height:100px;overflow:auto}.s>div{height:300px}</style>';
+document.body.innerHTML = '<div id=host></div><div id=other></div>';
+'installed'
+"#,
+        )?;
+        // Chromium: a shadow-tree scroller resets when its host leaves the
+        // document and keeps its offset across moveBefore; removing the root
+        // element resets the scrollers inside it; a display:none scroller
+        // reads 0 and shows its offset again once rendered.
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                r#"(() => { const host = document.getElementById('host');
+                    const other = document.getElementById('other');
+                    const scroller = (parent) => { const s = document.createElement('div');
+                        s.className = 's'; s.appendChild(document.createElement('div'));
+                        parent.appendChild(s); s.scrollTop = 50; return s; };
+                    const shadowed = () => { const h = document.createElement('div');
+                        host.replaceChildren(h); const root = h.attachShadow({ mode: 'open' });
+                        const style = document.createElement('style');
+                        style.textContent = '.s{height:100px;overflow:auto}.s>div{height:300px}';
+                        root.appendChild(style); return [h, scroller(root)]; };
+                    let [h, s] = shadowed();
+                    h.remove(); host.appendChild(h);
+                    const shadowReinserted = s.scrollTop;
+                    [h, s] = shadowed();
+                    other.moveBefore(h, null);
+                    const shadowMoved = s.scrollTop;
+                    s = scroller(other);
+                    s.style.display = 'none';
+                    const hidden = s.scrollTop;
+                    s.style.display = '';
+                    const shown = s.scrollTop;
+                    const html = document.documentElement;
+                    s.scrollTop = 50;
+                    document.removeChild(html); document.appendChild(html);
+                    return JSON.stringify([shadowReinserted, shadowMoved, hidden, shown, s.scrollTop]); })()"#,
+            )?,
+            "[0,50,0,50,0]"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("shadow and root scroll reset fixture should run");
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -103,6 +103,8 @@ pub(crate) fn node_document_design_mode_setter_function<'s>(
 }
 
 pub(in crate::native_bridge) use attributes::is_attr_node_value;
+#[cfg(test)]
+pub(crate) use attributes::take_named_node_map_attr_materializations_for_test;
 pub(super) use attributes::{
     build_named_node_map_wrapper_template, clear_live_attr_cache_entry,
     clear_live_attr_cache_entry_ns, live_get_attribute_node_ns_object,

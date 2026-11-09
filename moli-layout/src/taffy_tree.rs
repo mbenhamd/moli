@@ -65,6 +65,10 @@ impl PreparedWorldLayout {
         world.viewport_layout.unrounded_layout = self.numeric_viewport_layout;
     }
 
+    pub(crate) fn take_numeric_unrounded(&mut self) -> Vec<Layout> {
+        std::mem::take(&mut self.numeric_unrounded_layouts)
+    }
+
     fn capture_numeric_geometry<N>(&mut self, world: &LayoutWorld<N>)
     where
         N: Copy + Debug + Eq + Hash,
@@ -134,6 +138,8 @@ impl PreparedWorldLayout {
 pub(crate) fn prepare_world_layout<N>(
     world: &mut LayoutWorld<N>,
     viewport: PaintViewport,
+    environment: crate::LayoutEnvironment,
+    retained: Option<&mut crate::retention::RetainedReuse<N>>,
 ) -> PreparedWorldLayout
 where
     N: Copy + Debug + Eq + Hash,
@@ -158,6 +164,16 @@ where
     update_viewport_layout_style(world, viewport);
     let positioned_static_sources = prepare_layout_tree(world);
     prepare_table_layout_trees(world);
+    if let Some(reuse) = retained {
+        // Floats wrap siblings across the formatting context, so a cached
+        // block's result can depend on a float outside it. Check both worlds:
+        // a float removed by this mutation shaped the retained results too.
+        let numeric_allowed = reuse.prior.viewport == viewport
+            && reuse.prior.environment == environment
+            && !crate::retention::world_has_floats(world)
+            && !crate::retention::world_has_floats(&reuse.prior.world);
+        reuse.transfer_numeric(world, numeric_allowed);
+    }
     let mut prepared = PreparedWorldLayout {
         positioned_static_sources,
         numeric_unrounded_layouts: Vec::with_capacity(world.boxes.len()),
@@ -2074,6 +2090,138 @@ where
                 == Display::None
     }
 
+    /// Fixes each size-contained axis the box would otherwise size from its
+    /// content, per css-contain's "as if it had no content" rule.
+    ///
+    /// An axis stays free when the parent or the box's own size already
+    /// determines it (`known_dimensions`, a resolved preferred size, or an
+    /// aspect ratio against a known other axis); those paths never read the
+    /// content. Otherwise the content contribution is `contain-intrinsic-*`
+    /// or zero, and the box lays out its children against that fixed size so
+    /// they still overflow normally.
+    fn apply_size_containment(&self, id: LayoutBoxId, inputs: LayoutInput) -> LayoutInput {
+        let layout_box = &self.boxes[id.index()];
+        let axes = layout_box.size_contained_axes();
+        if !axes.width && !axes.height {
+            return inputs;
+        }
+        let style = &layout_box.style.taffy;
+        let parent_width = inputs.parent_size.width;
+        let padding = style
+            .padding
+            .resolve_or_zero(parent_width, resolve_stylo_calc_value);
+        let border = style
+            .border
+            .resolve_or_zero(parent_width, resolve_stylo_calc_value);
+        let scrollbars = self.get_scrollbar_insets(id.to_taffy());
+        let pb_scrollbar = Size {
+            width: padding.left
+                + padding.right
+                + border.left
+                + border.right
+                + scrollbars.left
+                + scrollbars.right,
+            height: padding.top
+                + padding.bottom
+                + border.top
+                + border.bottom
+                + scrollbars.top
+                + scrollbars.bottom,
+        };
+        let box_sizing_adjustment = if style.box_sizing == BoxSizing::ContentBox {
+            Size {
+                width: padding.left + padding.right + border.left + border.right,
+                height: padding.top + padding.bottom + border.top + border.bottom,
+            }
+        } else {
+            Size::ZERO
+        };
+        let inherent = inputs.sizing_mode == SizingMode::InherentSize;
+        // Fully size-contained replaced content has no natural ratio; an
+        // explicit `aspect-ratio` still applies.
+        let aspect_ratio = if axes.width && axes.height {
+            layout_box.style.resolved_aspect_ratio(None)
+        } else {
+            layout_box.resolved_aspect_ratio()
+        };
+        let resolved_size = style
+            .size
+            .maybe_resolve(inputs.parent_size, resolve_stylo_calc_value)
+            .maybe_add(box_sizing_adjustment);
+        let min_size = style
+            .min_size
+            .maybe_resolve(inputs.parent_size, resolve_stylo_calc_value)
+            .maybe_add(box_sizing_adjustment);
+        let max_size = style
+            .max_size
+            .maybe_resolve(inputs.parent_size, resolve_stylo_calc_value)
+            .maybe_add(box_sizing_adjustment);
+        let intrinsic = layout_box.style.contain_intrinsic_size();
+        let mut known = inputs.known_dimensions;
+        let mut height_injected = false;
+        let derivable_from_other_axis = |axis_known: Option<f32>, other: Option<f32>| {
+            axis_known.is_some() || (aspect_ratio.is_some() && other.is_some())
+        };
+        if axes.width
+            && known.width.is_none()
+            && !style.size.width.is_stretch()
+            && !(inherent
+                && derivable_from_other_axis(
+                    resolved_size.width,
+                    known.height.or(resolved_size.height),
+                ))
+        {
+            let content = intrinsic.width.unwrap_or(0.0) + pb_scrollbar.width;
+            known.width = Some(if inherent {
+                content.maybe_clamp(min_size.width, max_size.width)
+            } else {
+                content
+            });
+        }
+        if axes.height
+            && known.height.is_none()
+            && !style.size.height.is_stretch()
+            && !(inherent
+                && derivable_from_other_axis(
+                    resolved_size.height,
+                    known.width.or(resolved_size.width),
+                ))
+        {
+            height_injected = true;
+            let content = intrinsic.height.unwrap_or(0.0) + pb_scrollbar.height;
+            known.height = Some(if inherent {
+                content.maybe_clamp(min_size.height, max_size.height)
+            } else {
+                content
+            });
+        }
+        // With no natural ratio, a replaced box's specified sizes must not be
+        // derived from an injected zero on the other axis through its
+        // natural size.
+        if inherent && axes.width && axes.height && layout_box.is_replaced() {
+            if known.width.is_none() {
+                known.width = resolved_size
+                    .width
+                    .map(|width| width.maybe_clamp(min_size.width, max_size.width));
+            }
+            if known.height.is_none() {
+                known.height = resolved_size
+                    .height
+                    .map(|height| height.maybe_clamp(min_size.height, max_size.height));
+            }
+        }
+        LayoutInput {
+            known_dimensions: known,
+            known_dimensions_are_definite: Size {
+                width: inputs.known_dimensions_are_definite.width,
+                // An injected height stays indefinite: percentage children of
+                // an auto-height contained box compute to auto, as in Blink.
+                height: inputs.known_dimensions_are_definite.height && !height_injected,
+            },
+            ..inputs
+        }
+    }
+
     fn compute_child_layout_uncached(
         &mut self,
         node_id: NodeId,
@@ -2094,6 +2242,7 @@ where
         block_context: Option<&mut BlockContext<'_>>,
     ) -> LayoutOutput {
         let id = LayoutBoxId::from_taffy(node_id);
+        let inputs = self.apply_size_containment(id, inputs);
         let layout_box = &self.boxes[id.index()];
         let kind = layout_box.kind;
         let display = layout_box.style.display();
@@ -3465,7 +3614,12 @@ mod tests {
         ));
         world.boxes[parent.index()].children.push(leaf);
         world.boxes[leaf.index()].parent = Some(parent);
-        let _prepared = prepare_world_layout(&mut world, crate::PaintViewport::new(800, 600, 1.0));
+        let _prepared = prepare_world_layout(
+            &mut world,
+            crate::PaintViewport::new(800, 600, 1.0),
+            crate::LayoutEnvironment::default(),
+            None,
+        );
 
         let output = world.measure_complete_layout(
             root.to_taffy(),

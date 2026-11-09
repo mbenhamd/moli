@@ -48,6 +48,13 @@ pub(super) fn set_node_scroll_position(
     };
     if changed && queue_observable_effects {
         queue_scroll_observable_effects(scope, runtime_ptr, document, false);
+        // The element joins its Document's pending scroll event targets; the
+        // next rendering update fires `scroll` and `scrollend` at it. A
+        // disconnected element has no scroll container, so its change fires
+        // nothing, like Chromium.
+        if unsafe { &*runtime_ptr }.dom_host().is_connected(handle) {
+            let _ = unsafe { &mut *runtime_ptr }.queue_element_scroll_events(scope, handle);
+        }
     }
     changed
 }
@@ -127,12 +134,13 @@ pub(crate) fn queue_scroll_observable_effects(
     queue_document_events: bool,
 ) {
     // Under the live-geometry policy a read in the same batched action must
-    // see this offset, so the key moves now rather than when effects flush.
+    // see this offset, so the published tree follows it now rather than when
+    // effects flush.
     if unsafe { &*runtime_ptr }
         .layout_policy()
         .relayouts_stale_reads()
     {
-        unsafe { &*runtime_ptr }.invalidate_layout_after_interaction_state_change();
+        unsafe { &*runtime_ptr }.invalidate_layout_after_scroll_offset_change();
     }
     if unsafe { &mut *runtime_ptr }.defer_scroll_observable_effects(document, queue_document_events)
     {
@@ -160,7 +168,7 @@ pub(crate) fn apply_scroll_observable_effects(
     // Native lazy loading combines the retained projection with live scroll
     // offsets. Geometry and input retain that projection until fresh visual
     // publication replaces it, or, under the live-geometry policy, until the
-    // next read lays out again because the scroll moved the layout key.
+    // next read translates the published tree to the new offsets.
     for effects in &effects {
         if let Some(document) = effects.document() {
             queue_revealed_lazy_image_loads(scope, runtime_ptr, document);

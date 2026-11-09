@@ -61,6 +61,34 @@ pub(super) fn named_node_map_attribute_names<'s>(
     fallback_named_node_map_attribute_names(scope, element)
 }
 
+/// The length of the map: `named_node_map_attribute_names(..).len()`
+/// without building the names of a live element.
+pub(super) fn named_node_map_attribute_count<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    element: v8::Local<'s, v8::Object>,
+) -> usize {
+    if let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, element)
+        && let Some(native_element) = unsafe { &*runtime_ptr }
+            .dom_host()
+            .node(handle)
+            .and_then(Node::as_element)
+    {
+        return native_element
+            .attributes()
+            .iter()
+            .filter(|attribute| {
+                !is_synthetic_detached_style_attribute(
+                    scope,
+                    element,
+                    &attribute.name(),
+                    attribute.value(),
+                )
+            })
+            .count();
+    }
+    named_node_map_attribute_names(scope, element).len()
+}
+
 fn fallback_named_node_map_attribute_names<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     element: v8::Local<'s, v8::Object>,
@@ -90,6 +118,17 @@ fn fallback_named_node_map_attribute_names<'s>(
     out
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static ATTR_MATERIALIZATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many indexed Attr lookups ran since the last call.
+#[cfg(test)]
+pub(crate) fn take_named_node_map_attr_materializations_for_test() -> u64 {
+    ATTR_MATERIALIZATIONS.with(|count| count.replace(0))
+}
+
 pub(super) struct IndexedAttribute {
     name: String,
     value: String,
@@ -98,15 +137,28 @@ pub(super) struct IndexedAttribute {
     local_name: String,
 }
 
-fn live_indexed_attribute(
-    scope: &mut v8::PinScope<'_, '_>,
-    element: v8::Local<'_, v8::Object>,
+/// The map's `index`th attribute of a live element, skipping the same
+/// synthetic `style` attribute that `length` and the names skip.
+fn live_indexed_attribute<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    element: v8::Local<'s, v8::Object>,
     index: usize,
 ) -> Option<IndexedAttribute> {
     let (runtime_ptr, handle) = node_runtime_and_handle_from_object(scope, element).ok()?;
     let runtime = unsafe { &*runtime_ptr };
-    let element = runtime.dom_host().node(handle).and_then(Node::as_element)?;
-    let attribute = element.attributes().get(index)?;
+    let native_element = runtime.dom_host().node(handle).and_then(Node::as_element)?;
+    let attribute = native_element
+        .attributes()
+        .iter()
+        .filter(|attribute| {
+            !is_synthetic_detached_style_attribute(
+                scope,
+                element,
+                &attribute.name(),
+                attribute.value(),
+            )
+        })
+        .nth(index)?;
     Some(IndexedAttribute {
         name: attribute.name(),
         value: attribute.value().to_owned(),
@@ -190,6 +242,8 @@ fn indexed_attribute_object<'s>(
     index: usize,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let attribute = indexed_attribute(scope, element, index)?;
+    #[cfg(test)]
+    ATTR_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
     let cache = live_attr_cache_object(scope, element)?;
     let cache_key = indexed_attribute_cache_key(&attribute);
     let namespace_key =
@@ -250,12 +304,13 @@ pub(super) fn attribute_node_for_index<'s>(
     element: v8::Local<'s, v8::Object>,
     index: usize,
 ) -> Option<v8::Local<'s, v8::Value>> {
-    if native_named_node_map_attribute_names(scope, element).is_some() {
-        return indexed_attribute_object(scope, element, index).map(Into::into);
+    if let Some(attr) = indexed_attribute_object(scope, element, index) {
+        return Some(attr.into());
     }
-    indexed_attribute_object(scope, element, index)
-        .map(Into::into)
-        .or_else(|| fallback_attribute_node_for_index(scope, element, index))
+    if native_named_node_map_attribute_names(scope, element).is_some() {
+        return None;
+    }
+    fallback_attribute_node_for_index(scope, element, index)
 }
 
 fn fallback_attribute_node_for_name<'s>(

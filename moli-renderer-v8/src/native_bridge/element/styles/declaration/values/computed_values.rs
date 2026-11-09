@@ -307,6 +307,7 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_for_pseudo
     if !computed_style_applies(runtime, handle) {
         return String::new();
     }
+    super::computed_properties::flush_layout_for_size_container_read(runtime, handle, context);
     let property = canonical_style_property_name(property);
     let value = normalized_stylo_computed_pseudo_style_value(
         runtime,
@@ -774,6 +775,13 @@ pub(super) fn computed_direction_with_resolution(
     let direction = resolution.raw_property(runtime, handle, "direction");
     if direction.eq_ignore_ascii_case("rtl") {
         return "rtl".to_owned();
+    }
+    // Stylo owns the cascade for explicit `dir`, so author `direction` wins.
+    // `dir=auto`, `<bdi>` and non-HTML `dir` have no hint; the DOM walk owns them.
+    if direction.eq_ignore_ascii_case("ltr")
+        && !html_directionality_lacks_stylo_hint(runtime.dom_host(), handle)
+    {
+        return "ltr".to_owned();
     }
     html_directionality(runtime.dom_host(), handle)
         .as_str()

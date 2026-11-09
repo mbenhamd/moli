@@ -30,6 +30,7 @@ mod pass;
 mod positioned;
 mod projection;
 mod replaced;
+mod retention;
 mod scrollbar;
 mod snapshot;
 mod source;
@@ -63,7 +64,7 @@ pub use layout_tree::{
     LayoutResolvedGridTrackList, LayoutResolvedGridTracks, LayoutScrollContainerMetrics,
     LayoutScrollExtent, LayoutScrollIntoViewGeometry, LayoutSize, LayoutTransform2D,
     LayoutTreeRetentionMetrics, LayoutUsedSize, LayoutViewport, MAX_RETAINED_LAYOUT_BOXES,
-    MAX_RETAINED_LAYOUT_FRAGMENTS, MAX_RETAINED_LAYOUT_TREE_BYTES,
+    MAX_RETAINED_LAYOUT_FRAGMENTS, MAX_RETAINED_LAYOUT_TREE_BYTES, ScrollOffsetSync,
 };
 pub use list::{ListCounter, list_marker_text};
 pub use normalize::{NormalizedBoxNode, NormalizedBoxTree, NormalizedFormattingContext};
@@ -73,6 +74,11 @@ pub use normalize_source::{
 pub use pass::{
     EmbeddedFrameRenderer, EmbeddedFrameSnapshot, LayoutPassRequest, ScreenshotLayoutRequest,
     build_layout_pass, build_layout_pass_with_embedded_frames, build_screenshot_snapshot,
+};
+#[cfg(feature = "test-support")]
+pub use retention::{
+    incremental_numeric_reused_total, incremental_verify_comparison_count,
+    incremental_verify_mismatch_count, set_incremental_layout_verify_for_test,
 };
 pub use scrollbar::{
     LayoutControlSurfaceHit, LayoutScrollbarAxis, LayoutScrollbarColors, LayoutScrollbarCornerHit,
@@ -97,18 +103,19 @@ pub use source::{
     ChildBoxPolicy, LayoutElementCategory, LayoutElementMetadata, LayoutElementSemantics,
     LayoutFormControlData, LayoutFormControlKind, LayoutHyperlink, LayoutImageResource,
     LayoutInputControlKind, LayoutListData, LayoutListRole, LayoutNamespace, LayoutPseudo,
-    LayoutReplacedKind, LayoutSource, LayoutSourceKind, LayoutStyleResolver, LayoutTableData,
-    LayoutTableRole, LayoutTextSelection, ReplacedMetrics, ResolvedLayoutElementStyles,
-    ResolvedLayoutPseudoStyle, html_display_contents_is_none,
+    LayoutQueryContainerSize, LayoutReplacedKind, LayoutSource, LayoutSourceKind,
+    LayoutStyleResolver, LayoutTableData, LayoutTableRole, LayoutTextSelection, ReplacedMetrics,
+    ResolvedLayoutElementStyles, ResolvedLayoutPseudoStyle, html_display_contents_is_none,
 };
 pub use style::{
     LayoutDisplay, LayoutInlineAlignment, LayoutListMarkerPosition, LayoutListMarkerType,
     LayoutPosition, ResolvedLayoutStyle,
 };
 pub use text::{
-    DocumentLayoutServices, FontFaceData, SystemFontPolicy, WebFontDeclaration, WebFontFace,
-    WebFontRegistration, WebFontRegistrationError, WebFontRegistrationOutcome,
-    WebFontRegistrationScope, WebFontStyle, WebFontUnicodeRange, validate_web_font_bytes,
+    DocumentLayoutServices, FontFaceData, SystemFontPolicy, TextMeasureFont, TextMeasureFontStyle,
+    TextMeasurement, WebFontDeclaration, WebFontFace, WebFontRegistration,
+    WebFontRegistrationError, WebFontRegistrationOutcome, WebFontRegistrationScope, WebFontStyle,
+    WebFontUnicodeRange, validate_web_font_bytes,
 };
 pub use world::{
     LayoutAnonymousReason, LayoutBox, LayoutBoxId, LayoutBoxKind, LayoutCapabilityDiagnostic,

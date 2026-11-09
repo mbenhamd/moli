@@ -234,7 +234,7 @@ where
 
     /// Answers a batch while letting the renderer specialize queries such as
     /// shadow-tree offsetParent visibility before their default is computed.
-    /// Source lookup belongs to this operation, never to the retained tree.
+    /// Source lookups use the tree's lazily derived provenance index.
     pub fn answer_queries_with(
         &self,
         batch: &LayoutQueryBatch<N>,

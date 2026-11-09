@@ -2001,6 +2001,7 @@ where
 pub(crate) fn prepare_inline_contexts<N>(
     world: &mut LayoutWorld<N>,
     services: &mut DocumentLayoutServices,
+    retained: Option<&mut crate::retention::RetainedReuse<N>>,
 ) where
     N: Copy + Debug + Eq + Hash,
 {
@@ -2015,10 +2016,18 @@ pub(crate) fn prepare_inline_contexts<N>(
         layout_box.inline_flattened = false;
         layout_box.inline_static_position = None;
     }
+    // Clean boxes keep the flattening decided in the previous pass, and clean
+    // owners keep their shaped context; everything else prepares as usual.
+    let needs_prepare = retained.map(|reuse| reuse.transfer_inline_flags_and_owners(world));
 
     let owners = (0..world.boxes.len())
         .map(LayoutBoxId::from_index)
         .filter(|id| world.boxes[id.index()].inline_formatting_context)
+        .filter(|id| {
+            needs_prepare
+                .as_ref()
+                .is_none_or(|needs_prepare| needs_prepare[id.index()])
+        })
         .collect::<Vec<_>>();
     let mut initialized = false;
     for owner in owners {

@@ -850,6 +850,11 @@ impl ElementControlState {
         true
     }
 
+    pub fn clear_scroll_offsets(&mut self) {
+        self.scroll_top = None;
+        self.scroll_left = None;
+    }
+
     pub fn set_scroll_left(&mut self, scroll_left: f64) -> bool {
         if self.scroll_left == Some(scroll_left) {
             return false;

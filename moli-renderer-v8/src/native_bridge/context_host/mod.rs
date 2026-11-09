@@ -833,6 +833,13 @@ pub(crate) struct JsContextHost {
     scrollbars_hidden: bool,
     document_layout_state: RefCell<layout_state::DocumentLayoutState>,
     layout_pass_active: Cell<bool>,
+    /// Under the live-geometry policy, a scroll offset changed since the
+    /// published tree last sampled offsets. Reads of that tree first move its
+    /// projection to the current offsets; a scroll is not a layout input.
+    pending_scroll_offset_sync: Cell<bool>,
+    /// Scroll offset changes since startup. A scroll keeps the live layout
+    /// key but still changes what a screencast frame shows.
+    scroll_offset_generation: Cell<u64>,
     #[cfg(test)]
     fail_live_layout_refresh_for_test: Cell<bool>,
     completed_layout_pass_count: Cell<u64>,

@@ -512,8 +512,20 @@ pub struct ResolvedLayoutStyle {
     will_change_containment: bool,
     will_change_position: bool,
     will_change_stacking_context: bool,
+    size_containment: LogicalSizeContainment,
+    query_container_axes: LogicalSizeContainment,
+    contain_intrinsic_width: Option<f32>,
+    contain_intrinsic_height: Option<f32>,
     list_marker_type: LayoutListMarkerType,
     list_marker_position: LayoutListMarkerPosition,
+}
+
+/// Size containment axes in logical terms: `contain:inline-size` and
+/// `container-type:inline-size` depend on the box's writing mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LogicalSizeContainment {
+    pub(crate) inline: bool,
+    pub(crate) block: bool,
 }
 
 impl std::fmt::Debug for ResolvedLayoutStyle {
@@ -570,6 +582,7 @@ impl std::fmt::Debug for ResolvedLayoutStyle {
             .field("layout_containment", &self.layout_containment)
             .field("paint_containment", &self.paint_containment)
             .field("will_change_containment", &self.will_change_containment)
+            .field("size_containment", &self.size_containment)
             .field("will_change_position", &self.will_change_position)
             .field(
                 "will_change_stacking_context",
@@ -736,6 +749,27 @@ impl ResolvedLayoutStyle {
             layout_containment = true;
             paint_containment = true;
         }
+        let container_type = computed.clone_container_type();
+        let size_containment = LogicalSizeContainment {
+            inline: contain.contains(style::values::computed::Contain::INLINE_SIZE)
+                || container_type.intersects(
+                    style::values::computed::ContainerType::SIZE
+                        | style::values::computed::ContainerType::INLINE_SIZE,
+                ),
+            block: contain.contains(style::values::computed::Contain::BLOCK_SIZE)
+                || container_type.intersects(style::values::computed::ContainerType::SIZE),
+        };
+        let query_container_axes = LogicalSizeContainment {
+            inline: container_type.intersects(
+                style::values::computed::ContainerType::SIZE
+                    | style::values::computed::ContainerType::INLINE_SIZE,
+            ),
+            block: container_type.intersects(style::values::computed::ContainerType::SIZE),
+        };
+        let contain_intrinsic_width =
+            contain_intrinsic_px(&computed.clone_contain_intrinsic_width());
+        let contain_intrinsic_height =
+            contain_intrinsic_px(&computed.clone_contain_intrinsic_height());
         let will_change = computed.clone_will_change().bits;
         let will_change_containment = will_change.contains(WillChangeBits::CONTAIN);
         let will_change_position = will_change.contains(WillChangeBits::POSITION);
@@ -803,10 +837,12 @@ impl ResolvedLayoutStyle {
             computed.get_box().has_transform_or_perspective()
                 || will_change.intersects(WillChangeBits::TRANSFORM | WillChangeBits::PERSPECTIVE);
         if matches!(display, LayoutDisplay::Block | LayoutDisplay::BlockListItem)
-            && (layout_containment || paint_containment)
+            && (layout_containment
+                || paint_containment
+                || computed.clone_container_type().is_size_container_type())
         {
-            // Layout and paint containment establish an independent formatting
-            // context. Taffy's FlowRoot keeps the computed CSS display intact
+            // Layout and paint containment, and a size query container,
+            // establish an independent formatting context. Taffy's FlowRoot keeps the computed CSS display intact
             // in `display` while selecting the non-collapsing block algorithm.
             taffy.display = TaffyDisplay::FlowRoot;
         }
@@ -874,6 +910,10 @@ impl ResolvedLayoutStyle {
             will_change_containment,
             will_change_position,
             will_change_stacking_context,
+            size_containment,
+            query_container_axes,
+            contain_intrinsic_width,
+            contain_intrinsic_height,
             list_marker_type,
             list_marker_position,
         }
@@ -953,6 +993,16 @@ impl ResolvedLayoutStyle {
             will_change_containment: false,
             will_change_position: false,
             will_change_stacking_context: false,
+            size_containment: LogicalSizeContainment {
+                inline: false,
+                block: false,
+            },
+            query_container_axes: LogicalSizeContainment {
+                inline: false,
+                block: false,
+            },
+            contain_intrinsic_width: None,
+            contain_intrinsic_height: None,
             list_marker_type: LayoutListMarkerType::Disc,
             list_marker_position: LayoutListMarkerPosition::Outside,
         }
@@ -1087,6 +1137,25 @@ impl ResolvedLayoutStyle {
     }
 
     /// Applies an exact group opacity in DOM-free paint-order tests.
+    /// Test builder: a `container-type` on logical axes.
+    pub fn with_query_container(mut self, inline: bool, block: bool) -> Self {
+        self.query_container_axes = LogicalSizeContainment { inline, block };
+        self
+    }
+
+    /// Test builder: size containment on logical axes (`contain`/`container-type`).
+    pub fn with_size_containment(mut self, inline: bool, block: bool) -> Self {
+        self.size_containment = LogicalSizeContainment { inline, block };
+        self
+    }
+
+    /// Test builder: `contain-intrinsic-size` lengths in CSS pixels.
+    pub fn with_contain_intrinsic_size(mut self, width: Option<f32>, height: Option<f32>) -> Self {
+        self.contain_intrinsic_width = width;
+        self.contain_intrinsic_height = height;
+        self
+    }
+
     pub fn with_opacity(mut self, opacity: f32) -> Self {
         self.opacity = opacity.clamp(0.0, 1.0);
         self
@@ -1315,6 +1384,45 @@ impl ResolvedLayoutStyle {
                     || self.will_change_containment))
     }
 
+    /// Physical axes this box answers container queries on.
+    pub(crate) const fn query_container_physical_axes(&self) -> Size<bool> {
+        if self.uses_horizontal_writing_mode() {
+            Size {
+                width: self.query_container_axes.inline,
+                height: self.query_container_axes.block,
+            }
+        } else {
+            Size {
+                width: self.query_container_axes.block,
+                height: self.query_container_axes.inline,
+            }
+        }
+    }
+
+    /// Size containment axes in physical terms, before per-box eligibility.
+    pub(crate) const fn size_containment_axes(&self) -> Size<bool> {
+        if self.uses_horizontal_writing_mode() {
+            Size {
+                width: self.size_containment.inline,
+                height: self.size_containment.block,
+            }
+        } else {
+            Size {
+                width: self.size_containment.block,
+                height: self.size_containment.inline,
+            }
+        }
+    }
+
+    /// The `contain-intrinsic-*` content-box size, used in place of the
+    /// laid-out content of a size-contained axis.
+    pub(crate) const fn contain_intrinsic_size(&self) -> Size<Option<f32>> {
+        Size {
+            width: self.contain_intrinsic_width,
+            height: self.contain_intrinsic_height,
+        }
+    }
+
     pub(crate) const fn applies_paint_containment(&self) -> bool {
         self.paint_containment
     }
@@ -1480,6 +1588,13 @@ impl ResolvedLayoutStyle {
         })
     }
 
+    /// Whether automatic overflow revealed a scrollbar on this box. `scroll`
+    /// always reserves its bar and is not feedback state.
+    pub(crate) fn has_revealed_auto_scrollbars(&self) -> bool {
+        (self.revealed_scrollbar_x && self.overflow_x == LayoutOverflowMode::Auto)
+            || (self.revealed_scrollbar_y && self.overflow_y == LayoutOverflowMode::Auto)
+    }
+
     pub(crate) fn is_floated(&self) -> bool {
         self.taffy.float != taffy::Float::None
     }
@@ -1546,6 +1661,8 @@ impl ResolvedLayoutStyle {
         placeholder.layout_containment = false;
         placeholder.paint_containment = false;
         placeholder.will_change_containment = false;
+        placeholder.size_containment = LogicalSizeContainment::default();
+        placeholder.query_container_axes = LogicalSizeContainment::default();
         placeholder.will_change_position = false;
         placeholder.will_change_stacking_context = false;
         placeholder.visible = false;
@@ -2049,6 +2166,10 @@ impl ResolvedLayoutStyle {
             will_change_containment: false,
             will_change_position: false,
             will_change_stacking_context: false,
+            size_containment: LogicalSizeContainment::default(),
+            query_container_axes: LogicalSizeContainment::default(),
+            contain_intrinsic_width: None,
+            contain_intrinsic_height: None,
             list_marker_type: parent.list_marker_type.clone(),
             list_marker_position: parent.list_marker_position,
         }
@@ -2117,6 +2238,10 @@ impl ResolvedLayoutStyle {
             will_change_containment: false,
             will_change_position: false,
             will_change_stacking_context: false,
+            size_containment: LogicalSizeContainment::default(),
+            query_container_axes: LogicalSizeContainment::default(),
+            contain_intrinsic_width: None,
+            contain_intrinsic_height: None,
             list_marker_type: parent.list_marker_type.clone(),
             list_marker_position: parent.list_marker_position,
         }
@@ -2171,6 +2296,14 @@ impl ResolvedLayoutStyle {
 
 fn usable_aspect_ratio(ratio: Option<f32>) -> Option<f32> {
     ratio.filter(|ratio| ratio.is_finite() && *ratio > 0.0)
+}
+
+fn contain_intrinsic_px(value: &style::values::computed::ContainIntrinsicSize) -> Option<f32> {
+    use style::values::generics::box_::GenericContainIntrinsicSize as Size;
+    match value {
+        Size::None | Size::AutoNone => None,
+        Size::Length(length) | Size::AutoLength(length) => Some(length.0.px()),
+    }
 }
 
 fn taffy_size_dimension(

@@ -11,7 +11,7 @@ use crate::{
         dispatch_pagehide_for_runtime_owner, dispatch_unload_for_runtime_owner,
     },
     detached_event_target::dispatch_detached_simple_event,
-    document_runtime::DomHandle,
+    document_runtime::{DomHandle, EventTargetHandle},
     dom::native::DocumentReadyState,
     frame_owner_model::{
         FrameDocumentCompleteLifecycleAction, FrameDocumentDescendantLoadCompletion,
@@ -21,10 +21,7 @@ use crate::{
         FrameRealmId,
     },
     native_bridge::document::DETACHED_STATE_SLOT,
-    util::{
-        call_object_method, context_host_ptr_from_global_bridge, get_private_object, v8_string,
-        v8str,
-    },
+    util::{context_host_ptr_from_global_bridge, get_private_object, v8_string, v8str},
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -897,8 +894,8 @@ impl JsContextHost {
         else {
             return;
         };
-        let Some(document) =
-            unsafe { &mut *host_ptr }.child_browsing_context_document_wrapper(scope, handle)
+        let Some(document_handle) =
+            unsafe { &*host_ptr }.child_browsing_context_document_handle(handle)
         else {
             return;
         };
@@ -913,8 +910,16 @@ impl JsContextHost {
         );
 
         dispatch_pagehide_for_runtime_owner(scope, window);
+        // Native dispatch keeps the UA event trusted; the author-visible
+        // dispatchEvent method marks script dispatches untrusted.
         if let Some(event) = construct_original_event(scope, "visibilitychange") {
-            let _ = call_object_method(scope, document, "dispatchEvent", &[event.into()]);
+            let _ = unsafe { &mut *host_ptr }.dispatch_public_event_best_effort(
+                scope,
+                host_ptr,
+                EventTargetHandle::Node(document_handle),
+                event,
+                "child document-open visibilitychange",
+            );
         }
         dispatch_unload_for_runtime_owner(scope, window);
         let _ = unsafe { &mut *host_ptr }

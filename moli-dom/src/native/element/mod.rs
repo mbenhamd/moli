@@ -485,6 +485,23 @@ impl Element {
         InputType::from_attribute_value(self.attribute("type"))
     }
 
+    /// A `textarea`, or an `input` whose type edits text (selection and
+    /// value APIs apply, and layout reads its focus to place the caret).
+    pub fn is_text_control(&self) -> bool {
+        self.is_html_textarea()
+            || (self.is_html_input()
+                && !matches!(
+                    self.input_type(),
+                    InputType::Hidden
+                        | InputType::Checkbox
+                        | InputType::Radio
+                        | InputType::Button
+                        | InputType::Submit
+                        | InputType::Reset
+                        | InputType::Image
+                ))
+    }
+
     pub fn input_value(&self) -> String {
         if self.is_html_input()
             && self.input_type().is_checkable()
@@ -1043,6 +1060,16 @@ impl Element {
             return false;
         }
         self.control_state_mut().set_scroll_top(scroll_top)
+    }
+
+    /// Forget the scroll offset, as when the element's scroll container is
+    /// destroyed by removal from its Document.
+    pub fn reset_scroll_offsets(&mut self) {
+        if self.control_state().scroll_top().is_some()
+            || self.control_state().scroll_left().is_some()
+        {
+            self.control_state_mut().clear_scroll_offsets();
+        }
     }
 
     pub fn scroll_left(&self) -> f64 {

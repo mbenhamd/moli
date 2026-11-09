@@ -528,6 +528,65 @@ fn computed_direction_tracks_input_html_directionality() {
 }
 
 #[test]
+fn author_direction_overrides_dir_attribute_hint() {
+    let mut vm = new_storage_test_vm("https://direction-cascade-computed-style.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  if (!document.documentElement) {
+    document.appendChild(document.createElement('html'));
+  }
+  if (!document.head) {
+    document.documentElement.appendChild(document.createElement('head'));
+  }
+  if (!document.body) {
+    document.documentElement.appendChild(document.createElement('body'));
+  }
+  document.head.appendChild(document.createElement('style')).textContent =
+    '.ltr { direction: ltr; } .rtl { direction: rtl; }';
+
+  const add = (parent, tag, className, dir, text) => {
+    const element = document.createElement(tag);
+    element.className = className;
+    if (dir) element.dir = dir;
+    element.textContent = text;
+    parent.appendChild(element);
+    return element;
+  };
+  const direction = (element) => getComputedStyle(element).direction;
+
+  const authored = add(document.body, 'div', 'ltr', '', 'x');
+  const authoredChild = add(authored, 'span', '', '', 'x');
+  const inherited = add(document.body, 'div', '', '', 'x');
+  const initial = direction(inherited);
+  document.documentElement.dir = 'rtl';
+
+  const ltrScope = add(document.body, 'div', '', 'ltr', '');
+  const auto = add(ltrScope, 'div', '', 'auto', 'abc');
+  const autoChild = add(auto, 'span', '', '', '');
+  const autoBefore = direction(autoChild);
+  auto.firstChild.data = 'ת';
+
+  const mathNs = 'http://www.w3.org/1998/Math/MathML';
+  const math = ltrScope.appendChild(document.createElementNS(mathNs, 'math'));
+  math.setAttribute('dir', 'rtl');
+  const mi = math.appendChild(document.createElementNS(mathNs, 'mi'));
+
+  return [
+    initial, direction(authored), direction(authoredChild), direction(inherited),
+    autoBefore, direction(auto), direction(autoChild), direction(math), direction(mi),
+  ].join('|');
+})()
+"#,
+        )
+        .expect("direction cascade computed style should evaluate");
+
+    assert_eq!(result, "ltr|ltr|ltr|rtl|ltr|rtl|rtl|rtl|rtl");
+}
+
+#[test]
 fn has_pseudo_class_computed_style_updates_after_dom_mutation() {
     let mut vm = new_storage_test_vm("https://has-pseudo-computed-style.test/");
 

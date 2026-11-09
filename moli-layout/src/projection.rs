@@ -30,6 +30,10 @@ pub(crate) struct LayoutPassPhaseMetrics {
     pub(crate) numeric_layout_pass_count: usize,
     pub(crate) numeric_feedback_invalidated_node_count: usize,
     pub(crate) numeric_feedback_overflow_recomputed_node_count: usize,
+    pub(crate) container_query_iteration_count: usize,
+    pub(crate) retained_reused_box_count: usize,
+    pub(crate) retained_reused_inline_count: usize,
+    pub(crate) retained_reused_numeric_count: usize,
 }
 
 pub(crate) fn finish_layout_pass<N, S: crate::LayoutSource<NodeId = N>>(
@@ -119,6 +123,10 @@ where
             .numeric_feedback_invalidated_node_count,
         numeric_feedback_overflow_recomputed_node_count: phase_metrics
             .numeric_feedback_overflow_recomputed_node_count,
+        container_query_iteration_count: phase_metrics.container_query_iteration_count,
+        retained_reused_box_count: phase_metrics.retained_reused_box_count,
+        retained_reused_inline_count: phase_metrics.retained_reused_inline_count,
+        retained_reused_numeric_count: phase_metrics.retained_reused_numeric_count,
         box_count: projection.boxes.len(),
         fragment_count: projection.fragments.len(),
         paint_event_count: paint_projection_metrics.event_count,
@@ -256,9 +264,12 @@ where
         for (source, box_id) in &world.source_mapping {
             principal_sources[box_id.index()] = Some(*source);
         }
-        let scroll_proxy_links = world
-            .display_contents_mapping
-            .iter()
+        // The mapping is a hash map; order its sources by their first box so
+        // the projected vector is the same on every pass for the same tree.
+        let mut proxy_sources: Vec<_> = world.display_contents_mapping.iter().collect();
+        proxy_sources.sort_by_key(|(_, boxes)| boxes.first().map(|id| id.index()));
+        let scroll_proxy_links = proxy_sources
+            .into_iter()
             .flat_map(|(source, boxes)| {
                 boxes
                     .iter()
@@ -926,6 +937,45 @@ where
                 .next()
                 .expect("a frozen layout tree always owns the viewport coordinate space"),
         );
+        let mut scroll_projection: Vec<crate::layout_tree::ScrollProjectionInput> = self
+            .world
+            .boxes
+            .iter()
+            .zip(&self.resolved_transforms)
+            .map(
+                |(layout_box, transform)| crate::layout_tree::ScrollProjectionInput {
+                    location: LayoutPoint::new(
+                        layout_box.final_layout.location.x,
+                        layout_box.final_layout.location.y,
+                    ),
+                    css_transform: transform.transform,
+                    viewport_anchored_root: layout_box.layout_parent.is_none()
+                        && layout_box.style.is_fixed_positioned(),
+                    sticky: layout_box.style.position() == crate::LayoutPosition::Sticky,
+                    sticky_descendant: false,
+                },
+            )
+            .collect();
+        // Mark every layout ancestor of a sticky box: a scroll offset change
+        // on any of them can move the sticky box relative to its scrollport.
+        for (index, layout_box) in self.world.boxes.iter().enumerate() {
+            if !scroll_projection[index].sticky {
+                continue;
+            }
+            let mut parent = layout_box.layout_parent;
+            let mut steps = 0;
+            while let Some(id) = parent {
+                let Some(input) = scroll_projection.get_mut(id.index()) else {
+                    break;
+                };
+                if input.sticky_descendant || steps > self.world.boxes.len() {
+                    break;
+                }
+                input.sticky_descendant = true;
+                parent = self.world.boxes[id.index()].layout_parent;
+                steps += 1;
+            }
+        }
         let world = self.world;
         let boxes = self
             .boxes
@@ -993,6 +1043,7 @@ where
             self.clip_chain,
             embedded_frames,
         )
+        .with_scroll_projection(scroll_projection)
     }
 }
 
