@@ -242,6 +242,7 @@ fn measure(runtime: &JsContextHost, owner: DomHandle, text: &str) -> moli_layout
             ascent: size * 0.8,
             descent: size * 0.2,
             x_height: size * 0.5,
+            ink: None,
         };
     };
     let document = runtime

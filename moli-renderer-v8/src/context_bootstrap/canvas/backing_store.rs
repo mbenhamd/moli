@@ -198,7 +198,7 @@ fn ensure_canvas_like_backing_store<'s>(
     Some(bytes)
 }
 
-fn html_canvas_identity<'s>(
+pub(super) fn html_canvas_identity<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     canvas: v8::Local<'s, v8::Object>,
 ) -> Option<(*mut JsContextHost, DomHandle)> {

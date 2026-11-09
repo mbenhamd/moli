@@ -1495,6 +1495,7 @@ fn canvas_context_string_setters_parse_webidl_domstring() {
   };
 
   const ctx = document.createElement('canvas').getContext('2d');
+  // "null" and "undefined" are DOMStrings but not CSS fonts: ignored.
   ctx.font = null;
   const fontNull = ctx.font;
   ctx.font = undefined;
@@ -1544,7 +1545,7 @@ fn canvas_context_string_setters_parse_webidl_domstring() {
 
     assert_eq!(
         result,
-        r##"{"fontNull":"null","fontUndefined":"undefined","fontObject":"16px serif","fontSymbol":"TypeError","fontAfterSymbol":"16px serif","fontThrow":"RangeError","fontAfterThrow":"16px serif","fillObject":"#ff0000","fillSymbol":"TypeError","fillAfterSymbol":"#ff0000","fillThrow":"RangeError","fillAfterThrow":"#ff0000","offscreenFont":"20px sans-serif","offscreenFill":"#00ff00"}"##
+        r##"{"fontNull":"10px sans-serif","fontUndefined":"10px sans-serif","fontObject":"16px serif","fontSymbol":"TypeError","fontAfterSymbol":"16px serif","fontThrow":"RangeError","fontAfterThrow":"16px serif","fillObject":"#ff0000","fillSymbol":"TypeError","fillAfterSymbol":"#ff0000","fillThrow":"RangeError","fillAfterThrow":"#ff0000","offscreenFont":"20px sans-serif","offscreenFill":"#00ff00"}"##
     );
 }
 

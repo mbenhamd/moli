@@ -188,6 +188,7 @@ mod canvas_context_kind_tests {
 mod backing_store;
 mod constructors;
 mod context2d;
+mod font;
 mod helpers;
 mod image_bitmap;
 mod objects;

@@ -53,6 +53,7 @@ async fn dispatch_main_document_domcontentloaded_for_rendering_test(
     Ok(owner)
 }
 
+mod canvas_text;
 mod form_controls;
 mod layout_geometry;
 mod optical_sizing;

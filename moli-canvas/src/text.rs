@@ -46,9 +46,10 @@ pub fn draw_text(
 fn parse_font_size_px(font: &str) -> u32 {
     font.split_whitespace()
         .find_map(|part| part.strip_suffix("px"))
-        .and_then(|value| value.parse::<u32>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(10)
+        // The 2D context stores Blink's float serialization, e.g. `19.2px`.
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 1.0)
+        .map_or(10, |value| value.min(f64::from(u32::MAX)) as u32)
 }
 
 fn text_scale(font: &str) -> u32 {

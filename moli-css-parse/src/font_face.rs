@@ -107,6 +107,8 @@ pub struct CssFontShorthand {
     pub style: String,
     pub weight: String,
     pub stretch: String,
+    /// `font-variant-caps`; the shorthand only sets `normal` or `small-caps`.
+    pub variant_caps: String,
 }
 
 /// Shares the CSS font grammar with style declarations, including quoted
@@ -156,6 +158,7 @@ pub fn parse_font_shorthand(value: &str) -> Option<CssFontShorthand> {
             style: property("font-style")?,
             weight: property("font-weight")?,
             stretch: property("font-stretch")?,
+            variant_caps: property("font-variant-caps").unwrap_or_else(|| "normal".to_owned()),
         })
     })
 }
