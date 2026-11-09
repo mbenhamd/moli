@@ -1576,3 +1576,39 @@ fn live_geometry_focus_styles_that_change_boxes_lay_out_again() {
     );
     assert_eq!(b_left, 30.0, ":focus-within padding must reach geometry");
 }
+
+#[test]
+fn live_geometry_focus_inside_a_shadow_host_reaches_host_focus_styles_and_window_scroll() {
+    let mut vm = new_parsed_test_vm(
+        "https://live-geometry-focus-shadow.test/",
+        "<!doctype html><html><head><style>#h{display:block}#h:focus{padding-top:20px}</style></head><body style=margin:0><div id=h></div><div style=height:3000px></div><button id=far>far</button></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.eval(
+        "document.getElementById('h').attachShadow({mode:'open'}).innerHTML = '<button id=inner>in</button>'; 'attached'",
+    )
+    .expect("shadow setup");
+    let host_height = "String(document.getElementById('h').getBoundingClientRect().height)";
+    let unfocused: f64 = vm.eval(host_height).expect("first read").parse().unwrap();
+    vm.eval("document.getElementById('h').shadowRoot.getElementById('inner').focus(); 'focused'")
+        .expect("focus inner");
+    let focused: f64 = vm.eval(host_height).expect("focused read").parse().unwrap();
+    assert_eq!(
+        focused,
+        unfocused + 20.0,
+        "host :focus padding must reach geometry"
+    );
+    assert_eq!(
+        vm.eval(
+            "const far = document.getElementById('far'); far.focus(); JSON.stringify([scrollY > 0, far.getBoundingClientRect().bottom <= innerHeight])"
+        )
+        .expect("focus far"),
+        "[true,true]",
+        "focus() scrolls the window and the next read sees the scrolled geometry"
+    );
+    let blurred: f64 = vm.eval(host_height).expect("blurred read").parse().unwrap();
+    assert_eq!(
+        blurred, unfocused,
+        "moving focus out drops host :focus padding"
+    );
+}
