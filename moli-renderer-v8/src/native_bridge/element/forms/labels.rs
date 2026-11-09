@@ -91,10 +91,9 @@ fn collect_shadow_including_labels_at(
     }
 }
 
-fn shadow_including_label_handles(runtime: &JsContextHost) -> Vec<DomHandle> {
+fn shadow_including_label_handles(runtime: &JsContextHost, document: DomHandle) -> Vec<DomHandle> {
     let mut labels = Vec::new();
-    let (root, include_root) = (runtime.dom_host().document_handle(), false);
-    collect_shadow_including_labels_from(runtime, root, include_root, &mut labels);
+    collect_shadow_including_labels_from(runtime, document, false, &mut labels);
     labels
 }
 
@@ -128,7 +127,14 @@ fn shadow_including_contains(
 
 fn label_handles_for_control(runtime: &JsContextHost, control_handle: DomHandle) -> Vec<DomHandle> {
     if runtime.dom_host().is_connected(control_handle) {
-        return shadow_including_label_handles(runtime);
+        // A control in a child browsing context shares this host with the top
+        // document, so its labels must come from its own node document.
+        return runtime
+            .dom_host()
+            .owner_document_handle(control_handle)
+            .map_or_else(Vec::new, |document| {
+                shadow_including_label_handles(runtime, document)
+            });
     }
 
     let root = runtime
@@ -276,6 +282,44 @@ fn label_reflected_control_handle(
     label_control_handle(runtime, label_handle)
 }
 
+/// IDs that a label's `for` must carry to target this control: the control's
+/// own, or that of a shadow host whose reference target resolves to it.
+fn label_for_target_ids(runtime: &JsContextHost, control_handle: DomHandle) -> Vec<String> {
+    let id_of = |handle| {
+        runtime
+            .dom_host()
+            .node(handle)
+            .and_then(Node::as_element)
+            .and_then(Element::id)
+            .map(str::to_owned)
+    };
+    let mut ids = id_of(control_handle).into_iter().collect::<Vec<_>>();
+    for binding in runtime.dom_host().snapshot_shadow_root_bindings() {
+        if let Some(id) = id_of(binding.host)
+            && runtime
+                .dom_host()
+                .resolve_reference_target_chain(binding.host)
+                == Some(control_handle)
+        {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// Skips the tree-order `for` lookup, a subtree walk outside the top document,
+/// for labels that name some other element. A match here is still resolved in
+/// full, because a duplicate ID may make another element the actual target.
+fn label_may_target_ids(runtime: &JsContextHost, label_handle: DomHandle, ids: &[String]) -> bool {
+    runtime
+        .dom_host()
+        .node(label_handle)
+        .and_then(Node::as_element)
+        .and_then(|label| label.attribute("for"))
+        .filter(|for_id| !for_id.is_empty())
+        .is_none_or(|for_id| ids.iter().any(|id| id == for_id))
+}
+
 pub(crate) fn control_label_handles(
     runtime: &JsContextHost,
     control_handle: DomHandle,
@@ -291,9 +335,13 @@ pub(crate) fn control_label_handles(
         return Vec::new();
     }
 
+    let target_ids = label_for_target_ids(runtime, control_handle);
     label_handles_for_control(runtime, control_handle)
         .into_iter()
-        .filter(|label_handle| label_control_handle(runtime, *label_handle) == Some(control_handle))
+        .filter(|label_handle| {
+            label_may_target_ids(runtime, *label_handle, &target_ids)
+                && label_control_handle(runtime, *label_handle) == Some(control_handle)
+        })
         .collect()
 }
 
