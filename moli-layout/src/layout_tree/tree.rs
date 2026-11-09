@@ -283,6 +283,186 @@ where
     }
 }
 
+/// Result of [`FrozenLayoutTree::sync_scroll_offsets`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScrollOffsetSync {
+    /// Every scroll container already applies its source's offset.
+    Unchanged,
+    /// Applied offsets, scrollbars and coordinate spaces now match the
+    /// sampled offsets.
+    Updated,
+    /// The tree cannot follow the new offsets without a layout pass.
+    NeedsLayout,
+}
+
+impl<N> FrozenLayoutTree<N>
+where
+    N: Copy + Debug + Eq + Hash,
+{
+    /// Re-samples every scroll container's offset and moves the published
+    /// projection to it without a layout pass.
+    ///
+    /// A layout pass reads scroll offsets only when it projects boxes: the
+    /// applied offset is the requested offset clamped to the box's scroll
+    /// range, each child of a non-root scroll container is translated by
+    /// minus that offset in the container's space, and every box that is not
+    /// anchored to the viewport is translated by minus the viewport offset.
+    /// Box sizes, positions, scroll ranges, clips and fragments do not depend
+    /// on them; sticky positioning resolves against the unscrolled scrollport
+    /// (`finish_sticky_positioning`). Moving an offset is therefore exactly a
+    /// translation of the affected coordinate spaces, which this applies.
+    ///
+    /// `sample` returns a source's scroll offset in CSSOM (unzoomed) pixels,
+    /// as [`crate::LayoutSource::scroll_offset`] does during a pass.
+    pub fn sync_scroll_offsets(
+        &mut self,
+        sample: &mut dyn FnMut(N) -> LayoutPoint,
+    ) -> ScrollOffsetSync {
+        let mut outcome = ScrollOffsetSync::Unchanged;
+        for frame in &mut self.embedded_frames {
+            match frame.tree.sync_scroll_offsets(sample) {
+                ScrollOffsetSync::NeedsLayout => return ScrollOffsetSync::NeedsLayout,
+                ScrollOffsetSync::Updated => outcome = ScrollOffsetSync::Updated,
+                ScrollOffsetSync::Unchanged => {}
+            }
+        }
+
+        // Offset change (old minus new) per scroll container, in the box's
+        // own zoomed coordinate space.
+        let mut moved = vec![LayoutPoint::ZERO; self.boxes.len()];
+        let mut any_moved = false;
+        for (index, layout_box) in self.boxes.iter_mut().enumerate() {
+            let extent = &mut layout_box.scroll_extent;
+            if !extent.is_scroll_container {
+                continue;
+            }
+            let Some(source) = layout_box.principal_source else {
+                // Only a principal box imports a source offset; any other
+                // box was projected at the origin.
+                continue;
+            };
+            let zoom = layout_box.geometry.effective_zoom;
+            let offset = sample(source);
+            let requested = LayoutPoint::new(
+                finite_or_zero(offset.x * zoom),
+                finite_or_zero(offset.y * zoom),
+            );
+            let applied = LayoutPoint::new(
+                requested
+                    .x
+                    .clamp(extent.minimum_offset.x, extent.maximum_offset.x),
+                requested
+                    .y
+                    .clamp(extent.minimum_offset.y, extent.maximum_offset.y),
+            );
+            if applied == extent.applied_offset {
+                continue;
+            }
+            moved[index] = LayoutPoint::new(
+                extent.applied_offset.x - applied.x,
+                extent.applied_offset.y - applied.y,
+            );
+            any_moved = true;
+            extent.applied_offset = applied;
+            extent.horizontal_scrollbar = extent.horizontal_scrollbar.map(|bar| {
+                crate::LayoutScrollbarGeometry::new(
+                    bar.axis,
+                    bar.frame,
+                    bar.minimum_offset,
+                    bar.maximum_offset,
+                    applied.x,
+                    extent.scrollport.width,
+                    extent.scroll_size.width,
+                )
+            });
+            extent.vertical_scrollbar = extent.vertical_scrollbar.map(|bar| {
+                crate::LayoutScrollbarGeometry::new(
+                    bar.axis,
+                    bar.frame,
+                    bar.minimum_offset,
+                    bar.maximum_offset,
+                    applied.y,
+                    extent.scrollport.height,
+                    extent.scroll_size.height,
+                )
+            });
+        }
+        if !any_moved {
+            return outcome;
+        }
+
+        let root = self.root_box.index();
+        let viewport_moved = moved.get(root).copied().unwrap_or(LayoutPoint::ZERO);
+        if let Some(root_box) = self.boxes.get(root) {
+            self.viewport_scroll = root_box.scroll_extent.applied_offset;
+        }
+
+        // Viewport translation each box gains, exact and ignoring CSS
+        // transforms, resolved parent first.
+        let count = self.boxes.len();
+        let mut shift: Vec<Option<((f64, f64), (f64, f64))>> = vec![None; count];
+        let mut chain = Vec::new();
+        for start in 0..count {
+            let mut current = start;
+            while shift[current].is_none() {
+                chain.push(current);
+                match self.boxes[current].geometry.layout_parent {
+                    Some(parent) if parent.index() < count => current = parent.index(),
+                    Some(_) => return ScrollOffsetSync::NeedsLayout,
+                    None => break,
+                }
+                if chain.len() > count {
+                    return ScrollOffsetSync::NeedsLayout;
+                }
+            }
+            while let Some(index) = chain.pop() {
+                let geometry = &self.boxes[index].geometry;
+                let resolved = match geometry.layout_parent {
+                    None if geometry.position.is_fixed() => ((0.0, 0.0), (0.0, 0.0)),
+                    None => {
+                        let viewport = (f64::from(viewport_moved.x), f64::from(viewport_moved.y));
+                        (viewport, viewport)
+                    }
+                    Some(parent) => {
+                        let parent = parent.index();
+                        let (exact, plain) =
+                            shift[parent].expect("a parent resolves before its child");
+                        let scrolled = moved[parent];
+                        if parent == root || scrolled == LayoutPoint::ZERO {
+                            (exact, plain)
+                        } else {
+                            let [a, b, c, d, _, _] = self.boxes[parent]
+                                .coordinate_space
+                                .local_to_viewport
+                                .coefficients;
+                            let (dx, dy) = (f64::from(scrolled.x), f64::from(scrolled.y));
+                            (
+                                (exact.0 + a * dx + c * dy, exact.1 + b * dx + d * dy),
+                                (plain.0 + dx, plain.1 + dy),
+                            )
+                        }
+                    }
+                };
+                shift[index] = Some(resolved);
+            }
+        }
+        for (layout_box, shift) in self.boxes.iter_mut().zip(shift) {
+            let ((exact_x, exact_y), (plain_x, plain_y)) =
+                shift.expect("every box resolves its shift");
+            let space = &mut layout_box.coordinate_space;
+            space.local_to_viewport.coefficients[4] += exact_x;
+            space.local_to_viewport.coefficients[5] += exact_y;
+            space.local_to_viewport_ignoring_css_transforms.coefficients[4] += plain_x;
+            space.local_to_viewport_ignoring_css_transforms.coefficients[5] += plain_y;
+        }
+        ScrollOffsetSync::Updated
+    }
+}
+
+fn finite_or_zero(value: f32) -> f32 {
+    if value.is_finite() { value } else { 0.0 }
+}
+
 fn validate_retention_metrics(metrics: LayoutTreeRetentionMetrics) -> Result<(), LayoutError> {
     if metrics.box_count > MAX_RETAINED_LAYOUT_BOXES
         || metrics.fragment_count > MAX_RETAINED_LAYOUT_FRAGMENTS
