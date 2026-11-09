@@ -56,6 +56,23 @@ pub struct TextMeasurement {
     pub descent: f32,
     /// x-height of the first available font, in CSS pixels.
     pub x_height: f32,
+    /// Union of the shaped glyphs' outline boxes, when every glyph's font
+    /// exposes TrueType outline bounds and at least one glyph has ink.
+    pub ink: Option<TextInkBounds>,
+}
+
+/// Glyph outline extent relative to the start of the line (x) and the
+/// alphabetic baseline (y), in CSS pixels. All values grow outward.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TextInkBounds {
+    /// Distance from the line start to the leftmost ink (positive = left).
+    pub left: f32,
+    /// Distance from the line start to the rightmost ink.
+    pub right: f32,
+    /// Distance from the baseline to the topmost ink (positive = up).
+    pub ascent: f32,
+    /// Distance from the baseline to the lowest ink (positive = down).
+    pub descent: f32,
 }
 
 impl DocumentLayoutServices {
@@ -112,6 +129,7 @@ impl DocumentLayoutServices {
                 ascent,
                 descent,
                 x_height,
+                ink: None,
             };
         }
         let mut styles: Vec<TextStyle<'static, 'static, TextBrush>> = Vec::new();
@@ -160,8 +178,54 @@ impl DocumentLayoutServices {
             ascent,
             descent,
             x_height,
+            ink: ink_bounds(&layout),
         }
     }
+}
+
+fn ink_bounds(layout: &parley::Layout<TextBrush>) -> Option<TextInkBounds> {
+    use read_fonts::{TableProvider, types::GlyphId};
+
+    let mut bounds: Option<TextInkBounds> = None;
+    for line in layout.lines() {
+        let baseline = line.metrics().baseline;
+        for item in line.items() {
+            let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                continue;
+            };
+            let run = glyph_run.run();
+            let font_data = &run.font().font;
+            let font =
+                read_fonts::FontRef::from_index(font_data.data.as_ref(), font_data.index).ok()?;
+            let units_per_em = f32::from(font.head().ok()?.units_per_em());
+            if units_per_em <= 0.0 {
+                return None;
+            }
+            let scale = run.font_size() / units_per_em;
+            let glyf = font.glyf().ok()?;
+            let loca = font.loca(None).ok()?;
+            for glyph in glyph_run.positioned_glyphs() {
+                // An empty outline (a space) has no ink.
+                let Some(outline) = loca.get_glyf(GlyphId::new(glyph.id), &glyf).ok()? else {
+                    continue;
+                };
+                let rise = baseline - glyph.y;
+                let glyph_bounds = TextInkBounds {
+                    left: -(glyph.x + f32::from(outline.x_min()) * scale),
+                    right: glyph.x + f32::from(outline.x_max()) * scale,
+                    ascent: rise + f32::from(outline.y_max()) * scale,
+                    descent: -rise - f32::from(outline.y_min()) * scale,
+                };
+                bounds = Some(bounds.map_or(glyph_bounds, |current| TextInkBounds {
+                    left: current.left.max(glyph_bounds.left),
+                    right: current.right.max(glyph_bounds.right),
+                    ascent: current.ascent.max(glyph_bounds.ascent),
+                    descent: current.descent.max(glyph_bounds.descent),
+                }));
+            }
+        }
+    }
+    bounds
 }
 
 fn primary_metrics(
@@ -227,6 +291,27 @@ mod tests {
             (empty.advance, empty.ascent, empty.descent),
             (0.0, 16.0, 4.0)
         );
+    }
+
+    #[test]
+    fn ink_bounds_cover_the_shaped_outlines() {
+        let mut services = ahem_services();
+        // The fixture's X outline spans its 0.6em advance from the baseline
+        // up to 0.8em. A space has no outline.
+        let ink = services
+            .measure_text(" XX", &font("Ahem", 10.0))
+            .ink
+            .expect("Ahem has TrueType outlines");
+        assert_eq!(
+            ink,
+            TextInkBounds {
+                left: -6.0,
+                right: 18.0,
+                ascent: 8.0,
+                descent: 0.0
+            }
+        );
+        assert_eq!(services.measure_text("  ", &font("Ahem", 10.0)).ink, None);
     }
 
     #[test]

@@ -106,8 +106,8 @@ pub use style::{
     LayoutPosition, ResolvedLayoutStyle,
 };
 pub use text::{
-    DocumentLayoutServices, FontFaceData, SystemFontPolicy, TextMeasureFont, TextMeasureFontStyle,
-    TextMeasurement, WebFontDeclaration, WebFontFace, WebFontRegistration,
+    DocumentLayoutServices, FontFaceData, SystemFontPolicy, TextInkBounds, TextMeasureFont,
+    TextMeasureFontStyle, TextMeasurement, WebFontDeclaration, WebFontFace, WebFontRegistration,
     WebFontRegistrationError, WebFontRegistrationOutcome, WebFontRegistrationScope, WebFontStyle,
     WebFontUnicodeRange, validate_web_font_bytes,
 };
