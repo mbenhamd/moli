@@ -6,6 +6,8 @@ use moli_layout::{
     LayoutQueryAnswer, LayoutQueryBatch, LayoutResolvedGridTracks, LayoutScrollIntoViewGeometry,
 };
 
+use moli_svg::SvgMatrixComponents;
+
 use super::client_rect::{ClientRect, union_client_rect, zero_client_rect};
 use super::mock::{answer_queries as answer_mock_queries, answer_query as answer_mock_query};
 use crate::{document_runtime::DomHandle, native_bridge::JsContextHost};
@@ -98,7 +100,7 @@ fn read_svg_content_client_rects(
     let Some(root) = screen::svg_layout_viewport_root(runtime, source) else {
         return Ok(None);
     };
-    let Some(root_box) = read_layout_client_rects(runtime, root)?
+    let Some(root_box) = read_css_box_client_rects(runtime, root)?
         .into_iter()
         .reduce(union_client_rect)
     else {
@@ -132,7 +134,115 @@ pub(crate) fn read_client_rects(
     if let Some(rects) = read_svg_content_client_rects(runtime, source)? {
         return Ok(rects);
     }
+    read_css_box_client_rects(runtime, source)
+}
+
+/// Client rects of a source that has CSS boxes: in the Document's pass, or,
+/// below a `<foreignObject>`, in that element's own content pass.
+fn read_css_box_client_rects(
+    runtime: &JsContextHost,
+    source: DomHandle,
+) -> Result<Vec<ClientRect>, LayoutError> {
+    if let Some(rects) = read_foreign_object_content_client_rects(runtime, source)? {
+        return Ok(rects);
+    }
     read_layout_client_rects(runtime, source)
+}
+
+/// The `<foreignObject>` hosting `source`'s CSS boxes, with the transform
+/// from its content space to client coordinates. `Ok(None)` when `source`
+/// is not such content or layout is mocked. The transform is `None` when
+/// the outermost `<svg>` has no box, so the content is not rendered.
+fn foreign_object_layout_host(
+    runtime: &JsContextHost,
+    source: DomHandle,
+) -> Result<Option<(DomHandle, Option<SvgMatrixComponents>)>, LayoutError> {
+    use crate::context_bootstrap::svg_runtime::screen;
+    if !runtime.layout_policy().uses_real_layout() {
+        return Ok(None);
+    }
+    let Some((foreign_object, root)) = screen::svg_foreign_object_host(runtime, source) else {
+        return Ok(None);
+    };
+    let transform = read_css_box_client_rects(runtime, root)?
+        .into_iter()
+        .reduce(union_client_rect)
+        .map(|root_box| {
+            screen::svg_foreign_object_content_transform(
+                runtime,
+                foreign_object,
+                root,
+                [root_box.left, root_box.top, root_box.width, root_box.height],
+            )
+        });
+    Ok(Some((foreign_object, transform)))
+}
+
+/// Client rects of CSS content below a `<foreignObject>`: its rects in the
+/// content pass, each mapped through the SVG screen CTM to the bounding box
+/// of the transformed quad, as Blink reports them.
+fn read_foreign_object_content_client_rects(
+    runtime: &JsContextHost,
+    source: DomHandle,
+) -> Result<Option<Vec<ClientRect>>, LayoutError> {
+    let Some((foreign_object, transform)) = foreign_object_layout_host(runtime, source)? else {
+        return Ok(None);
+    };
+    let Some(transform) = transform else {
+        return Ok(Some(Vec::new()));
+    };
+    let rects = match runtime
+        .answer_foreign_object_layout_query(foreign_object, &LayoutQuery::ClientRects { source })?
+    {
+        Some(LayoutQueryAnswer::ClientRects(rects)) => rects,
+        None => return Ok(Some(Vec::new())),
+        _ => return Err(provider_contract_error("foreignObject client rects")),
+    };
+    Ok(Some(
+        rects
+            .into_iter()
+            .map(|rect| transformed_client_rect(ClientRect::from(rect), transform))
+            .collect(),
+    ))
+}
+
+fn transformed_client_rect(rect: ClientRect, transform: SvgMatrixComponents) -> ClientRect {
+    let corners = [
+        (rect.left, rect.top),
+        (rect.right, rect.top),
+        (rect.left, rect.bottom),
+        (rect.right, rect.bottom),
+    ]
+    .map(|(x, y)| {
+        (
+            transform.a * x + transform.c * y + transform.e,
+            transform.b * x + transform.d * y + transform.f,
+        )
+    });
+    let left = corners
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f64::INFINITY, f64::min);
+    let right = corners
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let top = corners
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f64::INFINITY, f64::min);
+    let bottom = corners
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f64::NEG_INFINITY, f64::max);
+    ClientRect {
+        left,
+        top,
+        right,
+        bottom,
+        width: right - left,
+        height: bottom - top,
+    }
 }
 
 fn read_layout_client_rects(
@@ -223,6 +333,10 @@ pub(crate) fn observable_bounding_client_rects(
     if sources.iter().any(|source| {
         crate::context_bootstrap::svg_runtime::screen::svg_layout_viewport_root(runtime, *source)
             .is_some()
+            || crate::context_bootstrap::svg_runtime::screen::svg_foreign_object_host(
+                runtime, *source,
+            )
+            .is_some()
     }) {
         return sources
             .iter()
@@ -281,6 +395,21 @@ pub(crate) fn read_element_metrics(
     runtime: &JsContextHost,
     source: DomHandle,
 ) -> Result<Option<LayoutElementMetrics<DomHandle>>, LayoutError> {
+    if let Some((foreign_object, transform)) = foreign_object_layout_host(runtime, source)? {
+        // Box metrics are untransformed CSS sizes, so they come straight from
+        // the content pass; unrendered content has none.
+        if transform.is_none() {
+            return Ok(None);
+        }
+        return match runtime.answer_foreign_object_layout_query(
+            foreign_object,
+            &LayoutQuery::ElementMetrics { source },
+        )? {
+            Some(LayoutQueryAnswer::ElementMetrics(metrics)) => Ok(metrics),
+            None => Ok(None),
+            _ => Err(provider_contract_error("foreignObject element metrics")),
+        };
+    }
     match query_source(runtime, source, LayoutQuery::ElementMetrics { source })? {
         Some(LayoutQueryAnswer::ElementMetrics(metrics)) => Ok(metrics),
         None => Ok(None),

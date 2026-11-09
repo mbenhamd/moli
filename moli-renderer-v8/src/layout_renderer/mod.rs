@@ -36,9 +36,42 @@ pub(crate) fn build_native_layout_pass(
         request,
         environment_override,
         &mut document_stack,
+        false,
     )
 }
 
+/// Lays out the HTML content of one `<foreignObject>` as its own block root
+/// in its Document's current style world.
+///
+/// The outer `<svg>` is a replaced box in the Document's pass, so content
+/// below it has no CSS box there. This one-shot pass gives that content the
+/// CSS geometry Blink computes for it, in the `<foreignObject>`'s local
+/// coordinate space (CSS pixels before the SVG screen CTM). It never
+/// publishes, keeps the Document's retained world, and does not update the
+/// Document's container-query sizes.
+pub(crate) fn build_foreign_object_layout_pass(
+    runtime: &JsContextHost,
+    foreign_object: DomHandle,
+    services: &mut DocumentLayoutServices,
+    embedded_document_services: &mut HashMap<DomHandle, DocumentLayoutServices>,
+    request: LayoutPassRequest,
+) -> Result<LayoutPassResult<DomHandle>, moli_layout::LayoutError> {
+    let mut document_stack = Vec::new();
+    services.with_retained_world_set_aside(|services| {
+        build_native_layout_pass_recursive(
+            runtime,
+            foreign_object,
+            services,
+            embedded_document_services,
+            request,
+            None,
+            &mut document_stack,
+            true,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_native_layout_pass_recursive(
     runtime: &JsContextHost,
     root: DomHandle,
@@ -47,6 +80,7 @@ fn build_native_layout_pass_recursive(
     request: LayoutPassRequest,
     environment_override: Option<crate::style_engine::StyloStyleEnvironment>,
     document_stack: &mut Vec<DomHandle>,
+    foreign_object_root: bool,
 ) -> Result<LayoutPassResult<DomHandle>, moli_layout::LayoutError> {
     let profile_started = moli_trace::cpu_profile_enabled().then(std::time::Instant::now);
     let document = runtime
@@ -60,6 +94,7 @@ fn build_native_layout_pass_recursive(
     // different style world, and the frozen policies stay one-shot.
     if runtime.layout_policy().relayouts_stale_reads()
         && environment_override.is_none()
+        && !foreign_object_root
         && incremental_layout_enabled()
     {
         request = request.with_retained_world();
@@ -71,13 +106,22 @@ fn build_native_layout_pass_recursive(
         request.requests_paint(),
     );
     let source_ready = profile_started.map(|_| std::time::Instant::now());
-    let mut styles = style_resolver::NativeLayoutStyleResolver::new(
-        runtime,
-        root,
-        document,
-        request.viewport,
-        environment_override,
-    );
+    let mut styles = if foreign_object_root {
+        style_resolver::NativeLayoutStyleResolver::for_foreign_object_content(
+            runtime,
+            root,
+            document,
+            request.viewport,
+        )
+    } else {
+        style_resolver::NativeLayoutStyleResolver::new(
+            runtime,
+            root,
+            document,
+            request.viewport,
+            environment_override,
+        )
+    };
     let styles_ready = profile_started.map(|_| std::time::Instant::now());
     let result = {
         let mut frames = NativeEmbeddedFrameRenderer {
@@ -204,6 +248,7 @@ impl EmbeddedFrameRenderer<DomHandle> for NativeEmbeddedFrameRenderer<'_> {
             request,
             self.environment_override,
             self.document_stack,
+            false,
         );
         self.embedded_document_services.insert(document, services);
         let output = result?;

@@ -69,6 +69,50 @@ pub(crate) fn svg_layout_viewport_root(
     None
 }
 
+/// The `<foreignObject>` whose CSS content contains `handle`, and the
+/// outermost `<svg>` whose CSS box hosts that `<foreignObject>`.
+///
+/// Only non-SVG ancestors may separate `handle` from the `<foreignObject>`:
+/// HTML placed directly in other SVG content is not rendered. `handle` may
+/// itself be an outermost `<svg>` embedded in the `<foreignObject>`.
+pub(crate) fn svg_foreign_object_host(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+) -> Option<(DomHandle, DomHandle)> {
+    let mut current = runtime.dom_host().node(handle)?.parent_node_id();
+    while let Some(candidate) = current {
+        let node = runtime.dom_host().node(candidate)?;
+        if node.namespace() == Some(crate::native_bridge::document::SVG_NS) {
+            if node.local_name() != Some("foreignObject")
+                || svg_bbox_has_non_rendered_ancestor(runtime, candidate)
+            {
+                return None;
+            }
+            return svg_layout_viewport_root(runtime, candidate).map(|root| (candidate, root));
+        }
+        current = node.parent_node_id();
+    }
+    None
+}
+
+/// Transform from the CSS content space of `foreign_object` (CSS pixels
+/// with the origin at its `x`/`y`) to client coordinates, given the client
+/// border box of its outermost `<svg>` (`root`).
+pub(crate) fn svg_foreign_object_content_transform(
+    runtime: &JsContextHost,
+    foreign_object: DomHandle,
+    root: DomHandle,
+    root_border_box: [f64; 4],
+) -> SvgMatrixComponents {
+    let offset = |attribute: &str| {
+        svg_geometry_optional_length_attribute_for_handle(runtime, foreign_object, attribute)
+            .unwrap_or(0.0)
+    };
+    svg_root_content_transform(runtime, root, root_border_box)
+        .multiply(svg_ctm_below_root(runtime, foreign_object, root))
+        .multiply(SvgMatrixComponents::translate(offset("x"), offset("y")))
+}
+
 /// Client bounds `[x, y, width, height]` of `handle`, given the client
 /// border box of its outermost `<svg>` (`root`). `None` when `handle` is not
 /// rendered (inside `<defs>`-like containers or `display: none`).
