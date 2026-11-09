@@ -77,8 +77,12 @@ pub(super) fn named_node_map_attribute_count<'s>(
             .attributes()
             .iter()
             .filter(|attribute| {
-                !(attribute.value().is_empty()
-                    && is_synthetic_detached_style_name(scope, element, &attribute.name()))
+                !is_synthetic_detached_style_attribute(
+                    scope,
+                    element,
+                    &attribute.name(),
+                    attribute.value(),
+                )
             })
             .count();
     }
@@ -133,15 +137,28 @@ pub(super) struct IndexedAttribute {
     local_name: String,
 }
 
-fn live_indexed_attribute(
-    scope: &mut v8::PinScope<'_, '_>,
-    element: v8::Local<'_, v8::Object>,
+/// The map's `index`th attribute of a live element, skipping the same
+/// synthetic `style` attribute that `length` and the names skip.
+fn live_indexed_attribute<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    element: v8::Local<'s, v8::Object>,
     index: usize,
 ) -> Option<IndexedAttribute> {
     let (runtime_ptr, handle) = node_runtime_and_handle_from_object(scope, element).ok()?;
     let runtime = unsafe { &*runtime_ptr };
-    let element = runtime.dom_host().node(handle).and_then(Node::as_element)?;
-    let attribute = element.attributes().get(index)?;
+    let native_element = runtime.dom_host().node(handle).and_then(Node::as_element)?;
+    let attribute = native_element
+        .attributes()
+        .iter()
+        .filter(|attribute| {
+            !is_synthetic_detached_style_attribute(
+                scope,
+                element,
+                &attribute.name(),
+                attribute.value(),
+            )
+        })
+        .nth(index)?;
     Some(IndexedAttribute {
         name: attribute.name(),
         value: attribute.value().to_owned(),
