@@ -6,7 +6,7 @@ use super::*;
 #[tokio::test(flavor = "current_thread")]
 async fn svg_content_client_rects_and_text_boxes_follow_screen_ctm_and_fonts() {
     run_page_vm_async_test(async move {
-        let mut loader =
+        let loader =
             crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
         loader.set_optional_resource_fetch_mask(
             crate::protocol_types::OptionalResourceFetchMask::FONT,

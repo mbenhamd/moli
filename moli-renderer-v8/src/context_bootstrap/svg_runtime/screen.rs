@@ -5,7 +5,7 @@
 //! CTM: element transforms, nested viewports and the outer viewport's viewBox
 //! mapping into the outer box's content area.
 
-use moli_svg::{SvgGeometryElement, SvgMatrixComponents};
+use moli_svg::SvgMatrixComponents;
 
 use super::builders::{
     parse_svg_preserve_aspect_ratio_value, parse_svg_view_box_value, svg_bbox_for_handle,
@@ -86,17 +86,9 @@ pub(crate) fn svg_client_bounds(
     if let Some(bounds) = svg_bbox_for_handle(runtime, handle, screen_ctm, false, &mut Vec::new()) {
         return Some([bounds.x, bounds.y, bounds.width, bounds.height]);
     }
-    // An element without geometry still has a position: its user-space origin.
-    let origin = SvgGeometryElement::Rect {
-        x: 0.0,
-        y: 0.0,
-        width: 0.0,
-        height: 0.0,
-        rx: 0.0,
-        ry: 0.0,
-    };
-    moli_svg::bounding_box_for_transformed_element(&origin, screen_ctm)
-        .map(|origin| [origin.x, origin.y, 0.0, 0.0])
+    // An element without geometry still has a position: its user-space
+    // origin mapped through the screen CTM.
+    Some([screen_ctm.e, screen_ctm.f, 0.0, 0.0])
 }
 
 /// Transform from `handle`'s local user space (including its own transform)
