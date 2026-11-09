@@ -546,6 +546,9 @@ impl JsContextHost {
         else {
             return false;
         };
+        // Chromium still fires at an element removed after it scrolled; a
+        // scroll change while disconnected queues nothing (see
+        // `set_node_scroll_position`).
         if self.dom_host().node(element).is_none() {
             return false;
         }
@@ -556,7 +559,8 @@ impl JsContextHost {
             return false;
         }
         // A scroll handler can replace its Document. Never fire the pending
-        // `scrollend` into that replacement.
+        // `scrollend` into that replacement. An element the handler removed
+        // still gets its `scrollend`, like Chromium.
         if self.window_document_owner_is_current_for_dispatch_scope(
             target.owner(),
             target.dispatch_scope(),

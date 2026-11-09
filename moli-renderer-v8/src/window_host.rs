@@ -1970,6 +1970,8 @@ pub(crate) fn dispatch_rendering_update_event_for_handle(
     let Some(event) = event_ctor.new_instance(scope, &[event_type_str.into(), init.into()]) else {
         return false;
     };
+    // The user agent fires these events, so they are trusted.
+    mark_event_trusted(scope, event);
     // A listener exception is reported by the public-dispatch boundary, but
     // does not mean that the Document or event target disappeared. The
     // rendering update must still continue its pending event list and finish
