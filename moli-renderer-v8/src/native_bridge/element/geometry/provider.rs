@@ -219,10 +219,22 @@ fn transformed_client_rect(rect: ClientRect, transform: SvgMatrixComponents) -> 
             transform.b * x + transform.d * y + transform.f,
         )
     });
-    let left = corners.iter().map(|(x, _)| *x).fold(f64::INFINITY, f64::min);
-    let right = corners.iter().map(|(x, _)| *x).fold(f64::NEG_INFINITY, f64::max);
-    let top = corners.iter().map(|(_, y)| *y).fold(f64::INFINITY, f64::min);
-    let bottom = corners.iter().map(|(_, y)| *y).fold(f64::NEG_INFINITY, f64::max);
+    let left = corners
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f64::INFINITY, f64::min);
+    let right = corners
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let top = corners
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f64::INFINITY, f64::min);
+    let bottom = corners
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(f64::NEG_INFINITY, f64::max);
     ClientRect {
         left,
         top,
