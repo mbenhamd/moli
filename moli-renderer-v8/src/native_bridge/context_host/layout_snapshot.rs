@@ -20,8 +20,16 @@ pub(crate) struct LayoutInputKey {
     pub(super) environment: crate::style_engine::StyloStyleEnvironment,
 }
 
+/// What can move layout without changing [`LayoutInputKey`]'s other fields:
+/// DOM changes other than hover moves and writes to attributes that reach
+/// layout only through selectors, and style invalidations. Such a write that
+/// some selector reads restyles an element and so moves the live style input
+/// generation in the key; one that no selector reads leaves layout valid.
+pub(super) type LayoutDirtyMark = (u64, u64);
+
 struct LatestFrozenLayout {
     document: DomHandle,
+    dirty_mark: LayoutDirtyMark,
     /// Recorded only under the live-geometry policy; frozen policies never
     /// compare inputs.
     inputs: Option<LayoutInputKey>,
@@ -62,14 +70,37 @@ impl LatestLayoutTreeCache {
         })
     }
 
+    /// Whether nothing that can affect layout changed since the latest tree:
+    /// the inputs match apart from the DOM version, and `dirty_mark` matches.
+    pub(super) fn is_layout_clean(
+        &self,
+        document: DomHandle,
+        inputs: &LayoutInputKey,
+        dirty_mark: LayoutDirtyMark,
+    ) -> bool {
+        self.latest.as_ref().is_some_and(|snapshot| {
+            snapshot.document == document
+                && snapshot.dirty_mark == dirty_mark
+                && snapshot.inputs.as_ref().is_some_and(|published| {
+                    published.styles == inputs.styles
+                        && published.used_geometry == inputs.used_geometry
+                        && published.resources == inputs.resources
+                        && published.viewport == inputs.viewport
+                        && published.environment == inputs.environment
+                })
+        })
+    }
+
     pub(super) fn publish(
         &mut self,
         document: DomHandle,
         inputs: Option<LayoutInputKey>,
+        dirty_mark: LayoutDirtyMark,
         tree: FrozenLayoutTree<DomHandle>,
     ) {
         self.latest = Some(LatestFrozenLayout {
             document,
+            dirty_mark,
             inputs,
             tree: Box::new(tree),
         });

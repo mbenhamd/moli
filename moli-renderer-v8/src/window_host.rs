@@ -472,7 +472,18 @@ pub(super) fn event_target_dispatch_event_callback<'s>(
         return;
     }
 
-    let event_type = event_type_string(scope, event);
+    // The shared script-dispatch preparation owns clearing isTrusted, so a
+    // saved user-agent event re-dispatched by script is untrusted. Its own
+    // validation repeats the checks above and passes.
+    let Some((event, event_type)) =
+        crate::context_bootstrap::event_target_dispatch::prepare_script_dispatch(
+            scope,
+            event.into(),
+        )
+    else {
+        return;
+    };
+    let event_type = Some(event_type);
     if let Some(handle) = child_window_target {
         let event_type = event_type.as_deref().unwrap_or_default();
         host.dispatch_child_window_event(scope, handle, event_type, event);
@@ -531,16 +542,6 @@ pub(super) fn event_target_dispatch_event_callback<'s>(
         }
         Err(message) => throw_type_error(scope, &message),
     }
-}
-
-fn event_type_string(
-    scope: &mut v8::PinScope<'_, '_>,
-    event: v8::Local<'_, v8::Object>,
-) -> Option<String> {
-    crate::context_bootstrap::event_backing(scope, event)
-        .get(scope, v8str(scope, "type").into())
-        .and_then(|value| value.to_string(scope))
-        .map(|value| value.to_rust_string_lossy(scope))
 }
 
 pub(super) fn window_set_timeout_callback<'s>(
@@ -1934,6 +1935,25 @@ pub(crate) fn dispatch_document_event_for_handle(
     document_handle: DomHandle,
     event_type: &str,
 ) -> bool {
+    let (bubbles, _) = super::host::host_event_defaults(event_type);
+    dispatch_rendering_update_event_for_handle(
+        scope,
+        host_ptr,
+        document_handle,
+        event_type,
+        bubbles,
+    )
+}
+
+/// Fire a non-cancelable rendering-update event (such as `scroll`) at a node.
+/// An element's `scroll` and `scrollend` do not bubble; a Document's do.
+pub(crate) fn dispatch_rendering_update_event_for_handle(
+    scope: &mut v8::PinScope<'_, '_>,
+    host_ptr: *mut JsContextHost,
+    target_handle: DomHandle,
+    event_type: &str,
+    bubbles: bool,
+) -> bool {
     let runtime = unsafe { &mut *host_ptr };
     let global = scope.get_current_context().global(scope);
     let Some(event_ctor) = global
@@ -1945,13 +1965,14 @@ pub(crate) fn dispatch_document_event_for_handle(
     let Some(event_type_str) = v8_string(scope, event_type) else {
         return false;
     };
-    let (bubbles, cancelable) = super::host::host_event_defaults(event_type);
-    let init = WindowDocumentEventInitDeclaration::new(bubbles, cancelable)
+    let init = WindowDocumentEventInitDeclaration::new(bubbles, false)
         .bind(scope)
         .expect("window document event init declaration should bind");
     let Some(event) = event_ctor.new_instance(scope, &[event_type_str.into(), init.into()]) else {
         return false;
     };
+    // The user agent fires these events, so they are trusted.
+    mark_event_trusted(scope, event);
     // A listener exception is reported by the public-dispatch boundary, but
     // does not mean that the Document or event target disappeared. The
     // rendering update must still continue its pending event list and finish
@@ -1959,9 +1980,9 @@ pub(crate) fn dispatch_document_event_for_handle(
     let _ = runtime.dispatch_public_event_best_effort(
         scope,
         host_ptr,
-        EventTargetHandle::Node(document_handle),
+        EventTargetHandle::Node(target_handle),
         event,
-        "rendering-update document event",
+        "rendering-update event",
     );
     true
 }

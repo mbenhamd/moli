@@ -2883,6 +2883,37 @@ fn child_document_open_revalidates_owner_after_descendant_unload_reentry() {
     );
 }
 #[test]
+fn child_document_open_unload_visibilitychange_is_trusted() {
+    let mut vm = new_storage_test_vm("https://document-open-visibilitychange.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const root = document.documentElement || document.appendChild(document.createElement("html"));
+  const body = document.body || root.appendChild(document.createElement("body"));
+  const frame = document.createElement("iframe");
+  body.appendChild(frame);
+  const childDocument = frame.contentDocument;
+  const descendant = childDocument.createElement("iframe");
+  childDocument.body.appendChild(descendant);
+  const log = [];
+  descendant.contentDocument.addEventListener("visibilitychange", (event) => {
+    log.push(`vis:${event.isTrusted}`);
+  });
+
+  childDocument.open();
+  childDocument.close();
+  return log.join("|");
+})()
+"#,
+        )
+        .expect("document.open descendant unload fixture should evaluate");
+
+    // Chromium 1248: the descendant's document-open visibilitychange is trusted.
+    assert_eq!(result, "vis:true");
+}
+#[test]
 fn detached_first_exposure_retires_prebootstrapped_child_realm() {
     let mut vm = new_storage_test_vm("https://stale-child-function-request.test/");
 

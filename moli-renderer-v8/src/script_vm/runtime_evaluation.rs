@@ -55,7 +55,9 @@ impl ScriptVm {
     ) -> RendererPerformanceMetricSnapshot {
         let started_micros = lifecycle.started.timestamp_micros;
         let timestamp_ms = |timestamp_micros: u64| timestamp_micros as f64 / 1_000.0;
-        let dom = moli_dom_memory_counters(self.document_runtime.dom_host().dom());
+        // Runs on every page turn: read the arena's O(1) counts instead of the
+        // full `moli_dom_memory_counters` scan, which reports the same values.
+        let dom = self.document_runtime.dom_host().dom();
         RendererPerformanceMetricSnapshot {
             time_origin_ms: Some(timestamp_ms(started_micros)),
             now_ms: Some(
@@ -70,8 +72,8 @@ impl ScriptVm {
                 .load
                 .map(|stamp| timestamp_ms(stamp.timestamp_micros)),
             document_count: Some(1.0),
-            frame_count: Some((1 + dom.iframe_element_count) as f64),
-            node_count: Some(dom.node_count as f64),
+            frame_count: Some((1 + dom.html_frame_element_count()) as f64),
+            node_count: Some(dom.len() as f64),
             resource_count: Some(resource_count as f64),
         }
     }

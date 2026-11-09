@@ -599,22 +599,36 @@ impl<'a> QueryElement<'a> {
     }
 }
 
-pub(crate) fn html_directionality(host: &DomHost, handle: NodeId) -> CssDirection {
+enum HtmlDirectionalitySource {
+    Fixed {
+        direction: CssDirection,
+        has_stylo_hint: bool,
+    },
+    Content(NodeId),
+    Default,
+}
+
+fn html_directionality_source(host: &DomHost, handle: NodeId) -> HtmlDirectionalitySource {
     let mut current = Some(handle);
     while let Some(handle) = current {
         if let Some(element) = host.node(handle).and_then(Node::as_element) {
-            if let Some(direction) = element.attribute("dir").and_then(normalized_direction) {
-                return direction;
+            let dir = element.attribute("dir");
+            if let Some(direction) = dir.and_then(normalized_direction) {
+                return HtmlDirectionalitySource::Fixed {
+                    direction,
+                    has_stylo_hint: element.namespace() == "http://www.w3.org/1999/xhtml",
+                };
             }
-            if element
-                .attribute("dir")
-                .is_some_and(|value| value.eq_ignore_ascii_case("auto"))
+            if dir.is_some_and(|value| value.eq_ignore_ascii_case("auto"))
                 || element.is_html_element("bdi")
             {
-                return auto_direction_for_element(host, handle).unwrap_or(CssDirection::Ltr);
+                return HtmlDirectionalitySource::Content(handle);
             }
             if element.is_html_input() && element.input_type() == InputType::Tel {
-                return CssDirection::Ltr;
+                return HtmlDirectionalitySource::Fixed {
+                    direction: CssDirection::Ltr,
+                    has_stylo_hint: true,
+                };
             }
         }
         current = host
@@ -622,7 +636,27 @@ pub(crate) fn html_directionality(host: &DomHost, handle: NodeId) -> CssDirectio
             .and_then(Node::parent_node)
             .or_else(|| host.shadow_root_host(handle));
     }
-    CssDirection::Ltr
+    HtmlDirectionalitySource::Default
+}
+
+pub(crate) fn html_directionality(host: &DomHost, handle: NodeId) -> CssDirection {
+    match html_directionality_source(host, handle) {
+        HtmlDirectionalitySource::Fixed { direction, .. } => direction,
+        HtmlDirectionalitySource::Content(root) => {
+            auto_direction_for_element(host, root).unwrap_or(CssDirection::Ltr)
+        }
+        HtmlDirectionalitySource::Default => CssDirection::Ltr,
+    }
+}
+
+/// Whether the directionality of `handle` comes from a source the cascade
+/// cannot see: `dir=auto`, `<bdi>` content, or `dir` on a non-HTML element.
+pub(crate) fn html_directionality_lacks_stylo_hint(host: &DomHost, handle: NodeId) -> bool {
+    match html_directionality_source(host, handle) {
+        HtmlDirectionalitySource::Fixed { has_stylo_hint, .. } => !has_stylo_hint,
+        HtmlDirectionalitySource::Content(_) => true,
+        HtmlDirectionalitySource::Default => false,
+    }
 }
 
 fn auto_direction_for_element(host: &DomHost, root: NodeId) -> Option<CssDirection> {

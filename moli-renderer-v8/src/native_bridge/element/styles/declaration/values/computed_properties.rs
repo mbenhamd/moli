@@ -16,7 +16,7 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_with_conte
         let Some(property) = canonical_computed_cssom_query_property_name(property) else {
             return String::new();
         };
-        flush_layout_for_layout_dependent_property(runtime, handle, &property);
+        flush_layout_for_layout_dependent_property(runtime, handle, &property, context);
         return computed_style_property_value_with_context(runtime, handle, &property, context);
     }
     style_property_value_with_viewport_width(
@@ -41,30 +41,58 @@ fn flush_layout_for_layout_dependent_property(
     runtime: &JsContextHost,
     handle: DomHandle,
     property: &str,
+    context: StyleComputationContext,
 ) {
-    if runtime.layout_policy().relayouts_stale_reads()
-        && matches!(
-            property,
-            "grid-template-columns"
-                | "grid-template-rows"
-                | "width"
-                | "height"
-                | "inline-size"
-                | "block-size"
-                | "top"
-                | "right"
-                | "bottom"
-                | "left"
-                | "inset-block-start"
-                | "inset-block-end"
-                | "inset-inline-start"
-                | "inset-inline-end"
-        )
-        && runtime.dom_host().is_connected(handle)
-    {
+    if !is_layout_dependent_property(property) {
+        flush_layout_for_size_container_read(runtime, handle, context);
+        return;
+    }
+    if runtime.layout_policy().relayouts_stale_reads() && runtime.dom_host().is_connected(handle) {
         // On failure the stale tree is gone and the value is the computed one.
         let _ = runtime.refresh_live_layout_for_sampling();
     }
+}
+
+/// Any property, on an element or its pseudo-element, can depend on layout
+/// through `@container` or `cq*` units. The read restyles first; it pays for a
+/// pass only when the DOM changed or some element was restyled since the
+/// published tree. A write to an attribute no selector reads restyles nothing
+/// and so leaves the store valid.
+pub(super) fn flush_layout_for_size_container_read(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+    context: StyleComputationContext,
+) {
+    if runtime.layout_policy().relayouts_stale_reads()
+        && !runtime.layout_pass_is_active()
+        && runtime.dom_host().is_connected(handle)
+        // This read drains pending style work first, so the flag and the
+        // staleness check below see a just-toggled class.
+        && ComputedStyleRead::new_with_context(runtime, handle, context).depends_on_size_container()
+        && runtime.size_container_read_needs_layout()
+    {
+        let _ = runtime.refresh_live_layout_for_sampling();
+    }
+}
+
+fn is_layout_dependent_property(property: &str) -> bool {
+    matches!(
+        property,
+        "grid-template-columns"
+            | "grid-template-rows"
+            | "width"
+            | "height"
+            | "inline-size"
+            | "block-size"
+            | "top"
+            | "right"
+            | "bottom"
+            | "left"
+            | "inset-block-start"
+            | "inset-block-end"
+            | "inset-inline-start"
+            | "inset-inline-end"
+    )
 }
 
 pub(super) fn computed_style_property_value_with_context(

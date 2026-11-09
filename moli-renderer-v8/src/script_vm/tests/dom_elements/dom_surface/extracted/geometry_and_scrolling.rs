@@ -1612,3 +1612,27 @@ fn live_geometry_focus_inside_a_shadow_host_reaches_host_focus_styles_and_window
         "moving focus out drops host :focus padding"
     );
 }
+
+#[test]
+fn focusing_the_focused_element_neither_scrolls_nor_fires_events() {
+    let mut vm = new_parsed_test_vm(
+        "https://refocus-noop.test/",
+        "<!doctype html><html><body style=margin:0><button id=a>a</button><div style=height:3000px></div></body></html>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+  const a = document.getElementById('a');
+  a.focus();
+  scrollTo(0, 943);
+  const seen = [];
+  for (const type of ['focus', 'focusin', 'blur', 'focusout']) a.addEventListener(type, () => seen.push(type));
+  a.focus();
+  return JSON.stringify([scrollY, seen.join(','), document.activeElement.id]);
+})()"#
+        )
+        .expect("refocus"),
+        r#"[943,"","a"]"#
+    );
+}

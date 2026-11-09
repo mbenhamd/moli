@@ -9,6 +9,9 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum PendingRenderingUpdatePayload {
     DocumentScrollEvents,
+    /// An element in the Document's pending scroll event targets. One entry
+    /// per element coalesces repeated scrolls before the update runs.
+    ElementScrollEvents(crate::document_runtime::DomHandle),
     AnimationStartScan(EventTargetHandle),
     /// Flush the main Document's autofocus candidates after DOMContentLoaded.
     /// The candidate is intentionally resolved at execution time.
@@ -88,6 +91,24 @@ impl JsContextHost {
             target,
             RendererPageRenderingUpdateTaskKind::DocumentScrollEvents,
             PendingRenderingUpdatePayload::DocumentScrollEvents,
+        )
+    }
+
+    /// Add a scrolled element to its Document's pending scroll event targets.
+    /// The rendering update fires its `scroll` and then `scrollend`; neither
+    /// bubbles.
+    pub(crate) fn queue_element_scroll_events(
+        &mut self,
+        scope: &mut v8::PinScope<'_, '_>,
+        element: crate::document_runtime::DomHandle,
+    ) -> bool {
+        let Some(target) = self.window_document_task_target_for_node(scope, element) else {
+            return false;
+        };
+        self.queue_rendering_update(
+            target,
+            RendererPageRenderingUpdateTaskKind::DocumentScrollEvents,
+            PendingRenderingUpdatePayload::ElementScrollEvents(element),
         )
     }
 
@@ -245,6 +266,9 @@ impl JsContextHost {
         Some(match payload {
             PendingRenderingUpdatePayload::DocumentScrollEvents => {
                 self.dispatch_authorized_document_scroll_events(scope, host_ptr, target)
+            }
+            PendingRenderingUpdatePayload::ElementScrollEvents(element) => {
+                self.dispatch_authorized_element_scroll_events(scope, host_ptr, target, element)
             }
             PendingRenderingUpdatePayload::AnimationStartScan(event_target) => {
                 self.dispatch_authorized_animation_start_scan(scope, host_ptr, target, event_target)
@@ -509,6 +533,47 @@ impl JsContextHost {
             target,
             resolved.document_handle,
         )
+    }
+
+    fn dispatch_authorized_element_scroll_events(
+        &mut self,
+        scope: &mut v8::PinScope<'_, '_>,
+        host_ptr: *mut JsContextHost,
+        target: WindowDocumentTaskTarget,
+        element: crate::document_runtime::DomHandle,
+    ) -> bool {
+        let Some(resolved) = self.resolve_authorized_window_document_task_context(scope, target)
+        else {
+            return false;
+        };
+        // Chromium still fires at an element removed after it scrolled; a
+        // scroll change while disconnected queues nothing (see
+        // `set_node_scroll_position`).
+        if self.dom_host().node(element).is_none() {
+            return false;
+        }
+        let scope = &mut v8::ContextScope::new(scope, resolved.context);
+        if !crate::window_host::dispatch_rendering_update_event_for_handle(
+            scope, host_ptr, element, "scroll", false,
+        ) {
+            return false;
+        }
+        // A scroll handler can replace its Document. Never fire the pending
+        // `scrollend` into that replacement. An element the handler removed
+        // still gets its `scrollend`, like Chromium.
+        if self.window_document_owner_is_current_for_dispatch_scope(
+            target.owner(),
+            target.dispatch_scope(),
+        ) {
+            let _ = crate::window_host::dispatch_rendering_update_event_for_handle(
+                scope,
+                host_ptr,
+                element,
+                "scrollend",
+                false,
+            );
+        }
+        true
     }
 
     fn dispatch_authorized_document_scroll_events_in_current_context(
