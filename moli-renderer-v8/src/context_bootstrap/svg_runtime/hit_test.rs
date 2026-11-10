@@ -641,7 +641,9 @@ fn paint_server_resolves(
     let dom = runtime.dom_host();
     let document = dom.owner_document_handle(handle).ok_or(Coarse)?;
     let document_url = runtime.document_url_for_handle(document);
-    let same_document = |url: &str| url.split('#').next().unwrap_or(url);
+    fn same_document(url: &str) -> &str {
+        url.split('#').next().unwrap_or(url)
+    }
     let Some((_, fragment)) = url.as_str().split_once('#') else {
         return Err(Coarse);
     };
