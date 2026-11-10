@@ -121,6 +121,7 @@ mod v8_finalizer;
 pub(crate) mod v8_platform;
 mod v8_traced_webidl_callback;
 mod wasm_module_support;
+mod web_locks_runtime;
 mod web_storage_handles;
 pub(crate) mod webidl;
 mod webidl_callback_execution;

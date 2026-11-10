@@ -311,6 +311,7 @@ impl JsContextHost {
     ) -> Self {
         let message_port_registry = browser_context_runtime.message_port_registry();
         let broadcast_channel_registry = browser_context_runtime.broadcast_channel_registry();
+        let web_lock_registry = browser_context_runtime.web_lock_registry();
         let shared_worker_client_owner_id =
             browser_context_runtime.next_shared_worker_client_owner_id();
         let document_url = runtime.document_url().clone();
@@ -538,6 +539,8 @@ impl JsContextHost {
             message_port_registry,
             message_port_wrappers: HashMap::new(),
             broadcast_channel_registry,
+            web_lock_registry,
+            web_locks: super::web_locks::WebLockHostState::default(),
             shared_worker_client_owner_id,
             child_shared_worker_client_owner_ids: HashMap::new(),
             shared_worker_clients: SharedWorkerClientEndpointOwner::default(),

@@ -436,6 +436,7 @@ pub(crate) use self::navigation_restore::{
 };
 pub(crate) use self::navigation_traversal::queue_top_level_history_traversal_by_delta;
 pub(crate) use self::navigator_runtime::install_worker_navigator_runtime_state;
+pub(crate) use self::navigator_runtime::run_web_lock_task;
 pub(crate) use self::navigator_runtime::{
     bind_window_navigator_identity_seed, set_window_navigator_identity,
 };

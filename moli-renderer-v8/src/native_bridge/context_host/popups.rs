@@ -2128,6 +2128,7 @@ impl JsContextHost {
             self.retire_window_execution_context(execution_context_owner);
         let retired_broadcast_channel_count =
             self.close_broadcast_channels_for_execution_context_owner(execution_context_owner);
+        self.release_web_locks_for_execution_context_owner(execution_context_owner);
         let retired_websocket_count =
             self.retire_websockets_for_execution_context_owner(execution_context_owner);
         let retired_image_decode_count =

@@ -35,6 +35,18 @@ pub(crate) enum RendererPageMiscPlatformApiTaskKind {
     LegacyStorageUsageAndQuota,
     LegacyStorageGrantedQuota,
     LegacyStorageError,
+    /// A Web Locks request was granted (or `ifAvailable` found it unavailable):
+    /// run its callback. Web Locks shares this source instead of a dedicated
+    /// web locks task source; only per-source FIFO order is observable.
+    WebLockGranted,
+    /// A held Web Lock was stolen: reject its request promise.
+    WebLockStolen,
+}
+
+impl RendererPageMiscPlatformApiTaskKind {
+    pub(crate) const fn is_web_lock(self) -> bool {
+        matches!(self, Self::WebLockGranted | Self::WebLockStolen)
+    }
 }
 
 pub(crate) type RendererPageMiscPlatformApiOwner = RendererPageWindowDocumentTaskOwner;

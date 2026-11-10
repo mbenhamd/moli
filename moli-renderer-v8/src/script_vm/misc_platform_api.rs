@@ -40,6 +40,26 @@ impl ScriptVm {
         let owner = task.owner();
         let task_id = task.task_id();
         let kind = task.kind();
+        if kind.is_web_lock() {
+            let Some(request) = self
+                ._context_host
+                .borrow_mut()
+                .take_pending_web_lock_task_for_exact_target(task_id, owner.target(), kind)
+            else {
+                return Err(anyhow!(
+                    "authorized Web Locks task lost its exact request payload"
+                ));
+            };
+            return self.with_default_context_scope(|scope, host_ptr| {
+                Ok(unsafe { &mut *host_ptr }.dispatch_authorized_web_lock_task(
+                    scope,
+                    host_ptr,
+                    owner.target(),
+                    kind,
+                    request,
+                ))
+            });
+        }
         let Some(callback) = self
             ._context_host
             .borrow_mut()
