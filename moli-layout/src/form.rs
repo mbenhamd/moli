@@ -43,20 +43,35 @@ where
                 .clip_form_control_contents();
         }
         let owner_label = world.boxes[control.index()].source_label.clone();
+        let single_line = world.boxes[control.index()]
+            .element_semantics
+            .as_ref()
+            .is_some_and(is_single_line_text_control);
         let placeholder_style = if placeholder {
             styles.placeholder_style(owner)?.map(|style| {
                 let mut style = style.into_style();
                 style.force_layout_display(LayoutDisplay::Block);
+                if single_line {
+                    // The placeholder's `white-space: pre` comes from the UA
+                    // `input::placeholder` rule, so author rules can override
+                    // it. That rule's `overflow: hidden` cannot cascade into a
+                    // ::placeholder style, so it is applied here: a long
+                    // placeholder never widens the control's scroll range.
+                    style.clip_form_control_contents();
+                }
                 style
             })
         } else {
             None
         };
-        let editor_style = styles.anonymous_style(
+        let mut editor_style = styles.anonymous_style(
             LayoutAnonymousStyleContext::from_parent(&world.boxes[control.index()])
                 .expect("form control has a source owner"),
             LayoutDisplay::Block,
         )?;
+        if single_line {
+            editor_style.force_single_line_text_control();
+        }
         let selection = world.boxes[control.index()].text_selection;
         if texts.is_empty() && selection.is_some() {
             texts.push(Arc::from(""));
@@ -110,6 +125,24 @@ where
         }
     }
     Ok(())
+}
+
+/// Single-line text inputs whose inner editor Blink always lays out as
+/// `white-space: pre` (`TextControlInnerEditorElement`); textareas and selects
+/// keep their own wrapping.
+fn is_single_line_text_control(semantics: &LayoutElementSemantics) -> bool {
+    matches!(
+        semantics.category,
+        LayoutElementCategory::FormControl(LayoutFormControlKind::Input(
+            LayoutInputControlKind::Text
+                | LayoutInputControlKind::Search
+                | LayoutInputControlKind::Email
+                | LayoutInputControlKind::Telephone
+                | LayoutInputControlKind::Password
+                | LayoutInputControlKind::Url
+                | LayoutInputControlKind::Number
+        ))
+    )
 }
 
 fn form_control_texts(semantics: &Option<LayoutElementSemantics>) -> Option<(Vec<Arc<str>>, bool)> {
@@ -223,7 +256,11 @@ pub fn form_control_text(
             | LayoutInputControlKind::Url
             | LayoutInputControlKind::Week => {
                 if value.is_empty() {
-                    placeholder_text.to_string()
+                    // HTML strips line breaks from an input's placeholder hint
+                    // (Blink `TextControlElement::StrippedPlaceholder`); the
+                    // value sanitization algorithm already strips the value.
+                    // A textarea keeps them as hint line breaks.
+                    placeholder_text.replace(['\r', '\n'], "")
                 } else {
                     value.to_string()
                 }
