@@ -1427,6 +1427,25 @@ impl ResolvedLayoutStyle {
         self.paint_containment
     }
 
+    /// Applies the containment `content-visibility: hidden` implies (size,
+    /// layout and paint) to a box whose contents layout then skips.
+    pub(crate) fn apply_hidden_content_visibility(&mut self) {
+        self.layout_containment = true;
+        self.paint_containment = true;
+        self.size_containment = LogicalSizeContainment {
+            inline: true,
+            block: true,
+        };
+        if matches!(
+            self.display,
+            LayoutDisplay::Block | LayoutDisplay::BlockListItem
+        ) {
+            // Layout containment establishes an independent formatting
+            // context, as the Stylo import does for authored containment.
+            self.taffy.display = TaffyDisplay::FlowRoot;
+        }
+    }
+
     /// Returns the accumulated CSS `zoom` applied to this box's layout values.
     ///
     /// Stylo has already applied this factor to computed CSS lengths. Layout,

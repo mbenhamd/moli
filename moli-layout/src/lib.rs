@@ -104,7 +104,7 @@ pub use source::{
     ChildBoxPolicy, LayoutElementCategory, LayoutElementMetadata, LayoutElementSemantics,
     LayoutFormControlData, LayoutFormControlKind, LayoutHyperlink, LayoutImageResource,
     LayoutInputControlKind, LayoutListData, LayoutListRole, LayoutNamespace, LayoutPseudo,
-    LayoutQueryContainerSize, LayoutReplacedKind, LayoutSource, LayoutSourceKind,
+    LayoutDetailsSlots, LayoutQueryContainerSize, LayoutReplacedKind, LayoutSource, LayoutSourceKind,
     LayoutStyleResolver, LayoutTableData, LayoutTableRole, LayoutTextSelection, ReplacedMetrics,
     ResolvedLayoutElementStyles, ResolvedLayoutPseudoStyle, html_display_contents_is_none,
 };

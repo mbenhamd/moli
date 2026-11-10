@@ -464,11 +464,68 @@ where
             children.extend(self.build_pseudo(world, source_node, LayoutPseudo::Marker, marker)?);
         }
         children.extend(self.build_pseudo(world, source_node, LayoutPseudo::Before, before)?);
+        let details = self.source.details_slots(source_node);
+        let mut details_content = Vec::new();
         for child in self.checked_flat_children(source_node)? {
-            children.extend(self.build_source_node(world, child, style)?);
+            let boxes = self.build_source_node(world, child, style)?;
+            match details {
+                Some(slots) if slots.summary != Some(child) => details_content.extend(boxes),
+                _ => children.extend(boxes),
+            }
+        }
+        if let Some(slots) = details {
+            children.push(self.build_details_content(
+                world,
+                source_node,
+                style,
+                slots.open,
+                details_content,
+            )?);
         }
         children.extend(self.build_pseudo(world, source_node, LayoutPseudo::After, after)?);
         Ok(children)
+    }
+
+    /// Builds the `::details-content` slot box after the summary slot.
+    ///
+    /// HTML styles this slot `display: block`, and also
+    /// `content-visibility: hidden` while the `details` is closed. A closed
+    /// slot is size-contained, so it still takes part in its parent's
+    /// formatting context (a grid or flex `details` keeps the gap before it)
+    /// while contributing no size, and its laid-out contents are skipped.
+    fn build_details_content(
+        &mut self,
+        world: &mut LayoutWorld<S::NodeId>,
+        owner: S::NodeId,
+        parent_style: &ResolvedLayoutStyle,
+        open: bool,
+        children: Vec<LayoutBoxId>,
+    ) -> Result<LayoutBoxId, LayoutError> {
+        let mut style = self.styles.anonymous_style(
+            LayoutAnonymousStyleContext::new(owner, parent_style),
+            LayoutDisplay::Block,
+        )?;
+        let reason = if open {
+            LayoutAnonymousReason::DetailsContent
+        } else {
+            style.apply_hidden_content_visibility();
+            LayoutAnonymousReason::ClosedDetailsContent
+        };
+        let owner_label = self.source.label(owner);
+        let id = world.allocate(LayoutWorld::new_box(
+            None,
+            Some(owner),
+            None,
+            format!("{}({owner_label})", reason.debug_name()),
+            Some(owner_label),
+            None,
+            Some(reason),
+            LayoutBoxKind::AnonymousBlock,
+            style.clone(),
+            None,
+        ));
+        self.attach_children(world, id, owner, &style, children, false)?;
+        Ok(id)
     }
 
     fn build_pseudo(

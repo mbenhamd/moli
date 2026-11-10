@@ -1804,48 +1804,46 @@ document.body.innerHTML = '<div id=host></div><div id=other></div>';
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn closed_details_lays_out_only_its_first_summary() {
+async fn live_closed_details_content_adds_no_size_but_keeps_descendant_geometry() {
     run_page_vm_async_test(async move {
-        let loader =
-            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
-        let mut page_vm = test_page_vm_with_loader_and_document_url(
-            &loader,
-            Vec::new(),
-            Url::parse("https://example.com/details.html")?,
-        );
-        page_vm.vm_mut().eval(
+        let mut page_vm = live_geometry_page(
             r#"
-document.head.innerHTML = '<style>html,body{margin:0;padding:0}body{font:16px/20px monospace}p{margin:0}</style>';
-document.body.innerHTML = '<details id=d><summary id=s>Head</summary><p>a</p><summary>second</summary><p>b</p></details><div id=after>x</div>';
+document.head.innerHTML = '<style>html,body{margin:0;padding:0}body{font:16px/20px monospace}p{margin:0}#g{display:grid;row-gap:10px}#h{height:60px}</style>';
+document.body.innerHTML = '<details id=d><summary id=s>Head</summary><p>a</p><summary>second</summary><p>b</p></details><div id=after>x</div><details id=g><summary>G</summary><div id=h></div></details>';
+'installed'
 "#,
         )?;
-        page_vm.vm_mut().sync_live_document_style_sources();
-        page_vm.vm_mut().publish_layout_for_test()?;
-        let closed = page_vm.vm_mut().eval(
-            r#"JSON.stringify([
-document.getElementById('d').getBoundingClientRect().height,
-document.getElementById('after').getBoundingClientRect().top,
-document.getElementById('s').getBoundingClientRect().height])"#,
-        )?;
-        page_vm
-            .vm_mut()
-            .eval("document.getElementById('d').open = true")?;
-        page_vm.vm_mut().sync_live_document_style_sources();
-        page_vm.vm_mut().publish_layout_for_test()?;
-        let open = page_vm.vm_mut().eval(
-            r#"JSON.stringify([
-document.getElementById('d').getBoundingClientRect().height,
-document.getElementById('after').getBoundingClientRect().top])"#,
-        )?;
-        // Chromium 147: the closed details keeps only its first summary (one
-        // 20px line); the other children, including a second summary, sit in
-        // the hidden `::details-content` slot. Opening it shows all four.
-        assert_eq!(closed, "[20,20,20]");
-        assert_eq!(open, "[80,80]");
+        let read = |y: u32| {
+            format!(
+                r#"(() => {{ const $ = id => document.getElementById(id);
+const h = $('h').getBoundingClientRect(); const hit = document.elementFromPoint(5, {y});
+return JSON.stringify([$('d').getBoundingClientRect().height, $('after').getBoundingClientRect().top,
+  $('s').getBoundingClientRect().height, $('g').getBoundingClientRect().height,
+  h.top, h.height, h.width, hit.id || hit.tagName]); }})()"#
+            )
+        };
+        let toggle = |open: bool| {
+            format!("document.getElementById('d').open = {open}; document.getElementById('g').open = {open}; 'toggled'")
+        };
+        // Chromium (Playwright chromium-1248 headless shell): a closed details
+        // keeps only its first summary in the summary slot. Every other child,
+        // a second summary included, sits in the `::details-content` slot,
+        // which still occupies a grid row (summary 20 + gap 10) but adds no
+        // size, paint or hit target. Geometry reads still lay out its
+        // contents: #h keeps its 60px box under the zero-height slot.
+        let closed = r#"[20,20,20,30,70,60,800,"HTML"]"#;
+        assert_eq!(page_vm.vm_mut().eval(&read(100))?, closed);
+        page_vm.vm_mut().eval(&toggle(true))?;
+        assert_eq!(
+            page_vm.vm_mut().eval(&read(150))?,
+            r#"[80,80,20,90,130,60,800,"h"]"#
+        );
+        page_vm.vm_mut().eval(&toggle(false))?;
+        assert_eq!(page_vm.vm_mut().eval(&read(100))?, closed);
         Ok::<_, anyhow::Error>(())
     })
     .await
-    .expect("closed details fixture should run");
+    .expect("live closed details fixture should run");
 }
 
 #[tokio::test(flavor = "current_thread")]
