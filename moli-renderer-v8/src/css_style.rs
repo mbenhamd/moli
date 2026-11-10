@@ -837,7 +837,7 @@ fn cssom_declaration_value_is_unitless_zero(value: &str) -> bool {
     moli_css_parse::normalize_cssom_component_value_serialization(value).as_deref() == Some("0")
 }
 
-pub(crate) fn normalize_cssom_flex_basis_value(value: &str) -> Option<String> {
+pub(crate) fn normalize_cssom_flex_component_value(value: &str) -> Option<String> {
     let serialized = moli_css_parse::normalize_cssom_component_value_serialization(value)?;
     if serialized == "0" {
         Some("0px".to_owned())
@@ -846,14 +846,9 @@ pub(crate) fn normalize_cssom_flex_basis_value(value: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn normalize_cssom_flex_shorthand_value(value: &str) -> Option<String> {
-    let serialized = moli_css_parse::normalize_cssom_component_value_serialization(value)?;
-    if serialized == "0" {
-        Some("0px".to_owned())
-    } else {
-        Some(serialized)
-    }
-}
+pub(crate) use self::normalize_cssom_flex_component_value as normalize_cssom_flex_basis_value;
+
+pub(crate) use self::normalize_cssom_flex_component_value as normalize_cssom_flex_shorthand_value;
 
 /// Splits top-level component values for box-like CSSOM reconstruction. Validity
 /// for the shorthand or its longhands must come from Stylo/PDB.
@@ -1277,31 +1272,6 @@ pub(crate) fn css_declaration_list_property_value(
         winner = Some(entry);
     }
     winner.map(|entry| entry.value)
-}
-
-pub(crate) fn resolve_css_url_function(value: &str, base_url: &url::Url) -> String {
-    let value = value.trim();
-    let Some(raw_url) = value
-        .strip_prefix("url(")
-        .and_then(|value| value.strip_suffix(')'))
-        .map(str::trim)
-    else {
-        return value.to_owned();
-    };
-    let raw_url = raw_url
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .or_else(|| {
-            raw_url
-                .strip_prefix('\'')
-                .and_then(|value| value.strip_suffix('\''))
-        })
-        .unwrap_or(raw_url);
-    base_url
-        .join(raw_url)
-        .or_else(|_| url::Url::parse(raw_url))
-        .map(|url| format!("url(\"{}\")", url.as_str()))
-        .unwrap_or_else(|_| value.to_owned())
 }
 
 pub(crate) fn parse_css_font_faces(css_text: &str) -> Vec<CssFontFaceEntry> {
