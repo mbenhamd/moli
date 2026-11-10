@@ -17,6 +17,15 @@ pub(crate) enum CssSizingBox {
     Border,
 }
 
+/// The CSS Transforms reference box of a box that renders a source or a
+/// generated pseudo-element. A non-replaced inline has no box of its own to
+/// size against, so, as in Blink, its percentages resolve against an empty box.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransformReferenceBox {
+    Border,
+    Empty,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CssSizing {
     pub box_kind: CssSizingBox,
@@ -44,6 +53,11 @@ pub struct FrozenLayoutBox<N> {
     /// or box-sizing/writing-mode when an ordinary read reuses an older layout
     /// snapshot. This is interpretation metadata, not another copy of sizes.
     pub(crate) css_sizing: Option<CssSizing>,
+    /// Generated pseudo-element rendered by this box, if any.
+    pub(crate) pseudo: Option<crate::LayoutPseudo>,
+    /// Reference box for resolving `transform` percentages. `None` for a box
+    /// that renders nothing itself (`display: none` or `contents`).
+    pub(crate) transform_reference: Option<TransformReferenceBox>,
     pub resolved_grid_tracks: Option<super::model::LayoutResolvedGridTracks>,
     /// Paint ordinal of this box's scrollbar/corner surface, if any.
     pub(crate) control_paint_order: Option<u32>,

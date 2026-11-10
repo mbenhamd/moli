@@ -32,7 +32,7 @@ use super::observation::{
     ComputedStyleRead, PreparedAnonymousStyleContext, RetainedStyleObservation,
     StyleComputationContext, StyleObservation,
 };
-use super::sizing::used_size_from_layout_snapshot;
+use super::sizing::{transform_reference_box_from_layout_snapshot, used_size_from_layout_snapshot};
 use super::style_world::{
     effective_raw_stylesheet_sources, style_base_url, stylesheet_source_document_for_handle,
 };

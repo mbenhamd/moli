@@ -40,6 +40,38 @@ pub fn parse_dom_matrix_value(text: &str) -> Option<DomMatrixComponents> {
 }
 
 pub fn parse_dom_matrix_value_with_dimension(text: &str) -> Option<(DomMatrixComponents, bool)> {
+    parse_transform_list(text, None)
+}
+
+/// Resolves a computed CSS `<transform-list>` to its matrix, with translation
+/// percentages taken against a `width` x `height` transform reference box.
+/// DOMMatrix string parsing stays absolute-length only; this is for CSSOM
+/// resolved values, where layout supplies the box.
+pub fn resolve_css_transform_matrix(
+    text: &str,
+    reference_width: f64,
+    reference_height: f64,
+) -> Option<DomMatrixComponents> {
+    parse_transform_list(
+        text,
+        Some(ReferenceBox {
+            width: reference_width,
+            height: reference_height,
+        }),
+    )
+    .map(|(components, _)| components)
+}
+
+#[derive(Clone, Copy)]
+struct ReferenceBox {
+    width: f64,
+    height: f64,
+}
+
+fn parse_transform_list(
+    text: &str,
+    reference: Option<ReferenceBox>,
+) -> Option<(DomMatrixComponents, bool)> {
     if text.is_empty() {
         return Some((DomMatrixComponents::identity(), true));
     }
@@ -58,7 +90,7 @@ pub fn parse_dom_matrix_value_with_dimension(text: &str) -> Option<(DomMatrixCom
     let is_2d = functions.iter().all(is_2d_transform_function);
     let mut product = DomMatrixComponents::identity();
     for function in functions {
-        product = product.multiply(components_from_transform_function(&function)?);
+        product = product.multiply(components_from_transform_function(&function, reference)?);
     }
     Some((product, is_2d))
 }
@@ -82,8 +114,11 @@ fn is_2d_transform_function(function: &CssTransformFunction) -> bool {
 
 fn components_from_transform_function(
     function: &CssTransformFunction,
+    reference: Option<ReferenceBox>,
 ) -> Option<DomMatrixComponents> {
     let arguments = &function.arguments;
+    let translate_x = |raw: &str| css_translation_argument(raw, reference.map(|r| r.width));
+    let translate_y = |raw: &str| css_translation_argument(raw, reference.map(|r| r.height));
     match function.name.as_str() {
         "matrix" if arguments.len() == 6 => {
             let values = css_number_arguments(arguments)?;
@@ -102,21 +137,21 @@ fn components_from_transform_function(
             dom_matrix_components_from_values(&values)
         }
         "translate" if matches!(arguments.len(), 1 | 2) => {
-            let tx = css_px_length_argument(&arguments[0])?;
+            let tx = translate_x(arguments[0].as_str())?;
             let ty = arguments
                 .get(1)
-                .map(|argument| css_px_length_argument(argument))
+                .map(|argument| translate_y(argument.as_str()))
                 .unwrap_or(Some(0.0))?;
             Some(DomMatrixComponents::translation(tx, ty, 0.0))
         }
         "translatex" if arguments.len() == 1 => Some(DomMatrixComponents::translation(
-            css_px_length_argument(&arguments[0])?,
+            translate_x(arguments[0].as_str())?,
             0.0,
             0.0,
         )),
         "translatey" if arguments.len() == 1 => Some(DomMatrixComponents::translation(
             0.0,
-            css_px_length_argument(&arguments[0])?,
+            translate_y(arguments[0].as_str())?,
             0.0,
         )),
         "translatez" if arguments.len() == 1 => Some(DomMatrixComponents::translation(
@@ -125,8 +160,8 @@ fn components_from_transform_function(
             css_px_length_argument(&arguments[0])?,
         )),
         "translate3d" if arguments.len() == 3 => Some(DomMatrixComponents::translation(
-            css_px_length_argument(&arguments[0])?,
-            css_px_length_argument(&arguments[1])?,
+            translate_x(arguments[0].as_str())?,
+            translate_y(arguments[1].as_str())?,
             css_px_length_argument(&arguments[2])?,
         )),
         "scale" if matches!(arguments.len(), 1 | 2) => {
@@ -209,6 +244,17 @@ fn css_number_argument(raw: &str) -> Option<f64> {
 
 fn css_px_length_argument(raw: &str) -> Option<f64> {
     moli_css_parse::parse_px_length(raw, UnitlessLength::ZeroOnly)
+}
+
+/// A translation length; with a reference box, also a percentage of `basis`
+/// (or a `calc()` mixing both).
+fn css_translation_argument(raw: &str, basis: Option<f64>) -> Option<f64> {
+    match basis {
+        Some(basis) => {
+            moli_css_parse::resolve_length_percentage(raw, basis, UnitlessLength::ZeroOnly)
+        }
+        None => css_px_length_argument(raw),
+    }
 }
 
 fn css_angle_degrees_argument(raw: &str) -> Option<f64> {
