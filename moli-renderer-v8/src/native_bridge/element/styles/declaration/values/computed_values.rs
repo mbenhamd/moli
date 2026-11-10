@@ -359,9 +359,16 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_for_pseudo
         "display" => value
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| default_pseudo_display(runtime, handle, pseudo_element)),
+        // Only pseudo-elements with a modelled box resolve against layout;
+        // any other pseudo keeps its computed value rather than borrowing the
+        // originating element's box.
         "transform" | "-webkit-transform" => value
-            .map(|value| {
-                resolve_computed_transform_value(runtime, handle, pseudo, &value).unwrap_or(value)
+            .map(|value| match pseudo {
+                Some(pseudo) => {
+                    resolve_computed_transform_value(runtime, handle, Some(pseudo), &value)
+                        .unwrap_or(value)
+                }
+                None => value,
             })
             .unwrap_or_default(),
         "content" => match value.as_deref() {

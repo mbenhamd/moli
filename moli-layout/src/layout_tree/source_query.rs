@@ -200,19 +200,35 @@ where
             .transform_reference_box_size()
     }
 
-    /// The transform reference-box size of the first box generated for
-    /// `pseudo` on `originating`; `None` when that pseudo-element has no box.
+    /// The transform reference-box size of `pseudo` on `originating`; `None`
+    /// when that pseudo-element generates no box.
+    ///
+    /// The pseudo's generated text leaf also carries pseudo ownership and is
+    /// allocated before the pseudo's own box, so the first match is not the
+    /// reference box. A border-box match is the pseudo's own box (text is
+    /// always non-replaced inline). Otherwise the own box is inline or absent
+    /// (`display: contents`), and like Blink the text's empty box applies.
     pub fn transform_reference_box_size_for_pseudo(
         &self,
         originating: N,
         pseudo: crate::LayoutPseudo,
     ) -> Option<LayoutSize> {
-        self.boxes
-            .iter()
-            .find(|layout_box| {
-                layout_box.pseudo == Some(pseudo) && layout_box.hit_source == Some(originating)
-            })?
-            .transform_reference_box_size()
+        let is_border = |layout_box: &&FrozenLayoutBox<N>| {
+            matches!(
+                layout_box.transform_reference,
+                Some(TransformReferenceBox::Border)
+            )
+        };
+        let mut generated = self.boxes.iter().filter(|layout_box| {
+            layout_box.pseudo == Some(pseudo) && layout_box.hit_source == Some(originating)
+        });
+        let first = generated.next()?;
+        let reference = if is_border(&first) {
+            first
+        } else {
+            generated.find(is_border).unwrap_or(first)
+        };
+        reference.transform_reference_box_size()
     }
 
     /// Physical and logical CSSOM sizes from this snapshot's sizing box,
