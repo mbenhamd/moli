@@ -9,6 +9,9 @@ use kurbo::{
 const SHAPE_PATH_TOLERANCE: f64 = 0.1;
 const ARC_LENGTH_ACCURACY: f64 = 1e-6;
 const FILL_BOUNDARY_EPSILON: f64 = 1e-9;
+/// Stroke hit areas are compared in user units; a thousandth of a unit is far
+/// below a device pixel at ordinary zoom.
+const STROKE_HIT_ACCURACY: f64 = 1e-3;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SvgGeometryPoint {
@@ -210,40 +213,134 @@ pub fn is_point_in_fill_with_rule(
     {
         return false;
     }
-    geometry_path(element).is_some_and(|path| {
-        let path = close_subpaths_for_fill(&path);
-        let point = Point::new(point.x, point.y);
-        let winding = path.winding(point);
-        let inside = match fill_rule {
-            SvgFillRule::NonZero => winding != 0,
-            SvgFillRule::EvenOdd => winding % 2 != 0,
-        };
-        inside
-            || path.segments().any(|segment| {
-                segment.nearest(point, FILL_BOUNDARY_EPSILON).distance_sq
-                    <= FILL_BOUNDARY_EPSILON.powi(2)
-            })
-    })
+    geometry_path(element)
+        .is_some_and(|path| path_fill_contains(&path, Point::new(point.x, point.y), fill_rule))
 }
 
-/// Whether `point` lies within `half_width` of the element's rendered outline.
+fn path_fill_contains(path: &BezPath, point: Point, fill_rule: SvgFillRule) -> bool {
+    let path = close_subpaths_for_fill(path);
+    let winding = path.winding(point);
+    let inside = match fill_rule {
+        SvgFillRule::NonZero => winding != 0,
+        SvgFillRule::EvenOdd => winding % 2 != 0,
+    };
+    inside
+        || path.segments().any(|segment| {
+            segment.nearest(point, FILL_BOUNDARY_EPSILON).distance_sq
+                <= FILL_BOUNDARY_EPSILON.powi(2)
+        })
+}
+
+/// The painted parts of a shape that a hit test considers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SvgShapeHitArea<'a> {
+    /// The fill rule when the fill is painted.
+    pub fill: Option<SvgFillRule>,
+    /// The stroke when it is painted.
+    pub stroke: Option<SvgStrokeHitArea<'a>>,
+}
+
+/// A painted stroke in the shape's user space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SvgStrokeHitArea<'a> {
+    pub width: f64,
+    /// Resolved `stroke-dasharray` lengths; empty for a solid stroke.
+    pub dashes: &'a [f64],
+    pub dash_offset: f64,
+}
+
+/// Whether `point` lies on the painted fill or stroke of `element`.
 ///
-/// This is the stroke area with round joins and caps; it does not model
-/// butt/square caps, miter joins or dashing.
-pub fn is_point_within_outline_distance(
+/// The shape path is built once for both tests, after a bounding-box
+/// rejection. The stroke area is everything within half the stroke width of
+/// the (dashed) outline, which matches round joins and caps; butt and square
+/// caps and miter joins are not modelled. A dash array that cannot dash
+/// (non-finite, negative or summing to zero) leaves the stroke solid, as SVG
+/// requires.
+pub fn is_point_in_shape_hit_area(
     element: &SvgGeometryElement,
     point: SvgGeometryPoint,
-    half_width: f64,
+    area: SvgShapeHitArea<'_>,
 ) -> bool {
-    if !point.x.is_finite() || !point.y.is_finite() || half_width.is_nan() || half_width <= 0.0 {
+    if !point.x.is_finite() || !point.y.is_finite() {
+        return false;
+    }
+    let fill = area
+        .fill
+        .filter(|_| !matches!(element, SvgGeometryElement::Line { .. }));
+    let stroke = area.stroke.filter(|stroke| stroke.width > 0.0);
+    if fill.is_none() && stroke.is_none() {
         return false;
     }
     let point = Point::new(point.x, point.y);
+    let half_width = stroke.map_or(0.0, |stroke| stroke.width / 2.0);
+    let reach = half_width.max(FILL_BOUNDARY_EPSILON);
+    let outside = |bounds: Rect| {
+        point.x < bounds.x0 - reach
+            || point.x > bounds.x1 + reach
+            || point.y < bounds.y0 - reach
+            || point.y > bounds.y1 + reach
+    };
+    let analytic = analytic_bounds(element);
+    if analytic.is_some_and(outside) {
+        return false;
+    }
+    let Some(path) = geometry_path(element) else {
+        return false;
+    };
+    if analytic.is_none() && (path.segments().next().is_none() || outside(path.bounding_box())) {
+        return false;
+    }
+    if fill.is_some_and(|rule| path_fill_contains(&path, point, rule)) {
+        return true;
+    }
+    let Some(stroke) = stroke else {
+        return false;
+    };
     let limit = half_width * half_width;
-    geometry_path(element).is_some_and(|path| {
-        path.segments()
-            .any(|segment| segment.nearest(point, FILL_BOUNDARY_EPSILON).distance_sq <= limit)
-    })
+    let near = |segment: PathSeg| segment.nearest(point, STROKE_HIT_ACCURACY).distance_sq <= limit;
+    if dash_array_dashes(stroke.dashes) {
+        let offset = if stroke.dash_offset.is_finite() {
+            stroke.dash_offset
+        } else {
+            0.0
+        };
+        kurbo::segments(kurbo::dash(path.iter(), offset, stroke.dashes)).any(near)
+    } else {
+        path.segments().any(near)
+    }
+}
+
+fn dash_array_dashes(dashes: &[f64]) -> bool {
+    let total = dashes.iter().sum::<f64>();
+    !dashes.is_empty()
+        && dashes.iter().all(|dash| dash.is_finite() && *dash >= 0.0)
+        && total.is_finite()
+        && total > 0.0
+}
+
+/// Bounds of the basic shapes without building their path.
+fn analytic_bounds(element: &SvgGeometryElement) -> Option<Rect> {
+    match element {
+        SvgGeometryElement::Circle { cx, cy, r } if *r > 0.0 => {
+            Some(Rect::new(cx - r, cy - r, cx + r, cy + r))
+        }
+        SvgGeometryElement::Ellipse { cx, cy, rx, ry } => {
+            let (rx, ry) = normalized_ellipse_radii(*rx, *ry);
+            (rx > 0.0 && ry > 0.0).then(|| Rect::new(cx - rx, cy - ry, cx + rx, cy + ry))
+        }
+        SvgGeometryElement::Line { x1, y1, x2, y2 } => {
+            Some(Rect::from_points((*x1, *y1), (*x2, *y2)))
+        }
+        SvgGeometryElement::Rect {
+            x,
+            y,
+            width,
+            height,
+            ..
+        } if *width > 0.0 && *height > 0.0 => Some(Rect::new(*x, *y, x + width, y + height)),
+        _ => None,
+    }
 }
 
 pub fn point_at_length(segments: &[SvgGeometrySegment], distance: f64) -> SvgGeometryPoint {

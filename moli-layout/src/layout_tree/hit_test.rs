@@ -53,6 +53,10 @@ pub struct LayoutHit<N> {
     pub paint_order: Option<u32>,
     pub local_point: LayoutPoint,
     pub is_text: bool,
+    /// Whether the hit box's computed `pointer-events` admits hit testing.
+    /// A query that ignores `pointer-events: none` still reports it, so one
+    /// pass can serve both the respecting and the penetrating answer.
+    pub pointer_events: bool,
     /// The exact physical content box in the hit fragment's own coordinate
     /// space.
     ///
@@ -482,6 +486,7 @@ where
             paint_order: Some(entry.paint_order),
             local_point,
             is_text: entry.is_text,
+            pointer_events: entry.pointer_events,
             local_content_box,
             viewport_to_local: inverse,
         })

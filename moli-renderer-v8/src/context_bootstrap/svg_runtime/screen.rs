@@ -5,11 +5,11 @@
 //! CTM: element transforms, nested viewports and the outer viewport's viewBox
 //! mapping into the outer box's content area.
 
-use moli_svg::{SvgFillRule, SvgGeometryPoint, SvgMatrixComponents};
+use moli_svg::{SvgGeometryPoint, SvgMatrixComponents, SvgShapeHitArea, SvgStrokeHitArea};
 
 use super::builders::{
     parse_svg_preserve_aspect_ratio_value, parse_svg_view_box_value, svg_bbox_for_handle,
-    svg_bbox_has_non_rendered_ancestor, svg_computed_pixel_value, svg_element_has_display_none,
+    svg_bbox_has_non_rendered_ancestor, svg_computed_pixel_value, svg_fill_rule_from_computed,
     svg_geometry_element_for_handle, svg_geometry_optional_length_attribute_for_handle,
     svg_local_name_is_non_rendered_container, svg_transform_for_handle,
 };
@@ -280,7 +280,8 @@ fn svg_view_box_transform(
 }
 
 /// SVG content of the outermost `<svg>` `root` under `point`, foremost
-/// (last in document order) first.
+/// (last in document order) first. With `first_only` the walk stops at the
+/// foremost hit.
 ///
 /// `content_box` is `root`'s CSS content box `[x, y, width, height]` and
 /// `point` the query point, both in the coordinate space of `root`'s hit
@@ -289,32 +290,36 @@ fn svg_view_box_transform(
 /// Every candidate honours `pointer-events` (`auto` acts as
 /// `visiblePainted`) and `visibility`. Basic shapes and paths test their
 /// exact fill and, for a painted stroke, the area within half the stroke
-/// width of the outline (round joins and caps, no dashing). Text, images,
-/// `use` and `foreignObject` test their SVG bounding box. Nested viewport
+/// width of the dashed outline (round joins and caps). Text, images, `use`
+/// and `foreignObject` test their SVG bounding box. Nested viewport
 /// clipping, `clip-path` and masks are not applied.
 pub(crate) fn svg_content_hits_at_point(
     runtime: &JsContextHost,
     root: DomHandle,
     content_box: [f64; 4],
     point: [f64; 2],
+    first_only: bool,
 ) -> Vec<DomHandle> {
     let [x, y, width, height] = content_box;
     let root_ctm = SvgMatrixComponents::translate(x, y)
         .multiply(svg_view_box_transform(runtime, root, width, height));
     let mut hits = Vec::new();
-    collect_svg_content_hits(runtime, root, root_ctm, point, &mut hits);
-    hits.reverse();
+    collect_svg_content_hits(runtime, root, root_ctm, point, first_only, &mut hits);
     hits
 }
 
+/// Walks `parent`'s children in reverse paint order: later siblings, and a
+/// subtree's descendants above the subtree root, come first.
 fn collect_svg_content_hits(
     runtime: &JsContextHost,
     parent: DomHandle,
     parent_ctm: SvgMatrixComponents,
     point: [f64; 2],
+    first_only: bool,
     hits: &mut Vec<DomHandle>,
-) {
-    for child in runtime.dom_host().child_handles(parent) {
+) -> bool {
+    let children = runtime.dom_host().child_handles(parent).collect::<Vec<_>>();
+    for child in children.into_iter().rev() {
         let Some(node) = runtime.dom_host().node(child) else {
             continue;
         };
@@ -324,9 +329,15 @@ fn collect_svg_content_hits(
         let Some(local_name) = node.local_name() else {
             continue;
         };
-        if svg_local_name_is_non_rendered_container(local_name)
-            || svg_element_has_display_none(runtime, child)
-        {
+        if svg_local_name_is_non_rendered_container(local_name) {
+            continue;
+        }
+        let Some(computed) =
+            crate::native_bridge::element::ComputedStyleRead::new(runtime, child).computed_values()
+        else {
+            continue;
+        };
+        if computed.clone_display().is_none() {
             continue;
         }
         let local = if local_name == "svg" {
@@ -335,29 +346,30 @@ fn collect_svg_content_hits(
             svg_transform_for_handle(runtime, child)
         };
         let ctm = parent_ctm.multiply(local);
-        if svg_content_contains_point(runtime, child, local_name, ctm, point) {
-            hits.push(child);
+        if !matches!(local_name, "use" | "image" | "foreignObject")
+            && collect_svg_content_hits(runtime, child, ctm, point, first_only, hits)
+        {
+            return true;
         }
-        if !matches!(local_name, "use" | "image" | "foreignObject") {
-            collect_svg_content_hits(runtime, child, ctm, point, hits);
+        if svg_content_contains_point(runtime, child, local_name, &computed, ctm, point) {
+            hits.push(child);
+            if first_only {
+                return true;
+            }
         }
     }
+    false
 }
 
 fn svg_content_contains_point(
     runtime: &JsContextHost,
     handle: DomHandle,
     local_name: &str,
+    computed: &style::properties::ComputedValues,
     ctm: SvgMatrixComponents,
     [x, y]: [f64; 2],
 ) -> bool {
-    use style::values::computed::{FillRule, SVGPaintKind};
-    use style::values::generics::svg::SVGLength;
-    let Some(computed) =
-        crate::native_bridge::element::ComputedStyleRead::new(runtime, handle).computed_values()
-    else {
-        return false;
-    };
+    use style::values::computed::SVGPaintKind;
     // Stylo's Servo build parses only `auto | none`; SVG treats `auto` as
     // `visiblePainted`.
     if computed.clone_pointer_events() == style::computed_values::pointer_events::T::None
@@ -372,29 +384,24 @@ fn svg_content_contains_point(
         inverse.b * x + inverse.d * y + inverse.f,
     );
     if let Some(geometry) = svg_geometry_element_for_handle(runtime, handle) {
-        if !matches!(computed.clone_fill().kind, SVGPaintKind::None) {
-            let rule = if computed.clone_fill_rule() == FillRule::Evenodd {
-                SvgFillRule::EvenOdd
-            } else {
-                SvgFillRule::NonZero
-            };
-            if moli_svg::is_point_in_fill_with_rule(&geometry, local, rule) {
-                return true;
-            }
-        }
-        if matches!(computed.clone_stroke().kind, SVGPaintKind::None) {
-            return false;
-        }
-        // Percentages resolve against the viewport diagonal; they fall back
-        // to the initial width here.
-        let width = match computed.clone_stroke_width() {
-            SVGLength::LengthPercentage(width) => width
-                .0
-                .to_length()
-                .map_or(1.0, |length| f64::from(length.px())),
-            SVGLength::ContextValue => 1.0,
+        let fill = (!matches!(computed.clone_fill().kind, SVGPaintKind::None))
+            .then(|| svg_fill_rule_from_computed(computed));
+        let painted_stroke = !matches!(computed.clone_stroke().kind, SVGPaintKind::None);
+        let dashes = if painted_stroke {
+            svg_stroke_dashes(computed)
+        } else {
+            Vec::new()
         };
-        return moli_svg::is_point_within_outline_distance(&geometry, local, width / 2.0);
+        let stroke = painted_stroke.then(|| SvgStrokeHitArea {
+            width: svg_stroke_length(computed.clone_stroke_width(), 1.0),
+            dashes: &dashes,
+            dash_offset: svg_stroke_length(computed.clone_stroke_dashoffset(), 0.0),
+        });
+        return moli_svg::is_point_in_shape_hit_area(
+            &geometry,
+            local,
+            SvgShapeHitArea { fill, stroke },
+        );
     }
     let bbox_target = match local_name {
         "image" | "use" | "foreignObject" => true,
@@ -417,4 +424,48 @@ fn svg_content_contains_point(
                 && local.x <= bounds.x + bounds.width
                 && local.y <= bounds.y + bounds.height
         })
+}
+
+/// A stroke length in user units. Percentages resolve against the viewport
+/// diagonal, which is not modelled; they take `fallback`, as does
+/// `context-value`.
+fn svg_stroke_length<L: SvgStrokeLengthValue>(
+    value: style::values::generics::svg::SVGLength<L>,
+    fallback: f64,
+) -> f64 {
+    match value {
+        style::values::generics::svg::SVGLength::LengthPercentage(length) => {
+            length.absolute_px().unwrap_or(fallback)
+        }
+        style::values::generics::svg::SVGLength::ContextValue => fallback,
+    }
+}
+
+trait SvgStrokeLengthValue {
+    fn absolute_px(&self) -> Option<f64>;
+}
+
+impl SvgStrokeLengthValue for style::values::computed::LengthPercentage {
+    fn absolute_px(&self) -> Option<f64> {
+        self.to_length().map(|length| f64::from(length.px()))
+    }
+}
+
+impl SvgStrokeLengthValue for style::values::computed::NonNegativeLengthPercentage {
+    fn absolute_px(&self) -> Option<f64> {
+        self.0.absolute_px()
+    }
+}
+
+/// Resolved `stroke-dasharray`; empty (a solid stroke) for `none`,
+/// `context-value` or a percentage entry.
+fn svg_stroke_dashes(computed: &style::properties::ComputedValues) -> Vec<f64> {
+    match computed.clone_stroke_dasharray() {
+        style::values::generics::svg::SVGStrokeDashArray::Values(values) => values
+            .iter()
+            .map(SvgStrokeLengthValue::absolute_px)
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default(),
+        style::values::generics::svg::SVGStrokeDashArray::ContextValue => Vec::new(),
+    }
 }

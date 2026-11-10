@@ -275,3 +275,76 @@ async fn svg_content_pointer_events_override_a_transparent_outer_svg() {
     .await
     .expect("SVG pointer-events hit-test fixture should run");
 }
+
+/// Even-odd leaves the inner square of two same-direction subpaths unfilled;
+/// non-zero fills it (winding 2).
+#[tokio::test(flavor = "current_thread")]
+async fn svg_fill_rule_decides_whether_an_inner_subpath_is_a_hole() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-fill-rule-hit-test",
+            r#"<svg id=s width=200 height=100 style="display:block">
+  <path id=eo fill-rule=evenodd d="M0 0H80V80H0Z M20 20H60V60H20Z" />
+  <path id=nz transform="translate(100,0)" d="M0 0H80V80H0Z M20 20H60V60H20Z" />
+</svg>"#,
+        )?;
+        assert_eq!(
+            page_vm
+                .vm_mut()
+                .eval("__hits([[40, 40], [10, 40], [140, 40]])")?,
+            ["s|s,body,html", "eo|eo,s,body,html", "nz|nz,s,body,html"].join(" "),
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG fill-rule hit-test fixture should run");
+}
+
+/// A `visibility: hidden` shape is not painted and so not hit, even below a
+/// visible group; the point falls through to the `<svg>`.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_hidden_shape_under_a_visible_group_falls_through_to_the_svg() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-visibility-hit-test",
+            r#"<svg id=s width=200 height=100 style="display:block">
+  <g id=g><rect id=hidden width=80 height=80 style="visibility:hidden" /></g>
+  <rect id=shown x=100 width=80 height=80 />
+</svg>"#,
+        )?;
+        assert_eq!(
+            page_vm.vm_mut().eval("__hits([[40, 40], [140, 40]])")?,
+            ["s|s,body,html", "shown|shown,s,body,html"].join(" "),
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG visibility hit-test fixture should run");
+}
+
+/// Two dashed strokes of one ring, as in a donut chart. The circumference is
+/// 2π·50 ≈ 314.16, so each dash covers a quarter (78.54). `a` starts at 3
+/// o'clock and runs clockwise to 6; `b` is shifted one quarter on, 6 to 9.
+/// The top of the ring is a gap in both.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_dashed_ring_segments_are_hit_only_on_their_own_arc() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-dashed-stroke-hit-test",
+            r#"<svg id=s width=200 height=200 style="display:block">
+  <circle id=a cx=100 cy=100 r=50 fill=none stroke=red stroke-width=20 stroke-dasharray="78.54 235.62" />
+  <circle id=b cx=100 cy=100 r=50 fill=none stroke=blue stroke-width=20 stroke-dasharray="78.54 235.62" stroke-dashoffset="-78.54" />
+</svg>"#,
+        )?;
+        // Points on the ring at 45°, 135° and 270° (y grows downward).
+        assert_eq!(
+            page_vm
+                .vm_mut()
+                .eval("__hits([[135, 135], [65, 135], [100, 50]])")?,
+            ["a|a,s,body,html", "b|b,s,body,html", "s|s,body,html"].join(" "),
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG dashed stroke hit-test fixture should run");
+}

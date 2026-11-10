@@ -1706,7 +1706,7 @@ pub(super) fn svg_local_name_is_non_rendered_container(local_name: &str) -> bool
     )
 }
 
-pub(super) fn svg_element_has_display_none(
+fn svg_element_has_display_none(
     runtime: &crate::native_bridge::JsContextHost,
     handle: crate::document_runtime::DomHandle,
 ) -> bool {
@@ -1724,12 +1724,18 @@ pub(super) fn svg_geometry_fill_rule<'s>(
     else {
         return svg_geometry::SvgFillRule::NonZero;
     };
-    let rule = crate::native_bridge::element::computed_style_property_for_handle(
-        unsafe { &*runtime_ptr },
-        handle,
-        "fill-rule",
-    );
-    if rule.trim().eq_ignore_ascii_case("evenodd") {
+    crate::native_bridge::element::ComputedStyleRead::new(unsafe { &*runtime_ptr }, handle)
+        .computed_values()
+        .map_or(svg_geometry::SvgFillRule::NonZero, |computed| {
+            svg_fill_rule_from_computed(&computed)
+        })
+}
+
+/// The one mapping from computed `fill-rule` to the geometry fill rule.
+pub(super) fn svg_fill_rule_from_computed(
+    computed: &style::properties::ComputedValues,
+) -> svg_geometry::SvgFillRule {
+    if computed.clone_fill_rule() == style::values::computed::FillRule::Evenodd {
         svg_geometry::SvgFillRule::EvenOdd
     } else {
         svg_geometry::SvgFillRule::NonZero

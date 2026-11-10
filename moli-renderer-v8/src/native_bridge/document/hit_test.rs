@@ -507,13 +507,13 @@ fn point_is_inside_viewport(metrics: moli_layout::LayoutDocumentMetrics, x: f64,
         && y < f64::from(metrics.viewport.css_height)
 }
 
-/// The frozen-layout answers a point query needs: the viewport, the
-/// pointer-events-respecting hit(s), and every hit including boxes with
-/// `pointer-events: none`. The latter lets SVG content re-enable hit testing
-/// below an outer `<svg>` that is itself transparent to pointer events.
+/// The frozen-layout answers a point query needs: the viewport and every hit,
+/// front to back, including boxes with `pointer-events: none`. Each hit
+/// reports its own `pointer-events`, so the respecting answer is a filter of
+/// the same pass, and SVG content can still re-enable hit testing below an
+/// outer `<svg>` that is itself transparent to pointer events.
 struct PointHits {
     metrics: moli_layout::LayoutDocumentMetrics,
-    hits: Vec<moli_layout::LayoutHit<DomHandle>>,
     every: Vec<moli_layout::LayoutHit<DomHandle>>,
 }
 
@@ -521,23 +521,10 @@ fn point_hit_answers(
     runtime: &JsContextHost,
     document: DomHandle,
     point: moli_layout::LayoutPoint,
-    single: bool,
 ) -> Result<Option<PointHits>, moli_layout::LayoutError> {
     use moli_layout::{LayoutQuery, LayoutQueryAnswer, LayoutQueryBatch};
-    let respecting = if single {
-        LayoutQuery::HitTest {
-            point,
-            ignore_pointer_events_none: false,
-        }
-    } else {
-        LayoutQuery::HitTestAll {
-            point,
-            ignore_pointer_events_none: false,
-        }
-    };
     let batch = LayoutQueryBatch::new(vec![
         LayoutQuery::DocumentMetrics,
-        respecting,
         LayoutQuery::HitTestAll {
             point,
             ignore_pointer_events_none: true,
@@ -549,30 +536,26 @@ fn point_hit_answers(
         Err(error) => return Err(error),
     };
     let mut answers = answers.answers.into_iter();
-    match (answers.next(), answers.next(), answers.next()) {
+    match (answers.next(), answers.next()) {
         (
             Some(LayoutQueryAnswer::DocumentMetrics(metrics)),
-            Some(LayoutQueryAnswer::HitTest(hit)),
             Some(LayoutQueryAnswer::HitTestAll(every)),
-        ) => Ok(Some(PointHits {
-            metrics,
-            hits: hit.into_iter().collect(),
-            every,
-        })),
-        (
-            Some(LayoutQueryAnswer::DocumentMetrics(metrics)),
-            Some(LayoutQueryAnswer::HitTestAll(hits)),
-            Some(LayoutQueryAnswer::HitTestAll(every)),
-        ) => Ok(Some(PointHits {
-            metrics,
-            hits,
-            every,
-        })),
+        ) => Ok(Some(PointHits { metrics, every })),
         _ => Err(moli_layout::LayoutError::source_contract(
             "renderer geometry provider",
             "returned a mismatched point hit test answer".to_owned(),
         )),
     }
+}
+
+/// The outermost `<svg>` a hit lands on, with its content box.
+fn outer_svg_hit(
+    runtime: &JsContextHost,
+    hit: &moli_layout::LayoutHit<DomHandle>,
+) -> Option<moli_layout::LayoutRect> {
+    let content_box = hit.local_content_box?;
+    crate::context_bootstrap::svg_runtime::screen::is_outermost_svg(runtime, hit.source)
+        .then_some(content_box)
 }
 
 /// SVG content below an outermost `<svg>` has no CSS box, so layout stops at
@@ -581,19 +564,12 @@ fn point_hit_answers(
 fn svg_content_hits(
     runtime: &JsContextHost,
     hit: &moli_layout::LayoutHit<DomHandle>,
+    content_box: moli_layout::LayoutRect,
+    first_only: bool,
 ) -> Vec<DomHandle> {
-    use crate::context_bootstrap::svg_runtime::screen;
-    let Some(content_box) = hit.local_content_box else {
-        return Vec::new();
-    };
-    let Some(svg) = runtime.dom_host().node(hit.source).and_then(|node| {
-        (node.is_element() && screen::is_outermost_svg(runtime, hit.source)).then_some(hit.source)
-    }) else {
-        return Vec::new();
-    };
-    screen::svg_content_hits_at_point(
+    crate::context_bootstrap::svg_runtime::screen::svg_content_hits_at_point(
         runtime,
-        svg,
+        hit.source,
         [
             f64::from(content_box.x),
             f64::from(content_box.y),
@@ -601,6 +577,7 @@ fn svg_content_hits(
             f64::from(content_box.height),
         ],
         [f64::from(hit.local_point.x), f64::from(hit.local_point.y)],
+        first_only,
     )
 }
 
@@ -623,15 +600,10 @@ fn element_at_point(
     // A single-point query intentionally keeps a foremost text hit and maps
     // it to its web-exposed parent element. This is observably different from
     // the penetrating-list filtering performed by `elements_at_point`.
-    let Some(PointHits {
-        metrics,
-        hits,
-        every,
-    }) = point_hit_answers(
+    let Some(PointHits { metrics, every }) = point_hit_answers(
         runtime,
         document,
         moli_layout::LayoutPoint::new(x as f32, y as f32),
-        true,
     )?
     else {
         return Ok(None);
@@ -639,15 +611,25 @@ fn element_at_point(
     if !point_is_inside_viewport(metrics, x, y) {
         return Ok(None);
     }
-    let hit = hits.into_iter().next();
-    // SVG content painted at or above the foremost hit wins, including content
-    // that re-enables pointer events below a transparent `<svg>`.
-    let svg_hit = every
-        .iter()
-        .take_while(|candidate| hit.is_none_or(|hit| candidate.paint_order >= hit.paint_order))
-        .find_map(|candidate| svg_content_hits(runtime, candidate).into_iter().next());
-    Ok(svg_hit
-        .or_else(|| hit.and_then(|hit| element_for_hit_source(runtime, hit.source)))
+    // Front to back, the first box that respects pointer events wins unless
+    // SVG content painted at or above it is hit first. Content can re-enable
+    // pointer events below a transparent `<svg>`.
+    let mut element = None;
+    for hit in &every {
+        if let Some(shape) = outer_svg_hit(runtime, hit).and_then(|content_box| {
+            svg_content_hits(runtime, hit, content_box, true)
+                .into_iter()
+                .next()
+        }) {
+            element = Some(shape);
+            break;
+        }
+        if hit.pointer_events {
+            element = element_for_hit_source(runtime, hit.source);
+            break;
+        }
+    }
+    Ok(element
         .and_then(|element| retarget_element_to_tree_scope(runtime, element, tree_scope))
         .or_else(|| document_root_element(runtime, document)))
 }
@@ -659,15 +641,10 @@ fn elements_at_point(
     x: f64,
     y: f64,
 ) -> Result<Vec<DomHandle>, moli_layout::LayoutError> {
-    let Some(PointHits {
-        metrics,
-        hits,
-        every,
-    }) = point_hit_answers(
+    let Some(PointHits { metrics, every }) = point_hit_answers(
         runtime,
         document,
         moli_layout::LayoutPoint::new(x as f32, y as f32),
-        false,
     )?
     else {
         return Ok(Vec::new());
@@ -676,15 +653,8 @@ fn elements_at_point(
         return Ok(Vec::new());
     }
 
-    // Both lists are front to back; SVG content sits directly above the
-    // `<svg>` box that hosts it.
-    let mut svg_layers = every
-        .iter()
-        .filter_map(|candidate| {
-            let shapes = svg_content_hits(runtime, candidate);
-            (!shapes.is_empty()).then_some((candidate.paint_order, shapes))
-        })
-        .peekable();
+    // Front to back; SVG content sits directly above the `<svg>` box that
+    // hosts it.
     let mut seen = HashSet::new();
     let mut elements = Vec::new();
     let mut push = |element: DomHandle, elements: &mut Vec<DomHandle>| {
@@ -694,21 +664,16 @@ fn elements_at_point(
             elements.push(element);
         }
     };
-    for hit in hits {
-        while let Some((_, shapes)) =
-            svg_layers.next_if(|(paint_order, _)| *paint_order >= hit.paint_order)
-        {
-            for shape in shapes {
+    for hit in &every {
+        if let Some(content_box) = outer_svg_hit(runtime, hit) {
+            for shape in svg_content_hits(runtime, hit, content_box, false) {
                 push(shape, &mut elements);
             }
         }
-        if let Some(element) = element_for_list_hit_source(runtime, hit.source) {
+        if hit.pointer_events
+            && let Some(element) = element_for_list_hit_source(runtime, hit.source)
+        {
             push(element, &mut elements);
-        }
-    }
-    for (_, shapes) in svg_layers {
-        for shape in shapes {
-            push(shape, &mut elements);
         }
     }
     if let Some(root) = document_root_element(runtime, document) {
