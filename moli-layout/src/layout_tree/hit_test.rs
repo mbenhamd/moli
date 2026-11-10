@@ -125,8 +125,11 @@ where
             .filter_map(|entry| self.hit_for_entry(&entry, ignore_pointer_events_none, &mut clips))
             .collect::<Vec<_>>();
         hits.sort_by_key(|hit| std::cmp::Reverse(hit.paint_order));
+        // One hit per source and `pointer-events` value: a source's foremost
+        // fragment can be transparent to pointer events (an `::after` with
+        // `pointer-events: none`) while another fragment of it still hits.
         let mut seen = HashSet::new();
-        hits.retain(|hit| seen.insert(hit.source));
+        hits.retain(|hit| seen.insert((hit.source, hit.pointer_events)));
         hits
     }
 

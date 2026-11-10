@@ -25,6 +25,7 @@ mod callbacks;
 mod filters;
 mod path_data;
 mod rect;
+pub(crate) mod hit_test;
 pub(crate) mod screen;
 mod text_layout;
 

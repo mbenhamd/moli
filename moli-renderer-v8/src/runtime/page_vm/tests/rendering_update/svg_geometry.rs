@@ -348,3 +348,164 @@ async fn svg_dashed_ring_segments_are_hit_only_on_their_own_arc() {
     .await
     .expect("SVG dashed stroke hit-test fixture should run");
 }
+
+/// A pseudo-element with `pointer-events: none` over its owner does not
+/// hide the owner's own box.
+#[tokio::test(flavor = "current_thread")]
+async fn pointer_events_none_pseudo_element_does_not_hide_its_owner() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "pseudo-pointer-events-hit-test",
+            r#"<style>#o::after{content:"";position:absolute;left:0;top:0;width:100px;height:100px;pointer-events:none}</style>
+<div id=o style="position:relative;width:50px;height:50px"></div>"#,
+        )?;
+        assert_eq!(
+            page_vm.vm_mut().eval("__hits([[25, 25], [75, 25]])")?,
+            ["o|o,body,html", "body|body,html"].join(" "),
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("pseudo-element pointer-events hit-test fixture should run");
+}
+
+/// Dashes end in the stroke's line caps: none past a butt end, a disk for
+/// round, a half-width square for square.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_dash_ends_follow_the_stroke_linecap() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-dash-linecap-hit-test",
+            r#"<svg id=s width=200 height=120 style="display:block">
+  <line id=b x1=10 y1=20 x2=190 y2=20 stroke=red stroke-width=20 stroke-dasharray="10 20" />
+  <line id=r x1=10 y1=60 x2=190 y2=60 stroke=red stroke-width=20 stroke-dasharray="10 20" stroke-linecap=round />
+  <line id=q x1=10 y1=100 x2=190 y2=100 stroke=red stroke-width=20 stroke-dasharray="10 20" stroke-linecap=square />
+</svg>"#,
+        )?;
+        // The first dash runs from x=10 to x=20.
+        assert_eq!(
+            page_vm
+                .vm_mut()
+                .eval("__hits([[15, 20], [25, 20], [25, 60], [29, 68], [29, 108]])")?,
+            [
+                "b|b,s,body,html",
+                "s|s,body,html",
+                "r|r,s,body,html",
+                "s|s,body,html",
+                "q|q,s,body,html",
+            ]
+            .join(" "),
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG dash linecap hit-test fixture should run");
+}
+
+/// Percentage stroke lengths resolve against the viewport diagonal
+/// (200 here), and `pathLength` rescales the dash pattern.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_stroke_percentages_and_path_length_scale_the_stroke() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-stroke-percent-hit-test",
+            r#"<svg id=s width=200 height=200 style="display:block">
+  <line id=w x1=0 y1=20 x2=200 y2=20 stroke=red stroke-width="10%" />
+  <line id=d x1=0 y1=60 x2=200 y2=60 stroke=red stroke-width=10 stroke-dasharray="5% 10%" />
+  <line id=p x1=0 y1=100 x2=200 y2=100 stroke=red stroke-width=10 stroke-dasharray="10 10" pathLength=100 />
+</svg>"#,
+        )?;
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                "__hits([[100, 28], [100, 32], [5, 60], [20, 60], [15, 100], [25, 100]])"
+            )?,
+            [
+                "w|w,s,body,html",
+                "s|s,body,html",
+                "d|d,s,body,html",
+                "s|s,body,html",
+                "p|p,s,body,html",
+                "s|s,body,html",
+            ]
+            .join(" "),
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG stroke percentage hit-test fixture should run");
+}
+
+/// Percentage geometry resolves against the viewport. Clipped and `<switch>`
+/// content, which the geometry model does not decide, keeps the outer
+/// `<svg>` answer.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_percent_geometry_resolves_and_clipped_content_stays_coarse() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-coarse-fallback-hit-test",
+            r#"<svg id=s width=200 height=200 style="display:block">
+  <defs><clipPath id=c><rect x=0 y=100 width=50 height=50 /></clipPath></defs>
+  <rect id=r width="50%" height="50%" fill=red />
+  <g clip-path="url(#c)"><rect id=c1 x=0 y=100 width=100 height=100 fill=blue /></g>
+  <switch>
+    <rect id=w1 x=100 y=100 width=100 height=100 fill=green systemLanguage="zz" />
+    <rect id=w2 x=100 y=100 width=100 height=100 fill=green />
+  </switch>
+</svg>"#,
+        )?;
+        assert_eq!(
+            page_vm
+                .vm_mut()
+                .eval("__hits([[75, 75], [75, 175], [150, 150]])")?,
+            ["r|r,s,body,html", "s|s,body,html", "s|s,body,html"].join(" "),
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG coarse fallback hit-test fixture should run");
+}
+
+/// A paint server reference that does not resolve paints its fallback, and
+/// nothing without one; unpainted shapes and text are not hit.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_unresolved_paint_and_unpainted_text_are_not_hit() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-unpainted-hit-test",
+            r#"<svg id=s width=300 height=100 style="display:block">
+  <defs><linearGradient id=lg><stop offset=0 stop-color=red /></linearGradient></defs>
+  <rect id=m width=100 height=100 fill="url(#missing) none" />
+  <rect id=g x=100 width=100 height=100 fill="url(#missing)" />
+  <rect id=gr x=200 width=100 height=100 fill="url(#lg)" />
+  <text id=t x=10 y=50 font-size=40 fill=none stroke=none>Hi</text>
+</svg>"#,
+        )?;
+        assert_eq!(
+            page_vm
+                .vm_mut()
+                .eval("__hits([[30, 40], [150, 50], [250, 50]])")?,
+            ["s|s,body,html", "s|s,body,html", "gr|gr,s,body,html"].join(" "),
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG unpainted hit-test fixture should run");
+}
+
+/// A point on the viewport's scrollbar hits no element, not even the root.
+#[tokio::test(flavor = "current_thread")]
+async fn element_from_point_on_the_viewport_scrollbar_is_null() {
+    run_page_vm_async_test(async move {
+        let mut page_vm =
+            svg_hit_test_page_vm("scrollbar-hit-test", r#"<div style="height:3000px"></div>"#)?;
+        assert_eq!(
+            page_vm
+                .vm_mut()
+                .eval("__hits([[innerWidth - 5, 10], [10, 10]])")?,
+            ["null|", "div|div,body,html"].join(" "),
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("viewport scrollbar hit-test fixture should run");
+}
