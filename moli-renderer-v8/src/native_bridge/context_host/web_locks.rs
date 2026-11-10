@@ -11,8 +11,8 @@ use super::*;
 use crate::{
     page_task_queue::{RendererPageMiscPlatformApiTaskId, RendererPageMiscPlatformApiTaskKind},
     web_locks_runtime::{
-        SharedRendererWebLockRegistry, WebLockClientId, WebLockInfo, WebLockMode, WebLockOwner,
-        WebLockRequest, WebLockRequestId, WebLockRequestOutcome, dispatch_web_lock_actions,
+        WebLockClientId, WebLockInfo, WebLockMode, WebLockOwner, WebLockRequest, WebLockRequestId,
+        WebLockRequestOutcome, dispatch_web_lock_actions,
     },
 };
 use moli_storage_key::MoliStorageKey;
@@ -105,10 +105,6 @@ fn new_client_label() -> String {
 }
 
 impl JsContextHost {
-    pub(crate) fn web_lock_registry(&self) -> SharedRendererWebLockRegistry {
-        self.web_lock_registry.clone()
-    }
-
     pub(crate) fn next_web_lock_request_id(&self) -> WebLockRequestId {
         self.web_lock_registry.next_id()
     }
