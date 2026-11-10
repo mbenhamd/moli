@@ -141,7 +141,7 @@ fn class_toggle_on_a_descendant_adds_no_container_iteration() {
         .eval(
             r#"(() => {
               const dep = document.getElementById('dep');
-              dep.classList.add('marker');
+              dep.classList.add('color');
               return dep.getBoundingClientRect().height;
             })()"#,
         )

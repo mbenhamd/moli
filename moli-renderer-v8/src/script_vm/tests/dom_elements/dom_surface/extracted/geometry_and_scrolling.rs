@@ -1538,7 +1538,8 @@ fn assert_scroll_matches_a_fresh_layout(
         passes,
         "layout passes the scroll costs"
     );
-    vm.eval("document.body.setAttribute('data-fresh', '1'); 'mutated'")
+    // An attribute no selector reads would not lay out; a style write does.
+    vm.eval("document.body.style.paddingBottom = '0px'; 'mutated'")
         .expect("force a fresh layout");
     assert_eq!(
         vm.eval(&probe).expect("fresh geometry"),
