@@ -1762,27 +1762,28 @@ impl ResolvedLayoutStyle {
     pub(crate) fn parley_text_style(
         &self,
     ) -> parley::TextStyle<'static, 'static, crate::stylo_to_parley::TextBrush> {
-        if let Some(computed) = self.computed.as_ref() {
-            let mut style = crate::stylo_to_parley::text_style(computed);
-            if self.single_line_text_control {
-                style.white_space_collapse = parley::WhiteSpaceCollapse::Preserve;
-                style.text_wrap_mode = parley::TextWrapMode::NoWrap;
+        let mut style = if let Some(computed) = self.computed.as_ref() {
+            crate::stylo_to_parley::text_style(computed)
+        } else {
+            parley::TextStyle {
+                font_size: self.font_size,
+                line_height: parley::LineHeight::Absolute(self.line_height),
+                brush: crate::stylo_to_parley::TextBrush {
+                    color: self.text_color,
+                    paint: true,
+                    synthetic_bold: false,
+                    decoration: crate::stylo_to_parley::TextDecorationBrush::default(),
+                    shadows: std::sync::Arc::from([]),
+                    stroke: None,
+                },
+                ..parley::TextStyle::default()
             }
-            return style;
+        };
+        if self.single_line_text_control {
+            style.white_space_collapse = parley::WhiteSpaceCollapse::Preserve;
+            style.text_wrap_mode = parley::TextWrapMode::NoWrap;
         }
-        parley::TextStyle {
-            font_size: self.font_size,
-            line_height: parley::LineHeight::Absolute(self.line_height),
-            brush: crate::stylo_to_parley::TextBrush {
-                color: self.text_color,
-                paint: true,
-                synthetic_bold: false,
-                decoration: crate::stylo_to_parley::TextDecorationBrush::default(),
-                shadows: std::sync::Arc::from([]),
-                stroke: None,
-            },
-            ..parley::TextStyle::default()
-        }
+        style
     }
 
     pub(crate) fn text_indent(&self, containing_width: f32) -> (f32, parley::IndentOptions) {
