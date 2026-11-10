@@ -435,17 +435,20 @@ async fn svg_stroke_percentages_and_path_length_scale_the_stroke() {
     .expect("SVG stroke percentage hit-test fixture should run");
 }
 
-/// Percentage geometry resolves against the viewport. Clipped and `<switch>`
-/// content, which the geometry model does not decide, keeps the outer
-/// `<svg>` answer.
+/// Percentage geometry resolves against the viewport. An `<svg>` with
+/// clipped or `<switch>` content, which the geometry model does not decide,
+/// keeps the outer `<svg>` answer everywhere, even over a plain shape.
 #[tokio::test(flavor = "current_thread")]
 async fn svg_percent_geometry_resolves_and_clipped_content_stays_coarse() {
     run_page_vm_async_test(async move {
         let mut page_vm = svg_hit_test_page_vm(
             "svg-coarse-fallback-hit-test",
             r#"<svg id=s width=200 height=200 style="display:block">
-  <defs><clipPath id=c><rect x=0 y=100 width=50 height=50 /></clipPath></defs>
   <rect id=r width="50%" height="50%" fill=red />
+</svg>
+<svg id=k width=200 height=200 style="display:block">
+  <defs><clipPath id=c><rect x=0 y=100 width=50 height=50 /></clipPath></defs>
+  <rect id=r2 width=100 height=100 fill=red />
   <g clip-path="url(#c)"><rect id=c1 x=0 y=100 width=100 height=100 fill=blue /></g>
   <switch>
     <rect id=w1 x=100 y=100 width=100 height=100 fill=green systemLanguage="zz" />
@@ -456,8 +459,15 @@ async fn svg_percent_geometry_resolves_and_clipped_content_stays_coarse() {
         assert_eq!(
             page_vm
                 .vm_mut()
-                .eval("__hits([[75, 75], [75, 175], [150, 150]])")?,
-            ["r|r,s,body,html", "s|s,body,html", "s|s,body,html"].join(" "),
+                .eval("__hits([[75, 75], [150, 150], [75, 275], [75, 375], [150, 350]])")?,
+            [
+                "r|r,s,body,html",
+                "s|s,body,html",
+                "k|k,body,html",
+                "k|k,body,html",
+                "k|k,body,html",
+            ]
+            .join(" "),
         );
         Ok::<_, anyhow::Error>(())
     })
@@ -508,4 +518,86 @@ async fn element_from_point_on_the_viewport_scrollbar_is_null() {
     })
     .await
     .expect("viewport scrollbar hit-test fixture should run");
+}
+
+/// Content outside the geometry model's allowlist keeps the outer `<svg>`
+/// answer for the whole `<svg>`, so a lower shape never wins where the
+/// model would misplace the front one: a CSS transform, `transform: none`
+/// over a `transform` attribute, a `<use>` whose stroke reaches past its
+/// bounding box, a non-scaling stroke, and a length unit the model does not
+/// parse. Each `<svg>` is 100px tall, a back rect filling it.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_content_outside_the_allowlist_keeps_the_outer_svg() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-allowlist-hit-test",
+            r##"<svg id=s1 width=100 height=100 style="display:block">
+  <rect id=b1 width=100 height=100 fill=blue />
+  <rect id=f1 width=50 height=50 fill=red style="transform:translate(50px,50px)" />
+</svg>
+<svg id=s2 width=100 height=100 style="display:block">
+  <rect id=b2 width=100 height=100 fill=blue />
+  <rect id=f2 width=50 height=50 fill=red transform="translate(50,50)" style="transform:none" />
+</svg>
+<svg id=s3 width=100 height=100 style="display:block">
+  <defs><line id=src x1=10 y1=50 x2=90 y2=50 /></defs>
+  <rect id=b3 width=100 height=100 fill=blue />
+  <use id=f3 href="#src" stroke=red stroke-width=30 />
+</svg>
+<svg id=s4 width=100 height=100 style="display:block">
+  <rect id=b4 width=100 height=100 fill=blue />
+  <g transform="scale(0.1)"><line id=f4 x1=0 y1=500 x2=1000 y2=500 stroke=red stroke-width=20 vector-effect=non-scaling-stroke /></g>
+</svg>
+<svg id=s5 width=100 height=100 style="display:block">
+  <rect id=b5 width=100 height=100 fill=blue />
+  <line id=f5 x1=0 y1="10vb" x2=100 y2="10vb" stroke=red stroke-width=10 />
+</svg>"##,
+        )?;
+        // Each point is on the front shape where the browser paints it and
+        // off it where the attribute-only geometry would put it.
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                "__hits([[75, 75], [25, 125], [50, 260], [50, 358], [50, 450]])"
+            )?,
+            [
+                "s1|s1,body,html",
+                "s2|s2,body,html",
+                "s3|s3,body,html",
+                "s4|s4,body,html",
+                "s5|s5,body,html",
+            ]
+            .join(" "),
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG allowlist fallback hit-test fixture should run");
+}
+
+/// A dash pattern that `pathLength` scales to nothing would expand into
+/// an unbounded number of dashes; the hit test stops at its bound and
+/// keeps the outer `<svg>` answer.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_dash_expansion_is_bounded_under_a_huge_path_length() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-dash-bound-hit-test",
+            r#"<svg id=s width=200 height=100 style="display:block">
+  <line id=l x1=0 y1=50 x2=200 y2=50 stroke=red stroke-width=20 stroke-dasharray="5 5" pathLength="1e30" />
+</svg>"#,
+        )?;
+        let started = std::time::Instant::now();
+        assert_eq!(
+            page_vm.vm_mut().eval("__hits([[100, 50]])")?,
+            "s|s,body,html"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "the bounded hit test took {:?}",
+            started.elapsed()
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG dash bound hit-test fixture should run");
 }

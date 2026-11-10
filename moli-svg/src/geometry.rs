@@ -257,6 +257,23 @@ pub struct SvgStrokeHitArea<'a> {
     pub path_length: Option<f64>,
 }
 
+/// A hit test whose stroke would expand past the work bound: more than
+/// 10,000 dash phases, more than 50,000 flattened points, a dash shorter
+/// than 1e-6 user units after `pathLength` scaling, or a path too large for
+/// its flattening tolerance. The caller cannot answer exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SvgHitTestUnbounded;
+
+/// Dash phases (dashes and gaps) one stroke may expand to.
+const MAX_DASH_PHASES: f64 = 10_000.0;
+/// Flattened stroke points one shape may expand to.
+const MAX_FLAT_POINTS: usize = 50_000;
+/// The shortest dash, in user units after `pathLength` scaling, that is
+/// expanded.
+const MIN_DASH_LENGTH: f64 = 1e-6;
+/// The largest path extent over flattening tolerance that is flattened.
+const MAX_EXTENT_OVER_TOLERANCE: f64 = 1e9;
+
 /// Whether `point` lies on the painted fill or stroke of `element`.
 ///
 /// Basic shapes and point lists are rejected on their bounds before any path
@@ -270,20 +287,23 @@ pub struct SvgStrokeHitArea<'a> {
 /// over-hits bevel corners by at most the half width. A dash array that
 /// cannot dash (non-finite, negative or summing to zero) leaves the stroke
 /// solid, as SVG requires.
+///
+/// Stroke expansion is bounded; past the bound the answer is
+/// [`SvgHitTestUnbounded`] instead of an approximation.
 pub fn is_point_in_shape_hit_area(
     element: &SvgGeometryElement,
     point: SvgGeometryPoint,
     area: SvgShapeHitArea<'_>,
-) -> bool {
+) -> Result<bool, SvgHitTestUnbounded> {
     if !point.x.is_finite() || !point.y.is_finite() {
-        return false;
+        return Ok(false);
     }
     let fill = area
         .fill
         .filter(|_| !matches!(element, SvgGeometryElement::Line { .. }));
     let stroke = area.stroke.filter(|stroke| stroke.width > 0.0);
     if fill.is_none() && stroke.is_none() {
-        return false;
+        return Ok(false);
     }
     let point = Point::new(point.x, point.y);
     let half_width = stroke.map_or(0.0, |stroke| stroke.width / 2.0);
@@ -298,10 +318,10 @@ pub fn is_point_in_shape_hit_area(
     let path = match element {
         SvgGeometryElement::Polygon { points } | SvgGeometryElement::Polyline { points } => {
             let Some(coordinates) = poly_coordinates(points) else {
-                return false;
+                return Ok(false);
             };
             if outside(coordinates_bounds(&coordinates)) {
-                return false;
+                return Ok(false);
             }
             poly_coordinates_path(
                 &coordinates,
@@ -310,10 +330,10 @@ pub fn is_point_in_shape_hit_area(
         }
         SvgGeometryElement::Path { d } => {
             let Some(path) = path_geometry(d) else {
-                return false;
+                return Ok(false);
             };
             if path.elements().is_empty() || outside(path.control_box()) {
-                return false;
+                return Ok(false);
             }
             path
         }
@@ -321,44 +341,70 @@ pub fn is_point_in_shape_hit_area(
             if analytic_bounds(element).is_none_or(outside) {
                 // Degenerate basic shapes render nothing, except a
                 // zero-length line, whose bounds are a point.
-                return false;
+                return Ok(false);
             }
             let Some(path) = geometry_path(element) else {
-                return false;
+                return Ok(false);
             };
             path
         }
     };
     if fill.is_some_and(|rule| path_fill_contains(&path, point, rule)) {
-        return true;
+        return Ok(true);
     }
     let Some(stroke) = stroke else {
-        return false;
+        return Ok(false);
     };
     let tolerance = (half_width / 100.0).clamp(1e-4, 0.05);
+    let bounds = path.control_box();
+    let extent = bounds.width().max(bounds.height());
+    if extent.is_nan() || extent / tolerance > MAX_EXTENT_OVER_TOLERANCE {
+        return Err(SvgHitTestUnbounded);
+    }
     let mut subpaths = FlatSubpaths::default();
     if dash_array_dashes(stroke.dashes) {
-        let mut scale = 1.0;
-        if let Some(path_length) = stroke.path_length.filter(|length| *length > 0.0) {
-            let length = path
-                .segments()
-                .map(|segment| segment.arclen(ARC_LENGTH_ACCURACY))
-                .sum::<f64>();
-            scale = length / path_length;
-        }
+        let length = path
+            .segments()
+            .map(|segment| segment.arclen(ARC_LENGTH_ACCURACY))
+            .sum::<f64>();
+        let scale = match stroke.path_length.filter(|length| *length > 0.0) {
+            Some(path_length) => length / path_length,
+            None => 1.0,
+        };
         let dashes = stroke
             .dashes
             .iter()
             .map(|dash| dash * scale)
             .collect::<Vec<_>>();
+        // A dash that scaling shrinks below the bound, or makes non-finite,
+        // would expand without limit.
+        if stroke
+            .dashes
+            .iter()
+            .zip(&dashes)
+            .any(|(dash, scaled)| *dash > 0.0 && (!scaled.is_finite() || *scaled < MIN_DASH_LENGTH))
+        {
+            return Err(SvgHitTestUnbounded);
+        }
+        if !dash_array_dashes(&dashes) {
+            return Ok(false);
+        }
+        // An odd-length array repeats twice per period.
+        let entries = if dashes.len() % 2 == 1 {
+            2 * dashes.len()
+        } else {
+            dashes.len()
+        };
+        let period = dashes.iter().sum::<f64>() * (entries / dashes.len()) as f64;
+        let phases = (length / period + 1.0) * entries as f64;
+        if phases.is_nan() || phases > MAX_DASH_PHASES {
+            return Err(SvgHitTestUnbounded);
+        }
         let offset = if stroke.dash_offset.is_finite() {
             stroke.dash_offset * scale
         } else {
             0.0
         };
-        if !dash_array_dashes(&dashes) {
-            return false;
-        }
         kurbo::flatten(
             kurbo::dash(path.iter(), offset, &dashes),
             tolerance,
@@ -368,9 +414,12 @@ pub fn is_point_in_shape_hit_area(
         kurbo::flatten(path.iter(), tolerance, |element| subpaths.push(element));
     }
     subpaths.finish();
-    subpaths.subpaths.iter().any(|(points, closed)| {
+    if subpaths.overflowed {
+        return Err(SvgHitTestUnbounded);
+    }
+    Ok(subpaths.subpaths.iter().any(|(points, closed)| {
         flat_subpath_stroke_contains(points, *closed, point, half_width, stroke.linecap)
-    })
+    }))
 }
 
 #[derive(Default)]
@@ -379,10 +428,23 @@ struct FlatSubpaths {
     current: Vec<Point>,
     /// A lone move-to paints nothing; a zero-length segment paints caps.
     drawn: bool,
+    points: usize,
+    /// More than [`MAX_FLAT_POINTS`] points were pushed; the rest are dropped.
+    overflowed: bool,
 }
 
 impl FlatSubpaths {
     fn push(&mut self, element: PathEl) {
+        if self.overflowed {
+            return;
+        }
+        self.points += 1;
+        if self.points > MAX_FLAT_POINTS {
+            self.overflowed = true;
+            self.subpaths.clear();
+            self.current.clear();
+            return;
+        }
         match element {
             PathEl::MoveTo(point) => {
                 self.finish();

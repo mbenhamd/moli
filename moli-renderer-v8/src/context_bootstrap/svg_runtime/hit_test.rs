@@ -2,8 +2,9 @@
 //!
 //! CSS layout produces a box only for the outermost `<svg>`, so point queries
 //! stop there. This module resolves the content under the point from SVG
-//! geometry. Where the model cannot be exact (clipping, masks, `<switch>`,
-//! context paint, `<use>`, unresolvable lengths), a hit becomes
+//! geometry, but only for an `<svg>` whose whole subtree the geometry model
+//! covers exactly: an allowlist of elements and computed properties checked
+//! once per query before any shape is tested. Any other subtree is
 //! [`Coarse`]: the caller then keeps the `<svg>` box answer, as before SVG
 //! content was resolved at all.
 
@@ -35,10 +36,11 @@ pub(crate) struct Coarse;
 /// `point` the query point, both in the coordinate space of `root`'s hit
 /// fragment, so CSS transforms on the outer box are already undone.
 ///
-/// Candidates honour `pointer-events` (`auto` acts as `visiblePainted`),
-/// `visibility`, `display` and nested `<svg>` viewport clipping. Shapes test
-/// their exact fill and their stroke (width, caps, dashing, `pathLength`).
-/// Painted text and images test their SVG bounding box.
+/// [`Coarse`] unless every element below `root` is on the allowlist (see
+/// [`eligible_children`]). Candidates honour `pointer-events` (`auto` acts
+/// as `visiblePainted`), `visibility`, `display` and nested `<svg>`
+/// viewport clipping. Shapes test their exact fill and their stroke (width,
+/// caps, dashing, `pathLength`). Painted text tests its SVG bounding box.
 pub(crate) fn svg_content_hits_at_point(
     runtime: &JsContextHost,
     root: DomHandle,
@@ -50,6 +52,9 @@ pub(crate) fn svg_content_hits_at_point(
     let Some(root_style) = computed_values(runtime, root) else {
         return Ok(Vec::new());
     };
+    if has_unmodelled_effects(runtime, root, &root_style) {
+        return Err(Coarse);
+    }
     let view_box = runtime
         .dom_host()
         .get_attribute(root, "viewBox")
@@ -60,8 +65,8 @@ pub(crate) fn svg_content_hits_at_point(
         ctm: SvgMatrixComponents::translate(x, y)
             .multiply(svg_view_box_transform(runtime, root, width, height)),
         viewport: Some(view_box.map_or((width, height), |[_, _, w, h]| (w, h))),
-        uncertain: clips_or_masks(runtime, root, &root_style),
     };
+    eligible_children(runtime, root, scope.viewport, Content::Graphics)?;
     let mut walk = Walk {
         runtime,
         point,
@@ -72,13 +77,137 @@ pub(crate) fn svg_content_hits_at_point(
     Ok(walk.hits)
 }
 
+/// Which children an element may have.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Content {
+    Graphics,
+    /// Inside `<text>`: only `<tspan>` and descriptive elements.
+    Text,
+}
+
+/// The allowlist pre-pass: `Ok` when the geometry model covers every child
+/// of `parent` and their subtrees exactly, given the nearest `viewport`.
+///
+/// Rendered content may use `g`, nested `svg` (see [`nested_svg`]), the
+/// basic shapes, `path`, `text` and `tspan`; `defs` may hold only paint
+/// servers. Paint servers, `title` and `desc` are never hit and their
+/// content is not inspected. Every other element (`use`, `image`,
+/// `foreignObject`, `switch`, `symbol`, `a`, `textPath`, animation
+/// elements, ...) is [`Coarse`], as is any rendered element with an effect,
+/// a transform or a length the model does not reproduce. Stops at the first
+/// such node.
+fn eligible_children(
+    runtime: &JsContextHost,
+    parent: DomHandle,
+    viewport: Option<(f64, f64)>,
+    content: Content,
+) -> Result<(), Coarse> {
+    for child in runtime.dom_host().child_handles(parent).collect::<Vec<_>>() {
+        let Some(node) = runtime.dom_host().node(child) else {
+            continue;
+        };
+        // Text, comments and elements outside the SVG namespace are not
+        // rendered here.
+        if node.namespace() != Some(SVG_NS) {
+            continue;
+        }
+        let Some(local_name) = node.local_name() else {
+            continue;
+        };
+        match (content, local_name) {
+            (_, "title" | "desc") => {}
+            (Content::Graphics, "linearGradient" | "radialGradient" | "pattern") => {}
+            (Content::Graphics, "defs") => {
+                eligible_definitions(runtime, child)?;
+            }
+            (
+                Content::Graphics,
+                "g" | "svg" | "circle" | "ellipse" | "line" | "path" | "polygon" | "polyline"
+                | "rect" | "text",
+            )
+            | (Content::Text, "tspan") => {
+                eligible_element(runtime, child, local_name, viewport)?;
+            }
+            _ => return Err(Coarse),
+        }
+    }
+    Ok(())
+}
+
+/// `<defs>` content is never rendered in place; only paint servers, which
+/// fills and strokes reference, are on the allowlist.
+fn eligible_definitions(runtime: &JsContextHost, defs: DomHandle) -> Result<(), Coarse> {
+    for child in runtime.dom_host().child_handles(defs).collect::<Vec<_>>() {
+        let Some(node) = runtime.dom_host().node(child) else {
+            continue;
+        };
+        if node.namespace() != Some(SVG_NS) {
+            continue;
+        }
+        if !matches!(
+            node.local_name(),
+            Some("linearGradient" | "radialGradient" | "pattern" | "title" | "desc")
+        ) {
+            return Err(Coarse);
+        }
+    }
+    Ok(())
+}
+
+fn eligible_element(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+    local_name: &str,
+    viewport: Option<(f64, f64)>,
+) -> Result<(), Coarse> {
+    let Some(computed) = computed_values(runtime, handle) else {
+        return Ok(());
+    };
+    // Not rendered, so neither it nor its subtree is hit.
+    if computed.clone_display().is_none() {
+        return Ok(());
+    }
+    if has_unmodelled_effects(runtime, handle, &computed)
+        || !transform_is_the_attribute(runtime, handle, &computed)
+    {
+        return Err(Coarse);
+    }
+    let mut viewport = viewport;
+    let lengths = Lengths(viewport);
+    match local_name {
+        "svg" => viewport = nested_svg(runtime, handle, &computed)?.viewport,
+        "circle" | "ellipse" | "line" | "path" | "polygon" | "polyline" | "rect" => {
+            paint_is_painted(runtime, handle, &computed.clone_fill())?;
+            paint_is_painted(runtime, handle, &computed.clone_stroke())?;
+            if local_name == "path" && !path_data_is_the_attribute(runtime, handle, &computed) {
+                return Err(Coarse);
+            }
+            geometry_element(runtime, handle, local_name, &computed, lengths)?;
+            stroke_width(&computed, lengths)?;
+            stroke_dash_offset(&computed, lengths)?;
+            if !stroke_dashes(&computed, lengths)?.is_empty() {
+                path_length(runtime, handle)?;
+            }
+        }
+        "text" | "tspan" => {
+            paint_is_painted(runtime, handle, &computed.clone_fill())?;
+            paint_is_painted(runtime, handle, &computed.clone_stroke())?;
+        }
+        _ => {}
+    }
+    let content = if matches!(local_name, "text" | "tspan") {
+        Content::Text
+    } else {
+        Content::Graphics
+    };
+    eligible_children(runtime, handle, viewport, content)
+}
+
 #[derive(Clone, Copy)]
 struct Scope {
     ctm: SvgMatrixComponents,
     /// The nearest viewport's size in user units, when it is known.
     viewport: Option<(f64, f64)>,
-    /// Inside clipping, masking or `<switch>`: a hit here is not exact.
-    uncertain: bool,
 }
 
 struct Walk<'a> {
@@ -119,37 +248,23 @@ impl Walk<'_> {
             if computed.clone_display().is_none() {
                 continue;
             }
-            let mut child_scope = Scope {
-                uncertain: scope.uncertain
-                    || local_name == "switch"
-                    || clips_or_masks(runtime, child, &computed)
-                    || has_css_only_transform(runtime, child, &computed),
-                ..scope
-            };
+            let mut child_scope = scope;
             if local_name == "svg" {
-                match nested_viewport(runtime, child, &computed, scope, self.point) {
-                    NestedViewport::ClipsPoint => continue,
-                    NestedViewport::Known(viewport) => child_scope.viewport = viewport,
-                    NestedViewport::Uncertain => {
-                        child_scope.uncertain = true;
-                        child_scope.viewport = None;
-                    }
+                let nested = nested_svg(runtime, child, &computed)?;
+                if nested.clips_point(scope.ctm, self.point) {
+                    continue;
                 }
+                child_scope.viewport = nested.viewport;
                 child_scope.ctm = scope
                     .ctm
                     .multiply(svg_nested_viewport_transform(runtime, child));
             } else {
                 child_scope.ctm = scope.ctm.multiply(svg_transform_for_handle(runtime, child));
             }
-            if !matches!(local_name, "use" | "image" | "foreignObject")
-                && self.children(child, child_scope)?
-            {
+            if self.children(child, child_scope)? {
                 return Ok(true);
             }
             if let ShapeHit::Hit = self.element(child, local_name, &computed, child_scope)? {
-                if child_scope.uncertain {
-                    return Err(Coarse);
-                }
                 self.hits.push(child);
                 if self.first_only {
                     return Ok(true);
@@ -228,22 +343,18 @@ impl Walk<'_> {
                 } else {
                     None
                 };
-                Ok(hit(moli_svg::is_point_in_shape_hit_area(
+                moli_svg::is_point_in_shape_hit_area(
                     &geometry,
                     local,
                     SvgShapeHitArea {
                         fill: fill.then(|| svg_fill_rule_from_computed(computed)),
                         stroke,
                     },
-                )))
+                )
+                .map(hit)
+                .map_err(|moli_svg::SvgHitTestUnbounded| Coarse)
             }
-            // A `<textPath>` hits along its glyphs, which no bounding box
-            // here models; inside its text's box the answer is not exact.
-            "textPath" => match super::text_layout::svg_text_root(runtime, handle) {
-                Some(text) if bbox_contains(runtime, text, local) => Err(Coarse),
-                _ => Ok(ShapeHit::Miss),
-            },
-            "text" | "tspan" | "a" => {
+            "text" | "tspan" => {
                 if super::text_layout::svg_text_root(runtime, handle).is_none() {
                     return Ok(ShapeHit::Miss);
                 }
@@ -251,10 +362,6 @@ impl Walk<'_> {
                     || paint_is_painted(runtime, handle, &computed.clone_stroke())?;
                 Ok(hit(painted && bbox_contains(runtime, handle, local)))
             }
-            "image" | "foreignObject" => Ok(hit(bbox_contains(runtime, handle, local))),
-            // A `<use>` hits only where its shadow content is painted, which
-            // its bounding box over-approximates.
-            "use" if bbox_contains(runtime, handle, local) => Err(Coarse),
             _ => Ok(ShapeHit::Miss),
         }
     }
@@ -283,77 +390,190 @@ fn bbox_contains(runtime: &JsContextHost, handle: DomHandle, local: SvgGeometryP
     })
 }
 
-fn clips_or_masks(runtime: &JsContextHost, handle: DomHandle, computed: &ComputedValues) -> bool {
+/// Clipping, masking, filters, markers and `vector-effect` change what is
+/// painted or hit in ways the model does not reproduce.
+fn has_unmodelled_effects(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+    computed: &ComputedValues,
+) -> bool {
+    use style::values::generics::url::GenericUrlOrNone;
+    let marker =
+        |value: style::values::computed::url::UrlOrNone| !matches!(value, GenericUrlOrNone::None);
     !matches!(
         computed.clone_clip_path(),
         style::values::generics::basic_shape::ClipPath::None
-    ) || runtime
-        .dom_host()
-        .get_attribute(handle, "clip-path")
-        .is_some()
-        || runtime.dom_host().get_attribute(handle, "mask").is_some()
+    ) || !computed.clone_filter().0.is_empty()
+        || marker(computed.clone_marker_start())
+        || marker(computed.clone_marker_mid())
+        || marker(computed.clone_marker_end())
+        || computed.clone_vector_effect() != style::values::computed::VectorEffect::none()
+        || [
+            "clip-path",
+            "mask",
+            "filter",
+            "marker",
+            "marker-start",
+            "marker-mid",
+            "marker-end",
+        ]
+        .into_iter()
+        .any(|attribute| {
+            runtime
+                .dom_host()
+                .get_attribute(handle, attribute)
+                .is_some()
+        })
 }
 
-/// Element transforms are read from the `transform` attribute. A CSS
-/// transform without one places the element elsewhere.
-fn has_css_only_transform(
+/// Whether the element is placed by its `transform` attribute alone, which
+/// the walk applies.
+///
+/// The attribute is a presentation hint, so the computed `transform`
+/// carries it unless author CSS overrides it (`transform: none` included).
+/// The two must therefore agree, as matrices. `translate`, `rotate` and
+/// `scale` have no attribute and must be `none`. A non-identity transform
+/// also needs an unauthored or zero `transform-origin`: SVG content
+/// transforms about `0 0`, which this stylesheet set leaves at the CSS
+/// initial value. An author `transform-origin: 50% 50%` is
+/// indistinguishable from that and is read as `0 0`.
+fn transform_is_the_attribute(
     runtime: &JsContextHost,
     handle: DomHandle,
     computed: &ComputedValues,
 ) -> bool {
     use style::values::generics::transform::{Rotate, Scale, Translate};
-    let css_transform = !computed.clone_transform().0.is_empty()
-        && runtime
-            .dom_host()
-            .get_attribute(handle, "transform")
-            .is_none();
-    css_transform
-        || !matches!(computed.clone_rotate(), Rotate::None)
+    if !matches!(computed.clone_rotate(), Rotate::None)
         || !matches!(computed.clone_scale(), Scale::None)
         || !matches!(computed.clone_translate(), Translate::None)
+    {
+        return false;
+    }
+    let attribute = svg_transform_for_handle(runtime, handle);
+    let transform = computed.clone_transform();
+    let css = if transform.0.is_empty() {
+        SvgMatrixComponents::identity()
+    } else {
+        match transform.to_transform_3d_matrix_f64(None) {
+            Ok((matrix, false)) => SvgMatrixComponents {
+                a: matrix.m11,
+                b: matrix.m12,
+                c: matrix.m21,
+                d: matrix.m22,
+                e: matrix.m41,
+                f: matrix.m42,
+            },
+            _ => return false,
+        }
+    };
+    if !matrices_agree(css, attribute) {
+        return false;
+    }
+    if matrices_agree(attribute, SvgMatrixComponents::identity()) {
+        return true;
+    }
+    let origin = computed.clone_transform_origin();
+    origin == style::values::computed::TransformOrigin::initial_value()
+        || (is_zero_length(&origin.horizontal)
+            && is_zero_length(&origin.vertical)
+            && origin.depth.px() == 0.0)
 }
 
-enum NestedViewport {
-    /// The nested viewport clips its content away from the point.
-    ClipsPoint,
-    Known(Option<(f64, f64)>),
-    Uncertain,
+fn is_zero_length(value: &LengthPercentage) -> bool {
+    value.to_length().is_some_and(|length| length.px() == 0.0)
+}
+
+/// Equal up to the single precision a computed transform stores.
+fn matrices_agree(left: SvgMatrixComponents, right: SvgMatrixComponents) -> bool {
+    [
+        (left.a, right.a),
+        (left.b, right.b),
+        (left.c, right.c),
+        (left.d, right.d),
+        (left.e, right.e),
+        (left.f, right.f),
+    ]
+    .into_iter()
+    .all(|(left, right)| (left - right).abs() <= 1e-5 * (1.0 + left.abs().max(right.abs())))
+}
+
+/// Whether the computed `d` is the `d` attribute's path. The walk reads the
+/// computed path, so CSS `d` that differs from the attribute, or `d: none`
+/// over a non-empty attribute, is not modelled.
+fn path_data_is_the_attribute(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+    computed: &ComputedValues,
+) -> bool {
+    use style::values::specified::svg_path::SVGPathData;
+    let attribute = runtime
+        .dom_host()
+        .get_attribute(handle, "d")
+        .map(|raw| SVGPathData::parse_bytes(raw.as_bytes()));
+    match computed.clone_d() {
+        style::values::computed::DProperty::Path(path) => {
+            attribute.is_some_and(|(parsed, valid)| {
+                valid && parsed.normalize(false) == path.normalize(false)
+            })
+        }
+        style::values::computed::DProperty::None => {
+            attribute.is_none_or(|(parsed, _)| parsed.commands().is_empty())
+        }
+    }
+}
+
+/// A nested `<svg>` the model places and clips exactly.
+struct NestedSvg {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    /// The viewport size its content resolves percentages against.
+    viewport: Option<(f64, f64)>,
 }
 
 /// The viewport a nested `<svg>` establishes, from its `x`, `y`, `width`,
 /// `height` and `viewBox` in the parent's user space.
-fn nested_viewport(
+///
+/// Exact only with `width` and `height` given, every position in plain
+/// numbers or `px` (what `svg_nested_viewport_transform` reads), no
+/// `transform` and no CSS geometry, and when it clips: SVG clips a nested
+/// viewport by default, but this stylesheet set computes `overflow:
+/// visible` for it, which is then indistinguishable from an author's.
+fn nested_svg(
     runtime: &JsContextHost,
     svg: DomHandle,
     computed: &ComputedValues,
-    parent: Scope,
-    point: [f64; 2],
-) -> NestedViewport {
-    // `svg_nested_viewport_transform` reads plain numbers; other units would
-    // place the viewport elsewhere.
-    let mut unit_error = false;
-    let mut length = |attribute: &str| {
-        let parsed = runtime
-            .dom_host()
-            .get_attribute(svg, attribute)
-            .as_deref()
-            .and_then(moli_svg::parse_length)?;
-        // The transform also drops negative values, which then disagree
-        // with the viewport clip.
-        if matches!(parsed.unit, SvgLengthUnit::Number | SvgLengthUnit::Px)
-            && parsed.value.is_finite()
-            && parsed.value >= 0.0
-        {
-            Some(parsed.value)
-        } else {
-            unit_error = true;
-            None
+) -> Result<NestedSvg, Coarse> {
+    use style::values::generics::length::GenericSize;
+    let length = |attribute: &str| -> Result<Option<f64>, Coarse> {
+        let Some(raw) = runtime.dom_host().get_attribute(svg, attribute) else {
+            return Ok(None);
+        };
+        match moli_svg::parse_length(&raw) {
+            Some(parsed)
+                if matches!(parsed.unit, SvgLengthUnit::Number | SvgLengthUnit::Px)
+                    && parsed.value.is_finite()
+                    && parsed.value >= 0.0 =>
+            {
+                Ok(Some(parsed.value))
+            }
+            _ => Err(Coarse),
         }
     };
-    let [x, y, width, height] = [length("x"), length("y"), length("width"), length("height")];
-    // A nested `<svg>`'s own `transform` is not applied below.
-    if unit_error || runtime.dom_host().get_attribute(svg, "transform").is_some() {
-        return NestedViewport::Uncertain;
+    let (x, y) = (length("x")?, length("y")?);
+    let (Some(width), Some(height)) = (length("width")?, length("height")?) else {
+        return Err(Coarse);
+    };
+    if runtime.dom_host().get_attribute(svg, "transform").is_some()
+        || !matches!(computed.clone_width(), GenericSize::Auto)
+        || !matches!(computed.clone_height(), GenericSize::Auto)
+        || !is_zero_length(&computed.clone_x())
+        || !is_zero_length(&computed.clone_y())
+        || computed.clone_overflow_x() == style::computed_values::overflow_x::T::Visible
+        || computed.clone_overflow_y() == style::computed_values::overflow_y::T::Visible
+    {
+        return Err(Coarse);
     }
     let view_box = runtime
         .dom_host()
@@ -361,28 +581,30 @@ fn nested_viewport(
         .as_deref()
         .and_then(parse_svg_view_box_value)
         .filter(|[_, _, width, height]| *width > 0.0 && *height > 0.0);
-    let size = width.zip(height);
-    let viewport = view_box.map(|[_, _, w, h]| (w, h)).or(size);
-    if computed.clone_overflow_x() == style::computed_values::overflow_x::T::Visible
-        && computed.clone_overflow_y() == style::computed_values::overflow_y::T::Visible
-    {
-        return NestedViewport::Known(viewport);
-    }
-    let Some((width, height)) = size else {
-        return NestedViewport::Uncertain;
-    };
-    if !parent.ctm.is_invertible() {
-        return NestedViewport::ClipsPoint;
-    }
-    let inverse = parent.ctm.inverse();
-    let [px, py] = point;
-    let local_x = inverse.a * px + inverse.c * py + inverse.e;
-    let local_y = inverse.b * px + inverse.d * py + inverse.f;
-    let (x, y) = (x.unwrap_or(0.0), y.unwrap_or(0.0));
-    if local_x < x || local_y < y || local_x > x + width || local_y > y + height {
-        NestedViewport::ClipsPoint
-    } else {
-        NestedViewport::Known(viewport)
+    Ok(NestedSvg {
+        x: x.unwrap_or(0.0),
+        y: y.unwrap_or(0.0),
+        width,
+        height,
+        viewport: Some(view_box.map_or((width, height), |[_, _, w, h]| (w, h))),
+    })
+}
+
+impl NestedSvg {
+    /// Whether the viewport clips its content away from `point`, given the
+    /// parent's CTM.
+    fn clips_point(&self, parent_ctm: SvgMatrixComponents, point: [f64; 2]) -> bool {
+        if !parent_ctm.is_invertible() {
+            return true;
+        }
+        let inverse = parent_ctm.inverse();
+        let [px, py] = point;
+        let local_x = inverse.a * px + inverse.c * py + inverse.e;
+        let local_y = inverse.b * px + inverse.d * py + inverse.f;
+        local_x < self.x
+            || local_y < self.y
+            || local_x > self.x + self.width
+            || local_y > self.y + self.height
     }
 }
 
@@ -470,8 +692,9 @@ impl Lengths {
         resolved.is_finite().then_some(resolved).ok_or(Coarse)
     }
 
-    /// An SVG geometry attribute in user units: absent or invalid is 0,
-    /// numbers, `px` and percentages resolve, other units are not modelled.
+    /// An SVG geometry attribute in user units: absent is 0, numbers, `px`
+    /// and percentages resolve. Other units, and values `moli_svg` does not
+    /// parse (which may be valid CSS lengths), are not modelled.
     fn attribute(
         self,
         runtime: &JsContextHost,
@@ -479,15 +702,12 @@ impl Lengths {
         attribute: &str,
         axis: Axis,
     ) -> Result<f64, Coarse> {
-        let Some(parsed) = runtime
-            .dom_host()
-            .get_attribute(handle, attribute)
-            .as_deref()
-            .and_then(moli_svg::parse_length)
-            .filter(|parsed| parsed.value.is_finite())
-        else {
+        let Some(raw) = runtime.dom_host().get_attribute(handle, attribute) else {
             return Ok(0.0);
         };
+        let parsed = moli_svg::parse_length(&raw)
+            .filter(|parsed| parsed.value.is_finite())
+            .ok_or(Coarse)?;
         match parsed.unit {
             SvgLengthUnit::Number | SvgLengthUnit::Px => Ok(parsed.value),
             SvgLengthUnit::Percentage => Ok(parsed.value / 100.0 * self.basis(axis)?),
@@ -553,15 +773,13 @@ fn geometry_element(
             x2: lengths.attribute(runtime, handle, "x2", Axis::X)?,
             y2: lengths.attribute(runtime, handle, "y2", Axis::Y)?,
         },
+        // The allowlist ensures the computed path is the attribute's.
         "path" => SvgGeometryElement::Path {
             d: match computed.clone_d() {
                 style::values::computed::DProperty::Path(path) => {
                     super::path_data::geometry_path_data(&path)
                 }
-                style::values::computed::DProperty::None => runtime
-                    .dom_host()
-                    .get_attribute(handle, "d")
-                    .unwrap_or_default(),
+                style::values::computed::DProperty::None => String::new(),
             },
         },
         "polygon" => SvgGeometryElement::Polygon {
