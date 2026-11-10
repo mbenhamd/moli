@@ -247,11 +247,15 @@ fn css_px_length_argument(raw: &str) -> Option<f64> {
 }
 
 /// A translation length; with a reference box, also a percentage of `basis`
-/// (or a `calc()` mixing both).
+/// (or a `calc()` mixing both). A resolved length-percentage is a single
+/// precision value, as in Blink's `FloatValueForLength`: the percentage is
+/// parsed as an `f32`, so `10%` of 50px would otherwise widen to
+/// 5.000000074505806 instead of 5.
 fn css_translation_argument(raw: &str, basis: Option<f64>) -> Option<f64> {
     match basis {
         Some(basis) => {
             moli_css_parse::resolve_length_percentage(raw, basis, UnitlessLength::ZeroOnly)
+                .map(|resolved| f64::from(resolved as f32))
         }
         None => css_px_length_argument(raw),
     }
