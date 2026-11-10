@@ -859,20 +859,21 @@ def _sidecar_response_headers(
             continue
         if substitute is not None and sidecar.name.endswith(".sub.headers"):
             body = substitute(body)
-        lines = body.decode("latin-1").splitlines()
-        for line in lines:
+        # Match wptserve's byte line splitting and trimming. Decoded string
+        # helpers also split VT/FF/NEL and strip non-ASCII header value bytes.
+        for line in body.splitlines():
             stripped = line.strip()
             if (
                 not stripped
-                or stripped.startswith("#")
-                or stripped.upper().startswith("HTTP/")
+                or stripped.startswith(b"#")
+                or stripped.upper().startswith(b"HTTP/")
             ):
                 continue
-            name, separator, value = stripped.partition(":")
+            name, separator, value = stripped.partition(b":")
             if not separator:
                 continue
-            header_name = name.strip()
-            header_value = value.strip()
+            header_name = name.strip().decode("latin-1")
+            header_value = value.strip().decode("latin-1")
             if _valid_static_response_header(header_name, header_value):
                 headers.append((header_name, header_value))
     return headers
@@ -1614,6 +1615,18 @@ class _FixtureThreadingHTTPSServer(_FixtureThreadingHTTPServer):
             request.close()
             return
         super().process_request_thread(request, client_address)
+
+    def shutdown_request(self, request: socket.socket) -> None:
+        if isinstance(request, ssl.SSLSocket):
+            try:
+                # EOF delimits streaming responses. Send close_notify before
+                # closing TCP so clients can distinguish completion from a
+                # truncated TLS stream. Bound the wait for the peer's alert.
+                request.settimeout(10.0)
+                request = request.unwrap()
+            except OSError:
+                pass
+        super().shutdown_request(request)
 
 
 class _Ipv6ThreadingHTTPSServer(_FixtureThreadingHTTPSServer):
@@ -2815,6 +2828,7 @@ requestExecutor("{executor_uuid}", {start_on_js});
                 elif wrapper_global == ANY_JS_DEDICATED_WORKER_GLOBAL:
                     wrapper = _wpt_any_dedicated_worker_wrapper_html(
                         cleaned,
+                        body_text,
                         query=parsed.query,
                     ).encode("utf-8")
                 else:
@@ -4238,6 +4252,7 @@ def _wpt_any_window_wrapper_html(
 
 def _wpt_any_dedicated_worker_wrapper_html(
     script_path: str,
+    script_source: str,
     *,
     query: str = "",
 ) -> str:
@@ -4246,8 +4261,14 @@ def _wpt_any_dedicated_worker_wrapper_html(
     if worker_query:
         worker_src = f"{worker_src}?{worker_query}"
     worker_src = html_escape(worker_src, quote=True)
+    timeout_meta = (
+        '<meta name="timeout" content="long">'
+        if parse_any_js_meta(script_source).timeout_multiplier > 1.0
+        else ""
+    )
     return (
         '<!doctype html><meta charset="utf-8">'
+        f"{timeout_meta}"
         '<script src="/resources/testharness.js"></script>'
         '<script src="/resources/testharnessreport.js"></script>'
         "<body><div id=\"log\"></div>"
