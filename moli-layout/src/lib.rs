@@ -101,10 +101,10 @@ pub use snapshot::{
     pixel_snap_paint_axis_allowing_zero, pixel_snap_paint_rect,
 };
 pub use source::{
-    ChildBoxPolicy, LayoutElementCategory, LayoutElementMetadata, LayoutElementSemantics,
-    LayoutFormControlData, LayoutFormControlKind, LayoutHyperlink, LayoutImageResource,
-    LayoutInputControlKind, LayoutListData, LayoutListRole, LayoutNamespace, LayoutPseudo,
-    LayoutDetailsSlots, LayoutQueryContainerSize, LayoutReplacedKind, LayoutSource, LayoutSourceKind,
+    ChildBoxPolicy, LayoutDetailsSlots, LayoutElementCategory, LayoutElementMetadata,
+    LayoutElementSemantics, LayoutFormControlData, LayoutFormControlKind, LayoutHyperlink,
+    LayoutImageResource, LayoutInputControlKind, LayoutListData, LayoutListRole, LayoutNamespace,
+    LayoutPseudo, LayoutQueryContainerSize, LayoutReplacedKind, LayoutSource, LayoutSourceKind,
     LayoutStyleResolver, LayoutTableData, LayoutTableRole, LayoutTextSelection, ReplacedMetrics,
     ResolvedLayoutElementStyles, ResolvedLayoutPseudoStyle, html_display_contents_is_none,
 };

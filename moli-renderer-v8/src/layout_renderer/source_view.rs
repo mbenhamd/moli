@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use moli_layout::{
-    LayoutDetailsSlots, LayoutElementCategory, LayoutElementMetadata, LayoutElementSemantics, LayoutImageResource,
-    LayoutNamespace, LayoutReplacedKind, LayoutSource, LayoutSourceKind, LayoutTableData,
-    LayoutTableRole, LayoutTextSelection, ReplacedMetrics,
+    LayoutDetailsSlots, LayoutElementCategory, LayoutElementMetadata, LayoutElementSemantics,
+    LayoutImageResource, LayoutNamespace, LayoutReplacedKind, LayoutSource, LayoutSourceKind,
+    LayoutTableData, LayoutTableRole, LayoutTextSelection, ReplacedMetrics,
 };
 
 use crate::{
