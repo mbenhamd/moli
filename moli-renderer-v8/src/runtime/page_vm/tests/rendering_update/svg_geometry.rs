@@ -601,3 +601,62 @@ async fn svg_dash_expansion_is_bounded_under_a_huge_path_length() {
     .await
     .expect("SVG dash bound hit-test fixture should run");
 }
+
+/// `pointer-events` keywords other than `auto` and `none` are SVG-only and
+/// the style engine drops them, so the element would read as `auto`. An
+/// element naming one, and a query outside the outer `<svg>`'s content box,
+/// keep the outer `<svg>` answer instead of a guessed one. Each `<svg>` is
+/// a block; the third has 20px of padding.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_unmodelled_pointer_events_and_points_outside_the_content_box_stay_coarse() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-pointer-events-keyword-hit-test",
+            r#"<svg id=s1 width=100 height=100 style="display:block">
+  <rect id=b1 width=100 height=100 fill=red />
+  <circle id=c1 cx=50 cy=50 r=30 fill=none pointer-events="all" />
+</svg>
+<svg id=s2 width=100 height=100 style="display:block">
+  <rect id=r2 width=100 height=100 fill=blue style="pointer-events: stroke" />
+</svg>
+<svg id=s3 width=100 height=100 viewBox="0 0 100 100" style="display:block;padding:20px">
+  <rect id=r3 x=-10 y=-10 width=60 height=60 fill=green />
+</svg>"#,
+        )?;
+        assert_eq!(
+            page_vm
+                .vm_mut()
+                .eval("__hits([[50, 50], [50, 150], [15, 215], [40, 240]])")?,
+            [
+                "s1|s1,body,html",
+                "s2|s2,body,html",
+                "s3|s3,body,html",
+                "r3|r3,s3,body,html",
+            ]
+            .join(" "),
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG pointer-events keyword hit-test fixture should run");
+}
+
+/// A stylesheet rule with an SVG-only `pointer-events` keyword is dropped
+/// before any computed value shows it, so its presence keeps every outer
+/// `<svg>` answer in that document.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_stylesheet_pointer_events_keyword_keeps_the_outer_svg() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-stylesheet-pointer-events-hit-test",
+            r#"<style>.edge { pointer-events: stroke }</style>
+<svg id=s width=100 height=100 style="display:block">
+  <rect id=r width=100 height=100 fill=blue class=edge />
+</svg>"#,
+        )?;
+        assert_eq!(page_vm.vm_mut().eval("__hits([[50, 50]])")?, "s|s,body,html");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG stylesheet pointer-events hit-test fixture should run");
+}

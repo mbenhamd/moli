@@ -49,10 +49,17 @@ pub(crate) fn svg_content_hits_at_point(
     first_only: bool,
 ) -> Result<Vec<DomHandle>, Coarse> {
     let [x, y, width, height] = content_box;
+    // The outer `<svg>` clips its content to the content box by default, and
+    // `overflow: visible` content past it is not modelled either.
+    if !(point[0] >= x && point[0] <= x + width && point[1] >= y && point[1] <= y + height) {
+        return Err(Coarse);
+    }
     let Some(root_style) = computed_values(runtime, root) else {
         return Ok(Vec::new());
     };
-    if has_unmodelled_effects(runtime, root, &root_style) {
+    if has_unmodelled_effects(runtime, root, &root_style)
+        || document_declares_svg_pointer_events(runtime, root)
+    {
         return Err(Coarse);
     }
     let view_box = runtime
@@ -424,6 +431,85 @@ fn has_unmodelled_effects(
                 .get_attribute(handle, attribute)
                 .is_some()
         })
+        || element_declares_svg_pointer_events(runtime, handle)
+}
+
+/// `pointer-events` keywords other than `auto` and `none` are SVG-only, and
+/// the style engine drops them, so the element computes `auto` (treated as
+/// `visiblePainted`). `visiblePainted` itself behaves exactly like that.
+/// Any other one (`all`, `fill`, `stroke`, ...) changes what is hit and is
+/// not modelled.
+fn is_unmodelled_pointer_events_keyword(keyword: &str) -> bool {
+    [
+        "visiblefill",
+        "visiblestroke",
+        "visible",
+        "painted",
+        "fill",
+        "stroke",
+        "all",
+        "bounding-box",
+    ]
+    .iter()
+    .any(|candidate| keyword.eq_ignore_ascii_case(candidate))
+}
+
+/// Whether CSS `text` declares `pointer-events` with an unmodelled keyword.
+/// A textual scan: it may also match inside a comment or string, which
+/// only makes a query coarse.
+fn css_declares_svg_pointer_events(text: &str) -> bool {
+    const NAME: &str = "pointer-events";
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(offset) = text[from..]
+        .as_bytes()
+        .windows(NAME.len())
+        .position(|window| window.eq_ignore_ascii_case(NAME.as_bytes()))
+    {
+        let mut index = from + offset + NAME.len();
+        from = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b':') {
+            continue;
+        }
+        index += 1;
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        let start = index;
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        {
+            index += 1;
+        }
+        if is_unmodelled_pointer_events_keyword(&text[start..index]) {
+            return true;
+        }
+    }
+    false
+}
+
+fn element_declares_svg_pointer_events(runtime: &JsContextHost, handle: DomHandle) -> bool {
+    let host = runtime.dom_host();
+    host.get_attribute(handle, "pointer-events")
+        .is_some_and(|value| is_unmodelled_pointer_events_keyword(value.trim()))
+        || host
+            .get_attribute(handle, "style")
+            .is_some_and(|style| css_declares_svg_pointer_events(&style))
+}
+
+/// An author stylesheet rule with an unmodelled `pointer-events` keyword is
+/// dropped before any computed value can show it, so its presence in the
+/// document makes every query coarse.
+fn document_declares_svg_pointer_events(runtime: &JsContextHost, root: DomHandle) -> bool {
+    let document = runtime
+        .dom_host()
+        .owner_document_handle(root)
+        .unwrap_or_else(|| runtime.document_handle());
+    runtime.any_author_stylesheet_text(document, css_declares_svg_pointer_events)
 }
 
 /// Whether the element is placed by its `transform` attribute alone, which

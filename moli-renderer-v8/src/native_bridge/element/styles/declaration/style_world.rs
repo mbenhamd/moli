@@ -233,6 +233,29 @@ fn connected_shadow_roots(host: &DomHost, document: DomHandle) -> Vec<DomHandle>
 }
 
 impl JsContextHost {
+    /// Whether `matches` holds for the text of any active author stylesheet
+    /// of `document`. A sheet parsed from text is checked as written, so
+    /// declarations the style engine dropped are still visible; a sheet
+    /// changed through the CSSOM has only its serialization.
+    pub(crate) fn any_author_stylesheet_text(
+        &self,
+        document: DomHandle,
+        mut matches: impl FnMut(&str) -> bool,
+    ) -> bool {
+        if self.author_styles_disabled() {
+            return false;
+        }
+        active_stylesheet_handles(self, document, false)
+            .into_iter()
+            .any(|handle| {
+                let source = stylesheet_source(self, handle);
+                match source.input_css_text() {
+                    Some(text) => matches(text),
+                    None => matches(&source.serialized_css_text()),
+                }
+            })
+    }
+
     pub(crate) fn document_has_active_author_stylesheet_sources(
         &self,
         document: DomHandle,
