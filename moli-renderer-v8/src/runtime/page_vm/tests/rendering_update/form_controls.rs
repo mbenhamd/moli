@@ -491,3 +491,111 @@ document.body.innerHTML = `<input id=field placeholder="Example">`;
         Ok::<_, anyhow::Error>(())
     }).await.expect("form focus paint fixture should run");
 }
+
+/// Rows (as inclusive runs) and the column span of dark pixels in one band.
+fn dark_ink(
+    image: &moli_paint::RasterImage,
+    x: u32,
+    width: u32,
+) -> (Vec<(u32, u32)>, Option<(u32, u32)>) {
+    let mut rows: Vec<(u32, u32)> = Vec::new();
+    let mut columns: Option<(u32, u32)> = None;
+    for y in 0..image.height {
+        let mut row_has_ink = false;
+        for x in x..x + width {
+            let index = ((y * image.width + x) * 4) as usize;
+            if image.rgba[index..index + 3]
+                .iter()
+                .all(|&channel| channel < 128)
+            {
+                row_has_ink = true;
+                columns = Some(columns.map_or((x, x), |(left, right)| (left.min(x), right.max(x))));
+            }
+        }
+        if row_has_ink {
+            match rows.last_mut() {
+                Some((_, end)) if *end + 1 == y => *end = y,
+                _ => rows.push((y, y)),
+            }
+        }
+    }
+    (rows, columns)
+}
+
+// Expected ink from Chromium headless shell 1248 screenshots of the same
+// markup with the bundled Ahem face (0.6em advance, 0.8em ink). The
+// placeholder's `white-space: pre` is an overridable UA default, so an author
+// `::placeholder { white-space: normal }` wraps "aa aa aa" onto two lines.
+// Line breaks in an input placeholder are stripped, so "aa\nbb" paints as one
+// 24px "aabb" line instead of breaking.
+#[tokio::test(flavor = "current_thread")]
+async fn input_placeholder_honours_author_white_space_and_strips_line_breaks() {
+    run_page_vm_async_test(async move {
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        loader.set_optional_resource_fetch_mask(
+            crate::protocol_types::OptionalResourceFetchMask::FONT,
+        );
+        let mut page_vm = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/placeholder-white-space.html")?,
+        );
+        let ahem = base64::engine::general_purpose::STANDARD.encode(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../moli-layout/tests/fixtures/moli-ahem.ttf"
+        )));
+        page_vm.vm_mut().eval(&format!(
+            r#"
+document.head.innerHTML = `<style>
+@font-face {{ font-family:MoliAhem; src:url(data:font/ttf;base64,{ahem}) format('truetype') }}
+html,body {{ margin:0; background:white }}
+input {{ position:absolute; top:0; box-sizing:content-box; width:30px; height:30px;
+  padding:0; border:0; outline:none; background:white; font:10px/10px MoliAhem }}
+::placeholder {{ color:black; opacity:1 }}
+#pre {{ left:0 }} #normal {{ left:40px }} #newline {{ left:80px; width:50px }}
+#normal::placeholder {{ white-space:normal }}
+</style>`;
+document.body.innerHTML = '<input id=pre placeholder="aa aa aa"><input id=normal placeholder="aa aa aa"><input id=newline placeholder="aa&#10;bb">';
+'installed'
+"#
+        ))?;
+        page_vm
+            .vm_mut()
+            .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+        let snapshot = page_vm
+            .vm_mut()
+            .screenshot_layout_snapshot(moli_layout::PaintViewport::new(200, 60, 1.0))?
+            .expect("placeholder white-space layout");
+        let image = moli_paint::raster_snapshot(&snapshot)?;
+        assert_eq!(
+            dark_ink(&image, 0, 30),
+            (vec![(10, 17)], Some((0, 29))),
+            "the UA default keeps the placeholder on one clipped line"
+        );
+        // Chromium paints the wrapped lines at rows 10-17 and 20-27: the
+        // taller placeholder keeps the inner editor's top instead of being
+        // centred. Moli does not reproduce that offset yet, so this compares
+        // the line shape only.
+        let (rows, columns) = dark_ink(&image, 40, 30);
+        let top = rows.first().map_or(0, |(start, _)| *start);
+        assert_eq!(
+            (
+                rows.iter()
+                    .map(|(start, end)| (start - top, end - top))
+                    .collect::<Vec<_>>(),
+                columns
+            ),
+            (vec![(0, 7), (10, 17)], Some((40, 69))),
+            "author ::placeholder white-space overrides the UA pre"
+        );
+        assert_eq!(
+            dark_ink(&image, 80, 50),
+            (vec![(10, 17)], Some((80, 103))),
+            "placeholder line breaks are stripped"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("placeholder white-space fixture");
+}

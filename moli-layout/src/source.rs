@@ -551,6 +551,21 @@ pub struct LayoutHyperlink<N> {
     pub destination: Option<N>,
 }
 
+/// Slot assignment of an HTML `details` element's flat-tree children.
+///
+/// HTML renders `details` through two UA shadow slots: its first `summary`
+/// child is assigned to the summary slot, and every other child to the
+/// `::details-content` slot. That slot is a `display: block` box, which is
+/// `content-visibility: hidden` while the element is closed. Layout builds
+/// the slot box only while it is closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayoutDetailsSlots<N> {
+    /// The child rendered in the summary slot, when the author supplied one.
+    pub summary: Option<N>,
+    /// Whether the `open` attribute is present.
+    pub open: bool,
+}
+
 /// A short-lived, read-only view of the renderer's canonical flat tree.
 pub trait LayoutSource {
     type NodeId: Copy + Debug + Eq + Hash;
@@ -599,6 +614,12 @@ pub trait LayoutSource {
 
     /// Returns the active selection for a source text node or text control.
     fn text_selection(&self, _node: Self::NodeId) -> Option<LayoutTextSelection> {
+        None
+    }
+
+    /// Returns the slot assignment of an HTML `details` element's children,
+    /// and `None` for every other node.
+    fn details_slots(&self, _node: Self::NodeId) -> Option<LayoutDetailsSlots<Self::NodeId>> {
         None
     }
 

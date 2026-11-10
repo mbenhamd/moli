@@ -77,6 +77,15 @@ impl<N> LayoutBox<N> {
             )
     }
 
+    /// Whether this box's contents are skipped, as Blink's display lock does
+    /// for `content-visibility: hidden`. The contents are still laid out, so
+    /// geometry queries answer from them, as Blink's forced layout for a
+    /// locked subtree does, but they are not painted, hit-tested, or part
+    /// of an ancestor's scrollable overflow.
+    pub(crate) fn skips_contents(&self) -> bool {
+        self.anonymous_reason == Some(crate::LayoutAnonymousReason::ClosedDetailsContent)
+    }
+
     pub(crate) fn is_pseudo_box(&self) -> bool {
         matches!(
             self.kind,

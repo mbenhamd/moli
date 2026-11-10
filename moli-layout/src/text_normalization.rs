@@ -131,6 +131,17 @@ pub fn classify_text_character(character: char, mode: TextWhiteSpaceCollapse) ->
         TextWhiteSpaceCollapse::PreserveBreaks if collapsible => TextCharacter::Collapsible {
             segment_break: false,
         },
+        // Blink ignores a preserved form feed rather than breaking at it
+        // (inline_items_builder.cc `ShouldIgnore`): it keeps its source
+        // mapping as a zero-width, non-breaking WORD JOINER unit.
+        TextWhiteSpaceCollapse::Preserve | TextWhiteSpaceCollapse::BreakSpaces
+            if character == '\u{000C}' =>
+        {
+            TextCharacter::Preserved {
+                character: '\u{2060}',
+                break_after: false,
+            }
+        }
         TextWhiteSpaceCollapse::Preserve | TextWhiteSpaceCollapse::BreakSpaces if segment_break => {
             TextCharacter::ForcedBreak {
                 preserve_pending: true,

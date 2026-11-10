@@ -2312,6 +2312,12 @@ where
         if inputs.run_mode == RunMode::PerformLayout {
             taffy::compute_oof_layout(self, node_id, &mut output);
         }
+        if self.boxes[LayoutBoxId::from_taffy(node_id).index()].skips_contents() {
+            // Layout containment gives the box no baseline for alignment
+            // (css-contain-2 §3.2), so skipped contents cannot shift it.
+            output.baselines.first = None;
+            output.baselines.last = None;
+        }
         output
     }
 
@@ -3143,14 +3149,7 @@ where
         content_offset: Point<f32>,
         floats: &mut Vec<InlineFloatPlacement>,
     ) -> Vec<f32> {
-        let wraps = self.boxes[context.root_style.index()]
-            .style
-            .computed
-            .as_ref()
-            .is_none_or(|computed| {
-                computed.get_inherited_text().text_wrap_mode
-                    == style::computed_values::text_wrap_mode::T::Wrap
-            });
+        let wraps = self.boxes[context.root_style.index()].style.wraps_text();
         let mut breaker = layout.break_lines();
         let mut slot = inline_float_slot(block_context, 0.0, None, 0.0);
         let mut clearance = slot.y.max(0.0);

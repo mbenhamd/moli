@@ -302,7 +302,11 @@ impl OverflowProjection {
     {
         let geometry = self.geometries[child.index()];
         let mut visual_overflow = self.scrollable_overflow[child.index()];
-        if clips_overflow(world, child) {
+        if world.boxes[child.index()].skips_contents() {
+            // Skipped contents are not rendered and add no scrollable
+            // overflow to any ancestor.
+            visual_overflow = geometry.border_box;
+        } else if clips_overflow(world, child) {
             let modes = world.boxes[child.index()].style.overflow_modes();
             // Clip/visible does not establish a scroll container. Clip just
             // that physical axis and keep overflow on the other axis. Native

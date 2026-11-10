@@ -108,11 +108,16 @@ fn emit_context<N>(
     events.push(PaintOrderEvent::BoxBackground(root));
 
     let mut collection = ContextCollection::default();
-    collection.inline_contents.push(PaintUnit {
-        id: root,
-        kind: UnitKind::Contents,
-        sequence: next_sequence(sequence),
-    });
+    // Skipped contents (`content-visibility: hidden`) paint nothing below the
+    // box itself, so they get no paint order and are never hit-tested.
+    let skips_contents = world.boxes[root.index()].skips_contents();
+    if !skips_contents {
+        collection.inline_contents.push(PaintUnit {
+            id: root,
+            kind: UnitKind::Contents,
+            sequence: next_sequence(sequence),
+        });
+    }
     if world.collapsed_table_borders.contains_key(&root) {
         collection.table_collapsed_borders.push(PaintUnit {
             id: root,
@@ -121,8 +126,10 @@ fn emit_context<N>(
         });
     }
 
-    for child in ordered_children(world, root) {
-        collect_subtree(world, child, None, sequence, &mut collection);
+    if !skips_contents {
+        for child in ordered_children(world, root) {
+            collect_subtree(world, child, None, sequence, &mut collection);
+        }
     }
 
     collection
@@ -225,25 +232,32 @@ fn collect_subtree<N>(
             sequence: next_sequence(sequence),
         },
     );
-    push_unit(
-        collection,
-        group,
-        PaintUnit {
-            id,
-            kind: UnitKind::Contents,
-            sequence: next_sequence(sequence),
-        },
-    );
-    // Atomic pseudo-context descendants inherit their ancestor's paint level.
-    // Ordinary in-flow descendants do not: each child must classify itself as
-    // normal, floating, atomic-inline, or positioned. Positioned descendants
-    // override an inherited pseudo-context at the start of this function.
-    let descendant_group = match group {
-        PaintGroup::NormalFlow => None,
-        PaintGroup::AtomicInline | PaintGroup::Float | PaintGroup::Positioned { .. } => Some(group),
-    };
-    for child in ordered_children(world, id) {
-        collect_subtree(world, child, descendant_group, sequence, collection);
+    // A box that skips its contents is normally a stacking context through
+    // its paint containment; an ineligible box still paints only itself.
+    if !layout_box.skips_contents() {
+        push_unit(
+            collection,
+            group,
+            PaintUnit {
+                id,
+                kind: UnitKind::Contents,
+                sequence: next_sequence(sequence),
+            },
+        );
+        // Atomic pseudo-context descendants inherit their ancestor's paint
+        // level. Ordinary in-flow descendants do not: each child must
+        // classify itself as normal, floating, atomic-inline, or positioned.
+        // Positioned descendants override an inherited pseudo-context at the
+        // start of this function.
+        let descendant_group = match group {
+            PaintGroup::NormalFlow => None,
+            PaintGroup::AtomicInline | PaintGroup::Float | PaintGroup::Positioned { .. } => {
+                Some(group)
+            }
+        };
+        for child in ordered_children(world, id) {
+            collect_subtree(world, child, descendant_group, sequence, collection);
+        }
     }
     if world.collapsed_table_borders.contains_key(&id) {
         push_unit(
