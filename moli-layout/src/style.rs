@@ -481,6 +481,10 @@ pub struct ResolvedLayoutStyle {
     unicode_bidi: InlineUnicodeBidi,
     vertical_align: InlineVerticalAlign,
     text_projection_deferred: bool,
+    /// Blink's single-line text-control inner editor uses `white-space: pre`
+    /// regardless of the control's computed white-space, so the value stays on
+    /// one line and overflows horizontally into the control's scroll range.
+    single_line_text_control: bool,
     overflow_clips: bool,
     overflow_x: LayoutOverflowMode,
     overflow_y: LayoutOverflowMode,
@@ -549,6 +553,7 @@ impl std::fmt::Debug for ResolvedLayoutStyle {
             .field("unicode_bidi", &self.unicode_bidi)
             .field("vertical_align", &self.vertical_align)
             .field("text_projection_deferred", &self.text_projection_deferred)
+            .field("single_line_text_control", &self.single_line_text_control)
             .field("overflow_clips", &self.overflow_clips)
             .field("out_of_flow", &self.out_of_flow)
             .field("position", &self.position)
@@ -879,6 +884,7 @@ impl ResolvedLayoutStyle {
             unicode_bidi,
             vertical_align,
             text_projection_deferred,
+            single_line_text_control: false,
             overflow_clips,
             overflow_x,
             overflow_y,
@@ -962,6 +968,7 @@ impl ResolvedLayoutStyle {
             unicode_bidi: InlineUnicodeBidi::Normal,
             vertical_align: InlineVerticalAlign::default(),
             text_projection_deferred: false,
+            single_line_text_control: false,
             overflow_clips,
             overflow_x,
             overflow_y,
@@ -1755,22 +1762,28 @@ impl ResolvedLayoutStyle {
     pub(crate) fn parley_text_style(
         &self,
     ) -> parley::TextStyle<'static, 'static, crate::stylo_to_parley::TextBrush> {
-        if let Some(computed) = self.computed.as_ref() {
-            return crate::stylo_to_parley::text_style(computed);
+        let mut style = if let Some(computed) = self.computed.as_ref() {
+            crate::stylo_to_parley::text_style(computed)
+        } else {
+            parley::TextStyle {
+                font_size: self.font_size,
+                line_height: parley::LineHeight::Absolute(self.line_height),
+                brush: crate::stylo_to_parley::TextBrush {
+                    color: self.text_color,
+                    paint: true,
+                    synthetic_bold: false,
+                    decoration: crate::stylo_to_parley::TextDecorationBrush::default(),
+                    shadows: std::sync::Arc::from([]),
+                    stroke: None,
+                },
+                ..parley::TextStyle::default()
+            }
+        };
+        if self.single_line_text_control {
+            style.white_space_collapse = parley::WhiteSpaceCollapse::Preserve;
+            style.text_wrap_mode = parley::TextWrapMode::NoWrap;
         }
-        parley::TextStyle {
-            font_size: self.font_size,
-            line_height: parley::LineHeight::Absolute(self.line_height),
-            brush: crate::stylo_to_parley::TextBrush {
-                color: self.text_color,
-                paint: true,
-                synthetic_bold: false,
-                decoration: crate::stylo_to_parley::TextDecorationBrush::default(),
-                shadows: std::sync::Arc::from([]),
-                stroke: None,
-            },
-            ..parley::TextStyle::default()
-        }
+        style
     }
 
     pub(crate) fn text_indent(&self, containing_width: f32) -> (f32, parley::IndentOptions) {
@@ -1801,6 +1814,22 @@ impl ResolvedLayoutStyle {
     /// Native controls have an internal viewport even when their CSS overflow is visible.
     pub(crate) fn clip_form_control_contents(&mut self) {
         self.overflow_clips = true;
+    }
+
+    /// Lays out this single-line text-control content box, and the text leaves
+    /// derived from it, as `white-space: pre`.
+    pub(crate) fn force_single_line_text_control(&mut self) {
+        self.single_line_text_control = true;
+        self.white_space_collapse = InlineWhiteSpaceCollapse::Preserve;
+    }
+
+    /// Whether inline content laid out with this style may wrap.
+    pub(crate) fn wraps_text(&self) -> bool {
+        !self.single_line_text_control
+            && self.computed.as_ref().is_none_or(|computed| {
+                computed.get_inherited_text().text_wrap_mode
+                    == style::computed_values::text_wrap_mode::T::Wrap
+            })
     }
 
     pub(crate) fn establishes_scroll_container(&self) -> bool {
@@ -2130,6 +2159,7 @@ impl ResolvedLayoutStyle {
             unicode_bidi: InlineUnicodeBidi::Normal,
             vertical_align: parent.vertical_align,
             text_projection_deferred: parent.text_projection_deferred,
+            single_line_text_control: parent.single_line_text_control,
             overflow_clips: false,
             overflow_x: LayoutOverflowMode::Visible,
             overflow_y: LayoutOverflowMode::Visible,
@@ -2202,6 +2232,7 @@ impl ResolvedLayoutStyle {
             unicode_bidi: InlineUnicodeBidi::Normal,
             vertical_align: parent.vertical_align,
             text_projection_deferred: parent.text_projection_deferred,
+            single_line_text_control: parent.single_line_text_control,
             overflow_clips: false,
             overflow_x: LayoutOverflowMode::Visible,
             overflow_y: LayoutOverflowMode::Visible,

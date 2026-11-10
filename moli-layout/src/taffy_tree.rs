@@ -3143,14 +3143,7 @@ where
         content_offset: Point<f32>,
         floats: &mut Vec<InlineFloatPlacement>,
     ) -> Vec<f32> {
-        let wraps = self.boxes[context.root_style.index()]
-            .style
-            .computed
-            .as_ref()
-            .is_none_or(|computed| {
-                computed.get_inherited_text().text_wrap_mode
-                    == style::computed_values::text_wrap_mode::T::Wrap
-            });
+        let wraps = self.boxes[context.root_style.index()].style.wraps_text();
         let mut breaker = layout.break_lines();
         let mut slot = inline_float_slot(block_context, 0.0, None, 0.0);
         let mut clearance = slot.y.max(0.0);
