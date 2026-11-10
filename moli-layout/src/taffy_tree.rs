@@ -2312,6 +2312,12 @@ where
         if inputs.run_mode == RunMode::PerformLayout {
             taffy::compute_oof_layout(self, node_id, &mut output);
         }
+        if self.boxes[LayoutBoxId::from_taffy(node_id).index()].skips_contents() {
+            // Layout containment gives the box no baseline for alignment
+            // (css-contain-2 §3.2), so skipped contents cannot shift it.
+            output.baselines.first = None;
+            output.baselines.last = None;
+        }
         output
     }
 

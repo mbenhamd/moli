@@ -152,8 +152,6 @@ pub enum LayoutAnonymousReason {
     MissingTableRow,
     MissingTableCell,
     FormControlContent,
-    /// The `::details-content` slot of an open `details` element.
-    DetailsContent,
     /// The `::details-content` slot of a closed `details` element, which is
     /// `content-visibility: hidden`.
     ClosedDetailsContent,
@@ -171,7 +169,6 @@ impl LayoutAnonymousReason {
             Self::MissingTableRow => "missing-table-row",
             Self::MissingTableCell => "missing-table-cell",
             Self::FormControlContent => "form-control-content",
-            Self::DetailsContent => "details-content",
             Self::ClosedDetailsContent => "closed-details-content",
         }
     }

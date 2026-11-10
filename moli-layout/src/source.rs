@@ -556,7 +556,8 @@ pub struct LayoutHyperlink<N> {
 /// HTML renders `details` through two UA shadow slots: its first `summary`
 /// child is assigned to the summary slot, and every other child to the
 /// `::details-content` slot. That slot is a `display: block` box, which is
-/// `content-visibility: hidden` while the element is closed.
+/// `content-visibility: hidden` while the element is closed. Layout builds
+/// the slot box only while it is closed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LayoutDetailsSlots<N> {
     /// The child rendered in the summary slot, when the author supplied one.
