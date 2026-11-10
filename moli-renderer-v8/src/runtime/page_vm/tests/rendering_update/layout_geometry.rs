@@ -1640,6 +1640,93 @@ async fn live_incremental_layout_reuses_main_document_numeric_results_exactly() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn live_incremental_layout_reuses_after_web_fonts_load_until_a_font_registers() {
+    run_page_vm_async_test(async move {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let narrow = encode(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../moli-layout/tests/fixtures/moli-ahem-narrow.ttf"
+        )));
+        let wide = encode(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../moli-layout/tests/fixtures/moli-ahem-wide.ttf"
+        )));
+        let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())?;
+        loader.set_optional_resource_fetch_mask(
+            crate::protocol_types::OptionalResourceFetchMask::FONT,
+        );
+        let mut page_vm = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/live-web-fonts.html")?,
+        );
+        page_vm
+            .vm_mut()
+            .set_layout_policy(moli_page_types::LayoutPolicy::Live);
+        page_vm.set_viewport_surface(Some(live_viewport(800, 0)))?;
+        page_vm.vm_mut().eval(&format!(
+            r#"
+document.head.innerHTML = `<style>
+@font-face {{ font-family:T; src:url(data:font/ttf;base64,{narrow}) format('truetype') }}
+html,body {{ margin:0 }} .t {{ display:inline-block; font:40px T }}
+</style>`;
+document.body.innerHTML = '<div id=rows></div><div id=leaf style="height:10px"></div>';
+const rows = document.getElementById('rows');
+for (let i = 0; i < 20; i++) {{
+  const d = document.createElement('div'); d.innerHTML = '<span class=t>AAAA</span> row ' + i; rows.appendChild(d);
+}}
+globalThis.wideBytes = Uint8Array.from(atob('{wide}'), c => c.charCodeAt(0));
+'installed'
+"#
+        ))?;
+        page_vm
+            .vm_mut()
+            .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+        let width = "String(document.querySelector('.t').getBoundingClientRect().width)";
+        // The narrow CSS face is registered and shapes the text.
+        assert_eq!(page_vm.vm_mut().eval(width)?, "80");
+
+        moli_layout::set_incremental_layout_verify_for_test(true);
+        let result = (|| {
+            let mismatches = moli_layout::incremental_verify_mismatch_count();
+            // Once fonts have settled, a leaf mutation reuses the retained
+            // world, and its geometry equals a full rebuild.
+            for height in [30, 50] {
+                let compared = moli_layout::incremental_verify_comparison_count();
+                let reused = moli_layout::incremental_numeric_reused_total();
+                page_vm.vm_mut().eval(&format!(
+                    "document.getElementById('leaf').style.height='{height}px'; 'ok'"
+                ))?;
+                page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
+                assert!(
+                    moli_layout::incremental_verify_comparison_count() > compared,
+                    "the pass after a leaf mutation reused no retained world"
+                );
+                assert!(moli_layout::incremental_numeric_reused_total() > reused);
+                assert_eq!(moli_layout::incremental_verify_mismatch_count(), mismatches);
+            }
+            // Registering a face that outranks the CSS one changes shaping a
+            // box comparison cannot see: the next pass is full and reads it.
+            let compared = moli_layout::incremental_verify_comparison_count();
+            page_vm.vm_mut().eval(
+                "document.fonts.add(new FontFace('T', wideBytes)); document.getElementById('leaf').style.height='70px'; 'ok'",
+            )?;
+            assert_eq!(page_vm.vm_mut().eval(width)?, "160");
+            assert_eq!(
+                moli_layout::incremental_verify_comparison_count(),
+                compared,
+                "a pass after a font registration reused the retained world"
+            );
+            Ok::<_, anyhow::Error>(())
+        })();
+        moli_layout::set_incremental_layout_verify_for_test(false);
+        result
+    })
+    .await
+    .expect("live web-font retention fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn live_geometry_scrolls_a_node_adopted_back_from_a_foreign_document() {
     run_page_vm_async_test(async move {
         let mut page_vm = live_geometry_page(

@@ -102,6 +102,16 @@ impl WebFontPriority {
 
 type WebFontOrder = BTreeMap<String, WebFontPriority>;
 
+/// The web-font inputs a live pass shaped with: the registered face set,
+/// identified by [`DocumentLayoutServices`]' font epoch, and the candidate
+/// order the pass ran under. A retained world is reused only under an equal
+/// key, since a box comparison cannot see either input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WebFontRetentionKey {
+    epoch: u64,
+    order: WebFontOrder,
+}
+
 #[derive(Clone, Debug)]
 struct SegmentedWebFontFace {
     source_slot: String,
@@ -908,6 +918,9 @@ pub struct DocumentLayoutServices {
     // Selection priority belongs to this Document's current FontFaceSet.
     web_font_order: WebFontOrder,
     has_font_face_set_order: bool,
+    /// Moves whenever registered faces, their memberships or their effective
+    /// selection order change, so a retained world shaped earlier is dropped.
+    font_epoch: u64,
     pub(crate) text_layout_passes: u64,
     /// Type-erased world from the previous live pass. Single owner, cleared
     /// whenever fonts or the layout policy change what shaping would produce.
@@ -949,6 +962,7 @@ impl DocumentLayoutServices {
             web_fonts: BTreeMap::new(),
             web_font_order: BTreeMap::new(),
             has_font_face_set_order: false,
+            font_epoch: 0,
             text_layout_passes: 0,
             retained_world: None,
             #[cfg(test)]
@@ -965,6 +979,7 @@ impl DocumentLayoutServices {
             web_fonts: BTreeMap::new(),
             web_font_order: BTreeMap::new(),
             has_font_face_set_order: false,
+            font_epoch: 0,
             text_layout_passes: 0,
             retained_world: None,
             #[cfg(test)]
@@ -1014,6 +1029,18 @@ impl DocumentLayoutServices {
 
     pub fn web_font_count(&self) -> usize {
         self.web_fonts.len()
+    }
+
+    /// The web-font inputs the next pass shapes with.
+    pub(crate) fn web_font_retention_key(&self) -> WebFontRetentionKey {
+        WebFontRetentionKey {
+            epoch: self.font_epoch,
+            order: self.web_font_order.clone(),
+        }
+    }
+
+    fn note_web_font_change(&mut self) {
+        self.font_epoch = self.font_epoch.wrapping_add(1);
     }
 
     /// Publishes CSS-connected order followed by manual insertion order for
@@ -1067,8 +1094,11 @@ impl DocumentLayoutServices {
         // only updates candidate priorities, never Fontique registrations.
         self.refresh_web_font_priorities();
         let changed = current != previous;
-        if changed && let Some(parley) = self.parley.as_mut() {
-            parley.invalidate_font_selection();
+        if changed {
+            self.note_web_font_change();
+            if let Some(parley) = self.parley.as_mut() {
+                parley.invalidate_font_selection();
+            }
         }
         changed
     }
@@ -1142,6 +1172,7 @@ impl DocumentLayoutServices {
             }
             current.membership = font.membership;
             current.source_key = font.source_key;
+            self.note_web_font_change();
             self.refresh_web_font_priorities();
             if let Some(parley) = self.parley.as_mut() {
                 parley.invalidate_font_selection();
@@ -1165,12 +1196,14 @@ impl DocumentLayoutServices {
             parley.register_web_font(&registration.slot, &font, &self.web_font_order)?;
             self.web_fonts.insert(registration.slot, font);
             parley.invalidate_font_selection();
+            self.note_web_font_change();
             return Ok(outcome);
         }
         if !validated {
             validate_registered_font(&font.face, font.sfnt_bytes.clone())?;
         }
         self.web_fonts.insert(registration.slot, font);
+        self.note_web_font_change();
         // Replacing bytes/descriptors must rebuild: unregistering by Fontique
         // attributes could also remove another slot with the same attributes.
         self.rebuild_font_collection();
@@ -1182,6 +1215,7 @@ impl DocumentLayoutServices {
         if self.web_fonts.remove(slot).is_none() {
             return false;
         }
+        self.note_web_font_change();
         self.rebuild_font_collection();
         true
     }
@@ -1235,6 +1269,9 @@ impl DocumentLayoutServices {
                 self.web_fonts.remove(slot);
                 removed = true;
             }
+        }
+        if changed {
+            self.note_web_font_change();
         }
         if removed {
             self.rebuild_font_collection();
@@ -1358,6 +1395,7 @@ impl DocumentLayoutServices {
             web_fonts,
             web_font_order: order,
             has_font_face_set_order: self.has_font_face_set_order,
+            font_epoch: self.font_epoch,
             text_layout_passes: 0,
             retained_world: None,
             #[cfg(test)]

@@ -36,6 +36,8 @@ where
     /// Viewport scroll policy as the builder produced it, before numeric
     /// preparation revealed scrollbars or rewrote the root and defining body.
     pub(crate) viewport_policy: crate::world::ViewportScrollPolicy,
+    /// Web fonts this world was shaped with.
+    pub(crate) web_fonts: crate::text::WebFontRetentionKey,
 }
 
 /// Which boxes in a fresh world may take products from a retained world.
