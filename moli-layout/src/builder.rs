@@ -464,11 +464,84 @@ where
             children.extend(self.build_pseudo(world, source_node, LayoutPseudo::Marker, marker)?);
         }
         children.extend(self.build_pseudo(world, source_node, LayoutPseudo::Before, before)?);
+        // Only a closed details gets a `::details-content` slot box. Stylo
+        // resolves the children against the details itself (a flex or grid
+        // details blockifies them), so wrapping an open details' children
+        // in a block slot would stack inline content. They stay the details'
+        // own children until style resolution knows the slot. Closed content
+        // is never painted, so its blockification is not visible.
+        let closed_details = self
+            .source
+            .details_slots(source_node)
+            .filter(|slots| !slots.open);
+        let mut details_content = Vec::new();
         for child in self.checked_flat_children(source_node)? {
-            children.extend(self.build_source_node(world, child, style)?);
+            let boxes = self.build_source_node(world, child, style)?;
+            match closed_details {
+                Some(slots) if slots.summary != Some(child) => details_content.extend(boxes),
+                _ => children.extend(boxes),
+            }
+        }
+        if closed_details.is_some() {
+            children.push(self.build_closed_details_content(
+                world,
+                source_node,
+                style,
+                details_content,
+            )?);
         }
         children.extend(self.build_pseudo(world, source_node, LayoutPseudo::After, after)?);
         Ok(children)
+    }
+
+    /// Builds a closed details' `::details-content` slot after its summary.
+    ///
+    /// HTML styles that slot `display: block; content-visibility: hidden`.
+    /// It is size-contained, so it still takes part in its parent's
+    /// formatting context (a grid or flex `details` keeps the gap before it)
+    /// while contributing no size, and its laid-out contents are skipped.
+    fn build_closed_details_content(
+        &mut self,
+        world: &mut LayoutWorld<S::NodeId>,
+        owner: S::NodeId,
+        parent_style: &ResolvedLayoutStyle,
+        children: Vec<LayoutBoxId>,
+    ) -> Result<LayoutBoxId, LayoutError> {
+        // Stylo blockifies the children of a flex details, so a block slot
+        // would stack them in its zero width. A flex slot keeps them on the
+        // details' own flex line, as when they are its direct items.
+        let flex = matches!(
+            parent_style.display(),
+            LayoutDisplay::Flex | LayoutDisplay::InlineFlex
+        );
+        let mut style = self.styles.anonymous_style(
+            LayoutAnonymousStyleContext::new(owner, parent_style),
+            if flex {
+                LayoutDisplay::Flex
+            } else {
+                LayoutDisplay::Block
+            },
+        )?;
+        if flex {
+            style.copy_flex_container_layout(parent_style);
+        }
+        style.apply_hidden_content_visibility();
+        let reason = LayoutAnonymousReason::ClosedDetailsContent;
+        let owner_label = self.source.label(owner);
+        let id = world.allocate(LayoutWorld::new_box(
+            None,
+            Some(owner),
+            None,
+            format!("{}({owner_label})", reason.debug_name()),
+            Some(owner_label),
+            None,
+            Some(reason),
+            LayoutBoxKind::AnonymousBlock,
+            style.clone(),
+            None,
+        ));
+        self.attach_children(world, id, owner, &style, children, false)?;
+        Ok(id)
     }
 
     fn build_pseudo(
