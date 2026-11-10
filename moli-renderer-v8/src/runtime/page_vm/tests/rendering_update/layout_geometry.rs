@@ -1825,7 +1825,7 @@ return JSON.stringify([$('d').getBoundingClientRect().height, $('after').getBoun
         let toggle = |open: bool| {
             format!("document.getElementById('d').open = {open}; document.getElementById('g').open = {open}; 'toggled'")
         };
-        // Chromium (Playwright chromium-1248 headless shell): a closed details
+        // Chromium 156 (Playwright chromium-1248): a closed details
         // keeps only its first summary in the summary slot. Every other child,
         // a second summary included, sits in the `::details-content` slot,
         // which still occupies a grid row (summary 20 + gap 10) but adds no
