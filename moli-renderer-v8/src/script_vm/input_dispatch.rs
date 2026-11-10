@@ -14,7 +14,8 @@ use drag_source::dispatch_drag_source_event;
 use super::input_dispatch_outcome;
 use super::input_helpers::{mouse_button_mask, single_changed_mouse_button};
 use super::inspector::{
-    current_selection_state, is_space_key, key_target_info, option_is_disabled, radio_group_members,
+    current_selection_state, is_space_key, key_target_info, keyboard_event_target,
+    option_is_disabled, radio_group_members,
 };
 use super::{
     ActiveDragSession, ActiveScrollbarDrag, ActiveTouchPoint, PendingDragGesture, ScriptVm,
@@ -2746,10 +2747,7 @@ impl ScriptVm {
             Rc::clone(&self._context_host),
             CurrentInputEvent::keyboard(key, modifiers),
         );
-        let handle = self
-            .document_runtime
-            .active_element_handle()
-            .or_else(|| self.document_runtime.document_focus_fallback_handle());
+        let handle = keyboard_event_target(&self._context_host.borrow());
         let Some(handle) = handle else {
             return Ok(input_dispatch_outcome(false));
         };
@@ -2790,10 +2788,7 @@ impl ScriptVm {
                 // Like Blink's KeyboardEventManager, resolve focus again after
                 // keydown listeners before targeting the character event.
                 let runtime = unsafe { &*runtime_ptr };
-                let Some(handle) = runtime
-                    .active_element_handle()
-                    .or_else(|| runtime.document_focus_fallback_handle())
-                else {
+                let Some(handle) = keyboard_event_target(runtime) else {
                     return Ok(input_dispatch_outcome(false));
                 };
                 let Some(keypress) = construct_keyboard_event(

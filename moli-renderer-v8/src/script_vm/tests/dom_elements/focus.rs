@@ -336,3 +336,63 @@ fn redispatching_a_saved_focus_event_makes_it_untrusted() {
         .expect("focus redispatch probe should evaluate");
     assert_eq!(result, "ua:true|replayed:false|after:false");
 }
+
+#[test]
+fn key_events_reach_focused_frame_document_body_and_frame_document_has_focus() {
+    let mut vm = new_parsed_test_vm(
+        "https://key-target-focused-frame.test/",
+        r#"<html><body>
+            <input id="outside">
+            <iframe id="frame"></iframe>
+        </body></html>"#,
+    );
+    vm.eval(
+        r#"
+(() => {
+  const frame = document.getElementById('frame');
+  const childDocument = frame.contentDocument;
+  childDocument.open();
+  childDocument.write('<body><p>slide</p></body>');
+  childDocument.close();
+  const name = target => target.id || target.localName;
+  window.__keys = [];
+  window.addEventListener('keydown', e => __keys.push(`top:${e.type}:${name(e.target)}`), true);
+  window.addEventListener('keyup', e => __keys.push(`top:${e.type}:${name(e.target)}`), true);
+  childDocument.addEventListener('keydown', e => __keys.push(`child:${e.type}:${name(e.target)}`), true);
+  childDocument.addEventListener('keyup', e => __keys.push(`child:${e.type}:${name(e.target)}`), true);
+  // Ask the child Document from its own realm, as frame content does.
+  const childHasFocus = frame.contentWindow.Function('return document.hasFocus()');
+  window.__focusState = () => [
+    document.activeElement.id,
+    childDocument.activeElement.localName,
+    document.hasFocus(),
+    childHasFocus(),
+  ].join(',');
+  frame.focus();
+})()
+"#,
+    )
+    .expect("focused frame fixture should initialize");
+
+    let press = |vm: &mut StandaloneScriptVmHarness| {
+        vm.dispatch_key_event("keydown", "ArrowRight", "ArrowRight", "", 1, false, false)
+            .expect("ArrowRight keydown should dispatch");
+        vm.dispatch_key_event("keyup", "ArrowRight", "ArrowRight", "", 1, false, false)
+            .expect("ArrowRight keyup should dispatch");
+        vm.eval("__keys.splice(0).join('|')")
+            .expect("key log should evaluate")
+    };
+
+    let frame_state = vm.eval("__focusState()").expect("frame focus state");
+    let frame_keys = press(&mut vm);
+    vm.eval("document.getElementById('outside').focus()")
+        .expect("outside input should focus");
+    let outside_state = vm.eval("__focusState()").expect("outside focus state");
+    let outside_keys = press(&mut vm);
+
+    assert_eq!(
+        [frame_state, frame_keys, outside_state, outside_keys].join(" / "),
+        "frame,body,true,true / child:keydown:body|child:keyup:body / \
+         outside,body,true,false / top:keydown:outside|top:keyup:outside"
+    );
+}
