@@ -1427,6 +1427,27 @@ impl ResolvedLayoutStyle {
         self.paint_containment
     }
 
+    /// Lays out an anonymous flex box's items as the flex `owner` lays out
+    /// its own: same direction, wrapping, gaps and main-axis alignment.
+    ///
+    /// A `normal`/`stretch` cross alignment becomes `flex-start`: a
+    /// size-contained single-line box has a zero cross size, and stretching
+    /// to it would give every item a zero height.
+    pub(crate) fn copy_flex_container_layout(&mut self, owner: &Self) {
+        let (from, to) = (&owner.taffy, &mut self.taffy);
+        to.flex_direction = from.flex_direction;
+        to.flex_wrap = from.flex_wrap;
+        to.gap = from.gap;
+        to.justify_content = from.justify_content;
+        to.align_content = from.align_content;
+        to.align_items = match from.align_items.keyword() {
+            taffy::AlignItemsKeyword::Normal | taffy::AlignItemsKeyword::Stretch => {
+                taffy::AlignItems::FLEX_START
+            }
+            _ => from.align_items,
+        };
+    }
+
     /// Applies the containment `content-visibility: hidden` implies (size,
     /// layout and paint) to a box whose contents layout then skips.
     pub(crate) fn apply_hidden_content_visibility(&mut self) {

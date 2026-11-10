@@ -1808,8 +1808,8 @@ async fn live_closed_details_content_adds_no_size_but_keeps_descendant_geometry(
     run_page_vm_async_test(async move {
         let mut page_vm = live_geometry_page(
             r#"
-document.head.innerHTML = '<style>html,body{margin:0;padding:0;height:100%}body{font:16px/20px monospace}p{margin:0}#g{display:grid;row-gap:10px}#h{height:60px}#f{display:flex}#bl{display:flex;align-items:baseline}#big{font:60px/80px monospace}</style>';
-document.body.innerHTML = '<details id=d><summary id=s>Head</summary><p>a</p><summary>second</summary><p>b</p></details><div id=after>x</div><details id=g><summary>G</summary><div id=h></div></details><details id=f open><summary>F</summary><span id=fa>A</span><span id=fb>B</span></details><details id=bl><summary id=bs>S</summary><span id=big>Big</span></details>';
+document.head.innerHTML = '<style>html,body{margin:0;padding:0;height:100%}body{font:16px/20px monospace}p{margin:0}#g{display:grid;row-gap:10px}#h{height:60px}#f{display:flex}#bl{display:flex;align-items:baseline}#big{font:60px/80px monospace}#c{display:flex;width:200px;margin-top:100px}</style>';
+document.body.innerHTML = '<details id=d><summary id=s>Head</summary><p>a</p><summary>second</summary><p>b</p></details><div id=after>x</div><details id=g><summary>G</summary><div id=h></div></details><details id=f open><summary>F</summary><span id=fa>A</span><span id=fb>B</span></details><details id=bl><summary id=bs>S</summary><span id=big>Big</span></details><details id=c><summary>C</summary><span id=ca>A</span><span id=cb>B</span></details>';
 'installed'
 "#,
         )?;
@@ -1820,7 +1820,9 @@ const r = id => $(id).getBoundingClientRect(); const h = r('h');
 const hit = document.elementFromPoint(5, {y});
 return JSON.stringify([r('d').height, r('after').top, r('s').height, r('g').height,
   h.top, h.height, h.width, hit ? hit.id || hit.tagName : null,
-  r('f').height, r('fa').top, r('fb').top, r('bl').height, r('bs').top - r('bl').top]); }})()"#
+  r('f').height, r('fa').top, r('fb').top, r('bl').height, r('bs').top - r('bl').top,
+  r('c').height, r('cb').top - r('ca').top, r('ca').width > 0,
+  Math.abs(r('cb').left - r('ca').right) < 0.5]); }})()"#
             )
         };
         let toggle = |open: bool| {
@@ -1834,13 +1836,14 @@ return JSON.stringify([r('d').height, r('after').top, r('s').height, r('g').heig
         // contents: #h keeps its 60px box under the zero-height slot. The
         // slot has no baseline, so closed content cannot move a baseline-
         // aligned summary (#bl). An open flex details keeps its inline
-        // spans on one 20px row (#f).
-        let closed = r#"[20,20,20,30,70,60,800,"BODY",20,70,70,20,0]"#;
+        // spans on one 20px row (#f). A closed flex details (#c) lays its
+        // hidden spans out on one row with their own widths, as when open.
+        let closed = r#"[20,20,20,30,70,60,800,"BODY",20,70,70,20,0,20,0,true,true]"#;
         assert_eq!(page_vm.vm_mut().eval(&read(120))?, closed);
         page_vm.vm_mut().eval(&toggle(true))?;
         assert_eq!(
             page_vm.vm_mut().eval(&read(150))?,
-            r#"[80,80,20,90,130,60,800,"h",20,190,190,20,0]"#
+            r#"[80,80,20,90,130,60,800,"h",20,190,190,20,0,20,0,true,true]"#
         );
         page_vm.vm_mut().eval(&toggle(false))?;
         assert_eq!(page_vm.vm_mut().eval(&read(120))?, closed);

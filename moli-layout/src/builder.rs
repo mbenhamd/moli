@@ -507,10 +507,24 @@ where
         parent_style: &ResolvedLayoutStyle,
         children: Vec<LayoutBoxId>,
     ) -> Result<LayoutBoxId, LayoutError> {
+        // Stylo blockifies the children of a flex details, so a block slot
+        // would stack them in its zero width. A flex slot keeps them on the
+        // details' own flex line, as when they are its direct items.
+        let flex = matches!(
+            parent_style.display(),
+            LayoutDisplay::Flex | LayoutDisplay::InlineFlex
+        );
         let mut style = self.styles.anonymous_style(
             LayoutAnonymousStyleContext::new(owner, parent_style),
-            LayoutDisplay::Block,
+            if flex {
+                LayoutDisplay::Flex
+            } else {
+                LayoutDisplay::Block
+            },
         )?;
+        if flex {
+            style.copy_flex_container_layout(parent_style);
+        }
         style.apply_hidden_content_visibility();
         let reason = LayoutAnonymousReason::ClosedDetailsContent;
         let owner_label = self.source.label(owner);
