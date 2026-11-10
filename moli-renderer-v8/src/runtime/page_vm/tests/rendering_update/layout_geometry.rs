@@ -1808,7 +1808,7 @@ async fn live_closed_details_content_adds_no_size_but_keeps_descendant_geometry(
     run_page_vm_async_test(async move {
         let mut page_vm = live_geometry_page(
             r#"
-document.head.innerHTML = '<style>html,body{margin:0;padding:0}body{font:16px/20px monospace}p{margin:0}#g{display:grid;row-gap:10px}#h{height:60px}</style>';
+document.head.innerHTML = '<style>html,body{margin:0;padding:0;height:100%}body{font:16px/20px monospace}p{margin:0}#g{display:grid;row-gap:10px}#h{height:60px}</style>';
 document.body.innerHTML = '<details id=d><summary id=s>Head</summary><p>a</p><summary>second</summary><p>b</p></details><div id=after>x</div><details id=g><summary>G</summary><div id=h></div></details>';
 'installed'
 "#,
@@ -1819,7 +1819,7 @@ document.body.innerHTML = '<details id=d><summary id=s>Head</summary><p>a</p><su
 const h = $('h').getBoundingClientRect(); const hit = document.elementFromPoint(5, {y});
 return JSON.stringify([$('d').getBoundingClientRect().height, $('after').getBoundingClientRect().top,
   $('s').getBoundingClientRect().height, $('g').getBoundingClientRect().height,
-  h.top, h.height, h.width, hit.id || hit.tagName]); }})()"#
+  h.top, h.height, h.width, hit ? hit.id || hit.tagName : null]); }})()"#
             )
         };
         let toggle = |open: bool| {
@@ -1831,7 +1831,7 @@ return JSON.stringify([$('d').getBoundingClientRect().height, $('after').getBoun
         // which still occupies a grid row (summary 20 + gap 10) but adds no
         // size, paint or hit target. Geometry reads still lay out its
         // contents: #h keeps its 60px box under the zero-height slot.
-        let closed = r#"[20,20,20,30,70,60,800,"HTML"]"#;
+        let closed = r#"[20,20,20,30,70,60,800,"BODY"]"#;
         assert_eq!(page_vm.vm_mut().eval(&read(100))?, closed);
         page_vm.vm_mut().eval(&toggle(true))?;
         assert_eq!(
