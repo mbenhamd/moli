@@ -1434,25 +1434,26 @@ impl ResolvedLayoutStyle {
         self.paint_containment
     }
 
-    /// Lays out an anonymous flex box's items as the flex `owner` lays out
-    /// its own: same direction, wrapping, gaps and main-axis alignment.
+    /// Whether this flex container's main axis is its inline (row) axis.
+    pub(crate) fn has_row_flex_direction(&self) -> bool {
+        matches!(
+            self.taffy.flex_direction,
+            taffy::FlexDirection::Row | taffy::FlexDirection::RowReverse
+        )
+    }
+
+    /// Lays out an anonymous flex box's items on one line from its start
+    /// edge, each at its own content size, as an inline line lays out
+    /// inline boxes.
     ///
-    /// A `normal`/`stretch` cross alignment becomes `flex-start`: a
-    /// size-contained single-line box has a zero cross size, and stretching
-    /// to it would give every item a zero height.
-    pub(crate) fn copy_flex_container_layout(&mut self, owner: &Self) {
-        let (from, to) = (&owner.taffy, &mut self.taffy);
-        to.flex_direction = from.flex_direction;
-        to.flex_wrap = from.flex_wrap;
-        to.gap = from.gap;
-        to.justify_content = from.justify_content;
-        to.align_content = from.align_content;
-        to.align_items = match from.align_items.keyword() {
-            taffy::AlignItemsKeyword::Normal | taffy::AlignItemsKeyword::Stretch => {
-                taffy::AlignItems::FLEX_START
-            }
-            _ => from.align_items,
-        };
+    /// Cross alignment is `flex-start`, not `stretch`: a size-contained box
+    /// can have a zero cross size, and stretching to it would give every
+    /// item a zero height.
+    pub(crate) fn lay_out_items_on_one_start_line(&mut self) {
+        self.taffy.flex_direction = taffy::FlexDirection::Row;
+        self.taffy.flex_wrap = taffy::FlexWrap::NoWrap;
+        self.taffy.justify_content = taffy::JustifyContent::FLEX_START;
+        self.taffy.align_items = taffy::AlignItems::FLEX_START;
     }
 
     /// Applies the containment `content-visibility: hidden` implies (size,
