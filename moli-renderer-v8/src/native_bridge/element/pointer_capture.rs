@@ -105,5 +105,8 @@ fn pointer_capture_receiver_has_frame<'s>(
     {
         return true;
     }
-    runtime.dom_host().owner_document_handle(handle) == Some(runtime.dom_host().document_handle())
+    runtime
+        .dom_host()
+        .owner_document_handle(handle)
+        .is_some_and(|document| runtime.document_has_browsing_context(document))
 }

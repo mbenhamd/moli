@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use moli_layout::{
-    LayoutElementCategory, LayoutElementMetadata, LayoutElementSemantics, LayoutImageResource,
-    LayoutNamespace, LayoutReplacedKind, LayoutSource, LayoutSourceKind, LayoutTableData,
-    LayoutTableRole, LayoutTextSelection, ReplacedMetrics,
+    LayoutDetailsSlots, LayoutElementCategory, LayoutElementMetadata, LayoutElementSemantics,
+    LayoutImageResource, LayoutNamespace, LayoutReplacedKind, LayoutSource, LayoutSourceKind,
+    LayoutTableData, LayoutTableRole, LayoutTextSelection, ReplacedMetrics,
 };
 
 use crate::{
@@ -140,6 +140,20 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
 
     fn flat_children(&self, node: Self::NodeId) -> Self::ChildIter<'_> {
         flat_children(self.host(), self.root, node).into_iter()
+    }
+
+    fn details_slots(&self, node: Self::NodeId) -> Option<LayoutDetailsSlots<Self::NodeId>> {
+        let host = self.host();
+        if !host.is_html_element_named(node, "details") {
+            return None;
+        }
+        let summary = flat_children(host, self.root, node)
+            .into_iter()
+            .find(|child| host.is_html_element_named(*child, "summary"));
+        Some(LayoutDetailsSlots {
+            summary,
+            open: host.get_attribute(node, "open").is_some(),
+        })
     }
 
     fn node_kind(&self, node: Self::NodeId) -> LayoutSourceKind {

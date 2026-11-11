@@ -37,7 +37,7 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_with_conte
 /// the stale layout instead of serving it (see
 /// `JsContextHost::refresh_live_layout_for_sampling`). The default frozen
 /// policy keeps sampling published geometry only.
-fn flush_layout_for_layout_dependent_property(
+pub(super) fn flush_layout_for_layout_dependent_property(
     runtime: &JsContextHost,
     handle: DomHandle,
     property: &str,
@@ -92,6 +92,8 @@ fn is_layout_dependent_property(property: &str) -> bool {
             | "inset-block-end"
             | "inset-inline-start"
             | "inset-inline-end"
+            | "transform"
+            | "-webkit-transform"
     )
 }
 

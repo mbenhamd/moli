@@ -1434,6 +1434,47 @@ impl ResolvedLayoutStyle {
         self.paint_containment
     }
 
+    /// Whether this flex container's main axis is its inline (row) axis.
+    pub(crate) fn has_row_flex_direction(&self) -> bool {
+        matches!(
+            self.taffy.flex_direction,
+            taffy::FlexDirection::Row | taffy::FlexDirection::RowReverse
+        )
+    }
+
+    /// Lays out an anonymous flex box's items on one line from its start
+    /// edge, each at its own content size, as an inline line lays out
+    /// inline boxes.
+    ///
+    /// Cross alignment is `flex-start`, not `stretch`: a size-contained box
+    /// can have a zero cross size, and stretching to it would give every
+    /// item a zero height.
+    pub(crate) fn lay_out_items_on_one_start_line(&mut self) {
+        self.taffy.flex_direction = taffy::FlexDirection::Row;
+        self.taffy.flex_wrap = taffy::FlexWrap::NoWrap;
+        self.taffy.justify_content = taffy::JustifyContent::FLEX_START;
+        self.taffy.align_items = taffy::AlignItems::FLEX_START;
+    }
+
+    /// Applies the containment `content-visibility: hidden` implies (size,
+    /// layout and paint) to a box whose contents layout then skips.
+    pub(crate) fn apply_hidden_content_visibility(&mut self) {
+        self.layout_containment = true;
+        self.paint_containment = true;
+        self.size_containment = LogicalSizeContainment {
+            inline: true,
+            block: true,
+        };
+        if matches!(
+            self.display,
+            LayoutDisplay::Block | LayoutDisplay::BlockListItem
+        ) {
+            // Layout containment establishes an independent formatting
+            // context, as the Stylo import does for authored containment.
+            self.taffy.display = TaffyDisplay::FlowRoot;
+        }
+    }
+
     /// Returns the accumulated CSS `zoom` applied to this box's layout values.
     ///
     /// Stylo has already applied this factor to computed CSS lengths. Layout,
