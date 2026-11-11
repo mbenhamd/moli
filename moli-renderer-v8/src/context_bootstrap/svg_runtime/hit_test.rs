@@ -468,8 +468,7 @@ pub(crate) fn css_declares_svg_pointer_events(text: &str) -> bool {
     {
         from += offset + NAME.len();
         let index = skip_whitespace_and_comments(bytes, from);
-        if bytes.get(index) == Some(&b':')
-            && value_starts_with_unmodelled_keyword(text, index + 1)
+        if bytes.get(index) == Some(&b':') && value_starts_with_unmodelled_keyword(text, index + 1)
         {
             return true;
         }

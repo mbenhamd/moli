@@ -685,7 +685,9 @@ __root.innerHTML = `<style>.hit { pointer-events: all }</style>
         page_vm.vm_mut().sync_live_document_style_sources();
         page_vm.vm_mut().publish_layout_for_test()?;
         assert_eq!(
-            page_vm.vm_mut().eval("__root.elementFromPoint(50, 50).id")?,
+            page_vm
+                .vm_mut()
+                .eval("__root.elementFromPoint(50, 50).id")?,
             "s"
         );
         Ok::<_, anyhow::Error>(())

@@ -2218,7 +2218,10 @@ fn set_style_entry<'s>(
     if name.is_empty() {
         return;
     }
-    hit_test::note_cssom_write(scope, hit_test::property_declares_svg_pointer_events(&name, value));
+    hit_test::note_cssom_write(
+        scope,
+        hit_test::property_declares_svg_pointer_events(&name, value),
+    );
     if style_interface(scope, style) == "CSSFontFaceDescriptors" {
         set_font_face_descriptor_style_entry(scope, style, &name, value, priority);
         return;

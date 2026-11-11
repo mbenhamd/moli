@@ -256,7 +256,10 @@ impl JsContextHost {
                 .any(|handle| source_matches(&stylesheet_source(self, handle)))
                 || adopted.iter().any(&mut source_matches)
         };
-        if tree_scope_matches(document, self.adopted_style_sheet_sources_for_document(document)) {
+        if tree_scope_matches(
+            document,
+            self.adopted_style_sheet_sources_for_document(document),
+        ) {
             return true;
         }
         connected_shadow_roots(self.dom_host(), document)
