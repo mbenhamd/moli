@@ -5,7 +5,7 @@ mod matrix;
 
 pub use css_parse::{
     dom_matrix_components_from_values, parse_dom_matrix_value,
-    parse_dom_matrix_value_with_dimension,
+    parse_dom_matrix_value_with_dimension, resolve_css_transform_matrix,
 };
 pub use matrix::{DOM_MATRIX_COMPONENT_COUNT, DomMatrixComponents};
 

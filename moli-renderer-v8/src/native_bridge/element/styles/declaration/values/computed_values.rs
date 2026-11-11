@@ -20,7 +20,7 @@ pub(super) fn resolve_moli_computed_style_value(
         return normalize_computed_color_functions(value, Some(&current_color));
     }
     if matches!(property, "transform" | "-webkit-transform")
-        && let Some(transform) = computed_transform_matrix_value(value)
+        && let Some(transform) = resolve_computed_transform_value(runtime, handle, None, value)
     {
         return transform;
     }
@@ -305,8 +305,15 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_for_pseudo
     if !computed_style_applies(runtime, handle) {
         return String::new();
     }
-    super::computed_properties::flush_layout_for_size_container_read(runtime, handle, context);
     let property = canonical_style_property_name(property);
+    let pseudo = layout_pseudo(pseudo_element);
+    if pseudo.is_some() && matches!(property.as_str(), "transform" | "-webkit-transform") {
+        super::computed_properties::flush_layout_for_layout_dependent_property(
+            runtime, handle, &property, context,
+        );
+    } else {
+        super::computed_properties::flush_layout_for_size_container_read(runtime, handle, context);
+    }
     let value = normalized_stylo_computed_pseudo_style_value(
         runtime,
         handle,
@@ -352,6 +359,18 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_for_pseudo
         "display" => value
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| default_pseudo_display(runtime, handle, pseudo_element)),
+        // Only pseudo-elements with a modelled box resolve against layout;
+        // any other pseudo keeps its computed value rather than borrowing the
+        // originating element's box.
+        "transform" | "-webkit-transform" => value
+            .map(|value| match pseudo {
+                Some(pseudo) => {
+                    resolve_computed_transform_value(runtime, handle, Some(pseudo), &value)
+                        .unwrap_or(value)
+                }
+                None => value,
+            })
+            .unwrap_or_default(),
         "content" => match value.as_deref() {
             Some("normal") | None => "none".to_owned(),
             Some(value) => value.to_owned(),
@@ -361,6 +380,60 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_for_pseudo
             .unwrap_or_else(|| normalize_computed_color("currentcolor")),
         _ => value.unwrap_or_default(),
     }
+}
+
+fn layout_pseudo(pseudo_element: &str) -> Option<moli_layout::LayoutPseudo> {
+    match pseudo_element {
+        "before" => Some(moli_layout::LayoutPseudo::Before),
+        "after" => Some(moli_layout::LayoutPseudo::After),
+        "marker" => Some(moli_layout::LayoutPseudo::Marker),
+        _ => None,
+    }
+}
+
+/// The CSSOM resolved value of `transform`: the used transform as a single
+/// `matrix()`/`matrix3d()`. Translation percentages resolve against the CSS
+/// transform reference box (the border box) from the latest layout; like
+/// Blink, a target that generates no box resolves to `none`. `None` keeps the
+/// computed value: there is no layout to consult, or the target is an SVG
+/// element inside an `<svg>`, whose default `view-box` reference this does not
+/// model.
+pub(super) fn resolve_computed_transform_value(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+    pseudo: Option<moli_layout::LayoutPseudo>,
+    value: &str,
+) -> Option<String> {
+    if let Some(matrix) = computed_transform_matrix_value(value) {
+        return Some(matrix);
+    }
+    if value.trim().eq_ignore_ascii_case("none")
+        || (pseudo.is_none() && is_svg_content_element(runtime, handle))
+    {
+        return None;
+    }
+    match transform_reference_box_from_layout_snapshot(runtime, handle, pseudo)? {
+        None => Some("none".to_owned()),
+        Some(size) => moli_geometry::resolve_css_transform_matrix(
+            value,
+            f64::from(size.width),
+            f64::from(size.height),
+        )?
+        .css_text(),
+    }
+}
+
+fn is_svg_content_element(runtime: &JsContextHost, handle: DomHandle) -> bool {
+    let host = runtime.dom_host();
+    let is_svg = |node: DomHandle| {
+        host.node(node)
+            .is_some_and(|node| node.namespace() == Some(crate::native_bridge::document::SVG_NS))
+    };
+    is_svg(handle)
+        && host
+            .node(handle)
+            .and_then(Node::parent_node)
+            .is_some_and(is_svg)
 }
 
 fn resolve_computed_text_decoration_length(

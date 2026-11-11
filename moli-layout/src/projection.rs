@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt::Debug, hash::Hash, time::Instant};
 
 use taffy::ResolveOrZero;
 
-use crate::layout_tree::{CssSizing, CssSizingBox, LayoutCoordinateSpace};
+use crate::layout_tree::{CssSizing, CssSizingBox, LayoutCoordinateSpace, TransformReferenceBox};
 use crate::overflow::{OverflowProjection, inset_rect, offset_rect, outset_rect};
 use crate::stacking::{PaintOrderEvent, build_paint_order};
 use crate::style::ResolvedLayoutTransform;
@@ -991,6 +991,17 @@ where
                         },
                         horizontal: layout_box.style.uses_horizontal_writing_mode(),
                     });
+                    let transform_reference = (!matches!(
+                        display,
+                        crate::LayoutDisplay::None | crate::LayoutDisplay::Contents
+                    ))
+                    .then_some(
+                        if display.is_inline_flow() && !layout_box.is_replaced() {
+                            TransformReferenceBox::Empty
+                        } else {
+                            TransformReferenceBox::Border
+                        },
+                    );
                     let resolved_grid_tracks = world
                         .resolved_grid_tracks
                         .get(&LayoutBoxId::from_index(geometry.id.index()))
@@ -1003,6 +1014,8 @@ where
                         principal_source,
                         hit_source,
                         css_sizing,
+                        pseudo: layout_box.pseudo,
+                        transform_reference,
                         resolved_grid_tracks,
                         control_paint_order,
                     }
