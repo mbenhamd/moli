@@ -350,11 +350,12 @@ pub(crate) fn new_web_lock_registry() -> SharedRendererWebLockRegistry {
 /// Callers pass actions returned by a registry method, after that method has
 /// released the registry Mutex. A grant whose Page route has closed belongs to
 /// a client that is gone, so its lock is released and the resulting grants are
-/// dispatched in turn.
+/// dispatched in turn. Returns the requests whose grant could not be posted.
 pub(crate) fn dispatch_web_lock_actions(
     registry: &RendererWebLockRegistry,
     actions: Vec<WebLockAction<WebLockOwner>>,
-) {
+) -> Vec<WebLockRequestId> {
+    let mut unsent = Vec::new();
     let mut actions = VecDeque::from(actions);
     while let Some(action) = actions.pop_front() {
         match action {
@@ -368,6 +369,7 @@ pub(crate) fn dispatch_web_lock_actions(
                     )
                     .is_err()
                 {
+                    unsent.push(request);
                     actions.extend(registry.release(request));
                 }
             }
@@ -380,6 +382,7 @@ pub(crate) fn dispatch_web_lock_actions(
             }
         }
     }
+    unsent
 }
 
 #[cfg(test)]

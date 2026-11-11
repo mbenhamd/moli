@@ -154,6 +154,12 @@ fn reject_client_error<'s>(
             "SecurityError",
             "Access to the Locks API is denied in this context.",
         ),
+        WebLockClientError::ClientIdUnavailable => reject_dom_exception(
+            scope,
+            resolver,
+            "UnknownError",
+            "The lock manager could not create a client id.",
+        ),
     }
 }
 
@@ -459,11 +465,20 @@ fn run_web_lock_grant(
     } else {
         match LockObjectDeclaration::new(grant.name, grant.mode.as_str().to_owned()).bind(scope) {
             Ok(lock) => lock.into(),
-            Err(_) => return false,
+            Err(_) => {
+                abandon_web_lock_grant(scope, host_ptr, request, "The Lock could not be created.");
+                return true;
+            }
         }
     };
     let Some(waiting) = v8::PromiseResolver::new(scope) else {
-        return false;
+        abandon_web_lock_grant(
+            scope,
+            host_ptr,
+            request,
+            "The lock callback could not be run.",
+        );
+        return true;
     };
     let receiver: v8::Local<'_, v8::Value> = v8::undefined(scope).into();
     let arguments = [lock];
@@ -513,10 +528,37 @@ fn run_web_lock_grant(
     let rejected = v8::Function::builder(web_lock_callback_rejected)
         .data(data)
         .build(scope);
-    if let (Some(fulfilled), Some(rejected)) = (fulfilled, rejected) {
-        let _ = waiting.get_promise(scope).then2(scope, fulfilled, rejected);
+    let observed = match (fulfilled, rejected) {
+        (Some(fulfilled), Some(rejected)) => waiting
+            .get_promise(scope)
+            .then2(scope, fulfilled, rejected)
+            .is_some(),
+        _ => false,
+    };
+    if !observed {
+        abandon_web_lock_grant(
+            scope,
+            host_ptr,
+            request,
+            "The lock callback's result could not be observed.",
+        );
     }
     true
+}
+
+/// A grant began but cannot reach the point where the callback's result
+/// releases the lock: release it now and reject the request promise.
+fn abandon_web_lock_grant(
+    scope: &mut v8::PinScope<'_, '_>,
+    host_ptr: *mut JsContextHost,
+    request: WebLockRequestId,
+    message: &str,
+) {
+    let Some(resolver) = unsafe { &mut *host_ptr }.finish_web_lock_request(request) else {
+        return;
+    };
+    let resolver = v8::Local::new(scope, &resolver);
+    reject_dom_exception(scope, resolver, "UnknownError", message);
 }
 
 fn web_lock_callback_fulfilled<'s>(

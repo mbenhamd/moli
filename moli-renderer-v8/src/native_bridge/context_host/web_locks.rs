@@ -25,6 +25,8 @@ pub(crate) enum WebLockClientError {
     InvalidState,
     /// The calling Document has an opaque origin.
     Security,
+    /// No random client id could be generated for the calling Window.
+    ClientIdUnavailable,
 }
 
 /// The calling Window's lock-manager address.
@@ -97,14 +99,14 @@ impl WebLockHostState {
     }
 }
 
-fn new_client_label() -> String {
+fn new_client_label() -> Option<String> {
     let mut random_bytes = [0_u8; 16];
-    if moli_crypto::fill_secure_random(&mut random_bytes).is_err() {
-        return String::new();
-    }
-    uuid::Builder::from_random_bytes(random_bytes)
-        .into_uuid()
-        .to_string()
+    moli_crypto::fill_secure_random(&mut random_bytes).ok()?;
+    Some(
+        uuid::Builder::from_random_bytes(random_bytes)
+            .into_uuid()
+            .to_string(),
+    )
 }
 
 impl JsContextHost {
@@ -131,13 +133,15 @@ impl JsContextHost {
         if storage_key.opaque_nonce().is_some() || storage_key.origin() == "null" {
             return Err(WebLockClientError::Security);
         }
-        let registry = &self.web_lock_registry;
-        let (client, label) = self
-            .web_locks
-            .clients
-            .entry(identity)
-            .or_insert_with(|| (registry.next_id(), new_client_label()))
-            .clone();
+        let (client, label) = match self.web_locks.clients.get(&identity) {
+            Some(entry) => entry.clone(),
+            None => {
+                let label = new_client_label().ok_or(WebLockClientError::ClientIdUnavailable)?;
+                let entry = (self.web_lock_registry.next_id(), label);
+                self.web_locks.clients.insert(identity, entry.clone());
+                entry
+            }
+        };
         Ok(WebLockClient {
             target,
             storage_key,
@@ -227,8 +231,14 @@ impl JsContextHost {
         );
         match outcome {
             WebLockRequestOutcome::Queued(actions) => {
-                dispatch_web_lock_actions(&self.web_lock_registry, actions);
-                true
+                let unsent = dispatch_web_lock_actions(&self.web_lock_registry, actions);
+                if !unsent.contains(&id) {
+                    return true;
+                }
+                // The registry already released the lock whose grant could not
+                // be posted; drop this Host's half too.
+                self.web_locks.forget_request(id);
+                false
             }
             WebLockRequestOutcome::NotAvailable => {
                 if let Some(state) = self.web_locks.requests.get_mut(&id) {
@@ -345,16 +355,26 @@ impl JsContextHost {
         Some(state.resolver.clone())
     }
 
-    /// The request's signal aborted. Only a request still waiting in its queue
-    /// is affected; returns its promise resolver and signal.
+    /// The request's signal aborted. A request whose callback has not run yet
+    /// is withdrawn: still queued, or already granted in the registry with its
+    /// grant task not yet run (that task then finds no request and is
+    /// discarded). Returns its promise resolver and signal.
     pub(crate) fn abort_pending_web_lock_request(
         &mut self,
         request: WebLockRequestId,
     ) -> Option<(v8::Global<v8::PromiseResolver>, v8::Global<v8::Object>)> {
-        let actions = self.web_lock_registry.abort_pending(request)?;
-        let state = self.web_locks.forget_request(request);
+        if self.web_locks.requests.get(&request)?.granted {
+            return None;
+        }
+        let state = self.web_locks.forget_request(request)?;
+        let mut actions = self
+            .web_lock_registry
+            .abort_pending(request)
+            .unwrap_or_default();
+        if !state.not_available {
+            actions.extend(self.web_lock_registry.release(request));
+        }
         dispatch_web_lock_actions(&self.web_lock_registry, actions);
-        let state = state?;
         let (signal, _) = state.abort?;
         Some((state.resolver, signal))
     }
