@@ -461,8 +461,7 @@ fn css_declares_svg_pointer_events(text: &str) -> bool {
     const NAME: &str = "pointer-events";
     let bytes = text.as_bytes();
     let mut from = 0;
-    while let Some(offset) = text[from..]
-        .as_bytes()
+    while let Some(offset) = bytes[from..]
         .windows(NAME.len())
         .position(|window| window.eq_ignore_ascii_case(NAME.as_bytes()))
     {
