@@ -721,3 +721,32 @@ async fn svg_cssom_written_pointer_events_keyword_keeps_the_outer_svg() {
     .await
     .expect("SVG CSSOM pointer-events hit-test fixture should run");
 }
+
+/// A CSSOM edit turns a `<style>` sheet into its serialization, which has
+/// dropped an SVG-only `pointer-events` keyword. The runtime noted the
+/// keyword when it parsed the text, so the outer `<svg>` answer stays.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_pointer_events_keyword_survives_an_unrelated_stylesheet_edit() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-edited-stylesheet-pointer-events-hit-test",
+            r#"<style id=sheet>.hit { pointer-events: all } .a { }</style>
+<svg id=s width=100 height=100 style="display:block">
+  <rect id=b width=100 height=100 fill=red />
+  <circle id=c cx=50 cy=50 r=30 fill=none class=hit />
+</svg>"#,
+        )?;
+        page_vm
+            .vm_mut()
+            .eval("document.getElementById('sheet').sheet.deleteRule(1); 'deleted'")?;
+        page_vm.vm_mut().sync_live_document_style_sources();
+        page_vm.vm_mut().publish_layout_for_test()?;
+        assert_eq!(
+            page_vm.vm_mut().eval("__hits([[50, 50]])")?,
+            "s|s,body,html"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG edited stylesheet pointer-events hit-test fixture should run");
+}

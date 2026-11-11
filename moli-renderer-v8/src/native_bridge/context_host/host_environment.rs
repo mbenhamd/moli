@@ -1366,8 +1366,12 @@ impl JsContextHost {
         self.cssom_declared_svg_pointer_events.set(true);
     }
 
-    pub(crate) fn cssom_declared_svg_pointer_events(&self) -> bool {
+    /// Whether author text ever parsed into a stylesheet of this runtime, or
+    /// written through the CSSOM, declared an SVG-only `pointer-events`
+    /// keyword. The parse drops it, so no later serialization shows it.
+    pub(crate) fn svg_pointer_events_keyword_seen(&self) -> bool {
         self.cssom_declared_svg_pointer_events.get()
+            || self.live_stylesheets.parsed_svg_pointer_events_keyword()
     }
 
     pub(crate) fn register_css_custom_property_for_document(

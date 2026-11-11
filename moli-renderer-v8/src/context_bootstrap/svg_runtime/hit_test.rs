@@ -455,7 +455,8 @@ fn is_unmodelled_pointer_events_keyword(keyword: &str) -> bool {
 }
 
 /// Whether CSS `text` declares `pointer-events` with an unmodelled keyword.
-/// A textual scan: it may also match inside a string, which only makes a
+/// A textual scan that reads `/* ... */` comments as whitespace. It may
+/// also match inside a string or a comment's text, which only makes a
 /// query coarse.
 pub(crate) fn css_declares_svg_pointer_events(text: &str) -> bool {
     const NAME: &str = "pointer-events";
@@ -525,12 +526,19 @@ fn element_declares_svg_pointer_events(runtime: &JsContextHost, handle: DomHandl
 /// keyword. The write reserializes the `style` attribute from what the
 /// style engine kept, dropping such a keyword from the written text and
 /// from the current attribute alike, so the runtime remembers it instead.
+/// Once the runtime has noted one, nothing is read; otherwise the current
+/// attribute is scanned in place, without a copy.
 pub(crate) fn note_inline_style_write(runtime: &JsContextHost, handle: DomHandle, declares: bool) {
+    if runtime.svg_pointer_events_keyword_seen() {
+        return;
+    }
     if declares
         || runtime
             .dom_host()
-            .get_attribute(handle, "style")
-            .is_some_and(|style| css_declares_svg_pointer_events(&style))
+            .node(handle)
+            .and_then(|node| node.as_element())
+            .and_then(|element| element.attribute("style"))
+            .is_some_and(css_declares_svg_pointer_events)
     {
         runtime.note_cssom_svg_pointer_events();
     }
@@ -551,10 +559,10 @@ pub(crate) fn note_cssom_write(scope: &mut v8::PinScope<'_, '_>, declares: bool)
 
 /// An author stylesheet rule with an unmodelled `pointer-events` keyword is
 /// dropped before any computed value can show it, so its presence in the
-/// document, or in any CSSOM write the text of which is gone, makes every
-/// query coarse.
+/// document, or in any author text the runtime parsed or the CSSOM wrote
+/// whose text is gone, makes every query coarse.
 fn document_declares_svg_pointer_events(runtime: &JsContextHost, root: DomHandle) -> bool {
-    if runtime.cssom_declared_svg_pointer_events() {
+    if runtime.svg_pointer_events_keyword_seen() {
         return true;
     }
     let document = runtime
