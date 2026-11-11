@@ -14,6 +14,7 @@ use crate::{
         WebLockClientId, WebLockInfo, WebLockMode, WebLockOwner, WebLockRequest, WebLockRequestId,
         WebLockRequestOutcome, dispatch_web_lock_actions,
     },
+    window_webidl_callback::WindowWebIdlCallbackFunction,
 };
 use moli_storage_key::MoliStorageKey;
 
@@ -41,7 +42,8 @@ pub(crate) struct NewWebLockRequest<'s> {
     pub(crate) mode: WebLockMode,
     pub(crate) if_available: bool,
     pub(crate) steal: bool,
-    pub(crate) callback: v8::Local<'s, v8::Function>,
+    /// The page-supplied `LockGrantedCallback`, bound to its Window.
+    pub(crate) callback: WindowWebIdlCallbackFunction,
     pub(crate) resolver: v8::Local<'s, v8::PromiseResolver>,
     pub(crate) abort: Option<(v8::Local<'s, v8::Object>, v8::Local<'s, v8::Function>)>,
 }
@@ -51,7 +53,7 @@ pub(crate) struct WebLockGrant {
     pub(crate) name: String,
     pub(crate) mode: WebLockMode,
     pub(crate) not_available: bool,
-    pub(crate) callback: v8::Global<v8::Function>,
+    pub(crate) callback: WindowWebIdlCallbackFunction,
     pub(crate) abort: Option<(v8::Global<v8::Object>, v8::Global<v8::Function>)>,
 }
 
@@ -59,7 +61,8 @@ struct WebLockRequestState {
     client: WebLockClientId,
     name: String,
     mode: WebLockMode,
-    callback: v8::Global<v8::Function>,
+    /// Taken by the grant task; the callback is invoked at most once.
+    callback: Option<WindowWebIdlCallbackFunction>,
     resolver: v8::Global<v8::PromiseResolver>,
     abort: Option<(v8::Global<v8::Object>, v8::Global<v8::Function>)>,
     grant_task: RendererPageMiscPlatformApiTaskId,
@@ -188,7 +191,7 @@ impl JsContextHost {
                 client: client.client,
                 name: request.name.clone(),
                 mode: request.mode,
-                callback: v8::Global::new(scope, request.callback),
+                callback: Some(request.callback),
                 resolver: v8::Global::new(scope, request.resolver),
                 abort: request.abort.map(|(signal, algorithm)| {
                     (
@@ -305,12 +308,13 @@ impl JsContextHost {
         if state.granted {
             return None;
         }
+        let callback = state.callback.take()?;
         state.granted = true;
         Some(WebLockGrant {
             name: state.name.clone(),
             mode: state.mode,
             not_available: state.not_available,
-            callback: state.callback.clone(),
+            callback,
             abort: state.abort.take(),
         })
     }

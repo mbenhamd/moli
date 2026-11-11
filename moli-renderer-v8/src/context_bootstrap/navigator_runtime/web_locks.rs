@@ -18,6 +18,8 @@ use crate::{
     web_api_interfaces,
     web_locks_runtime::{WebLockInfo, WebLockMode, WebLockRequestId},
     webidl,
+    webidl_callback_execution::WebIdlCallbackExecutionOutcome,
+    window_webidl_callback::WindowWebIdlCallbackFunction,
 };
 
 const LOCK_NAME_SLOT: &str = "__moliLockName";
@@ -230,27 +232,33 @@ fn lock_manager_request<'s>(
             return;
         }
     };
-    let (options, callback) = if args.length() == 2 {
-        (LockOptions::default(), args.get(1))
+    let (options, callback, callback_position) = if args.length() == 2 {
+        (LockOptions::default(), args.get(1), 2)
     } else {
         match webidl::parse_dictionary::<LockOptions>(
             scope,
             args.get(1),
             webidl::Context::argument("LockManager.request", 2),
         ) {
-            Ok(options) => (options.unwrap_or_default(), args.get(2)),
+            Ok(options) => (options.unwrap_or_default(), args.get(2), 3),
             Err(error) => {
                 webidl::throw_error(scope, &error);
                 return;
             }
         }
     };
-    let Ok(callback) = v8::Local::<v8::Function>::try_from(callback) else {
-        throw_type_error(
-            scope,
-            "Failed to execute 'request' on 'LockManager': The callback provided as parameter is not a function.",
-        );
-        return;
+    // LockGrantedCallback is a Web IDL callback function: conversion captures
+    // its relevant and incumbent Realms for the later grant task.
+    let callback = match webidl::convert::<webidl::WebIdlCallbackFunction>(
+        scope,
+        callback,
+        webidl::Context::argument("LockManager.request", callback_position),
+    ) {
+        Ok(callback) => callback,
+        Err(error) => {
+            webidl::throw_error(scope, &error);
+            return;
+        }
     };
 
     let Some(resolver) = v8::PromiseResolver::new(scope) else {
@@ -278,6 +286,16 @@ fn lock_manager_request<'s>(
         return;
     }
 
+    let callback = WindowWebIdlCallbackFunction::new(scope, unsafe { &*host_ptr }, callback);
+    if callback.relevant_identity().is_none() {
+        reject_dom_exception(
+            scope,
+            resolver,
+            "InvalidStateError",
+            "The callback's execution context is detached.",
+        );
+        return;
+    }
     let id = unsafe { &*host_ptr }.next_web_lock_request_id();
     let abort = match options.signal {
         Some(signal) => {
@@ -444,35 +462,49 @@ fn run_web_lock_grant(
             Err(_) => return false,
         }
     };
-    let callback = v8::Local::new(scope, &grant.callback);
     let Some(waiting) = v8::PromiseResolver::new(scope) else {
         return false;
     };
-    let outcome = {
-        let try_catch = std::pin::pin!(v8::TryCatch::new(scope));
-        let try_catch = try_catch.init();
-        let receiver = v8::undefined(&try_catch).into();
-        match callback.call(&try_catch, receiver, &[lock]) {
-            Some(result) => Ok(v8::Global::new(&try_catch, result)),
-            None => Err(try_catch
-                .exception()
-                .map(|exception| v8::Global::new(&try_catch, exception))),
-        }
+    let receiver: v8::Local<'_, v8::Value> = v8::undefined(scope).into();
+    let arguments = [lock];
+    let outcome = match grant.callback.prepare_execution(scope, host_ptr, None) {
+        Some(execution) => execution.invoke_with(
+            scope,
+            receiver,
+            &arguments,
+            |scope, callback, receiver, arguments| {
+                let try_catch = std::pin::pin!(v8::TryCatch::new(scope));
+                let try_catch = try_catch.init();
+                match callback.call(&try_catch, receiver, arguments) {
+                    Some(result) => Ok(v8::Global::new(&try_catch, result)),
+                    None => Err(try_catch
+                        .exception()
+                        .map(|exception| v8::Global::new(&try_catch, exception))),
+                }
+            },
+        ),
+        None => WebIdlCallbackExecutionOutcome::Unavailable,
     };
     // The lock is released when the callback's result settles; the request
     // promise then adopts that result.
     match outcome {
-        Ok(result) => {
+        WebIdlCallbackExecutionOutcome::Returned(result) => {
             let result = v8::Local::new(scope, &result);
             let _ = waiting.resolve(scope, result);
         }
-        Err(exception) => {
+        WebIdlCallbackExecutionOutcome::Failed(exception) => {
             let exception = match exception {
                 Some(exception) => v8::Local::new(scope, &exception),
                 None => v8::undefined(scope).into(),
             };
             let _ = waiting.reject(scope, exception);
         }
+        WebIdlCallbackExecutionOutcome::Unavailable => reject_dom_exception(
+            scope,
+            waiting,
+            "InvalidStateError",
+            "The callback's execution context is no longer available.",
+        ),
     }
     let data = request_id_value(scope, request);
     let fulfilled = v8::Function::builder(web_lock_callback_fulfilled)
