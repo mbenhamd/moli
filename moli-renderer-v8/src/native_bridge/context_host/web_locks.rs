@@ -11,8 +11,8 @@ use super::*;
 use crate::{
     page_task_queue::{RendererPageMiscPlatformApiTaskId, RendererPageMiscPlatformApiTaskKind},
     web_locks_runtime::{
-        WebLockClientId, WebLockInfo, WebLockMode, WebLockOwner, WebLockRequest, WebLockRequestId,
-        WebLockRequestOutcome, dispatch_web_lock_actions,
+        WebLockAction, WebLockClientId, WebLockInfo, WebLockMode, WebLockOwner, WebLockRequest,
+        WebLockRequestId, WebLockRequestOutcome, dispatch_web_lock_actions,
     },
     window_webidl_callback::WindowWebIdlCallbackFunction,
 };
@@ -231,14 +231,9 @@ impl JsContextHost {
         );
         match outcome {
             WebLockRequestOutcome::Queued(actions) => {
-                let unsent = dispatch_web_lock_actions(&self.web_lock_registry, actions);
-                if !unsent.contains(&id) {
-                    return true;
-                }
-                // The registry already released the lock whose grant could not
-                // be posted; drop this Host's half too.
-                self.web_locks.forget_request(id);
-                false
+                // A request whose own grant could not be posted was released
+                // by the registry and forgotten here; reject it.
+                !self.post_web_lock_actions(actions).contains(&id)
             }
             WebLockRequestOutcome::NotAvailable => {
                 if let Some(state) = self.web_locks.requests.get_mut(&id) {
@@ -287,6 +282,38 @@ impl JsContextHost {
         Some(request)
     }
 
+    /// Post registry actions after the registry call returned. A grant that
+    /// could not be posted was already released by the registry; its request
+    /// is forgotten here too when this Host created it. Returns those requests.
+    fn post_web_lock_actions(
+        &mut self,
+        actions: Vec<WebLockAction<WebLockOwner>>,
+    ) -> Vec<WebLockRequestId> {
+        let unsent = dispatch_web_lock_actions(&self.web_lock_registry, actions);
+        for request in &unsent {
+            self.web_locks.forget_request(*request);
+        }
+        unsent
+    }
+
+    /// Drop one request whose callback will never run and return any lock it
+    /// held or waited for to the queue. Used for a stale task, and for an
+    /// authorized grant task (already taken from the task table) that found no
+    /// realm: its request promise cannot be rejected without that realm.
+    pub(super) fn retire_web_lock_request(&mut self, request: WebLockRequestId) {
+        let Some(state) = self.web_locks.forget_request(request) else {
+            return;
+        };
+        let mut actions = self
+            .web_lock_registry
+            .abort_pending(request)
+            .unwrap_or_default();
+        if !state.not_available {
+            actions.extend(self.web_lock_registry.release(request));
+        }
+        self.post_web_lock_actions(actions);
+    }
+
     /// A grant or steal task reached a stale Document: drop its request and
     /// return any lock it held to the queue.
     pub(super) fn discard_pending_web_lock_task(
@@ -296,17 +323,7 @@ impl JsContextHost {
         let Some((_, _, request)) = self.web_locks.tasks.remove(&task_id) else {
             return false;
         };
-        if let Some(state) = self.web_locks.forget_request(request)
-            && !state.not_available
-        {
-            let mut actions = self.web_lock_registry.release(request);
-            actions.extend(
-                self.web_lock_registry
-                    .abort_pending(request)
-                    .unwrap_or_default(),
-            );
-            dispatch_web_lock_actions(&self.web_lock_registry, actions);
-        }
+        self.retire_web_lock_request(request);
         true
     }
 
@@ -338,7 +355,7 @@ impl JsContextHost {
         let state = self.web_locks.forget_request(request)?;
         if !state.not_available {
             let actions = self.web_lock_registry.release(request);
-            dispatch_web_lock_actions(&self.web_lock_registry, actions);
+            self.post_web_lock_actions(actions);
         }
         (!state.stolen).then_some(state.resolver)
     }
@@ -374,7 +391,7 @@ impl JsContextHost {
         if !state.not_available {
             actions.extend(self.web_lock_registry.release(request));
         }
-        dispatch_web_lock_actions(&self.web_lock_registry, actions);
+        self.post_web_lock_actions(actions);
         let (signal, _) = state.abort?;
         Some((state.resolver, signal))
     }
@@ -403,7 +420,7 @@ impl JsContextHost {
                 .tasks
                 .retain(|_, (_, _, request)| requests.contains_key(&*request));
         }
-        dispatch_web_lock_actions(&self.web_lock_registry, actions);
+        self.post_web_lock_actions(actions);
         identities.len()
     }
 

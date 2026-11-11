@@ -135,6 +135,11 @@ impl JsContextHost {
     ) -> PageMiscPlatformApiTargetEffect {
         let Some(resolved) = self.resolve_authorized_window_document_task_context(scope, target)
         else {
+            // The task entry is already taken, so nothing else would release a
+            // granted lock. A steal task has nothing to return.
+            if kind == RendererPageMiscPlatformApiTaskKind::WebLockGranted {
+                self.retire_web_lock_request(request);
+            }
             return PageMiscPlatformApiTargetEffect::CurrentOwnerCallbackRetired;
         };
         let scope = &mut v8::ContextScope::new(scope, resolved.context);

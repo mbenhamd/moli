@@ -416,7 +416,8 @@ fn web_lock_abort_algorithm<'s>(
 }
 
 /// Run one authorized Web Locks task in the requesting Window's realm.
-/// Returns whether script ran or a promise settled.
+/// Returns false when the request is already gone; true once the task acted on
+/// a live request (its callback ran, its promise settled, or its lock returned).
 pub(crate) fn run_web_lock_task(
     scope: &mut v8::PinScope<'_, '_>,
     host_ptr: *mut JsContextHost,
