@@ -2747,8 +2747,8 @@ impl ScriptVm {
             Rc::clone(&self._context_host),
             CurrentInputEvent::keyboard(key, modifiers),
         );
-        let handle = keyboard_event_target(&self._context_host.borrow());
-        let Some(handle) = handle else {
+        let Some((handle, editing_handle)) = key_and_editing_targets(&self._context_host.borrow())
+        else {
             return Ok(input_dispatch_outcome(false));
         };
 
@@ -2784,47 +2784,38 @@ impl ScriptVm {
             // Combined keydown/text input includes a cancelable keypress before
             // editing. Keep both events in this input turn; an explicit char
             // command already dispatched keypress and must not emit it twice.
-            let handle = if event_name == "keydown" && should_insert_text && !text.is_empty() {
-                // Like Blink's KeyboardEventManager, resolve focus again after
-                // keydown listeners before targeting the character event.
-                let runtime = unsafe { &*runtime_ptr };
-                let Some(handle) = keyboard_event_target(runtime) else {
-                    return Ok(input_dispatch_outcome(false));
+            let (handle, editing_handle) =
+                if event_name == "keydown" && should_insert_text && !text.is_empty() {
+                    // Like Blink's KeyboardEventManager, resolve focus again after
+                    // keydown listeners before targeting the character event.
+                    let runtime = unsafe { &*runtime_ptr };
+                    let Some((handle, editing_handle)) = key_and_editing_targets(runtime) else {
+                        return Ok(input_dispatch_outcome(false));
+                    };
+                    let Some(keypress) = construct_keyboard_event(
+                        scope,
+                        "keypress",
+                        key,
+                        code,
+                        alt,
+                        ctrl,
+                        meta,
+                        shift,
+                        auto_repeat,
+                    ) else {
+                        return Ok(input_dispatch_outcome(false));
+                    };
+                    if !dispatch_public_event(scope, runtime_ptr, handle, keypress).allows_default()
+                    {
+                        return Ok(input_dispatch_outcome(false));
+                    }
+                    (handle, editing_handle)
+                } else {
+                    (handle, editing_handle)
                 };
-                let Some(keypress) = construct_keyboard_event(
-                    scope,
-                    "keypress",
-                    key,
-                    code,
-                    alt,
-                    ctrl,
-                    meta,
-                    shift,
-                    auto_repeat,
-                ) else {
-                    return Ok(input_dispatch_outcome(false));
-                };
-                if !dispatch_public_event(scope, runtime_ptr, handle, keypress).allows_default() {
-                    return Ok(input_dispatch_outcome(false));
-                }
-                handle
-            } else {
-                handle
-            };
 
             let runtime = unsafe { &mut *runtime_ptr };
             let target = key_target_info(runtime, handle);
-            // Editing defaults stay on the unresolved active element: the
-            // contenteditable paths edit through the top context's selection,
-            // which never holds a range in a focused frame's document.
-            let editing_handle = runtime
-                .active_element_handle()
-                .filter(|active| {
-                    runtime
-                        .child_browsing_context_document_handle(*active)
-                        .is_some()
-                })
-                .unwrap_or(handle);
 
             let is_enter_key = key_lower == "enter" || (should_insert_text && text == "\r");
             if is_enter_key {
@@ -3165,4 +3156,19 @@ impl ScriptVm {
         }
         self.finish_input_event_dispatch_turn(result)
     }
+}
+
+/// The key event target and, from the same focus snapshot, the element the
+/// editing defaults use. Editing stays on the unresolved active element: the
+/// contenteditable paths edit through the top context's selection, which
+/// never holds a range in a focused frame's document.
+fn key_and_editing_targets(
+    runtime: &crate::native_bridge::JsContextHost,
+) -> Option<(DomHandle, DomHandle)> {
+    let handle = keyboard_event_target(runtime)?;
+    let editing_handle = runtime
+        .active_element_handle()
+        .or_else(|| runtime.document_focus_fallback_handle())
+        .unwrap_or(handle);
+    Some((handle, editing_handle))
 }

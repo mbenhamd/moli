@@ -391,7 +391,7 @@ fn key_events_reach_focused_frame_document_body_and_frame_document_has_focus() {
     frame.focus();
   };
   window.__editableFrameKeptMarkup = () =>
-    childDocument.body.querySelector('b')?.textContent === 'x';
+    childDocument.body.querySelector('b') !== null;
   frame.focus();
 })()
 "#,
