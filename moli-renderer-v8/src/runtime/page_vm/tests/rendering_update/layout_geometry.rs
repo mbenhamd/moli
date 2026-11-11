@@ -1727,6 +1727,29 @@ globalThis.wideBytes = Uint8Array.from(atob('{wide}'), c => c.charCodeAt(0));
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn live_incremental_layout_matches_a_full_rebuild_inside_inline_positioned_boxes() {
+    run_page_vm_async_test(async move {
+        // `#ov` is positioned inside a container with inline content, so it is
+        // laid out after the numeric snapshot. A text change dirties the
+        // container but leaves `#ov` and its subtree unchanged.
+        run_incremental_differential(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}#cb{position:relative;width:300px;height:200px}#ov{position:absolute;left:0;top:0;width:100%;height:100%}#in{position:absolute;width:100%;height:100%}#leaf{height:40px}</style>';
+document.body.innerHTML = '<div id=cb>lead <span id=tx>text</span><div id=ov><div id=in><div id=leaf></div></div></div></div>';
+'installed'
+"#,
+            &[
+                "document.getElementById('tx').textContent = 'longer text';",
+                "document.getElementById('tx').textContent = 'text';",
+            ],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("inline positioned incremental fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn live_geometry_scrolls_a_node_adopted_back_from_a_foreign_document() {
     run_page_vm_async_test(async move {
         let mut page_vm = live_geometry_page(

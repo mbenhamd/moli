@@ -238,6 +238,20 @@ where
                 mark_subtree_unclean(new, LayoutBoxId::from_index(index), &mut numeric_clean);
             }
         }
+        // A positioned box with an IFC static position is laid out by
+        // `finish_inline_positioned_layout`, after the numeric snapshot was
+        // taken. Its retained cache answers for descendant geometry that the
+        // snapshot never recorded, so a cache hit would leave the subtree at
+        // its snapshot values. Neither the box nor its subtree reuses results.
+        for index in 0..builder_len {
+            if numeric_clean[index]
+                && self.prior.world.boxes[index]
+                    .inline_static_position
+                    .is_some()
+            {
+                mark_subtree_unclean(new, LayoutBoxId::from_index(index), &mut numeric_clean);
+            }
+        }
         for (index, is_clean) in numeric_clean.iter().enumerate() {
             if !*is_clean {
                 continue;
