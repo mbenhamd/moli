@@ -150,6 +150,7 @@ pub(crate) fn answer_query(
                     paint_order: None,
                     local_point: *point,
                     is_text: false,
+                    pointer_events: true,
                     local_content_box: None,
                     viewport_to_local: moli_layout::LayoutTransform2D::IDENTITY,
                 },
@@ -167,6 +168,7 @@ pub(crate) fn answer_query(
                         paint_order: None,
                         local_point: *point,
                         is_text: false,
+                        pointer_events: true,
                         local_content_box: None,
                         viewport_to_local: moli_layout::LayoutTransform2D::IDENTITY,
                     }]
