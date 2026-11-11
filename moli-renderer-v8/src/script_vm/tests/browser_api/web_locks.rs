@@ -112,6 +112,45 @@ fn web_locks_steal_rejects_the_previous_holder_with_abort_error() {
 }
 
 #[test]
+fn web_locks_abort_in_the_requesting_task_skips_the_callback_and_frees_the_lock() {
+    let mut vm = page();
+    vm.eval(
+        r#"
+        globalThis.results = [];
+        const controller = new AbortController();
+        navigator.locks
+          .request("sa", { signal: controller.signal }, () => { results.push("callback"); })
+          .then(() => results.push("resolved"), error => results.push(error.name));
+        controller.abort();
+        const custom = new AbortController();
+        navigator.locks
+          .request("sr", { signal: custom.signal }, () => { results.push("callback"); })
+          .then(() => results.push("resolved"), reason => results.push("reason:" + reason));
+        custom.abort("x");
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        vm.eval_after_selected_page_tasks("results.join()").unwrap(),
+        "AbortError,reason:x"
+    );
+    // Chromium releases the withdrawn lock asynchronously, so check after a
+    // task turn rather than in the aborting task.
+    vm.eval(
+        r#"
+        navigator.locks
+          .request("sa", { ifAvailable: true }, lock => lock === null ? "held" : "free")
+          .then(value => results.push(value));
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        vm.eval_after_selected_page_tasks("results.join()").unwrap(),
+        "AbortError,reason:x,free"
+    );
+}
+
+#[test]
 fn web_locks_query_reports_held_and_pending_requests() {
     let mut vm = page();
     vm.eval(
