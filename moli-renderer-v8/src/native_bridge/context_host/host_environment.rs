@@ -1360,6 +1360,16 @@ impl JsContextHost {
             .shadow_root_has_adopted_style_sheet_sources(self.dom_host(), root)
     }
 
+    /// Remembers a CSSOM write of an SVG-only `pointer-events` keyword; see
+    /// `svg_runtime::hit_test::note_cssom_write`.
+    pub(crate) fn note_cssom_svg_pointer_events(&self) {
+        self.cssom_declared_svg_pointer_events.set(true);
+    }
+
+    pub(crate) fn cssom_declared_svg_pointer_events(&self) -> bool {
+        self.cssom_declared_svg_pointer_events.get()
+    }
+
     pub(crate) fn register_css_custom_property_for_document(
         &mut self,
         document: DomHandle,

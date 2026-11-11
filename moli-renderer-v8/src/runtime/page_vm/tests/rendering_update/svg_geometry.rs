@@ -663,3 +663,61 @@ async fn svg_stylesheet_pointer_events_keyword_keeps_the_outer_svg() {
     .await
     .expect("SVG stylesheet pointer-events hit-test fixture should run");
 }
+
+/// A shadow root's stylesheet is author style too: its SVG-only
+/// `pointer-events` keyword keeps the outer `<svg>` answer.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_shadow_root_stylesheet_pointer_events_keyword_keeps_the_outer_svg() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-shadow-stylesheet-pointer-events-hit-test",
+            "<div id=host></div>",
+        )?;
+        let shadow = r#"const host = document.getElementById('host');
+globalThis.__root = host.attachShadow({ mode: 'open' });
+__root.innerHTML = `<style>.hit { pointer-events: all }</style>
+<svg id=s width=100 height=100 style="display:block">
+  <rect id=b width=100 height=100 fill=red />
+  <circle id=c cx=50 cy=50 r=30 fill=none class=hit />
+</svg>`;
+'installed'"#;
+        page_vm.vm_mut().eval(shadow)?;
+        page_vm.vm_mut().sync_live_document_style_sources();
+        page_vm.vm_mut().publish_layout_for_test()?;
+        assert_eq!(
+            page_vm.vm_mut().eval("__root.elementFromPoint(50, 50).id")?,
+            "s"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG shadow stylesheet pointer-events hit-test fixture should run");
+}
+
+/// The CSSOM drops an SVG-only `pointer-events` keyword written through it,
+/// as the d3 zoom overlay's `.style("pointer-events", "all")` does, so the
+/// runtime remembers the write and keeps the outer `<svg>` answer.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_cssom_written_pointer_events_keyword_keeps_the_outer_svg() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-cssom-pointer-events-hit-test",
+            r#"<svg id=s width=100 height=100 style="display:block">
+  <rect id=b width=100 height=100 fill=red />
+  <circle id=c cx=50 cy=50 r=30 fill=none />
+</svg>"#,
+        )?;
+        page_vm
+            .vm_mut()
+            .eval("document.getElementById('c').style.pointerEvents = 'all'; 'set'")?;
+        page_vm.vm_mut().sync_live_document_style_sources();
+        page_vm.vm_mut().publish_layout_for_test()?;
+        assert_eq!(
+            page_vm.vm_mut().eval("__hits([[50, 50]])")?,
+            "s|s,body,html"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG CSSOM pointer-events hit-test fixture should run");
+}

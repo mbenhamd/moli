@@ -1,3 +1,4 @@
+use crate::context_bootstrap::svg_runtime::hit_test;
 use crate::css_style::compress_box_components;
 use crate::web_api_interfaces;
 use std::{
@@ -922,6 +923,7 @@ fn set_lightweight_css_style_css_text_internal<'s>(
     let Some(style) = lightweight_style_receiver(scope, style) else {
         return false;
     };
+    hit_test::note_cssom_write(scope, hit_test::css_declares_svg_pointer_events(css_text));
     clear_style_entries(scope, style);
     let use_stylo_declaration_block = style_uses_stylo_declaration_block(scope, style);
     if use_stylo_declaration_block
@@ -2216,6 +2218,7 @@ fn set_style_entry<'s>(
     if name.is_empty() {
         return;
     }
+    hit_test::note_cssom_write(scope, hit_test::property_declares_svg_pointer_events(&name, value));
     if style_interface(scope, style) == "CSSFontFaceDescriptors" {
         set_font_face_descriptor_style_entry(scope, style, &name, value, priority);
         return;

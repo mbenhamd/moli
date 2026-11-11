@@ -455,9 +455,9 @@ fn is_unmodelled_pointer_events_keyword(keyword: &str) -> bool {
 }
 
 /// Whether CSS `text` declares `pointer-events` with an unmodelled keyword.
-/// A textual scan: it may also match inside a comment or string, which
-/// only makes a query coarse.
-fn css_declares_svg_pointer_events(text: &str) -> bool {
+/// A textual scan: it may also match inside a string, which only makes a
+/// query coarse.
+pub(crate) fn css_declares_svg_pointer_events(text: &str) -> bool {
     const NAME: &str = "pointer-events";
     let bytes = text.as_bytes();
     let mut from = 0;
@@ -465,30 +465,50 @@ fn css_declares_svg_pointer_events(text: &str) -> bool {
         .windows(NAME.len())
         .position(|window| window.eq_ignore_ascii_case(NAME.as_bytes()))
     {
-        let mut index = from + offset + NAME.len();
-        from = index;
-        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-            index += 1;
-        }
-        if bytes.get(index) != Some(&b':') {
-            continue;
-        }
-        index += 1;
-        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-            index += 1;
-        }
-        let start = index;
-        while bytes
-            .get(index)
-            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        from += offset + NAME.len();
+        let index = skip_whitespace_and_comments(bytes, from);
+        if bytes.get(index) == Some(&b':')
+            && value_starts_with_unmodelled_keyword(text, index + 1)
         {
-            index += 1;
-        }
-        if is_unmodelled_pointer_events_keyword(&text[start..index]) {
             return true;
         }
     }
     false
+}
+
+/// Whether a CSSOM write of `value` to the property `name` declares an
+/// unmodelled `pointer-events` keyword.
+pub(crate) fn property_declares_svg_pointer_events(name: &str, value: &str) -> bool {
+    name.eq_ignore_ascii_case("pointer-events") && value_starts_with_unmodelled_keyword(value, 0)
+}
+
+/// Whether the CSS value at byte `index` of `text` starts with an
+/// unmodelled `pointer-events` keyword.
+fn value_starts_with_unmodelled_keyword(text: &str, index: usize) -> bool {
+    let bytes = text.as_bytes();
+    let start = skip_whitespace_and_comments(bytes, index);
+    let end = bytes[start..]
+        .iter()
+        .position(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'-'))
+        .map_or(bytes.len(), |length| start + length);
+    is_unmodelled_pointer_events_keyword(&text[start..end])
+}
+
+/// The first byte at or after `index` that is neither whitespace nor part
+/// of a `/* ... */` comment.
+fn skip_whitespace_and_comments(bytes: &[u8], mut index: usize) -> usize {
+    loop {
+        match bytes.get(index) {
+            Some(byte) if byte.is_ascii_whitespace() => index += 1,
+            Some(b'/') if bytes.get(index + 1) == Some(&b'*') => {
+                index = bytes[index + 2..]
+                    .windows(2)
+                    .position(|window| window == b"*/")
+                    .map_or(bytes.len(), |offset| index + 2 + offset + 2);
+            }
+            _ => return index,
+        }
+    }
 }
 
 fn element_declares_svg_pointer_events(runtime: &JsContextHost, handle: DomHandle) -> bool {
@@ -500,10 +520,43 @@ fn element_declares_svg_pointer_events(runtime: &JsContextHost, handle: DomHandl
             .is_some_and(|style| css_declares_svg_pointer_events(&style))
 }
 
+/// Notes a CSSOM write to the inline style of element `handle`; `declares` is
+/// whether the written text declares an unmodelled `pointer-events`
+/// keyword. The write reserializes the `style` attribute from what the
+/// style engine kept, dropping such a keyword from the written text and
+/// from the current attribute alike, so the runtime remembers it instead.
+pub(crate) fn note_inline_style_write(runtime: &JsContextHost, handle: DomHandle, declares: bool) {
+    if declares
+        || runtime
+            .dom_host()
+            .get_attribute(handle, "style")
+            .is_some_and(|style| css_declares_svg_pointer_events(&style))
+    {
+        runtime.note_cssom_svg_pointer_events();
+    }
+}
+
+/// Notes a CSSOM write in the page of `scope` to a declaration block or
+/// stylesheet that keeps only what the style engine parsed; `declares` is
+/// whether the written text declares an unmodelled `pointer-events`
+/// keyword.
+pub(crate) fn note_cssom_write(scope: &mut v8::PinScope<'_, '_>, declares: bool) {
+    if !declares {
+        return;
+    }
+    if let Some(host_ptr) = crate::util::context_host_ptr_from_global_bridge(scope) {
+        unsafe { &*host_ptr }.note_cssom_svg_pointer_events();
+    }
+}
+
 /// An author stylesheet rule with an unmodelled `pointer-events` keyword is
 /// dropped before any computed value can show it, so its presence in the
-/// document makes every query coarse.
+/// document, or in any CSSOM write the text of which is gone, makes every
+/// query coarse.
 fn document_declares_svg_pointer_events(runtime: &JsContextHost, root: DomHandle) -> bool {
+    if runtime.cssom_declared_svg_pointer_events() {
+        return true;
+    }
     let document = runtime
         .dom_host()
         .owner_document_handle(root)
