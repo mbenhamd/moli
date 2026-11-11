@@ -1391,3 +1391,36 @@ closed:frame.contentWindow.__views.every(dt=>dt.types.length===0&&dt.items.lengt
         }
     }
 }
+
+#[test]
+fn live_child_viewport_reads_follow_a_parent_restyle_without_a_parent_geometry_read() {
+    // @vitest/browser resizes its test iframe through a CSS variable on the
+    // parent and then lets the child read its viewport. Like Blink, the child
+    // sees the new size on that read, not on some later layout.
+    let mut vm = new_storage_test_vm("https://iframe-restyle-viewport.test/");
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.eval(
+        r#"
+        document.open();
+        document.write('<!doctype html><style>body{margin:0;--frame-width:300px}iframe{border:0;width:var(--frame-width);height:120px}</style><iframe id="frame"></iframe>');
+        document.close();
+        "#,
+    )
+    .expect("restyled frame fixture");
+    let result = vm
+        .eval(
+            r#"(() => {
+          const frame = document.getElementById('frame');
+          const child = frame.contentWindow;
+          const narrow = child.matchMedia('(max-width: 250px)');
+          frame.getBoundingClientRect();
+          const before = [child.innerWidth, narrow.matches];
+          document.body.style.setProperty('--frame-width', '200px');
+          const after = [child.innerWidth, child.innerHeight, narrow.matches,
+            child.matchMedia('(max-width: 250px)').matches];
+          return JSON.stringify([before, after]);
+        })()"#,
+        )
+        .expect("read the child viewport after a parent restyle");
+    assert_eq!(result, "[[300,false],[200,120,true,true]]");
+}
