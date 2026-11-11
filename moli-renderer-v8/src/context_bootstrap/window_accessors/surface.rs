@@ -18,15 +18,18 @@ fn window_inner_surface_dimension<'s>(
     };
     let host = unsafe { &*host_ptr };
     if let Some(frame_handle) = window_child_context_handle(scope, receiver) {
-        return crate::native_bridge::element::iframe_handle_viewport(host, frame_handle)
-            .and_then(|viewport| {
-                if width {
-                    viewport.width
-                } else {
-                    viewport.height
-                }
-            })
-            .unwrap_or(fallback);
+        return crate::native_bridge::element::iframe_handle_viewport_for_script(
+            host,
+            frame_handle,
+        )
+        .and_then(|viewport| {
+            if width {
+                viewport.width
+            } else {
+                viewport.height
+            }
+        })
+        .unwrap_or(fallback);
     }
     host.viewport_surface()
         .map(|viewport| {
