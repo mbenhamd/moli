@@ -77,3 +77,60 @@ fn pointer_capture_queries_pending_target_before_native_dispatch() {
         "pointerdown@first|gotpointercapture@first|pointermove@first|lostpointercapture@first|gotpointercapture@second|pointermove@second|lostpointercapture@second|pointermove@first|pointerup@first"
     );
 }
+
+#[test]
+fn pointer_capture_accepts_child_frame_nodes_with_detached_identity() {
+    // A child browsing context's Document is not the root Document, but it
+    // has a browsing context. Nodes in it that went through an inert
+    // Document, or were returned from a detached receiver, carry a detached
+    // native handle and must still accept pointer capture.
+    for variant in ["plain", "inert-roundtrip", "detached-closest"] {
+        let mut vm = new_storage_html_test_vm("https://pointer-capture-child-frame.test/");
+        vm.eval(&format!(
+            r#"
+              document.body.style.margin = '0';
+              const frame = document.createElement('iframe');
+              frame.style.cssText = 'position:fixed;left:0;top:0;width:240px;height:220px;border:0';
+              document.body.appendChild(frame);
+              const doc = frame.contentWindow.document;
+              doc.body.style.margin = '0';
+              let node = doc.createElement('div');
+              node.style.cssText = 'position:fixed;left:50px;top:50px;width:100px;height:100px';
+              doc.body.appendChild(node);
+              const inert = doc.implementation.createHTMLDocument('');
+              if ('{variant}' === 'inert-roundtrip') {{
+                inert.body.appendChild(node);
+                doc.body.appendChild(node);
+              }}
+              if ('{variant}' === 'detached-closest') {{
+                const inner = inert.createElement('span');
+                inert.body.appendChild(inner);
+                node.appendChild(inner);
+                node = inner.closest('div');
+              }}
+              globalThis.__childCaptureLog = [];
+              for (const type of ['pointerdown', 'gotpointercapture']) {{
+                node.addEventListener(type, event => {{
+                  __childCaptureLog.push(type);
+                  if (type === 'pointerdown') {{
+                    node.setPointerCapture(event.pointerId);
+                    __childCaptureLog.push(`has:${{node.hasPointerCapture(event.pointerId)}}`);
+                  }}
+                }});
+              }}
+              'ready'
+            "#
+        ))
+        .unwrap();
+        vm.publish_layout_for_test().unwrap();
+        vm.dispatch_mouse_event_at_point(80.0, 80.0, "mousedown", 0, None, 0.0, 0.0)
+            .unwrap();
+        vm.dispatch_mouse_event_at_point(200.0, 80.0, "mousemove", -1, None, 0.0, 0.0)
+            .unwrap();
+        assert_eq!(
+            vm.eval("__childCaptureLog.join('|')").unwrap(),
+            "pointerdown|has:true|gotpointercapture",
+            "{variant}"
+        );
+    }
+}
