@@ -2814,6 +2814,17 @@ impl ScriptVm {
 
             let runtime = unsafe { &mut *runtime_ptr };
             let target = key_target_info(runtime, handle);
+            // Editing defaults stay on the unresolved active element: the
+            // contenteditable paths edit through the top context's selection,
+            // which never holds a range in a focused frame's document.
+            let editing_handle = runtime
+                .active_element_handle()
+                .filter(|active| {
+                    runtime
+                        .child_browsing_context_document_handle(*active)
+                        .is_some()
+                })
+                .unwrap_or(handle);
 
             let is_enter_key = key_lower == "enter" || (should_insert_text && text == "\r");
             if is_enter_key {
@@ -2866,7 +2877,7 @@ impl ScriptVm {
                         TextEditInputType::InsertText,
                     )));
                 }
-                if let Some(editing_host) = contenteditable_editing_host(runtime, handle) {
+                if let Some(editing_host) = contenteditable_editing_host(runtime, editing_handle) {
                     return Ok(input_dispatch_outcome(replace_contenteditable_selection(
                         scope,
                         runtime_ptr,
@@ -3032,7 +3043,7 @@ impl ScriptVm {
 
             if (ctrl || meta)
                 && key_lower == "a"
-                && let Some(editing_host) = contenteditable_editing_host(runtime, handle)
+                && let Some(editing_host) = contenteditable_editing_host(runtime, editing_handle)
             {
                 return Ok(input_dispatch_outcome(select_contenteditable_contents(
                     scope,
@@ -3041,7 +3052,7 @@ impl ScriptVm {
             }
 
             if matches!(key_lower.as_str(), "backspace" | "delete")
-                && let Some(editing_host) = contenteditable_editing_host(runtime, handle)
+                && let Some(editing_host) = contenteditable_editing_host(runtime, editing_handle)
             {
                 return Ok(input_dispatch_outcome(replace_contenteditable_selection(
                     scope,

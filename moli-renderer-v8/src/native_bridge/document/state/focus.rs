@@ -45,9 +45,7 @@ pub(crate) fn document_is_in_focus_chain(runtime: &JsContextHost, document: DomH
             runtime.child_browsing_context_document_handle(active) == Some(document)
                 || retarget_active_element_to_document(runtime, active, document).is_some()
         }
-        None => runtime
-            .child_browsing_context_host_for_document_handle(document)
-            .is_none(),
+        None => document == runtime.dom_host().document_handle(),
     }
 }
 
