@@ -532,6 +532,26 @@ pub(crate) fn iframe_handle_viewport(
     iframe_handle_viewport_with_depth(host, frame_handle, 0)
 }
 
+/// The viewport a child Window's script observes (`innerWidth`,
+/// `innerHeight`, `matchMedia`, `visualViewport`).
+///
+/// Blink sizes a child frame during its parent's layout, so a read in the
+/// child right after the parent restyles the `<iframe>` already sees the new
+/// size. The frame viewport here is the one the parent's last layout
+/// published, so under the live-geometry policy this first brings that
+/// layout up to date, as a geometry read such as `getBoundingClientRect`
+/// does. A reentrant or failed pass, or a caller already inspecting the
+/// published tree, keeps the last published viewport.
+pub(crate) fn iframe_handle_viewport_for_script(
+    host: &JsContextHost,
+    frame_handle: DomHandle,
+) -> Option<StyleViewport> {
+    if host.layout_policy().relayouts_stale_reads() {
+        let _ = host.ensure_current_layout();
+    }
+    iframe_handle_viewport(host, frame_handle)
+}
+
 pub(crate) fn style_viewport_for_document(
     host: &JsContextHost,
     document: DomHandle,

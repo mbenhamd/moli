@@ -138,7 +138,7 @@ pub(crate) fn current_window_style_viewport(
     let global = scope.get_current_context().global(scope);
     window_child_context_handle(scope, global)
         .and_then(|frame_handle| {
-            crate::native_bridge::element::iframe_handle_viewport(host, frame_handle)
+            crate::native_bridge::element::iframe_handle_viewport_for_script(host, frame_handle)
         })
         .unwrap_or_else(|| host.style_viewport())
 }
