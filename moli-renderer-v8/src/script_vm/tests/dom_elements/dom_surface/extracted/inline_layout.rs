@@ -1671,3 +1671,32 @@ fn hanging_trailing_spaces_do_not_contribute_to_scrollable_overflow() {
     }
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
+
+// Expected values from Chromium headless shell 1248 with the same markup and
+// the bundled Ahem face (0.6em advance). Blink lays a single-line input's
+// inner editor out as `white-space: pre`, so its value overflows horizontally
+// (preserving spaces) instead of wrapping, while the placeholder is clipped by
+// its own `overflow: hidden` and a textarea still wraps. Moli does not yet
+// paint the search cancel button, so `type=search` (59 in Chromium) is left out.
+// A form feed survives value sanitization; Blink ignores it in inline layout,
+// so `aa\fbb` stays one 24px line.
+#[test]
+fn single_line_text_control_value_overflows_horizontally_without_wrapping() {
+    let markup = r#"<!doctype html><style>body{margin:0}input,textarea{box-sizing:content-box;width:15px;height:10px;padding:0;border:0;font:10px/10px MoliAhem;overflow:hidden;resize:none}</style><input id=a value="aa aa aa"><input id=b value="aa   aa"><input id=c placeholder="aa aa aa"><input id=d type=email value="aa aa aa"><textarea id=e>aa aa aa</textarea><input id=f value="aa&#12;bb">"#;
+    let mut vm = new_parsed_test_vm("https://single-line-text-control.test/", markup);
+    vm._context_host.borrow().register_layout_test_font(
+        "MoliAhem",
+        include_bytes!("../../../../../../../moli-layout/tests/fixtures/moli-ahem.ttf").to_vec(),
+    );
+    let query = "JSON.stringify(['a','b','c','d','f'].map(id=>{const e=document.getElementById(id);return [e.scrollWidth,e.clientWidth,e.scrollHeight,e.clientHeight]}))";
+    let expected = "[[48,15,10,10],[42,15,10,10],[15,15,10,10],[48,15,10,10],[24,15,10,10]]";
+    assert_eq!(vm.eval(query).unwrap(), expected);
+    publish_layout_for_test(&mut vm);
+    assert_eq!(vm.eval(query).unwrap(), expected, "after paint");
+    assert_eq!(
+        vm.eval("JSON.stringify([e.scrollWidth,e.clientWidth])")
+            .unwrap(),
+        "[15,15]",
+        "a textarea keeps wrapping inside its width"
+    );
+}

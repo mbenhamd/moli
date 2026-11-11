@@ -1804,6 +1804,64 @@ document.body.innerHTML = '<div id=host></div><div id=other></div>';
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn live_closed_details_content_adds_no_size_but_keeps_descendant_geometry() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0;padding:0;height:100%}body{font:16px/20px monospace}p{margin:0}#g{display:grid;row-gap:10px}#h{height:60px}#f{display:flex}#bl{display:flex;align-items:baseline}#big{font:60px/80px monospace}#c{display:flex;width:200px;margin-top:100px}#k{display:flex;flex-direction:column;width:300px}#w{display:flex;flex-wrap:wrap;width:200px}#e{display:flex;justify-content:flex-end;width:200px}</style>';
+document.body.innerHTML = '<details id=d><summary id=s>Head</summary><p>a</p><summary>second</summary><p>b</p></details><div id=after>x</div><details id=g><summary>G</summary><div id=h></div></details><details id=f open><summary>F</summary><span id=fa>A</span><span id=fb>B</span></details><details id=bl><summary id=bs>S</summary><span id=big>Big</span></details><details id=c><summary>C</summary><span id=ca>A</span><span id=cb>B</span></details><details id=k><summary>K</summary><div id=x>hi</div></details><details id=w><summary>W</summary><span id=wa>A</span><span id=wb>B</span></details><details id=e><summary>E</summary><span id=ea>A</span><span id=eb>B</span></details>';
+'installed'
+"#,
+        )?;
+        let read = |y: u32| {
+            format!(
+                r#"(() => {{ const $ = id => document.getElementById(id);
+const r = id => $(id).getBoundingClientRect(); const h = r('h');
+const hit = document.elementFromPoint(5, {y});
+return JSON.stringify([r('d').height, r('after').top, r('s').height, r('g').height,
+  h.top, h.height, h.width, hit ? hit.id || hit.tagName : null,
+  r('f').height, r('fa').top, r('fb').top, r('bl').height, r('bs').top - r('bl').top,
+  r('c').height, r('cb').top - r('ca').top, r('ca').width > 0,
+  Math.abs(r('cb').left - r('ca').right) < 0.5, r('x').width, r('wb').top - r('wa').top,
+  Math.abs(r('wb').left - r('wa').right) < 0.5, Math.abs(r('ea').left - r('e').right) < 0.5,
+  r('ea').top === r('eb').top]); }})()"#
+            )
+        };
+        let toggle = |open: bool| {
+            format!("for (const id of ['d', 'g', 'k', 'w']) document.getElementById(id).open = {open}; 'toggled'")
+        };
+        // Chromium 156 (Playwright chromium-1248): a closed details
+        // keeps only its first summary in the summary slot. Every other child,
+        // a second summary included, sits in the `::details-content` slot,
+        // which still occupies a grid row (summary 20 + gap 10) but adds no
+        // size, paint or hit target. Geometry reads still lay out its
+        // contents: #h keeps its 60px box under the zero-height slot. The
+        // slot has no baseline, so closed content cannot move a baseline-
+        // aligned summary (#bl). An open flex details keeps its inline
+        // spans on one 20px row (#f). A closed flex details (#c) lays its
+        // hidden spans out on one row with their own widths, as when open.
+        // The slot is a block box, whatever the flex details' direction,
+        // wrapping or justification: in a column details (#k) it stretches
+        // to the 300px width, as does its block #x, and its inline spans
+        // share one line from the slot's start edge (#w wraps, #e packs its
+        // summary and zero-width slot at its right edge). Opening #k and #w
+        // keeps the same widths and row.
+        let closed = r#"[20,20,20,30,70,60,800,"BODY",20,70,70,20,0,20,0,true,true,300,0,true,true,true]"#;
+        assert_eq!(page_vm.vm_mut().eval(&read(120))?, closed);
+        page_vm.vm_mut().eval(&toggle(true))?;
+        assert_eq!(
+            page_vm.vm_mut().eval(&read(150))?,
+            r#"[80,80,20,90,130,60,800,"h",20,190,190,20,0,20,0,true,true,300,0,true,true,true]"#
+        );
+        page_vm.vm_mut().eval(&toggle(false))?;
+        assert_eq!(page_vm.vm_mut().eval(&read(120))?, closed);
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("live closed details fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn webkit_line_clamp_ends_block_height_at_the_clamp_line() {
     run_page_vm_async_test(async move {
         let loader =

@@ -7,7 +7,7 @@
 
 use std::{cell::OnceCell, collections::HashMap};
 
-use moli_layout::LayoutUsedSize;
+use moli_layout::{LayoutPseudo, LayoutSize, LayoutUsedSize};
 
 use crate::{document_runtime::DomHandle, native_bridge::JsContextHost};
 
@@ -64,6 +64,22 @@ pub(super) fn used_size_from_layout_snapshot(
     handle: DomHandle,
 ) -> Option<LayoutUsedSize> {
     lookup_size(runtime, size_document(runtime, handle)?, handle)
+}
+
+/// The transform reference-box size of `handle`, or of its generated
+/// `pseudo`, from the latest published layout. The outer `None` means there
+/// is no layout to answer from; the inner `None` that layout generated no box.
+pub(super) fn transform_reference_box_from_layout_snapshot(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+    pseudo: Option<LayoutPseudo>,
+) -> Option<Option<LayoutSize>> {
+    runtime.with_latest_layout_tree_for_document(size_document(runtime, handle)?, |tree| {
+        match pseudo {
+            Some(pseudo) => tree.transform_reference_box_size_for_pseudo(handle, pseudo),
+            None => tree.transform_reference_box_size_for_source(handle),
+        }
+    })
 }
 
 fn size_document(runtime: &JsContextHost, handle: DomHandle) -> Option<DomHandle> {

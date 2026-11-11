@@ -999,6 +999,90 @@ fn computed_transform_rotate_calc_serializes_as_matrix() {
 }
 
 #[test]
+fn computed_transform_resolves_percentages_against_the_border_box() {
+    let mut vm = new_storage_test_vm("https://computed-transform-percentages.test/");
+    vm.eval(
+        r#"
+(() => {
+  const html = document.documentElement || document.appendChild(document.createElement('html'));
+  const head = document.head || html.appendChild(document.createElement('head'));
+  const body = document.body || html.appendChild(document.createElement('body'));
+  const style = document.createElement('style');
+  style.textContent = `
+    #header { position: relative; width: 200px; height: 40px; }
+    #header::before {
+      content: "x"; position: absolute; left: 50%;
+      width: 36px; height: 4px; transform: translateX(-50%);
+    }
+    #header::after {
+      content: "y"; display: block;
+      width: 50px; height: 10px; transform: translate(10%, -50%);
+    }
+    #header::backdrop { transform: translateX(-50%); }
+    #boxed {
+      width: 100px; height: 20px; padding: 5px 10px; border: 2px solid;
+      transform: scale(2) translate(-50%, 25%);
+    }
+  `;
+  head.appendChild(style);
+  body.innerHTML = '<div id="header"></div><div id="boxed"></div>';
+})()
+"#,
+    )
+    .expect("prepare transform percentage fixture");
+    publish_layout_for_test(&mut vm);
+    let result = vm
+        .eval(
+            r#"(() => {
+  const header = document.getElementById('header');
+  const before = getComputedStyle(header, '::before').transform;
+  return [
+    before,
+    new DOMMatrixReadOnly(before).m41,
+    getComputedStyle(header, '::after').transform,
+    getComputedStyle(header, '::backdrop').transform,
+    getComputedStyle(document.getElementById('boxed')).transform
+  ].join('|');
+})()"#,
+        )
+        .expect("computed transform percentages should evaluate");
+
+    // The pseudos' own boxes, not their generated text: 36px ::before border
+    // box gives -50% = -18px; the 50x10 ::after gives (5px, -5px). ::backdrop
+    // has no modelled box and keeps its computed value instead of resolving
+    // against #header's 200px box. #boxed border box is 124x34, so
+    // translate(-62px, 8.5px) after scale(2) moves by (-124px, 17px).
+    assert_eq!(
+        result,
+        "matrix(1, 0, 0, 1, -18, 0)|-18|matrix(1, 0, 0, 1, 5, -5)|translateX(-50%)|\
+         matrix(2, 0, 0, 2, -124, 17)"
+    );
+}
+
+#[test]
+fn computed_transform_with_percentages_is_none_without_a_box() {
+    let mut vm = new_storage_test_vm("https://computed-transform-no-box.test/");
+    vm.eval(
+        r#"
+(() => {
+  const html = document.documentElement || document.appendChild(document.createElement('html'));
+  const body = document.body || html.appendChild(document.createElement('body'));
+  body.innerHTML =
+    '<div id="hidden" style="display: none; width: 100px; transform: translateX(-50%)"></div>';
+})()
+"#,
+    )
+    .expect("prepare unrendered transform fixture");
+    publish_layout_for_test(&mut vm);
+    let result = vm
+        .eval("getComputedStyle(document.getElementById('hidden')).transform")
+        .expect("unrendered computed transform should evaluate");
+
+    // Blink resolves the transform of an element without a layout box to `none`.
+    assert_eq!(result, "none");
+}
+
+#[test]
 fn computed_style_serializes_animation_range_shorthand() {
     let mut vm = new_parsed_test_vm(
         "https://css-animation-range-computed-shorthand.test/",

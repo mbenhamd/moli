@@ -313,6 +313,18 @@ input[type="url" i] {
   padding-inline: 2px;
 }
 
+/*
+ * Blink's `input::-webkit-input-placeholder` defaults. They stay overridable:
+ * author `::placeholder` white-space wins over this UA rule, unlike the inner
+ * editor's forced `pre`. Stylo's ::placeholder property restriction drops
+ * `overflow`, so the HTML-to-layout form control adapter owns the placeholder's
+ * `overflow: hidden` clip.
+ */
+input::placeholder {
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
 input[type="search" i] {
   appearance: auto;
   box-sizing: border-box;
