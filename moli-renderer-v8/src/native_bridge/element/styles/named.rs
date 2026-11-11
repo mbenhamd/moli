@@ -14,6 +14,7 @@ use super::{
     style_object_pseudo_element,
 };
 use crate::{
+    context_bootstrap::svg_runtime::hit_test,
     css_style::css_style_declaration_property_value,
     util::{throw_type_error, v8_string},
 };
@@ -202,6 +203,11 @@ pub(crate) fn set_live_style_named_property_value<'s>(
         );
         return true;
     }
+    hit_test::note_inline_style_write(
+        unsafe { &*runtime_ptr },
+        handle,
+        hit_test::property_declares_svg_pointer_events(&property, &value),
+    );
     if set_inline_style_property_with_pdb_storage(
         scope,
         runtime_ptr,

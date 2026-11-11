@@ -210,20 +210,388 @@ pub fn is_point_in_fill_with_rule(
     {
         return false;
     }
-    geometry_path(element).is_some_and(|path| {
-        let path = close_subpaths_for_fill(&path);
-        let point = Point::new(point.x, point.y);
-        let winding = path.winding(point);
-        let inside = match fill_rule {
-            SvgFillRule::NonZero => winding != 0,
-            SvgFillRule::EvenOdd => winding % 2 != 0,
+    geometry_path(element)
+        .is_some_and(|path| path_fill_contains(&path, Point::new(point.x, point.y), fill_rule))
+}
+
+fn path_fill_contains(path: &BezPath, point: Point, fill_rule: SvgFillRule) -> bool {
+    let path = close_subpaths_for_fill(path);
+    let winding = path.winding(point);
+    let inside = match fill_rule {
+        SvgFillRule::NonZero => winding != 0,
+        SvgFillRule::EvenOdd => winding % 2 != 0,
+    };
+    inside
+        || path.segments().any(|segment| {
+            segment.nearest(point, FILL_BOUNDARY_EPSILON).distance_sq
+                <= FILL_BOUNDARY_EPSILON.powi(2)
+        })
+}
+
+/// The painted parts of a shape that a hit test considers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SvgShapeHitArea<'a> {
+    /// The fill rule when the fill is painted.
+    pub fill: Option<SvgFillRule>,
+    /// The stroke when it is painted.
+    pub stroke: Option<SvgStrokeHitArea<'a>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SvgStrokeLinecap {
+    Butt,
+    Round,
+    Square,
+}
+
+/// A painted stroke in the shape's user space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SvgStrokeHitArea<'a> {
+    pub width: f64,
+    pub linecap: SvgStrokeLinecap,
+    /// Resolved `stroke-dasharray` lengths; empty for a solid stroke.
+    pub dashes: &'a [f64],
+    pub dash_offset: f64,
+    /// A positive author `pathLength`. Dash lengths and the offset are scaled
+    /// by the computed path length over it.
+    pub path_length: Option<f64>,
+}
+
+/// A hit test whose stroke would expand past the work bound: more than
+/// 10,000 dash phases, more than 50,000 flattened points, a dash shorter
+/// than 1e-6 user units after `pathLength` scaling, or a path too large for
+/// its flattening tolerance. The caller cannot answer exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SvgHitTestUnbounded;
+
+/// Dash phases (dashes and gaps) one stroke may expand to.
+const MAX_DASH_PHASES: f64 = 10_000.0;
+/// Flattened stroke points one shape may expand to.
+const MAX_FLAT_POINTS: usize = 50_000;
+/// The shortest dash, in user units after `pathLength` scaling, that is
+/// expanded.
+const MIN_DASH_LENGTH: f64 = 1e-6;
+/// The largest path extent over flattening tolerance that is flattened.
+const MAX_EXTENT_OVER_TOLERANCE: f64 = 1e9;
+
+/// Whether `point` lies on the painted fill or stroke of `element`.
+///
+/// Basic shapes and point lists are rejected on their bounds before any path
+/// is built; a `<path>` is parsed once and rejected on its bounds. The path
+/// then serves both the fill and the stroke test.
+///
+/// The stroke outline is flattened with a user-space tolerance of a hundredth
+/// of the half width (at least 1e-4, at most 0.05), so the stroke edge is
+/// located to within that distance. Each dash and open subpath ends with its
+/// `stroke-linecap`. Joins are round, which under-hits miter corners and
+/// over-hits bevel corners by at most the half width. A dash array that
+/// cannot dash (non-finite, negative or summing to zero) leaves the stroke
+/// solid, as SVG requires.
+///
+/// Stroke expansion is bounded; past the bound the answer is
+/// [`SvgHitTestUnbounded`] instead of an approximation.
+pub fn is_point_in_shape_hit_area(
+    element: &SvgGeometryElement,
+    point: SvgGeometryPoint,
+    area: SvgShapeHitArea<'_>,
+) -> Result<bool, SvgHitTestUnbounded> {
+    if !point.x.is_finite() || !point.y.is_finite() {
+        return Ok(false);
+    }
+    let fill = area
+        .fill
+        .filter(|_| !matches!(element, SvgGeometryElement::Line { .. }));
+    let stroke = area.stroke.filter(|stroke| stroke.width > 0.0);
+    if fill.is_none() && stroke.is_none() {
+        return Ok(false);
+    }
+    let point = Point::new(point.x, point.y);
+    let half_width = stroke.map_or(0.0, |stroke| stroke.width / 2.0);
+    // Square caps reach furthest: half the width along both axes of the cap.
+    let reach = (half_width * std::f64::consts::SQRT_2).max(FILL_BOUNDARY_EPSILON);
+    let outside = |bounds: Rect| {
+        point.x < bounds.x0 - reach
+            || point.x > bounds.x1 + reach
+            || point.y < bounds.y0 - reach
+            || point.y > bounds.y1 + reach
+    };
+    let path = match element {
+        SvgGeometryElement::Polygon { points } | SvgGeometryElement::Polyline { points } => {
+            let Some(coordinates) = poly_coordinates(points) else {
+                return Ok(false);
+            };
+            if outside(coordinates_bounds(&coordinates)) {
+                return Ok(false);
+            }
+            poly_coordinates_path(
+                &coordinates,
+                matches!(element, SvgGeometryElement::Polygon { .. }),
+            )
+        }
+        SvgGeometryElement::Path { d } => {
+            let Some(path) = path_geometry(d) else {
+                return Ok(false);
+            };
+            if path.elements().is_empty() || outside(path.control_box()) {
+                return Ok(false);
+            }
+            path
+        }
+        _ => {
+            if analytic_bounds(element).is_none_or(outside) {
+                // Degenerate basic shapes render nothing, except a
+                // zero-length line, whose bounds are a point.
+                return Ok(false);
+            }
+            let Some(path) = geometry_path(element) else {
+                return Ok(false);
+            };
+            path
+        }
+    };
+    if fill.is_some_and(|rule| path_fill_contains(&path, point, rule)) {
+        return Ok(true);
+    }
+    let Some(stroke) = stroke else {
+        return Ok(false);
+    };
+    let tolerance = (half_width / 100.0).clamp(1e-4, 0.05);
+    let bounds = path.control_box();
+    let extent = bounds.width().max(bounds.height());
+    if extent.is_nan() || extent / tolerance > MAX_EXTENT_OVER_TOLERANCE {
+        return Err(SvgHitTestUnbounded);
+    }
+    let mut subpaths = FlatSubpaths::default();
+    if dash_array_dashes(stroke.dashes) {
+        let length = path
+            .segments()
+            .map(|segment| segment.arclen(ARC_LENGTH_ACCURACY))
+            .sum::<f64>();
+        let scale = match stroke.path_length.filter(|length| *length > 0.0) {
+            Some(path_length) => length / path_length,
+            None => 1.0,
         };
-        inside
-            || path.segments().any(|segment| {
-                segment.nearest(point, FILL_BOUNDARY_EPSILON).distance_sq
-                    <= FILL_BOUNDARY_EPSILON.powi(2)
-            })
-    })
+        let dashes = stroke
+            .dashes
+            .iter()
+            .map(|dash| dash * scale)
+            .collect::<Vec<_>>();
+        // A dash that scaling shrinks below the bound, or makes non-finite,
+        // would expand without limit.
+        if stroke
+            .dashes
+            .iter()
+            .zip(&dashes)
+            .any(|(dash, scaled)| *dash > 0.0 && (!scaled.is_finite() || *scaled < MIN_DASH_LENGTH))
+        {
+            return Err(SvgHitTestUnbounded);
+        }
+        if !dash_array_dashes(&dashes) {
+            return Ok(false);
+        }
+        // An odd-length array repeats twice per period.
+        let entries = if dashes.len() % 2 == 1 {
+            2 * dashes.len()
+        } else {
+            dashes.len()
+        };
+        let period = dashes.iter().sum::<f64>() * (entries / dashes.len()) as f64;
+        let phases = (length / period + 1.0) * entries as f64;
+        if phases.is_nan() || phases > MAX_DASH_PHASES {
+            return Err(SvgHitTestUnbounded);
+        }
+        let offset = if stroke.dash_offset.is_finite() {
+            stroke.dash_offset * scale
+        } else {
+            0.0
+        };
+        kurbo::flatten(
+            kurbo::dash(path.iter(), offset, &dashes),
+            tolerance,
+            |element| subpaths.push(element),
+        );
+    } else {
+        kurbo::flatten(path.iter(), tolerance, |element| subpaths.push(element));
+    }
+    subpaths.finish();
+    if subpaths.overflowed {
+        return Err(SvgHitTestUnbounded);
+    }
+    Ok(subpaths.subpaths.iter().any(|(points, closed)| {
+        flat_subpath_stroke_contains(points, *closed, point, half_width, stroke.linecap)
+    }))
+}
+
+#[derive(Default)]
+struct FlatSubpaths {
+    subpaths: Vec<(Vec<Point>, bool)>,
+    current: Vec<Point>,
+    /// A lone move-to paints nothing; a zero-length segment paints caps.
+    drawn: bool,
+    points: usize,
+    /// More than [`MAX_FLAT_POINTS`] points were pushed; the rest are dropped.
+    overflowed: bool,
+}
+
+impl FlatSubpaths {
+    fn push(&mut self, element: PathEl) {
+        if self.overflowed {
+            return;
+        }
+        self.points += 1;
+        if self.points > MAX_FLAT_POINTS {
+            self.overflowed = true;
+            self.subpaths.clear();
+            self.current.clear();
+            return;
+        }
+        match element {
+            PathEl::MoveTo(point) => {
+                self.finish();
+                self.current.push(point);
+            }
+            PathEl::LineTo(point) => {
+                self.drawn = true;
+                if self.current.last() != Some(&point) {
+                    self.current.push(point);
+                }
+            }
+            PathEl::ClosePath => {
+                let mut points = std::mem::take(&mut self.current);
+                if points.len() > 1 && points.first() == points.last() {
+                    points.pop();
+                }
+                if let Some(start) = points.first().copied() {
+                    self.subpaths.push((points, true));
+                    // A following segment without a move starts here.
+                    self.current.push(start);
+                }
+                self.drawn = false;
+            }
+            PathEl::QuadTo(..) | PathEl::CurveTo(..) => {}
+        }
+    }
+
+    fn finish(&mut self) {
+        let points = std::mem::take(&mut self.current);
+        if self.drawn && !points.is_empty() {
+            self.subpaths.push((points, false));
+        }
+        self.drawn = false;
+    }
+}
+
+/// The stroke of one flattened subpath (consecutive points distinct).
+fn flat_subpath_stroke_contains(
+    points: &[Point],
+    closed: bool,
+    point: Point,
+    half_width: f64,
+    linecap: SvgStrokeLinecap,
+) -> bool {
+    let limit = half_width * half_width;
+    let [first, .., last] = points else {
+        // A zero-length subpath paints only its caps, aligned with the x axis.
+        let Some(only) = points.first() else {
+            return false;
+        };
+        return match linecap {
+            SvgStrokeLinecap::Butt => false,
+            SvgStrokeLinecap::Round => (point - *only).hypot2() <= limit,
+            SvgStrokeLinecap::Square => {
+                (point.x - only.x).abs() <= half_width && (point.y - only.y).abs() <= half_width
+            }
+        };
+    };
+    let within_segment = |start: Point, end: Point| {
+        let direction = end - start;
+        let along = (point - start).dot(direction) / direction.hypot2();
+        (0.0..=1.0).contains(&along) && (point - (start + direction * along)).hypot2() <= limit
+    };
+    if points
+        .windows(2)
+        .any(|pair| within_segment(pair[0], pair[1]))
+        || (closed && points.len() > 2 && within_segment(*last, *first))
+    {
+        return true;
+    }
+    let joins = if closed {
+        points
+    } else {
+        &points[1..points.len() - 1]
+    };
+    if joins
+        .iter()
+        .any(|vertex| (point - *vertex).hypot2() <= limit)
+    {
+        return true;
+    }
+    if closed {
+        return false;
+    }
+    let cap_contains = |end: Point, outward: kurbo::Vec2| match linecap {
+        SvgStrokeLinecap::Butt => false,
+        SvgStrokeLinecap::Round => (point - end).hypot2() <= limit,
+        SvgStrokeLinecap::Square => {
+            let outward = outward / outward.hypot();
+            let offset = point - end;
+            let along = offset.dot(outward);
+            (0.0..=half_width).contains(&along) && offset.cross(outward).abs() <= half_width
+        }
+    };
+    cap_contains(*first, *first - points[1])
+        || cap_contains(*last, *last - points[points.len() - 2])
+}
+
+fn dash_array_dashes(dashes: &[f64]) -> bool {
+    let total = dashes.iter().sum::<f64>();
+    !dashes.is_empty()
+        && dashes.iter().all(|dash| dash.is_finite() && *dash >= 0.0)
+        && total.is_finite()
+        && total > 0.0
+}
+
+/// Bounds of the basic shapes without building their path.
+fn analytic_bounds(element: &SvgGeometryElement) -> Option<Rect> {
+    match element {
+        SvgGeometryElement::Circle { cx, cy, r } if *r > 0.0 => {
+            Some(Rect::new(cx - r, cy - r, cx + r, cy + r))
+        }
+        SvgGeometryElement::Ellipse { cx, cy, rx, ry } => {
+            let (rx, ry) = normalized_ellipse_radii(*rx, *ry);
+            (rx > 0.0 && ry > 0.0).then(|| Rect::new(cx - rx, cy - ry, cx + rx, cy + ry))
+        }
+        SvgGeometryElement::Line { x1, y1, x2, y2 } => {
+            Some(Rect::from_points((*x1, *y1), (*x2, *y2)))
+        }
+        SvgGeometryElement::Rect {
+            x,
+            y,
+            width,
+            height,
+            ..
+        } if *width > 0.0 && *height > 0.0 => Some(Rect::new(*x, *y, x + width, y + height)),
+        _ => None,
+    }
+}
+
+fn coordinates_bounds(coordinates: &[f64]) -> Rect {
+    coordinates.as_chunks::<2>().0.iter().fold(
+        Rect::new(
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ),
+        |bounds, [x, y]| {
+            Rect::new(
+                bounds.x0.min(*x),
+                bounds.y0.min(*y),
+                bounds.x1.max(*x),
+                bounds.y1.max(*y),
+            )
+        },
+    )
 }
 
 pub fn point_at_length(segments: &[SvgGeometrySegment], distance: f64) -> SvgGeometryPoint {
@@ -378,21 +746,28 @@ fn append_quarter_ellipse(
 }
 
 fn poly_points_geometry_path(raw: &str, close: bool) -> Option<BezPath> {
-    let coordinates = svg_number_list(raw)?;
-    if coordinates.len() < 2 || !coordinates.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut coordinates = coordinates.as_chunks::<2>().0.iter();
-    let first = coordinates.next()?;
+    Some(poly_coordinates_path(&poly_coordinates(raw)?, close))
+}
+
+/// A point list's coordinates, when it has at least one complete pair.
+fn poly_coordinates(raw: &str) -> Option<Vec<f64>> {
+    svg_number_list(raw)
+        .filter(|coordinates| coordinates.len() >= 2 && coordinates.len().is_multiple_of(2))
+}
+
+fn poly_coordinates_path(coordinates: &[f64], close: bool) -> BezPath {
     let mut path = BezPath::new();
-    path.move_to((first[0], first[1]));
-    for pair in coordinates {
-        path.line_to((pair[0], pair[1]));
+    let mut pairs = coordinates.as_chunks::<2>().0.iter();
+    if let Some([x, y]) = pairs.next() {
+        path.move_to((*x, *y));
+    }
+    for [x, y] in pairs {
+        path.line_to((*x, *y));
     }
     if close {
         path.close_path();
     }
-    Some(path)
+    path
 }
 
 fn close_subpaths_for_fill(path: &BezPath) -> BezPath {
