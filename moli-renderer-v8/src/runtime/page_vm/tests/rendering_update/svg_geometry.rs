@@ -654,7 +654,10 @@ async fn svg_stylesheet_pointer_events_keyword_keeps_the_outer_svg() {
   <rect id=r width=100 height=100 fill=blue class=edge />
 </svg>"#,
         )?;
-        assert_eq!(page_vm.vm_mut().eval("__hits([[50, 50]])")?, "s|s,body,html");
+        assert_eq!(
+            page_vm.vm_mut().eval("__hits([[50, 50]])")?,
+            "s|s,body,html"
+        );
         Ok::<_, anyhow::Error>(())
     })
     .await
