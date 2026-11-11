@@ -344,6 +344,7 @@ fn key_events_reach_focused_frame_document_body_and_frame_document_has_focus() {
         r#"<html><body>
             <input id="outside">
             <iframe id="frame"></iframe>
+            <div id="host"></div>
         </body></html>"#,
     );
     vm.eval(
@@ -368,6 +369,21 @@ fn key_events_reach_focused_frame_document_body_and_frame_document_has_focus() {
     document.hasFocus(),
     childHasFocus(),
   ].join(',');
+  // A frame inside a shadow tree: the parent Document's activeElement is
+  // the shadow host, not the frame.
+  const shadowFrame = document.createElement('iframe');
+  document.getElementById('host').attachShadow({ mode: 'open' }).append(shadowFrame);
+  const shadowDocument = shadowFrame.contentDocument;
+  shadowDocument.open();
+  shadowDocument.write('<body><p>shadow</p></body>');
+  shadowDocument.close();
+  shadowDocument.addEventListener('keydown', e => __keys.push(`shadow:${e.type}:${name(e.target)}`), true);
+  shadowDocument.addEventListener('keyup', e => __keys.push(`shadow:${e.type}:${name(e.target)}`), true);
+  const shadowHasFocus = shadowFrame.contentWindow.Function('return document.hasFocus()');
+  window.__focusShadowFrame = () => {
+    shadowFrame.focus();
+    return [document.activeElement.id, shadowHasFocus(), childHasFocus()].join(',');
+  };
   frame.focus();
 })()
 "#,
@@ -389,10 +405,23 @@ fn key_events_reach_focused_frame_document_body_and_frame_document_has_focus() {
         .expect("outside input should focus");
     let outside_state = vm.eval("__focusState()").expect("outside focus state");
     let outside_keys = press(&mut vm);
+    let shadow_state = vm
+        .eval("__focusShadowFrame()")
+        .expect("shadow frame focus state");
+    let shadow_keys = press(&mut vm);
 
     assert_eq!(
-        [frame_state, frame_keys, outside_state, outside_keys].join(" / "),
+        [
+            frame_state,
+            frame_keys,
+            outside_state,
+            outside_keys,
+            shadow_state,
+            shadow_keys
+        ]
+        .join(" / "),
         "frame,body,true,true / child:keydown:body|child:keyup:body / \
-         outside,body,true,false / top:keydown:outside|top:keyup:outside"
+         outside,body,true,false / top:keydown:outside|top:keyup:outside / \
+         host,true,false / shadow:keydown:body|shadow:keyup:body"
     );
 }
