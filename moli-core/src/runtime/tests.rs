@@ -37,7 +37,7 @@ use support::FixtureServer;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::{Mutex, oneshot},
+    sync::{Mutex, Notify, oneshot},
     task::JoinHandle,
 };
 use url::Url;
@@ -69,6 +69,59 @@ fn browser_clone_keeps_shared_renderer_and_fetch_owners_live_after_source_drop()
         clone.js_runtime.renderer_owner_id_for_diagnostics(),
         expected_renderer_owner_id
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn raw_document_body_materialization_uses_the_fetch_deadline() -> Result<()> {
+    let browser = Browser::new(AppConfig::default())?;
+    let url = Url::parse("https://deadline.test/stalled.bin")?;
+    let (body_tx, body_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let cancel_handle = FetchCancelHandle::new();
+    // Headers are already available. This isolates the body budget from
+    // transport startup while exercising the real materializer and deadline.
+    let response = StreamingRawResponse::new_with_head(
+        ResponseHead {
+            status_text: None,
+            final_url: url.clone(),
+            status: 200,
+            headers: vec![(
+                "content-type".to_owned(),
+                b"application/octet-stream".to_vec(),
+            )],
+            request_cookie_report: None,
+            cookie_set_reports: Vec::new(),
+            redirected: false,
+            redirect_chain: Vec::new(),
+            from_cache: false,
+            cache_state: Default::default(),
+            negotiated_http_version: None,
+        },
+        body_rx,
+        cancel_handle.clone(),
+        completion_rx,
+    );
+    let timeout = Duration::from_millis(100);
+    let error = browser
+        .fetch_document_wait_timeout(
+            url.as_str(),
+            RenderedDomWaitUntil::Load,
+            timeout,
+            super::PageVmInitStage::Load,
+            tokio::time::Instant::now() + timeout,
+            || super::FetchTimeoutPhase::StreamingMainBody,
+            browser.materialize_streaming_raw_response_raw_document(response),
+        )
+        .await
+        .expect_err("the stalled raw body must time out");
+    let timeout = error
+        .downcast_ref::<super::FetchReadinessTimeout>()
+        .expect("the raw body timeout must retain its typed phase");
+    assert_eq!(timeout.phase(), super::FetchTimeoutPhase::StreamingMainBody);
+    assert!(cancel_handle.is_cancelled());
+    assert!(body_tx.is_closed());
+    assert!(completion_tx.is_closed());
     Ok(())
 }
 
@@ -3269,36 +3322,64 @@ async fn live_page_subresource_response_wait_allows_unrelated_evaluate_while_pen
     Ok(())
 }
 
+async fn spawn_gated_async_response_server() -> Result<(String, Arc<Notify>, JoinHandle<()>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let release = Arc::new(Notify::new());
+    let server_release = release.clone();
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let release = server_release.clone();
+            tokio::spawn(async move {
+                let Ok(request) = read_http_request_head(&mut stream).await else {
+                    return;
+                };
+                let (content_type, body) =
+                    if request_path(&request).as_deref() == Some("/wait-until-slow-data") {
+                        release.notified().await;
+                        ("text/plain", "settled-slow")
+                    } else {
+                        ("text/html", "<!doctype html><html><body>ok</body></html>")
+                    };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    Ok((url, release, server))
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn window_fetch_returns_before_slow_network_response() -> Result<()> {
-    let server = FixtureServer::spawn().await?;
+    let (url, release_response, server) = spawn_gated_async_response_server().await?;
     let browser = Browser::new(AppConfig::default())?;
 
     let mut page = browser
         .fetch_with_wait_until(
-            &server.url("/static"),
+            &format!("{url}/static"),
             RenderedDomWaitUntil::Load,
             Duration::from_secs(5),
         )
         .await?;
 
-    let started = std::time::Instant::now();
-    let value = page
-        .evaluate_runtime_expression_async(
+    let value = tokio::time::timeout(
+        Duration::from_secs(2),
+        page.evaluate_runtime_expression_async(
             "fetch('/wait-until-slow-data').then(r => r.text()).then(text => { document.body.setAttribute('data-fetch-state', text); }); document.body.setAttribute('data-fetch-returned', '1'); 'returned';",
-        )
-        .await?;
+        ),
+    )
+    .await
+    .inspect_err(|_| release_response.notify_one())
+    .context("fetch() must return while its network response is gated")??;
     assert_eq!(value["value"], serde_json::json!("returned"));
-    assert!(
-        started.elapsed() < Duration::from_millis(200),
-        "fetch() should return a promise without waiting for the network response"
-    );
-    assert!(
-        page.serialize_html_async()
-            .await?
-            .contains("data-fetch-returned=\"1\"")
-    );
+    let before_response = page.serialize_html_async().await?;
+    assert!(before_response.contains("data-fetch-returned=\"1\""));
+    assert!(!before_response.contains("data-fetch-state="));
 
+    release_response.notify_one();
     browser
         .wait_for_page_network_idle(&mut page, Duration::from_secs(2))
         .await?;
@@ -3308,40 +3389,38 @@ async fn window_fetch_returns_before_slow_network_response() -> Result<()> {
             .contains("data-fetch-state=\"settled-slow\"")
     );
 
-    server.shutdown().await;
+    server.abort();
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn async_xhr_send_returns_before_slow_network_response() -> Result<()> {
-    let server = FixtureServer::spawn().await?;
+    let (url, release_response, server) = spawn_gated_async_response_server().await?;
     let browser = Browser::new(AppConfig::default())?;
 
     let mut page = browser
         .fetch_with_wait_until(
-            &server.url("/static"),
+            &format!("{url}/static"),
             RenderedDomWaitUntil::Load,
             Duration::from_secs(5),
         )
         .await?;
 
-    let started = std::time::Instant::now();
-    let value = page
-        .evaluate_runtime_expression_async(
+    let value = tokio::time::timeout(
+        Duration::from_secs(2),
+        page.evaluate_runtime_expression_async(
             "const xhr = new XMLHttpRequest(); xhr.open('GET', '/wait-until-slow-data'); xhr.onload = () => { document.body.setAttribute('data-xhr-state', xhr.responseText); }; xhr.send(); document.body.setAttribute('data-xhr-returned', '1'); 'returned';",
-        )
-        .await?;
+        ),
+    )
+    .await
+    .inspect_err(|_| release_response.notify_one())
+    .context("async XMLHttpRequest.send() must return while its response is gated")??;
     assert_eq!(value["value"], serde_json::json!("returned"));
-    assert!(
-        started.elapsed() < Duration::from_millis(200),
-        "async XMLHttpRequest.send() should not wait for the network response"
-    );
-    assert!(
-        page.serialize_html_async()
-            .await?
-            .contains("data-xhr-returned=\"1\"")
-    );
+    let before_response = page.serialize_html_async().await?;
+    assert!(before_response.contains("data-xhr-returned=\"1\""));
+    assert!(!before_response.contains("data-xhr-state="));
 
+    release_response.notify_one();
     browser
         .wait_for_page_network_idle(&mut page, Duration::from_secs(2))
         .await?;
@@ -3351,7 +3430,7 @@ async fn async_xhr_send_returns_before_slow_network_response() -> Result<()> {
             .contains("data-xhr-state=\"settled-slow\"")
     );
 
-    server.shutdown().await;
+    server.abort();
     Ok(())
 }
 
@@ -5518,7 +5597,7 @@ fn runtime_protocol_response_by_id(
 ) -> Option<&serde_json::Value> {
     messages.iter().find_map(|message| match message {
         RendererRuntimeInspectorMessage::Protocol(value)
-            if value.get("id").and_then(serde_json::Value::as_i64) == Some(response_id) =>
+            if value.payload().id_i64() == Some(response_id) =>
         {
             Some(value.value())
         }

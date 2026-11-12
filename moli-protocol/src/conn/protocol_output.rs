@@ -48,17 +48,14 @@ impl CdpConnection {
         predecessor: moli_core::RendererOutputFence,
         target_id: Option<String>,
     ) {
-        let sequence = self
-            .scheduler_state
-            .allocate_protocol_work_publish_sequence();
-        let work = crate::domains::activity::ProtocolSchedulerWork::renderer_fenced_output(
-            sequence,
-            events,
-            vec![predecessor],
-            target_id,
-        );
-        self.scheduler_state
-            .push_scheduler_event(super::CdpSchedulerEvent::ProtocolWorkPublished { work });
+        self.publish_protocol_work(move |sequence| {
+            crate::domains::activity::ProtocolSchedulerWork::renderer_fenced_output(
+                sequence,
+                events,
+                vec![predecessor],
+                target_id,
+            )
+        });
     }
 
     pub(crate) fn publish_renderer_fenced_protocol_output_after(
@@ -67,17 +64,49 @@ impl CdpConnection {
         predecessors: Vec<moli_core::RendererOutputFence>,
         target_id: Option<String>,
     ) {
-        let sequence = self
-            .scheduler_state
-            .allocate_protocol_work_publish_sequence();
-        let work = crate::domains::activity::ProtocolSchedulerWork::renderer_fenced_output(
-            sequence,
-            events,
-            predecessors,
-            target_id,
-        );
-        self.scheduler_state
-            .push_scheduler_event(super::CdpSchedulerEvent::ProtocolWorkPublished { work });
+        self.publish_protocol_work(move |sequence| {
+            crate::domains::activity::ProtocolSchedulerWork::renderer_fenced_output(
+                sequence,
+                events,
+                predecessors,
+                target_id,
+            )
+        });
+    }
+
+    pub(crate) fn publish_output_after_renderer_delivery(
+        &mut self,
+        events: Vec<super::BackgroundProtocolEvent>,
+        predecessor: Option<moli_core::RendererOutputCursor>,
+        target_id: Option<String>,
+    ) -> Vec<super::BackgroundProtocolEvent> {
+        let Some(predecessor) = predecessor else {
+            return events;
+        };
+        if !events.is_empty() {
+            self.publish_protocol_work(move |sequence| {
+                let mut work =
+                    crate::domains::activity::ProtocolSchedulerWork::renderer_fenced_output(
+                        sequence,
+                        events,
+                        Vec::new(),
+                        target_id,
+                    );
+                work.bind_renderer_delivery_predecessor(predecessor);
+                work
+            });
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn target_creation_output_predecessor(
+        &self,
+        target_id: &str,
+    ) -> Option<moli_core::RendererOutputCursor> {
+        let route = self.target_session_route_for_target_id(target_id)?;
+        self.browser_context_by_id(route.browser_context_id()?)?
+            .page_target(target_id)?
+            .creation_output_predecessor
     }
 
     pub(crate) fn apply_renderer_output_stream_control(
@@ -318,9 +347,8 @@ impl CdpConnection {
                 access.clone(),
                 target_id,
             );
-            self.scheduler_state.push_scheduler_event(
-                super::CdpSchedulerEvent::RendererOutputProjectionPrepared { pending },
-            );
+            self.scheduler_state
+                .push_scheduler_event(super::CdpSchedulerEvent::ProtocolTaskPrepared { pending });
         }
     }
 }

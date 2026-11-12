@@ -1,3 +1,4 @@
+use moli_inspector_json::InspectorJson;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -1823,7 +1824,6 @@ impl ScriptVm {
         let runtime_binding_replay_context_ptrs = self.runtime_binding_replay_context_ptrs();
         let renderer_document_isolate = self.renderer_document_isolate.clone();
         let page_inspector = &mut self.page_inspector;
-        let root_frame_id = self.root_frame_id.clone();
         let deferred_call_id = deferred_response
             .as_ref()
             .map(|callback| callback.call_id());
@@ -1839,7 +1839,7 @@ impl ScriptVm {
                 let messages = page_inspector.with_session_and_outbound(
                     inspector,
                     target,
-                    |session, outbound, runtime_bindings_to_replay| -> Result<Vec<Value>> {
+                    |session, outbound, runtime_bindings_to_replay| -> Result<Vec<InspectorJson>> {
                         let replay_global_snapshots =
                             capture_runtime_binding_replay_global_snapshots(
                                 scope,
@@ -1921,9 +1921,7 @@ impl ScriptVm {
                 ) {
                     restore_inspector_window_dispatch_scope(scope, owner, previous);
                 }
-                let messages = messages?;
-                page_inspector.record_execution_context_state(&messages, root_frame_id.as_deref());
-                Ok(messages)
+                messages
             });
         let messages = match messages {
             Ok(messages) => messages,
@@ -1949,6 +1947,8 @@ impl ScriptVm {
                 return Err(error);
             }
         };
+        let messages = self.runtime_inspector_messages_from_v8_messages(messages);
+        self.record_runtime_inspector_context_state(&messages);
         if let Some(started) = timing_started {
             tracing::info!(
                 target: "moli_cdp_nav_timing",
@@ -1972,8 +1972,6 @@ impl ScriptVm {
             crate::style_engine::StyleInvalidationTurnExitBoundary::RuntimeEvaluate,
             (),
         );
-        self.page_isolated_world_contexts
-            .record_inspector_context_state(&messages, self.root_frame_id.as_deref());
         if let Some(started) = timing_started {
             tracing::info!(
                 target: "moli_cdp_nav_timing",
@@ -1982,7 +1980,7 @@ impl ScriptVm {
                 elapsed_ms = started.elapsed().as_millis(),
             );
         }
-        Ok(self.runtime_inspector_messages_from_v8_messages(messages))
+        Ok(messages)
     }
 }
 

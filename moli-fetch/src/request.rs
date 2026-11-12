@@ -3,11 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use moli_cookie_jar::{
     BrowserCookieFacadeContext, NetworkCookieRequestContext, NetworkStorageAccessStatus,
-};
-#[cfg(any(test, feature = "test-support"))]
-use moli_cookie_jar::{
-    NetworkSiteContextMetadata, NetworkSiteContextTrackMetadata, redirect_types_for_request,
-    site_context_downgrade_type,
+    advance_cookie_request_context,
 };
 use moli_url::{WebOrigin, same_origin};
 use url::Url;
@@ -22,6 +18,14 @@ use crate::{
 enum RequestContext {
     Http,
     Browser(WebOrigin),
+}
+
+/// Referrer selection is independent from the cookie initiator and frame scope.
+#[derive(Debug, Clone)]
+enum ReferrerSource {
+    Client,
+    None,
+    Url(Url),
 }
 
 /// How explicit Cookie headers coexist with cookies selected from the store.
@@ -53,9 +57,10 @@ pub struct Request {
     pub priority_hints: RequestPriorityHints,
     pub browser_request_metadata: Option<BrowserRequestMetadata>,
     browser_navigation_kind: BrowserNavigationRequestKind,
-    infer_referrer_from_initiator: bool,
     context: RequestContext,
-    referrer_url: Option<Url>,
+    referrer_source: ReferrerSource,
+    /// Retained independently so Fetch can reset an explicit selection to client.
+    client_referrer_url: Option<Url>,
     pub use_page_network_policy: bool,
     pub request_mode: RequestMode,
     use_cors_preflight: bool,
@@ -597,9 +602,9 @@ impl Request {
             priority_hints: RequestPriorityHints::default(),
             browser_request_metadata: None,
             browser_navigation_kind: BrowserNavigationRequestKind::Navigate,
-            infer_referrer_from_initiator: true,
             context: RequestContext::Http,
-            referrer_url: None,
+            referrer_source: ReferrerSource::Client,
+            client_referrer_url: None,
             use_page_network_policy: false,
             request_mode: RequestMode::Navigate,
             use_cors_preflight: false,
@@ -633,9 +638,9 @@ impl Request {
             priority_hints: RequestPriorityHints::default(),
             browser_request_metadata: None,
             browser_navigation_kind: BrowserNavigationRequestKind::Navigate,
-            infer_referrer_from_initiator: true,
             context: RequestContext::Http,
-            referrer_url: None,
+            referrer_source: ReferrerSource::Client,
+            client_referrer_url: None,
             use_page_network_policy: false,
             request_mode: RequestMode::Navigate,
             use_cors_preflight: false,
@@ -702,9 +707,9 @@ impl Request {
             priority_hints: RequestPriorityHints::default(),
             browser_request_metadata: None,
             browser_navigation_kind: BrowserNavigationRequestKind::Navigate,
-            infer_referrer_from_initiator: true,
             context: RequestContext::Http,
-            referrer_url: None,
+            referrer_source: ReferrerSource::Client,
+            client_referrer_url: None,
             use_page_network_policy: false,
             request_mode: RequestMode::Cors,
             use_cors_preflight: false,
@@ -949,26 +954,26 @@ impl Request {
     }
 
     pub fn without_inferred_referrer(mut self) -> Self {
-        self.infer_referrer_from_initiator = false;
+        self.referrer_source = ReferrerSource::None;
         self
     }
 
     /// Sets a validated Fetch referrer without changing the request's origin
     /// or cookie initiator. Policy is applied when selecting the outgoing header.
     pub fn with_fetch_referrer(mut self, referrer: &str) -> Result<Self> {
-        self.referrer_url = match referrer {
-            "" | "about:client" => None,
-            _ => Some(Url::parse(referrer).context("invalid Fetch referrer URL")?),
+        self.referrer_source = match referrer {
+            "" => ReferrerSource::None,
+            "about:client" => ReferrerSource::Client,
+            _ => ReferrerSource::Url(Url::parse(referrer).context("invalid Fetch referrer URL")?),
         };
-        self.infer_referrer_from_initiator = !referrer.is_empty();
         Ok(self)
     }
 
     /// Copies referrer state and policy for a derived request, such as a CORS
     /// preflight. Other metadata, including integrity, belongs to that request.
     pub fn with_referrer_from(mut self, source: &Self) -> Self {
-        self.referrer_url = source.referrer_url.clone();
-        self.infer_referrer_from_initiator = source.infer_referrer_from_initiator;
+        self.referrer_source = source.referrer_source.clone();
+        self.client_referrer_url = source.client_referrer_url.clone();
         let source_metadata = source.subresource_request_metadata();
         let metadata = self.subresource_request_metadata.get_or_insert_default();
         metadata.referrer_policy =
@@ -976,10 +981,6 @@ impl Request {
         metadata.document_referrer_policy =
             source_metadata.and_then(|metadata| metadata.document_referrer_policy.clone());
         self
-    }
-
-    pub fn infers_referrer_from_initiator(&self) -> bool {
-        self.infer_referrer_from_initiator
     }
 
     /// The nonempty policy used for both Fetch event metadata and network headers.
@@ -991,16 +992,13 @@ impl Request {
         )
     }
 
-    /// Computes the inferred Referer header without changing the initiator
-    /// used for cookie-site and request-origin decisions.
+    /// Computes Referer from the selected source without consulting cookie state.
     pub fn referrer_header_value(&self, request_url: &Url) -> Option<String> {
-        if !self.infers_referrer_from_initiator() {
-            return None;
-        }
-        let referrer_url = self
-            .referrer_url
-            .as_ref()
-            .or(self.cookie_context.initiator_url.as_ref())?;
+        let referrer_url = match &self.referrer_source {
+            ReferrerSource::Client => self.client_referrer_url.as_ref()?,
+            ReferrerSource::None => return None,
+            ReferrerSource::Url(url) => url,
+        };
         crate::referrer_header_value(
             referrer_url,
             request_url,
@@ -1017,12 +1015,10 @@ impl Request {
         response_url: &Url,
         response_headers: &[(String, Vec<u8>)],
     ) {
-        self.referrer_url = self
+        self.referrer_source = self
             .referrer_header_value(response_url)
-            .and_then(|value| Url::parse(&value).ok());
-        if self.referrer_url.is_none() {
-            self.infer_referrer_from_initiator = false;
-        }
+            .and_then(|value| Url::parse(&value).ok())
+            .map_or(ReferrerSource::None, ReferrerSource::Url);
         if let Some(policy) = crate::response_referrer_policy_from_headers(response_headers) {
             self.subresource_request_metadata
                 .get_or_insert_default()
@@ -1145,6 +1141,7 @@ impl Request {
             self.request_headers
                 .retain(|(name, _)| !is_request_body_header_name(name));
         }
+        self.cookie_context.set_request_method(&self.method);
     }
 
     pub fn with_redirect_headers(mut self, headers: Option<crate::RequestHeaders>) -> Self {
@@ -1203,7 +1200,16 @@ impl Request {
     pub fn follow_redirect(&mut self, redirect: RedirectInfo) -> Result<()> {
         self.validate_request_mode_for_url(&redirect.to_url)?;
         self.check_redirect_policy(&redirect.to_url)?;
+        // Cookie origin adaptation must not become a new referrer source,
+        // including when this hop selected no referrer at all.
+        self.update_referrer_for_redirect(&redirect.from_url, &redirect.headers);
         self.apply_redirect_status(redirect.status);
+        self.cookie_context = advance_cookie_request_context(
+            self.network_cookie_context(),
+            self.initial_url(),
+            &redirect.to_url,
+            &self.method,
+        );
         self.url = redirect.to_url.clone();
         self.record_redirect(redirect);
         Ok(())
@@ -1349,6 +1355,7 @@ impl Request {
     /// initiator API without replacing the request's referrer context.
     pub fn network_cookie_context(&self) -> NetworkCookieRequestContext {
         let mut context = self.cookie_context.clone();
+        context.set_request_method(&self.method);
         if let Some(WebOrigin::Tuple(origin)) = self.request_origin() {
             let origin_url =
                 Url::parse(origin.ascii_serialization()).expect("a tuple origin is a valid URL");
@@ -1357,11 +1364,7 @@ impl Request {
                 .as_ref()
                 .is_none_or(|url| !same_origin(url, &origin_url))
             {
-                // Keep the embedding page's site-for-cookies/partition.
-                let browser_context = context.browser_context.clone();
-                context = context.with_initiator_url(&self.url, &origin_url);
-                context.browser_context = browser_context;
-                context = context.recompute_site_context_for_request(&self.url);
+                context = context.with_cookie_initiator_origin(&self.url, &origin_url);
             }
         }
         context
@@ -1404,6 +1407,7 @@ impl Request {
         self
     }
 
+    /// Replaces cookie inputs without changing the independent referrer source.
     pub fn with_cookie_context(mut self, cookie_context: NetworkCookieRequestContext) -> Self {
         self.cookie_context = cookie_context;
         self
@@ -1413,14 +1417,10 @@ impl Request {
         mut self,
         browser_context: BrowserCookieFacadeContext,
     ) -> Self {
-        let preserve_explicit_cross_site = self.cookie_context.site_context.is_cross_site();
         self.cookie_context.browser_context = browser_context;
         self.cookie_context = self
             .cookie_context
             .recompute_site_context_for_request(&self.url);
-        if preserve_explicit_cross_site {
-            self.cookie_context = self.cookie_context.with_cross_site_context();
-        }
         self
     }
 
@@ -1430,6 +1430,10 @@ impl Request {
     }
 
     pub fn with_top_level_navigation_cookie_context(mut self) -> Self {
+        // Initialize navigation defaults without a client URL. A subsequent
+        // with_initiator_url supplies the navigation's client; explicit Fetch
+        // referrer selections remain independent of these defaults.
+        self.client_referrer_url = None;
         let browser_context = self.cookie_context.browser_context;
         self.cookie_context = NetworkCookieRequestContext::top_level_navigation(&self.method);
         self.cookie_context.browser_context = browser_context;
@@ -1438,13 +1442,8 @@ impl Request {
     }
 
     pub fn with_subframe_navigation_cookie_context(mut self) -> Self {
-        let previous = self.cookie_context;
-        let mut cookie_context = NetworkCookieRequestContext::subresource(&self.method);
-        cookie_context.site_context = previous.site_context;
-        cookie_context.site_context_metadata = previous.site_context_metadata;
-        cookie_context.initiator_url = previous.initiator_url;
-        cookie_context.browser_context = previous.browser_context;
-        self.cookie_context = cookie_context;
+        self.cookie_context.set_subresource_request_type();
+        self.cookie_context.set_request_method(&self.method);
         self.request_mode = RequestMode::Navigate;
         self.priority_hints.subframe_context = true;
         self
@@ -1459,13 +1458,12 @@ impl Request {
     }
 
     pub(crate) fn is_top_level_navigation_request(&self) -> bool {
-        std::mem::discriminant(&self.cookie_context.request_type)
-            == std::mem::discriminant(
-                &NetworkCookieRequestContext::top_level_navigation(&self.method).request_type,
-            )
+        self.cookie_context.is_top_level_navigation()
     }
 
+    /// Initializes the client URL and the default cookie initiator and scope.
     pub fn with_initiator_url(mut self, initiator_url: &Url) -> Self {
+        self.client_referrer_url = Some(initiator_url.clone());
         self.cookie_context = self
             .cookie_context
             .with_initiator_url(&self.url, initiator_url);
@@ -1494,72 +1492,6 @@ impl Request {
             .cookie_context
             .with_storage_access_status(storage_access_status);
         self
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn effective_cookie_context(&self, request_url: &Url) -> NetworkCookieRequestContext {
-        let recomputed = self
-            .cookie_context
-            .clone()
-            .recompute_site_context_for_request(request_url);
-        let redirect_types = redirect_types_for_request(
-            &self.url,
-            request_url,
-            self.cookie_context.initiator_url.as_ref(),
-            &self.cookie_context.browser_context,
-            self.cookie_context.request_type,
-            self.cookie_context.is_method_safe,
-        );
-        let context_downgrade_type = site_context_downgrade_type(
-            self.cookie_context.site_context.context,
-            recomputed.site_context.context,
-        )
-        .or(self
-            .cookie_context
-            .site_context_metadata
-            .context
-            .downgrade_type);
-        let schemeful_context_downgrade_type = site_context_downgrade_type(
-            self.cookie_context.site_context.schemeful_context,
-            recomputed.site_context.schemeful_context,
-        )
-        .or(self
-            .cookie_context
-            .site_context_metadata
-            .schemeful_context
-            .downgrade_type);
-        recomputed.with_site_context_metadata(NetworkSiteContextMetadata::new(
-            NetworkSiteContextTrackMetadata::new(
-                self.cookie_context
-                    .site_context_metadata
-                    .context
-                    .downgraded_by_cross_site_redirect
-                    || context_downgrade_type.is_some(),
-                context_downgrade_type,
-            )
-            .with_http_method(
-                self.cookie_context
-                    .site_context_metadata
-                    .context
-                    .http_method,
-            )
-            .with_redirect_type(redirect_types.context.redirect_type),
-            NetworkSiteContextTrackMetadata::new(
-                self.cookie_context
-                    .site_context_metadata
-                    .schemeful_context
-                    .downgraded_by_cross_site_redirect
-                    || schemeful_context_downgrade_type.is_some(),
-                schemeful_context_downgrade_type,
-            )
-            .with_http_method(
-                self.cookie_context
-                    .site_context_metadata
-                    .schemeful_context
-                    .http_method,
-            )
-            .with_redirect_type(redirect_types.schemeful_context.redirect_type),
-        ))
     }
 }
 

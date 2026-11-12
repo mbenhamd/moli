@@ -4,6 +4,7 @@ use super::*;
 
 pub(in crate::worker) struct PendingWorkerFetch {
     pub(in crate::worker) resolver: v8::Global<v8::PromiseResolver>,
+    pub(in crate::worker) resource_timing: crate::context_bootstrap::FetchResourceTiming,
     pub(in crate::worker) document_url: Url,
     pub(in crate::worker) credentials_mode: RequestCredentialsMode,
     pub(in crate::worker) request_mode: moli_fetch::RequestMode,
@@ -58,6 +59,10 @@ pub(in crate::worker) struct WorkerFetchStreamingFinished {
 
 pub(in crate::worker) enum WorkerFetchResponse {
     Materialized(Box<Response>),
+    Filtered {
+        response: Box<Response>,
+        filter: crate::types::AsyncSubresourceFetchResponseFilter,
+    },
     Streamed {
         head: Box<ResponseHead>,
         body: SubresourceResponseBody,
@@ -65,23 +70,34 @@ pub(in crate::worker) enum WorkerFetchResponse {
 }
 
 impl WorkerFetchResponse {
+    pub(super) fn response_filter(
+        &self,
+    ) -> Option<crate::types::AsyncSubresourceFetchResponseFilter> {
+        match self {
+            Self::Filtered { filter, .. } => Some(filter.clone()),
+            _ => None,
+        }
+    }
+
     pub(super) fn head(&self) -> ResponseHead {
         match self {
-            Self::Materialized(response) => response.head(),
+            Self::Materialized(response) | Self::Filtered { response, .. } => response.head(),
             Self::Streamed { head, .. } => head.as_ref().clone(),
         }
     }
 
     pub(super) fn subresource_response_body(&self) -> SubresourceResponseBody {
         match self {
-            Self::Materialized(response) => SubresourceResponseBody::from_fetch_response(response),
+            Self::Materialized(response) | Self::Filtered { response, .. } => {
+                SubresourceResponseBody::from_fetch_response(response)
+            }
             Self::Streamed { body, .. } => body.clone(),
         }
     }
 
     pub(super) fn into_fetch_parts(self) -> WorkerFetchResponseParts {
         match self {
-            Self::Materialized(response) => {
+            Self::Materialized(response) | Self::Filtered { response, .. } => {
                 let (head, body) = response.into_body();
                 WorkerFetchResponseParts::Materialized {
                     head,

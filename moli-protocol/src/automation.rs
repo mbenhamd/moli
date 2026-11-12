@@ -627,7 +627,34 @@ pub struct DevToolsSetJavaScriptDialogPromptTextCommand {
 pub struct DevToolsHandleJavaScriptDialogCommand {
     pub context: AutomationContext,
     pub accept: bool,
-    pub prompt_text: String,
+    /// None preserves text previously set through the native Classic adapter.
+    /// CDP and BiDi supply Some("") when their optional input is omitted.
+    pub prompt_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevToolsUserPromptHandler {
+    Accept,
+    Dismiss,
+    Ignore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DevToolsJavaScriptDialogHandlers {
+    pub alert: DevToolsUserPromptHandler,
+    pub confirm: DevToolsUserPromptHandler,
+    pub prompt: DevToolsUserPromptHandler,
+}
+
+impl DevToolsJavaScriptDialogHandlers {
+    pub(crate) fn handler_for(self, dialog_type: &str) -> DevToolsUserPromptHandler {
+        match dialog_type {
+            "alert" => self.alert,
+            "confirm" => self.confirm,
+            "prompt" => self.prompt,
+            _ => DevToolsUserPromptHandler::Ignore,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

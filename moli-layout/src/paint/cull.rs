@@ -11,6 +11,7 @@ use std::{fmt::Debug, hash::Hash};
 use super::{
     filters::{expanded_filter_clip, project_filters},
     geometry::BoxAreas,
+    text::{caret_rect, range_selection_rects},
 };
 use crate::{
     LayoutBoxId, LayoutPoint, LayoutRect, LayoutTransform2D, PaintFilter, PaintFragment,
@@ -182,7 +183,46 @@ where
         PaintOrderEvent::BoxOutsetShadow(id) => outset_shadow_bounds(projection, id),
         PaintOrderEvent::BoxBackground(id) => box_background_bounds(projection, id),
         PaintOrderEvent::TableCollapsedBorders(id) => table_border_bounds(projection, id),
-        PaintOrderEvent::BoxContents(id) => box_contents_bounds(projection, id),
+        PaintOrderEvent::BoxContents(id)
+        | PaintOrderEvent::InlineContents(id)
+        | PaintOrderEvent::BoxText(id) => box_contents_bounds(projection, id),
+        PaintOrderEvent::BoxCaret(id) => caret_rect(&projection.world.boxes[id.index()])
+            .map_or(PaintCullBounds::Empty, |rect| {
+                map_box_rect(projection, id, rect)
+            }),
+        PaintOrderEvent::InlineSelection {
+            owner, start, end, ..
+        } => {
+            let mut bounds = PaintCullBounds::Empty;
+            range_selection_rects(
+                &projection.world.boxes[owner.index()],
+                Some(&(start..end)),
+                |rect| {
+                    bounds.include(map_box_rect(projection, owner, rect));
+                },
+            );
+            bounds
+        }
+        PaintOrderEvent::InlineBox { owner, fragment } => {
+            let id = projection.owner_paint_fragments[owner.index()][fragment];
+            map_box_rect(projection, owner, projection.fragments[id.index()].rect)
+        }
+        PaintOrderEvent::InlineText { owner, line, .. } => {
+            let layout_box = &projection.world.boxes[owner.index()];
+            let context = layout_box.inline_layout.as_ref().unwrap();
+            match context.fragments.lines[line].paint_bounds {
+                InlinePaintBounds::Empty => PaintCullBounds::Empty,
+                InlinePaintBounds::Unbounded => PaintCullBounds::Unbounded,
+                InlinePaintBounds::Bounded(bounds) => {
+                    let layout = layout_box.final_layout;
+                    let origin = LayoutPoint::new(
+                        layout.border.left + layout.padding.left,
+                        layout.border.top + layout.padding.top,
+                    );
+                    map_box_rect(projection, owner, offset_rect(bounds, origin))
+                }
+            }
+        }
         PaintOrderEvent::BoxOutline(id) => box_outline_bounds(projection, id),
         PaintOrderEvent::PushStackingContext(_) | PaintOrderEvent::PopStackingContext(_) => {
             PaintCullBounds::Empty

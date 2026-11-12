@@ -657,11 +657,31 @@ impl ScriptVm {
                         trace_fields,
                         record_started,
                     );
+                    if let PendingSubresourceContinuation::Fetch(fetch) = &pending.continuation {
+                        let entry = if opaque_response_blocked {
+                            // ORB removes the original headers and body measurements;
+                            // its TAO header cannot re-enable those measurements.
+                            fetch.resource_timing().failed(&pending.info.url)
+                        } else {
+                            fetch.resource_timing().completed(
+                                &pending.info.url, &pending.request_origin, pending.request_mode,
+                                &response.head(), response.body_bytes().len(), response_filter.as_ref(),
+                            )
+                        };
+                        crate::context_bootstrap::record_resource_performance_entry(scope, entry);
+                    }
+                    let mut metadata = crate::network_host::fetch_response_metadata(
+                        &pending.request_origin, &response.head(), pending.request_mode, response_filter.as_ref(),
+                    );
+                    if opaque_response_blocked {
+                        metadata.response_type = crate::types::FetchResponseType::Opaque;
+                        metadata.timing_allow_passed = false;
+                    }
                     let mut observable_response = response;
                     if matches!(
                         pending.info.resource_type,
                         SubresourceResourceType::Fetch | SubresourceResourceType::Xhr
-                    ) && !response_filter.is_some_and(|filter| filter.is_readable()) {
+                    ) && !response_filter.as_ref().is_some_and(|filter| filter.is_readable()) {
                         observable_response.headers =
                             crate::network_host::filter_cors_exposed_response_headers(
                                 &pending.request_origin,
@@ -683,20 +703,16 @@ impl ScriptVm {
                             } else {
                                 body
                             };
-                            let response_filter = opaque_response_blocked
-                                .then_some(AsyncSubresourceFetchResponseFilter::Opaque)
-                                .or(response_filter);
                             let response_obj =
-                                crate::network_host::build_fetch_response_object_from_body_source_for_request_mode_with_filter(
+                                crate::network_host::build_fetch_response_object_from_body_source_for_request_mode_with_metadata(
                                     scope,
-                                    &pending.request_origin,
                                     crate::network_host::FetchResponseRequest {
                                         method: &response_request_method,
                                         mode: pending.request_mode,
                                     },
                                     head,
                                     body,
-                                    response_filter,
+                                    metadata,
                                 );
                             if let Some(status_text) = response_status_text.as_deref() {
                                 crate::network_host::set_response_slot_string(
@@ -878,6 +894,10 @@ impl ScriptVm {
                         moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
                     match pending.continuation {
                         PendingSubresourceContinuation::Fetch(fetch) => {
+                            crate::context_bootstrap::record_resource_performance_entry(
+                                scope,
+                                fetch.resource_timing().failed(&pending.info.url),
+                            );
                             let resolver = fetch
                                 .into_resolver()
                                 .expect("detached keepalive failure is handled before V8 entry");

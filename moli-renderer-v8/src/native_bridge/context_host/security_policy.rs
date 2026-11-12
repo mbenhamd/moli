@@ -731,21 +731,26 @@ impl JsContextHost {
                     ),
                 )
             }
-            OwnerDispatchScope::Child(handle) => Some(
-                self.document_connect_csp_check_for_child_document_with_redirect_status(
-                    handle,
-                    document_url,
-                    request_url,
-                    redirect_status,
-                ),
-            ),
-            OwnerDispatchScope::LightweightPopup(popup_id) => self
-                .document_connect_csp_check_for_lightweight_popup_with_redirect_status(
-                    popup_id,
-                    document_url,
-                    request_url,
-                    redirect_status,
-                ),
+            OwnerDispatchScope::Child(_) | OwnerDispatchScope::LightweightPopup(_) => {
+                let snapshot = self.owner_document_policy_snapshot(owner)?;
+                let document_origin = self
+                    .window_document_origin(owner)
+                    .and_then(|origin| url::Url::parse(&origin).ok());
+                // Keep the actual Document URL for reports. Only unbound local
+                // policies use the receiver origin as a fallback for 'self'.
+                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
+                Some(
+                    unsafe { &*self.runtime }
+                        .document_connect_csp_check_for_document_with_redirect_status(
+                            snapshot.document_handle,
+                            document_url,
+                            document_origin.as_ref(),
+                            &snapshot.policy_container,
+                            request_url,
+                            redirect_status,
+                        ),
+                )
+            }
         }
     }
 
@@ -763,51 +768,6 @@ impl JsContextHost {
         )
         .map(|check| check.into_violations().1.is_none())
         .unwrap_or(true)
-    }
-
-    fn document_connect_csp_check_for_lightweight_popup_with_redirect_status(
-        &self,
-        popup_id: u64,
-        document_url: &url::Url,
-        request_url: &url::Url,
-        redirect_status: ContentSecurityPolicyRedirectStatus,
-    ) -> Option<DocumentContentSecurityPolicyCheck> {
-        let policy_container = self.lightweight_popup_policy_container(popup_id)?;
-        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-        Some(
-            unsafe { &*self.runtime }.document_connect_csp_check_for_document_with_redirect_status(
-                self.lightweight_popup_document_handle(popup_id),
-                document_url,
-                &policy_container.response_content_security_policies,
-                &policy_container.response_content_security_report_only_policies,
-                &policy_container.content_security_reporting_endpoints,
-                request_url,
-                redirect_status,
-            ),
-        )
-    }
-
-    fn document_connect_csp_check_for_child_document_with_redirect_status(
-        &self,
-        handle: DomHandle,
-        document_url: &url::Url,
-        request_url: &url::Url,
-        redirect_status: ContentSecurityPolicyRedirectStatus,
-    ) -> DocumentContentSecurityPolicyCheck {
-        let response_policies = self.child_response_content_security_policies(handle);
-        let response_report_only_policies =
-            self.child_response_content_security_report_only_policies(handle);
-        let response_reporting_endpoints = self.child_content_security_reporting_endpoints(handle);
-        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-        unsafe { &*self.runtime }.document_connect_csp_check_for_document_with_redirect_status(
-            self.child_browsing_context_document_handle(handle),
-            document_url,
-            response_policies,
-            response_report_only_policies,
-            &response_reporting_endpoints,
-            request_url,
-            redirect_status,
-        )
     }
 
     pub(crate) fn frame_navigation_csp_violation(
@@ -901,11 +861,18 @@ impl JsContextHost {
         &self,
         child_handle: DomHandle,
     ) -> Vec<ContentSecurityPolicy> {
-        match self.child_browsing_context_parent_handle(child_handle) {
-            Some(parent) => self.child_effective_response_content_security_policies(parent),
-            None => unsafe { &*self.runtime }
+        match self.owner_dispatch_scope_for_node(child_handle) {
+            Some(OwnerDispatchScope::Child(parent)) => {
+                self.child_effective_response_content_security_policies(parent)
+            }
+            Some(OwnerDispatchScope::LightweightPopup(popup)) => self
+                .lightweight_popup_policy_container(popup)
+                .map(|policy| policy.response_content_security_policies.clone())
+                .unwrap_or_default(),
+            Some(OwnerDispatchScope::Top) => unsafe { &*self.runtime }
                 .response_content_security_policies()
                 .to_vec(),
+            None => Vec::new(),
         }
     }
 
@@ -913,13 +880,22 @@ impl JsContextHost {
         &self,
         child_handle: DomHandle,
     ) -> Vec<ContentSecurityPolicy> {
-        match self.child_browsing_context_parent_handle(child_handle) {
-            Some(parent) => {
+        match self.owner_dispatch_scope_for_node(child_handle) {
+            Some(OwnerDispatchScope::Child(parent)) => {
                 self.child_effective_response_content_security_report_only_policies(parent)
             }
-            None => unsafe { &*self.runtime }
+            Some(OwnerDispatchScope::LightweightPopup(popup)) => self
+                .lightweight_popup_policy_container(popup)
+                .map(|policy| {
+                    policy
+                        .response_content_security_report_only_policies
+                        .clone()
+                })
+                .unwrap_or_default(),
+            Some(OwnerDispatchScope::Top) => unsafe { &*self.runtime }
                 .response_content_security_report_only_policies()
                 .to_vec(),
+            None => Vec::new(),
         }
     }
 
@@ -948,11 +924,18 @@ impl JsContextHost {
         &self,
         child_handle: DomHandle,
     ) -> ContentSecurityPolicyReportingEndpoints {
-        match self.child_browsing_context_parent_handle(child_handle) {
-            Some(parent) => self.child_effective_content_security_reporting_endpoints(parent),
-            None => unsafe { &*self.runtime }
+        match self.owner_dispatch_scope_for_node(child_handle) {
+            Some(OwnerDispatchScope::Child(parent)) => {
+                self.child_effective_content_security_reporting_endpoints(parent)
+            }
+            Some(OwnerDispatchScope::LightweightPopup(popup)) => self
+                .lightweight_popup_policy_container(popup)
+                .map(|policy| policy.content_security_reporting_endpoints.clone())
+                .unwrap_or_default(),
+            Some(OwnerDispatchScope::Top) => unsafe { &*self.runtime }
                 .content_security_reporting_endpoints()
                 .clone(),
+            None => ContentSecurityPolicyReportingEndpoints::default(),
         }
     }
 
@@ -1120,36 +1103,6 @@ impl JsContextHost {
                 .policy_container
                 .content_security_reporting_endpoints,
         )
-    }
-
-    fn child_response_content_security_policies(
-        &self,
-        handle: DomHandle,
-    ) -> &[ContentSecurityPolicy] {
-        self.child_browsing_contexts
-            .get(&handle)
-            .map(|entry| entry.response_content_security_policies())
-            .unwrap_or_default()
-    }
-
-    fn child_response_content_security_report_only_policies(
-        &self,
-        handle: DomHandle,
-    ) -> &[ContentSecurityPolicy] {
-        self.child_browsing_contexts
-            .get(&handle)
-            .map(|entry| entry.response_content_security_report_only_policies())
-            .unwrap_or_default()
-    }
-
-    fn child_content_security_reporting_endpoints(
-        &self,
-        handle: DomHandle,
-    ) -> ContentSecurityPolicyReportingEndpoints {
-        self.child_browsing_contexts
-            .get(&handle)
-            .map(|entry| entry.content_security_reporting_endpoints())
-            .unwrap_or_default()
     }
 
     pub(crate) fn dispatch_content_security_policy_violation_event_best_effort<'s>(
