@@ -58,6 +58,39 @@ mod tests {
     }
 
     #[test]
+    fn srgb_color_function_styles_install_and_paint() {
+        // A computed `color-mix()` background, as getComputedStyle() reports it.
+        let canonical =
+            canonicalize_fill_style("color(srgb 1 1 1 / 0.82)").expect("computed sRGB color");
+        assert_eq!(canonical, "color(srgb 1 1 1 / 0.82)");
+        assert_eq!(fill_style_rgba(&canonical), [255, 255, 255, 209]);
+
+        let canonical = canonicalize_fill_style("COLOR(srgb 100% 50% 0% / 50%)")
+            .expect("percentage components");
+        assert_eq!(canonical, "color(srgb 1 0.5 0 / 0.5)");
+        assert_eq!(fill_style_rgba(&canonical), [255, 128, 0, 128]);
+
+        let canonical =
+            canonicalize_fill_style("color(srgb 0.2 0.4 0.6 / 1)").expect("opaque alpha");
+        assert_eq!(canonical, "color(srgb 0.2 0.4 0.6)");
+        assert_eq!(fill_style_rgba(&canonical), [51, 102, 153, 255]);
+
+        let canonical = canonicalize_fill_style("color(srgb none 1 1)").expect("none component");
+        assert_eq!(canonical, "color(srgb none 1 1)");
+        assert_eq!(fill_style_rgba(&canonical), [0, 255, 255, 255]);
+
+        for raw in [
+            "color(srgb 1 1)",
+            "color(srgb 1 1 1 1)",
+            "color(srgb 1 1 1 / 0.5 0.5)",
+            "color(srgb red 1 1)",
+            "color(rec2020 1 1 1)",
+        ] {
+            assert_eq!(canonicalize_fill_style(raw), None, "{raw}");
+        }
+    }
+
+    #[test]
     fn hex_alpha_canonicalization_round_trips_every_byte() {
         for alpha in 0..=255_u8 {
             let raw = format!("#12ab34{alpha:02x}");
