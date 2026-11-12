@@ -1,4 +1,5 @@
 use crate::{
+    context_bootstrap::svg_runtime::hit_test,
     css_style::{
         CssStyleDeclarationItemArgs, CssStyleDeclarationPropertyArgs,
         CssStyleDeclarationSetPropertyArgs, CssStyleEntry as StyleEntry,
@@ -58,6 +59,11 @@ pub(crate) fn style_set_property_callback<'s>(
     if !parsed.priority.is_empty() && !parsed.priority.eq_ignore_ascii_case("important") {
         return;
     }
+    hit_test::note_inline_style_write(
+        unsafe { &*runtime_ptr },
+        handle,
+        hit_test::property_declares_svg_pointer_events(&name, &parsed.value),
+    );
     if !supported_declared_property(&name) {
         return;
     }
@@ -306,6 +312,7 @@ pub(crate) fn style_remove_property_callback<'s>(
         return;
     }
     let name = canonical_style_property_name(&parsed.property);
+    hit_test::note_inline_style_write(unsafe { &*runtime_ptr }, handle, false);
     let previous = style_property_value(unsafe { &*runtime_ptr }, handle, mode, &name);
     let previous = if name == "text-decoration"
         && cssom_text_decoration_line_value_is_compat(&style_property_value(
