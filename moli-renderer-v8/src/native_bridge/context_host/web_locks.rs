@@ -110,6 +110,11 @@ fn new_client_label() -> Option<String> {
 }
 
 impl JsContextHost {
+    #[cfg(test)]
+    pub(crate) fn web_lock_request_count(&self) -> usize {
+        self.web_locks.requests.len()
+    }
+
     pub(crate) fn next_web_lock_request_id(&self) -> WebLockRequestId {
         self.web_lock_registry.next_id()
     }

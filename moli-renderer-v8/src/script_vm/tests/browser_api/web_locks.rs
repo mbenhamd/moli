@@ -112,6 +112,40 @@ fn web_locks_steal_rejects_the_previous_holder_with_abort_error() {
 }
 
 #[test]
+fn web_locks_steal_rejects_a_settling_holder_and_retires_a_never_settling_one() {
+    let mut vm = page();
+    // The holder steals its own lock and settles in the same task, before the
+    // steal task runs: the steal still wins.
+    vm.eval(
+        r#"
+        globalThis.results = [];
+        navigator.locks
+          .request("race", () => {
+            navigator.locks.request("race", { steal: true }, () => { results.push("thief"); });
+            return 1;
+          })
+          .then(value => results.push("holder resolved " + value), error => results.push("holder " + error.name));
+        navigator.locks
+          .request("idle", () => new Promise(() => {}))
+          .catch(error => results.push("idle " + error.name));
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        vm.eval_after_selected_page_tasks("results.join()").unwrap(),
+        "holder AbortError,thief"
+    );
+    // A stolen holder whose callback never settles leaves no request behind.
+    vm.eval(r#"navigator.locks.request("idle", { steal: true }, () => { results.push("idle thief"); });"#)
+        .unwrap();
+    assert_eq!(
+        vm.eval_after_selected_page_tasks("results.join()").unwrap(),
+        "holder AbortError,thief,idle AbortError,idle thief"
+    );
+    assert_eq!(vm._context_host.borrow().web_lock_request_count(), 0);
+}
+
+#[test]
 fn web_locks_abort_in_the_requesting_task_skips_the_callback_and_frees_the_lock() {
     let mut vm = page();
     vm.eval(
