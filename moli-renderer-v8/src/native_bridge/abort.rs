@@ -336,6 +336,18 @@ impl AbortStore {
         true
     }
 
+    /// Drop one registered abort algorithm wherever it is registered. Needs
+    /// no scope: Globals compare by handle identity. Used when the owner of
+    /// the algorithm retires without a V8 scope, so a signal from another
+    /// realm stops rooting the algorithm's realm.
+    pub(crate) fn forget_abort_algorithm(&mut self, algorithm: &v8::Global<v8::Function>) {
+        for state in self.signals.values_mut() {
+            state
+                .abort_algorithms
+                .retain(|candidate| candidate != algorithm);
+        }
+    }
+
     pub(super) fn register_target_listener<'s>(
         &mut self,
         scope: &mut v8::PinScope<'s, '_>,

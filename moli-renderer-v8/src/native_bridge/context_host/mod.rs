@@ -118,7 +118,9 @@ mod media_loads;
 mod misc_platform_api_tasks;
 mod web_locks;
 pub(crate) use media_loads::PendingMediaLoadTerminalFollowup;
-pub(crate) use web_locks::{NewWebLockRequest, WebLockClient, WebLockClientError};
+pub(crate) use web_locks::{
+    NewWebLockRequest, WebLockClient, WebLockClientError, WebLockSettlement,
+};
 mod text_track_loads;
 pub(crate) use text_track_loads::{
     PendingMediaCanPlayFollowup, PendingMediaTextTrackGateRegistration,

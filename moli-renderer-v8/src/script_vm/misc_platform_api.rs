@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 
 use super::ScriptVm;
 use crate::{
+    native_bridge::JsContextHost,
     page_task_queue::{
         PageMiscPlatformApiTargetEffect, RendererPageMiscPlatformApiOwner,
         RendererPageMiscPlatformApiTaskId, RendererPageMiscPlatformApiTaskKind,
@@ -51,7 +52,7 @@ impl ScriptVm {
                 ));
             };
             return self.with_default_context_scope(|scope, host_ptr| {
-                Ok(unsafe { &mut *host_ptr }.dispatch_authorized_web_lock_task(
+                Ok(JsContextHost::dispatch_authorized_web_lock_task(
                     scope,
                     host_ptr,
                     owner.target(),

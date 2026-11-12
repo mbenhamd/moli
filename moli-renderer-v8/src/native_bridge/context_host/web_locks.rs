@@ -59,6 +59,15 @@ pub(crate) struct WebLockGrant {
     pub(crate) abort: Option<(v8::Global<v8::Object>, v8::Global<v8::Function>)>,
 }
 
+/// How a request ends once its callback's result settled.
+pub(crate) enum WebLockSettlement {
+    /// The lock was released; the request promise adopts the result.
+    Released(v8::Global<v8::PromiseResolver>),
+    /// A `steal` already removed the lock in the registry and its steal task
+    /// has not run yet; the request promise rejects with AbortError.
+    Stolen(v8::Global<v8::PromiseResolver>),
+}
+
 struct WebLockRequestState {
     client: WebLockClientId,
     name: String,
@@ -73,7 +82,6 @@ struct WebLockRequestState {
     /// and the registry holds nothing for this request.
     not_available: bool,
     granted: bool,
-    stolen: bool,
 }
 
 #[derive(Default)]
@@ -113,6 +121,21 @@ impl JsContextHost {
     #[cfg(test)]
     pub(crate) fn web_lock_request_count(&self) -> usize {
         self.web_locks.requests.len()
+    }
+
+    /// Forget one request's Host state and its task entries, and drop its abort
+    /// algorithm from this Host's AbortStore. Every retirement goes through
+    /// here, so a retired request never leaves an algorithm registered on a
+    /// signal that outlives the requesting realm.
+    fn forget_web_lock_request(
+        &mut self,
+        request: WebLockRequestId,
+    ) -> Option<WebLockRequestState> {
+        let state = self.web_locks.forget_request(request)?;
+        if let Some((_, algorithm)) = &state.abort {
+            self.bridge.abort.forget_abort_algorithm(algorithm);
+        }
+        Some(state)
     }
 
     pub(crate) fn next_web_lock_request_id(&self) -> WebLockRequestId {
@@ -212,7 +235,6 @@ impl JsContextHost {
                 steal_task,
                 not_available: false,
                 granted: false,
-                stolen: false,
             },
         );
         let owner = WebLockOwner {
@@ -254,7 +276,7 @@ impl JsContextHost {
                 {
                     return true;
                 }
-                self.web_locks.forget_request(id);
+                self.forget_web_lock_request(id);
                 false
             }
         }
@@ -296,17 +318,17 @@ impl JsContextHost {
     ) -> Vec<WebLockRequestId> {
         let unsent = dispatch_web_lock_actions(&self.web_lock_registry, actions);
         for request in &unsent {
-            self.web_locks.forget_request(*request);
+            self.forget_web_lock_request(*request);
         }
         unsent
     }
 
     /// Drop one request whose callback will never run and return any lock it
     /// held or waited for to the queue. Used for a stale task, and for an
-    /// authorized grant task (already taken from the task table) that found no
-    /// realm: its request promise cannot be rejected without that realm.
+    /// authorized grant or steal task (already taken from the task table) that
+    /// found no realm: its request promise cannot be settled without that realm.
     pub(super) fn retire_web_lock_request(&mut self, request: WebLockRequestId) {
-        let Some(state) = self.web_locks.forget_request(request) else {
+        let Some(state) = self.forget_web_lock_request(request) else {
             return;
         };
         let mut actions = self
@@ -352,29 +374,35 @@ impl JsContextHost {
     }
 
     /// The callback's result settled: release the lock and hand back the
-    /// request promise unless a steal already rejected it.
+    /// request promise. A granted lock the registry no longer holds was
+    /// stolen; forgetting the request also discards its queued steal task, so
+    /// the steal rejects here instead.
     pub(crate) fn finish_web_lock_request(
         &mut self,
         request: WebLockRequestId,
-    ) -> Option<v8::Global<v8::PromiseResolver>> {
-        let state = self.web_locks.forget_request(request)?;
-        if !state.not_available {
-            let actions = self.web_lock_registry.release(request);
-            self.post_web_lock_actions(actions);
+    ) -> Option<WebLockSettlement> {
+        let state = self.forget_web_lock_request(request)?;
+        if state.not_available {
+            return Some(WebLockSettlement::Released(state.resolver));
         }
-        (!state.stolen).then_some(state.resolver)
+        match self.web_lock_registry.release_held(request) {
+            Some(actions) => {
+                self.post_web_lock_actions(actions);
+                Some(WebLockSettlement::Released(state.resolver))
+            }
+            None => Some(WebLockSettlement::Stolen(state.resolver)),
+        }
     }
 
+    /// A steal task: the registry already removed the lock. Retire the request
+    /// now, so a callback that never settles roots nothing; its later
+    /// settlement, or a grant task that has not run yet, finds no request.
     pub(crate) fn steal_web_lock_request(
         &mut self,
         request: WebLockRequestId,
     ) -> Option<v8::Global<v8::PromiseResolver>> {
-        let state = self.web_locks.requests.get_mut(&request)?;
-        if state.stolen {
-            return None;
-        }
-        state.stolen = true;
-        Some(state.resolver.clone())
+        self.forget_web_lock_request(request)
+            .map(|state| state.resolver)
     }
 
     /// The request's signal aborted. A request whose callback has not run yet
@@ -388,7 +416,7 @@ impl JsContextHost {
         if self.web_locks.requests.get(&request)?.granted {
             return None;
         }
-        let state = self.web_locks.forget_request(request)?;
+        let state = self.forget_web_lock_request(request)?;
         let mut actions = self
             .web_lock_registry
             .abort_pending(request)
@@ -418,12 +446,16 @@ impl JsContextHost {
                 continue;
             };
             actions.extend(self.web_lock_registry.release_client(client));
-            let requests = &mut self.web_locks.requests;
-            requests.retain(|_, state| state.client != client);
-            let requests = &self.web_locks.requests;
-            self.web_locks
-                .tasks
-                .retain(|_, (_, _, request)| requests.contains_key(&*request));
+            let dropped = self
+                .web_locks
+                .requests
+                .iter()
+                .filter(|(_, state)| state.client == client)
+                .map(|(request, _)| *request)
+                .collect::<Vec<_>>();
+            for request in dropped {
+                self.forget_web_lock_request(request);
+            }
         }
         self.post_web_lock_actions(actions);
         identities.len()

@@ -9,7 +9,9 @@ use anyhow::{Result, anyhow};
 use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
 
 use crate::{
-    native_bridge::{JsContextHost, NewWebLockRequest, WebLockClient, WebLockClientError},
+    native_bridge::{
+        JsContextHost, NewWebLockRequest, WebLockClient, WebLockClientError, WebLockSettlement,
+    },
     page_task_queue::RendererPageMiscPlatformApiTaskKind,
     util::{
         context_host_ptr_from_context_slot, context_host_ptr_from_global_bridge, get_private_value,
@@ -432,13 +434,7 @@ pub(crate) fn run_web_lock_task(
             let Some(resolver) = unsafe { &mut *host_ptr }.steal_web_lock_request(request) else {
                 return false;
             };
-            let resolver = v8::Local::new(scope, &resolver);
-            reject_dom_exception(
-                scope,
-                resolver,
-                "AbortError",
-                "Lock broken by another request with the 'steal' option.",
-            );
+            reject_stolen(scope, &resolver);
             true
         }
         _ => false,
@@ -555,11 +551,25 @@ fn abandon_web_lock_grant(
     request: WebLockRequestId,
     message: &str,
 ) {
-    let Some(resolver) = unsafe { &mut *host_ptr }.finish_web_lock_request(request) else {
-        return;
-    };
-    let resolver = v8::Local::new(scope, &resolver);
-    reject_dom_exception(scope, resolver, "UnknownError", message);
+    match unsafe { &mut *host_ptr }.finish_web_lock_request(request) {
+        Some(WebLockSettlement::Released(resolver)) => {
+            let resolver = v8::Local::new(scope, &resolver);
+            reject_dom_exception(scope, resolver, "UnknownError", message);
+        }
+        Some(WebLockSettlement::Stolen(resolver)) => reject_stolen(scope, &resolver),
+        None => {}
+    }
+}
+
+/// Reject a request whose held lock was removed by another request's `steal`.
+fn reject_stolen(scope: &mut v8::PinScope<'_, '_>, resolver: &v8::Global<v8::PromiseResolver>) {
+    let resolver = v8::Local::new(scope, resolver);
+    reject_dom_exception(
+        scope,
+        resolver,
+        "AbortError",
+        "Lock broken by another request with the 'steal' option.",
+    );
 }
 
 fn web_lock_callback_fulfilled<'s>(
@@ -589,8 +599,13 @@ fn settle_web_lock_request<'s>(
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
         return;
     };
-    let Some(resolver) = unsafe { &mut *host_ptr }.finish_web_lock_request(request) else {
-        return;
+    let resolver = match unsafe { &mut *host_ptr }.finish_web_lock_request(request) {
+        Some(WebLockSettlement::Released(resolver)) => resolver,
+        Some(WebLockSettlement::Stolen(resolver)) => {
+            reject_stolen(scope, &resolver);
+            return;
+        }
+        None => return,
     };
     let resolver = v8::Local::new(scope, &resolver);
     let value = args.get(0);

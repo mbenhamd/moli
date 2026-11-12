@@ -125,21 +125,24 @@ impl JsContextHost {
 
     /// Run one authorized Web Locks grant or steal task in its exact
     /// Window/Document realm.
+    ///
+    /// Takes the Host only as a raw pointer: the grant runs page JavaScript,
+    /// which may re-enter this Host (`query()`, another `request()`, removing
+    /// an iframe), so every Host borrow here ends before that call.
     pub(crate) fn dispatch_authorized_web_lock_task(
-        &mut self,
         scope: &mut v8::PinScope<'_, '_>,
         host_ptr: *mut JsContextHost,
         target: WindowDocumentTaskTarget,
         kind: RendererPageMiscPlatformApiTaskKind,
         request: crate::web_locks_runtime::WebLockRequestId,
     ) -> PageMiscPlatformApiTargetEffect {
-        let Some(resolved) = self.resolve_authorized_window_document_task_context(scope, target)
-        else {
-            // The task entry is already taken, so nothing else would release a
-            // granted lock. A steal task has nothing to return.
-            if kind == RendererPageMiscPlatformApiTaskKind::WebLockGranted {
-                self.retire_web_lock_request(request);
-            }
+        let resolved = unsafe { &mut *host_ptr }
+            .resolve_authorized_window_document_task_context(scope, target);
+        let Some(resolved) = resolved else {
+            // The task entry is already taken, so nothing else would retire
+            // the request: return a granted lock to the queue, or drop a stolen
+            // request's state.
+            unsafe { &mut *host_ptr }.retire_web_lock_request(request);
             return PageMiscPlatformApiTargetEffect::CurrentOwnerCallbackRetired;
         };
         let scope = &mut v8::ContextScope::new(scope, resolved.context);

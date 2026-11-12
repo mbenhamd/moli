@@ -252,23 +252,29 @@ impl<O: Clone> WebLockRegistry<O> {
 
     /// Release one held lock, granting whatever it was blocking.
     pub(crate) fn release(&self, request: WebLockRequestId) -> Vec<WebLockAction<O>> {
+        self.release_held(request).unwrap_or_default()
+    }
+
+    /// Release one held lock, granting whatever it was blocking. Returns
+    /// `None` when the request holds no lock, for example because a `steal`
+    /// already removed it.
+    pub(crate) fn release_held(&self, request: WebLockRequestId) -> Option<Vec<WebLockAction<O>>> {
         let mut managers = self.managers.lock();
         let mut actions = Vec::new();
-        let mut emptied = None;
+        let mut released = None;
         for (key, manager) in managers.iter_mut() {
             if let Some(index) = manager.held.iter().position(|lock| lock.id == request) {
-                let released = manager.held.remove(index);
-                manager.process(&released.name, &mut actions);
-                if manager.is_empty() {
-                    emptied = Some(key.clone());
-                }
+                let lock = manager.held.remove(index);
+                manager.process(&lock.name, &mut actions);
+                released = Some(manager.is_empty().then(|| key.clone()));
                 break;
             }
         }
+        let emptied = released?;
         if let Some(key) = emptied {
             managers.remove(&key);
         }
-        actions
+        Some(actions)
     }
 
     /// Release every held lock and drop every pending request of one client.
