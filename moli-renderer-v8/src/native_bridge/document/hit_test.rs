@@ -1,9 +1,7 @@
 use crate::web_api_interfaces;
 use std::collections::HashSet;
 
-use super::super::element::{
-    ClientRect, observable_caret_position, observable_hit_test, observable_hit_test_all,
-};
+use super::super::element::{ClientRect, observable_caret_position, observable_geometry_batch};
 use super::super::node::{node_is_document, node_runtime_and_handle_from_args};
 use crate::document_runtime::DomHandle;
 use crate::native_bridge::{JsContextHost, set_wrapped_handle_or_null_for_receiver};
@@ -502,11 +500,142 @@ fn retarget_element_to_tree_scope(
     }
 }
 
-fn point_is_inside_viewport(metrics: moli_layout::LayoutDocumentMetrics, x: f64, y: f64) -> bool {
+/// Whether a point query at `(x, y)` can hit anything: inside the viewport
+/// and off its scrollbars, whose gutters the root's client size excludes.
+fn point_is_inside_viewport(
+    metrics: moli_layout::LayoutDocumentMetrics,
+    root_client_size: Option<moli_layout::LayoutSize>,
+    x: f64,
+    y: f64,
+) -> bool {
     x >= 0.0
         && y >= 0.0
         && x < f64::from(metrics.viewport.css_width)
         && y < f64::from(metrics.viewport.css_height)
+        && root_client_size
+            .is_none_or(|size| x < f64::from(size.width) && y < f64::from(size.height))
+}
+
+/// Answers `hit_queries` from one frozen-layout pass, together with whether
+/// the point is inside the viewport's client area. `None` without a layout.
+fn point_answers(
+    runtime: &JsContextHost,
+    document: DomHandle,
+    x: f64,
+    y: f64,
+    hit_queries: Vec<moli_layout::LayoutQuery<DomHandle>>,
+) -> Result<Option<(bool, Vec<moli_layout::LayoutQueryAnswer<DomHandle>>)>, moli_layout::LayoutError>
+{
+    use moli_layout::{LayoutQuery, LayoutQueryAnswer, LayoutQueryBatch};
+    let root = document_root_element(runtime, document);
+    let mut queries = vec![LayoutQuery::DocumentMetrics];
+    queries.extend(root.map(|source| LayoutQuery::ElementMetrics { source }));
+    let hit_count = hit_queries.len();
+    queries.extend(hit_queries);
+    let answers =
+        match observable_geometry_batch(runtime, document, &LayoutQueryBatch::new(queries)) {
+            Ok(answers) => answers,
+            Err(moli_layout::LayoutError::NoLayoutSnapshot) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+    let mut answers = answers.answers.into_iter();
+    let metrics = match answers.next() {
+        Some(LayoutQueryAnswer::DocumentMetrics(metrics)) => Some(metrics),
+        _ => None,
+    };
+    let root_client_size = match root.map(|_| answers.next()) {
+        None => Some(None),
+        Some(Some(LayoutQueryAnswer::ElementMetrics(metrics))) => {
+            Some(metrics.map(|metrics| metrics.client_size))
+        }
+        Some(_) => None,
+    };
+    let hits = answers.collect::<Vec<_>>();
+    match (metrics, root_client_size) {
+        (Some(metrics), Some(root_client_size)) if hits.len() == hit_count => Ok(Some((
+            point_is_inside_viewport(metrics, root_client_size, x, y),
+            hits,
+        ))),
+        _ => Err(mismatched_point_answer()),
+    }
+}
+
+fn mismatched_point_answer() -> moli_layout::LayoutError {
+    moli_layout::LayoutError::source_contract(
+        "renderer geometry provider",
+        "returned a mismatched point hit test answer".to_owned(),
+    )
+}
+
+/// Every hit under the point, front to back, including boxes with
+/// `pointer-events: none`. Each hit reports its own `pointer-events`, so the
+/// respecting answer is a filter of the same pass, and SVG content can still
+/// re-enable hit testing below an outer `<svg>` that is itself transparent
+/// to pointer events.
+fn every_hit(
+    answers: Vec<moli_layout::LayoutQueryAnswer<DomHandle>>,
+) -> Result<Vec<moli_layout::LayoutHit<DomHandle>>, moli_layout::LayoutError> {
+    match <[_; 1]>::try_from(answers) {
+        Ok([moli_layout::LayoutQueryAnswer::HitTestAll(every)]) => Ok(every),
+        _ => Err(mismatched_point_answer()),
+    }
+}
+
+fn hit_test_all_query(
+    x: f64,
+    y: f64,
+    ignore_pointer_events_none: bool,
+) -> moli_layout::LayoutQuery<DomHandle> {
+    moli_layout::LayoutQuery::HitTestAll {
+        point: moli_layout::LayoutPoint::new(x as f32, y as f32),
+        ignore_pointer_events_none,
+    }
+}
+
+/// The outermost `<svg>` a hit lands on, with its content box.
+fn outer_svg_hit(
+    runtime: &JsContextHost,
+    hit: &moli_layout::LayoutHit<DomHandle>,
+) -> Option<moli_layout::LayoutRect> {
+    let content_box = hit.local_content_box?;
+    crate::context_bootstrap::svg_runtime::screen::is_outermost_svg(runtime, hit.source)
+        .then_some(content_box)
+}
+
+/// SVG content below an outermost `<svg>` has no CSS box, so layout stops at
+/// the `<svg>`. Resolve the shapes under the point from the SVG geometry,
+/// foremost first. Where the geometry model is not exact, no content is
+/// reported and the `<svg>` box answers on its own.
+fn svg_content_hits(
+    runtime: &JsContextHost,
+    hit: &moli_layout::LayoutHit<DomHandle>,
+    first_only: bool,
+) -> Vec<DomHandle> {
+    let Some(content_box) = outer_svg_hit(runtime, hit) else {
+        return Vec::new();
+    };
+    crate::context_bootstrap::svg_runtime::hit_test::svg_content_hits_at_point(
+        runtime,
+        hit.source,
+        [
+            f64::from(content_box.x),
+            f64::from(content_box.y),
+            f64::from(content_box.width),
+            f64::from(content_box.height),
+        ],
+        [f64::from(hit.local_point.x), f64::from(hit.local_point.y)],
+        first_only,
+    )
+    .unwrap_or_default()
+}
+
+/// CSSOM View appends the document element to a hit list inside the viewport,
+/// so a point over no box still yields the root.
+fn document_root_element(runtime: &JsContextHost, document: DomHandle) -> Option<DomHandle> {
+    runtime
+        .dom_host()
+        .dom()
+        .document_element_handle_for_document(document)
 }
 
 fn element_at_point(
@@ -516,25 +645,90 @@ fn element_at_point(
     x: f64,
     y: f64,
 ) -> Result<Option<DomHandle>, moli_layout::LayoutError> {
+    use moli_layout::{LayoutQuery, LayoutQueryAnswer};
     // A single-point query intentionally keeps a foremost text hit and maps
     // it to its web-exposed parent element. This is observably different from
     // the penetrating-list filtering performed by `elements_at_point`.
-    let (metrics, hit) = match observable_hit_test(
+    let point = moli_layout::LayoutPoint::new(x as f32, y as f32);
+    let Some((inside, answers)) = point_answers(
         runtime,
         document,
-        moli_layout::LayoutPoint::new(x as f32, y as f32),
-        false,
-    ) {
-        Ok(answer) => answer,
-        Err(moli_layout::LayoutError::NoLayoutSnapshot) => return Ok(None),
-        Err(error) => return Err(error),
+        x,
+        y,
+        vec![
+            LayoutQuery::HitTest {
+                point,
+                ignore_pointer_events_none: true,
+            },
+            LayoutQuery::HitTest {
+                point,
+                ignore_pointer_events_none: false,
+            },
+        ],
+    )?
+    else {
+        return Ok(None);
     };
-    if !point_is_inside_viewport(metrics, x, y) {
+    if !inside {
         return Ok(None);
     }
-    Ok(hit
-        .and_then(|hit| element_for_hit_source(runtime, hit.source))
-        .and_then(|element| retarget_element_to_tree_scope(runtime, element, tree_scope)))
+    let Ok(
+        [
+            LayoutQueryAnswer::HitTest(foremost),
+            LayoutQueryAnswer::HitTest(respecting),
+        ],
+    ) = <[_; 2]>::try_from(answers)
+    else {
+        return Err(mismatched_point_answer());
+    };
+    let identity = |hit: &moli_layout::LayoutHit<DomHandle>| {
+        (
+            hit.source,
+            hit.fragment,
+            hit.paint_order,
+            hit.pointer_events,
+        )
+    };
+    let element = if foremost.as_ref().map(identity) == respecting.as_ref().map(identity) {
+        // Nothing transparent to pointer events lies above the respecting
+        // hit, so it answers alone: its SVG content first, then itself.
+        respecting.and_then(|hit| {
+            svg_content_hits(runtime, &hit, true)
+                .into_iter()
+                .next()
+                .or_else(|| element_for_hit_source(runtime, hit.source))
+        })
+    } else {
+        // A box with `pointer-events: none` lies in front. Front to back, the
+        // first box that respects pointer events wins unless SVG content
+        // painted at or above it is hit first; content can re-enable
+        // pointer events below a transparent `<svg>`.
+        let Some((_, answers)) = point_answers(
+            runtime,
+            document,
+            x,
+            y,
+            vec![hit_test_all_query(x, y, true)],
+        )?
+        else {
+            return Ok(None);
+        };
+        let mut element = None;
+        for hit in every_hit(answers)? {
+            if let Some(shape) = svg_content_hits(runtime, &hit, true).into_iter().next() {
+                element = Some(shape);
+                break;
+            }
+            if hit.pointer_events {
+                element = element_for_hit_source(runtime, hit.source);
+                break;
+            }
+        }
+        element
+    };
+    Ok(element
+        .and_then(|element| retarget_element_to_tree_scope(runtime, element, tree_scope))
+        .or_else(|| document_root_element(runtime, document)))
 }
 
 fn elements_at_point(
@@ -544,40 +738,43 @@ fn elements_at_point(
     x: f64,
     y: f64,
 ) -> Result<Vec<DomHandle>, moli_layout::LayoutError> {
-    let (metrics, hits) = match observable_hit_test_all(
+    let Some((inside, answers)) = point_answers(
         runtime,
         document,
-        moli_layout::LayoutPoint::new(x as f32, y as f32),
-        false,
-    ) {
-        Ok(answer) => answer,
-        Err(moli_layout::LayoutError::NoLayoutSnapshot) => return Ok(Vec::new()),
-        Err(error) => return Err(error),
+        x,
+        y,
+        vec![hit_test_all_query(x, y, true)],
+    )?
+    else {
+        return Ok(Vec::new());
     };
-    if !point_is_inside_viewport(metrics, x, y) {
+    if !inside {
         return Ok(Vec::new());
     }
 
+    // Front to back; SVG content sits directly above the `<svg>` box that
+    // hosts it.
     let mut seen = HashSet::new();
     let mut elements = Vec::new();
-    for hit in hits {
-        let Some(element) = element_for_list_hit_source(runtime, hit.source)
-            .and_then(|element| retarget_element_to_tree_scope(runtime, element, tree_scope))
-        else {
-            continue;
-        };
-        if seen.insert(element) {
+    let mut push = |element: DomHandle, elements: &mut Vec<DomHandle>| {
+        if let Some(element) = retarget_element_to_tree_scope(runtime, element, tree_scope)
+            && seen.insert(element)
+        {
             elements.push(element);
         }
+    };
+    for hit in every_hit(answers)? {
+        for shape in svg_content_hits(runtime, &hit, false) {
+            push(shape, &mut elements);
+        }
+        if hit.pointer_events
+            && let Some(element) = element_for_list_hit_source(runtime, hit.source)
+        {
+            push(element, &mut elements);
+        }
     }
-
-    if let Some(root) = runtime
-        .dom_host()
-        .dom()
-        .document_element_handle_for_document(document)
-        && seen.insert(root)
-    {
-        elements.push(root);
+    if let Some(root) = document_root_element(runtime, document) {
+        push(root, &mut elements);
     }
     Ok(elements)
 }

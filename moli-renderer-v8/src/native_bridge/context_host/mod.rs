@@ -840,6 +840,10 @@ pub(crate) struct JsContextHost {
     /// Scroll offset changes since startup. A scroll keeps the live layout
     /// key but still changes what a screencast frame shows.
     scroll_offset_generation: Cell<u64>,
+    /// A CSSOM write declared an SVG-only `pointer-events` keyword that the
+    /// style engine dropped, so its text is gone. Never cleared: SVG content
+    /// hit testing then keeps the coarse outer `<svg>` answer.
+    cssom_declared_svg_pointer_events: Cell<bool>,
     #[cfg(test)]
     fail_live_layout_refresh_for_test: Cell<bool>,
     completed_layout_pass_count: Cell<u64>,
