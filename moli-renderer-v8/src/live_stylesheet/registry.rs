@@ -1,4 +1,5 @@
 use super::*;
+use crate::context_bootstrap::svg_runtime::hit_test::css_declares_svg_pointer_events;
 
 #[derive(Debug, Default)]
 pub(crate) struct LiveStylesheetRegistry {
@@ -16,10 +17,31 @@ pub(crate) struct LiveStylesheetRegistry {
             RcWeak<RefCell<Option<StylesheetRuleWrapperBinding>>>,
         >,
     >,
+    /// Some author text parsed into a stylesheet of this registry declared
+    /// an SVG-only `pointer-events` keyword, which the parse drops. Never
+    /// cleared, so later CSSOM edits cannot hide it from hit testing.
+    parsed_svg_pointer_events_keyword: Cell<bool>,
 }
 
 impl LiveStylesheetRegistry {
     const MAX_INLINE_CONTENTS_CACHE_ENTRIES: usize = 256;
+
+    /// Whether author text parsed here ever declared an SVG-only
+    /// `pointer-events` keyword.
+    pub(crate) fn parsed_svg_pointer_events_keyword(&self) -> bool {
+        self.parsed_svg_pointer_events_keyword.get()
+    }
+
+    /// Every stylesheet parsed from author text in this registry passes
+    /// here: owner `<style>` text, linked and `@import`ed responses, and
+    /// constructed sheets. Cached initial contents were parsed here first.
+    fn note_parsed_author_text(&self, css_text: &str) {
+        if !self.parsed_svg_pointer_events_keyword.get()
+            && css_declares_svg_pointer_events(css_text)
+        {
+            self.parsed_svg_pointer_events_keyword.set(true);
+        }
+    }
 
     pub(crate) fn create(
         &self,
@@ -29,6 +51,7 @@ impl LiveStylesheetRegistry {
         allow_import_rules: AllowImportRules,
         shared_lock: SharedRwLock,
     ) -> LiveStylesheetRef {
+        self.note_parsed_author_text(css_text);
         let id = self.allocate_id();
         let stylesheet = Rc::new(LiveStylesheet::parse(
             id,
@@ -222,6 +245,9 @@ impl LiveStylesheetRegistry {
             return None;
         }
         let media = parent.import_edge_media(edge_id)?;
+        if successful {
+            self.note_parsed_author_text(css_text);
+        }
         let id = self.allocate_id();
         let child = Rc::new(LiveStylesheet::parse_with_media(
             id,

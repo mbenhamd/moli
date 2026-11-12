@@ -10,6 +10,7 @@ use super::{
     style_object_property_count_with_context,
 };
 use crate::{
+    context_bootstrap::svg_runtime::hit_test,
     css_style::{CssStyleDeclarationCssTextArgs, serialize_css_style_entries},
     webidl,
 };
@@ -115,6 +116,11 @@ pub(crate) fn style_css_text_setter_callback<'s>(
         );
         return;
     }
+    hit_test::note_inline_style_write(
+        unsafe { &*runtime_ptr },
+        handle,
+        hit_test::css_declares_svg_pointer_events(&parsed.value),
+    );
     let base_url = style_base_url(unsafe { &*runtime_ptr }, handle);
     unsafe { &mut *runtime_ptr }.set_element_inline_style_base_url(handle, base_url.clone());
     set_inline_style_css_text_with_pdb_storage(scope, runtime_ptr, handle, &parsed.value);

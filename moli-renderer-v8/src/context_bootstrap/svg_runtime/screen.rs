@@ -29,7 +29,7 @@ fn is_svg_element(runtime: &JsContextHost, handle: DomHandle) -> bool {
         .is_some_and(|node| node.namespace() == Some(crate::native_bridge::document::SVG_NS))
 }
 
-fn is_outermost_svg(runtime: &JsContextHost, handle: DomHandle) -> bool {
+pub(crate) fn is_outermost_svg(runtime: &JsContextHost, handle: DomHandle) -> bool {
     let Some(node) = runtime.dom_host().node(handle) else {
         return false;
     };
@@ -214,7 +214,7 @@ pub(super) fn svg_nested_viewport_transform(
 
 /// The viewBox-to-viewport transform of `svg` for a viewport of the given
 /// size (SVG 2 "equivalent transform of an SVG viewport").
-fn svg_view_box_transform(
+pub(super) fn svg_view_box_transform(
     runtime: &JsContextHost,
     svg: DomHandle,
     width: f64,

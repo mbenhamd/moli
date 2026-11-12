@@ -354,6 +354,7 @@ impl JsContextHost {
             layout_pass_active: Cell::new(false),
             pending_scroll_offset_sync: Cell::new(false),
             scroll_offset_generation: Cell::new(0),
+            cssom_declared_svg_pointer_events: Cell::new(false),
             #[cfg(test)]
             fail_live_layout_refresh_for_test: Cell::new(false),
             completed_layout_pass_count: Cell::new(0),
