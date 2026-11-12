@@ -24,7 +24,7 @@ use moli_protocol::{
         DevToolsNavigationWait, DevToolsRemoteHandleId, DevToolsSessionId,
         DevToolsSetFileInputFilesCommand, DevToolsTargetId, DevToolsTargetInfo, DevToolsTargetKind,
         FrontendProtocol, NavigationFrameEvent, NavigationFrameEventKind, NavigationLifecycleEvent,
-        TargetLifecycleEvent, webdriver_bidi_navigation_id_from_loader_id,
+        webdriver_bidi_navigation_id_from_loader_id,
     },
     conn::RuntimeInspectorResponseReady,
 };
@@ -37,9 +37,10 @@ use moli_protocol_webdriver_bidi::{
 };
 use moli_protocol_webdriver_classic::{
     CLASSIC_ELEMENT_REFERENCE_KEY, ClassicActionState, ClassicDevToolsCommandContext,
-    ClassicElementOriginViewportPoints, ClassicError, ClassicErrorCode, ClassicViewportBounds,
-    classic_element_id, element_center_from_geometry,
-    perform_actions_ticks_with_state_and_viewport, release_actions_commands,
+    ClassicElementOriginViewportPoints, ClassicError, ClassicErrorCode,
+    ClassicUnhandledPromptBehavior, ClassicViewportBounds, classic_element_id,
+    element_center_from_geometry, perform_actions_ticks_with_state_and_viewport,
+    release_actions_commands,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -95,10 +96,12 @@ pub(super) async fn ws_bidi_existing_session_upgrade_handler(
     {
         return StatusCode::CONFLICT.into_response();
     }
-    let file_prompt_handler = state
+    let Some(unhandled_prompt_behavior) = state
         .classic_session_registry
-        .file_prompt_handler_for_bidi_script_commands(&session_id)
-        .map(str::to_owned);
+        .unhandled_prompt_behavior(&session_id)
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let web_socket_url = format!("{}/{}", state.bidi_ws_url.trim_end_matches('/'), session_id);
     ws.on_upgrade(move |socket| async move {
         let Some(_connection) = state.control.connection() else {
@@ -109,7 +112,7 @@ pub(super) async fn ws_bidi_existing_session_upgrade_handler(
                 socket,
                 web_socket_url,
                 session_id,
-                file_prompt_handler,
+                unhandled_prompt_behavior,
                 state.bidi_session_registry,
             )
             .await
@@ -306,12 +309,18 @@ impl BidiSocketActor {
         self.bidi.attach_existing_session(session_id, registry)
     }
 
-    pub(in crate::protocol_server) fn set_file_prompt_handler_for_script_commands(
+    pub(in crate::protocol_server) fn configure_existing_session_prompt_handlers(
         &mut self,
-        handler: Option<&str>,
-    ) {
+        scheduler: &mut CdpScheduler,
+        behavior: &ClassicUnhandledPromptBehavior,
+    ) -> Result<(), moli_protocol_webdriver_bidi::BidiError> {
         self.bidi
-            .set_file_prompt_handler_for_script_commands(handler);
+            .set_unhandled_prompt_behavior(&behavior.returned_capability())?;
+        self.bidi.set_file_prompt_handler_for_script_commands(
+            behavior.file_prompt_handler_for_bidi_script_commands(),
+        );
+        scheduler.register_bidi_javascript_dialog_handler(self.bidi.javascript_dialog_handlers());
+        Ok(())
     }
 
     pub(in crate::protocol_server) fn release_session(
@@ -770,6 +779,7 @@ async fn handle_bidi_socket_message(
     };
     admission_event_sources.extend_protocol_output(apply_bidi_dialog_handler_lifecycle(
         scheduler,
+        bidi,
         command_method.as_deref(),
         &outcome,
     ));
@@ -802,9 +812,6 @@ async fn handle_bidi_socket_message(
     } else {
         match (automation_command, input_command) {
             (Some(dispatch), None) => {
-                let observe_context_created = bidi
-                    .subscribed_contexts_for_bidi_event("browsingContext.contextCreated")
-                    .is_some();
                 start_bidi_automation_command(
                     scheduler,
                     receivers,
@@ -814,7 +821,6 @@ async fn handle_bidi_socket_message(
                     pending_navigation_candidate
                         .as_ref()
                         .map(|candidate| candidate.background_command_id),
-                    observe_context_created,
                     bidi.subscribed_contexts_for_bidi_event("browsingContext.load")
                         .is_some(),
                 )
@@ -1074,6 +1080,7 @@ async fn handle_bidi_socket_message(
 
 fn apply_bidi_dialog_handler_lifecycle(
     scheduler: &mut CdpScheduler,
+    bidi: &BidiConnectionState,
     method: Option<&str>,
     outcome: &BidiCommandOutcome,
 ) -> ProtocolOutputSequence {
@@ -1082,8 +1089,7 @@ fn apply_bidi_dialog_handler_lifecycle(
             .unregister_automation_javascript_dialog_handler(FrontendProtocol::WebDriverBidi);
     }
     if method == Some("session.new") && outcome.response["type"] == "success" {
-        scheduler
-            .register_automation_javascript_dialog_handler(FrontendProtocol::WebDriverBidi, false);
+        scheduler.register_bidi_javascript_dialog_handler(bidi.javascript_dialog_handlers());
     }
     ProtocolOutputSequence::empty()
 }
@@ -1582,11 +1588,8 @@ struct BidiPendingRuntimeCommand {
 
 struct BidiDevToolsCommandCompletion {
     id: u64,
-    session_id: String,
     event_sources: BidiDevToolsEventSources,
     event_context: Option<String>,
-    close_target_event: Option<TargetLifecycleEvent>,
-    create_target_browser_context_id: Option<moli_protocol::automation::DevToolsBrowserContextId>,
     observe_browsing_context_load: bool,
     script_may_create_targets: bool,
     previous_target_discovery: Option<bool>,
@@ -2179,7 +2182,6 @@ async fn start_bidi_automation_command(
     bidi: &BidiConnectionState,
     mut dispatch: BidiDevToolsCommandDispatch,
     background_command_id: Option<u64>,
-    observe_context_created: bool,
     observe_browsing_context_load: bool,
 ) -> BidiDevToolsCommandStart {
     dispatch
@@ -2188,10 +2190,6 @@ async fn start_bidi_automation_command(
             bidi.file_prompt_handler_for_script_commands(),
         );
     let event_context = bidi_event_context_from_automation_command(&dispatch.command);
-    let close_target_id = match &dispatch.command {
-        AutomationCommand::CloseTarget(command) => Some(command.target_id.as_str().to_owned()),
-        _ => None,
-    };
     let script_may_create_targets = matches!(
         &dispatch.command,
         AutomationCommand::EvaluateScript(_) | AutomationCommand::CallFunction(_)
@@ -2212,16 +2210,6 @@ async fn start_bidi_automation_command(
         };
     event_sources
         .extend_protocol_output(scheduler.complete_ready_protocol_residences_after_command());
-    let close_target_event = if let Some(target_id) = close_target_id.as_deref() {
-        bidi_target_lifecycle_event_for_target(
-            scheduler,
-            &mut event_sources,
-            &dispatch.session_id,
-            target_id,
-        )
-    } else {
-        None
-    };
     if let Some(error) = validate_bidi_top_level_context_command(
         scheduler,
         &mut event_sources,
@@ -2236,20 +2224,12 @@ async fn start_bidi_automation_command(
             event_context,
         });
     }
-    let previous_target_discovery = ((observe_context_created || observe_browsing_context_load)
-        && script_may_create_targets)
+    let previous_target_discovery = (observe_browsing_context_load && script_may_create_targets)
         .then(|| scheduler.replace_target_discovery_enabled(true));
-    let create_target_browser_context_id = match &dispatch.command {
-        AutomationCommand::CreateTarget(command) => command.browser_context_id.clone(),
-        _ => None,
-    };
     let completion = BidiDevToolsCommandCompletion {
         id: dispatch.id,
-        session_id: dispatch.session_id.clone(),
         event_sources,
         event_context,
-        close_target_event,
-        create_target_browser_context_id,
         observe_browsing_context_load,
         script_may_create_targets,
         previous_target_discovery,
@@ -2309,11 +2289,8 @@ async fn complete_bidi_automation_command_execution(
 ) -> BidiDevToolsCommandOutput {
     let BidiDevToolsCommandCompletion {
         id,
-        session_id,
         mut event_sources,
         event_context,
-        close_target_event,
-        create_target_browser_context_id,
         observe_browsing_context_load,
         script_may_create_targets,
         previous_target_discovery,
@@ -2332,36 +2309,6 @@ async fn complete_bidi_automation_command_execution(
                 failure,
             );
         }
-    }
-    let created_target_id = match &execution.result {
-        Ok(AutomationResult::CreateTarget(result)) => Some(result.target_id.as_str().to_owned()),
-        _ => None,
-    };
-    let close_succeeded = matches!(&execution.result, Ok(AutomationResult::CloseTarget(_)));
-    if let Some(target_id) = created_target_id.as_deref() {
-        let mut event = match bidi_target_lifecycle_event_for_target(
-            scheduler,
-            &mut event_sources,
-            &session_id,
-            target_id,
-        ) {
-            Some(event) => event,
-            None => TargetLifecycleEvent {
-                target_id: DevToolsTargetId::from(target_id),
-                browser_context_id: create_target_browser_context_id.clone(),
-                kind: DevToolsTargetKind::Page,
-                url: "about:blank".to_owned(),
-                target_info: None,
-            },
-        };
-        if let Some(browser_context_id) = create_target_browser_context_id {
-            event.browser_context_id = Some(browser_context_id);
-            event.target_info = None;
-        }
-        event_sources.push_automation_event(AutomationEvent::TargetCreated(event));
-    }
-    if close_succeeded && let Some(event) = close_target_event {
-        event_sources.push_automation_event(AutomationEvent::TargetDestroyed(event));
     }
     if observe_browsing_context_load && script_may_create_targets {
         event_sources.push_initial_load_events_for_script_created_targets();
@@ -3178,16 +3125,6 @@ fn validate_bidi_top_level_context_command(
     }
 }
 
-fn bidi_target_lifecycle_event_for_target(
-    scheduler: &mut CdpScheduler,
-    event_sources: &mut BidiDevToolsEventSources,
-    session_id: &str,
-    target_id: &str,
-) -> Option<TargetLifecycleEvent> {
-    let result = bidi_target_info_for_target(scheduler, event_sources, session_id, target_id)?;
-    target_lifecycle_event_from_target_info(result)
-}
-
 fn bidi_target_info_for_target(
     scheduler: &mut CdpScheduler,
     event_sources: &mut BidiDevToolsEventSources,
@@ -3209,19 +3146,6 @@ fn bidi_target_info_for_target(
         return None;
     };
     Some(result.target_info)
-}
-
-fn target_lifecycle_event_from_target_info(
-    info: DevToolsTargetInfo,
-) -> Option<TargetLifecycleEvent> {
-    let target_id = info.target_id.clone()?;
-    Some(TargetLifecycleEvent {
-        target_id,
-        browser_context_id: info.browser_context_id.clone(),
-        kind: info.kind,
-        url: info.url.clone(),
-        target_info: Some(info),
-    })
 }
 
 fn bidi_event_context_from_automation_command(command: &AutomationCommand) -> Option<String> {
@@ -3420,7 +3344,8 @@ mod tests {
                 json!({"id": id, "method": method, "params": params}),
                 &mut registry,
             );
-            let _ = apply_bidi_dialog_handler_lifecycle(&mut scheduler, Some(method), &outcome);
+            let _ =
+                apply_bidi_dialog_handler_lifecycle(&mut scheduler, &bidi, Some(method), &outcome);
             assert_eq!(
                 scheduler.has_automation_javascript_dialog_handler(),
                 expected_available,
@@ -3445,7 +3370,8 @@ mod tests {
                 &mut registry,
             );
             assert_eq!(outcome.response["type"], "success");
-            let _ = apply_bidi_dialog_handler_lifecycle(&mut scheduler, Some(method), &outcome);
+            let _ =
+                apply_bidi_dialog_handler_lifecycle(&mut scheduler, &bidi, Some(method), &outcome);
             assert!(scheduler.has_automation_javascript_dialog_handler());
         }
         let _ = scheduler

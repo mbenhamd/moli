@@ -453,7 +453,12 @@ mod tests {
         let _response_capture = session.outbound.capture_dispatch_responses();
         dispatch_with_runtime_defaults(&session.session, request, &session.outbound)
             .expect("Inspector session dispatch");
-        session.outbound.take_messages_after(snapshot)
+        session
+            .outbound
+            .take_messages_after(snapshot)
+            .into_iter()
+            .map(|message| message.into_value())
+            .collect()
     }
 
     fn assert_successful_response(messages: &[Value], call_id: u64) {
@@ -793,7 +798,7 @@ mod tests {
         let restored_context = restored_messages
             .iter()
             .find(|message| {
-                message.get("method").and_then(Value::as_str)
+                message.method()
                     == Some("Runtime.executionContextCreated")
             })
             .unwrap_or_else(|| {
@@ -802,7 +807,8 @@ mod tests {
                 )
             });
         assert_eq!(
-            restored_context["params"]["context"]["origin"], "https://example.test",
+            restored_context.value()["params"]["context"]["origin"],
+            "https://example.test",
             "V8ContextInfo must carry the embedder-bound origin without outbound JSON rewriting"
         );
         let formatter_probe = serde_json::json!({
@@ -929,19 +935,13 @@ mod tests {
         let messages = restored.outbound.values_after(0);
         let cleared_index = messages
             .iter()
-            .position(|message| {
-                message.get("method").and_then(Value::as_str)
-                    == Some("Runtime.executionContextsCleared")
-            })
+            .position(|message| message.method() == Some("Runtime.executionContextsCleared"))
             .unwrap_or_else(|| {
                 panic!("restored Runtime session should clear old contexts: {messages:?}")
             });
         let created_index = messages
             .iter()
-            .position(|message| {
-                message.get("method").and_then(Value::as_str)
-                    == Some("Runtime.executionContextCreated")
-            })
+            .position(|message| message.method() == Some("Runtime.executionContextCreated"))
             .unwrap_or_else(|| {
                 panic!("restored Runtime session should report the new context: {messages:?}")
             });

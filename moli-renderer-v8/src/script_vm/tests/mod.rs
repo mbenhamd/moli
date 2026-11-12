@@ -329,6 +329,7 @@ fn register_pending_window_fetch_for_test(
     let internal_id = host.record_async_subresource_fetch(
         fetch_context,
         v8::Global::new(scope, resolver),
+        crate::context_bootstrap::FetchResourceTiming::capture(scope, &(&url).into()),
         keepalive,
         connect_policy,
         csp_report_context,
@@ -502,6 +503,7 @@ fn register_pending_window_fetch_with_connect_policy_for_test(
     let internal_id = host.record_async_subresource_fetch(
         fetch_context,
         v8::Global::new(scope, resolver),
+        crate::context_bootstrap::FetchResourceTiming::capture(scope, &(&document_url).into()),
         keepalive,
         crate::document_runtime::DocumentConnectPolicySnapshot::from_policy_container(&policy),
         csp_report_context,
@@ -2383,6 +2385,7 @@ mod webtransport_stream_interface_exposure;
 mod idb_index_native_receivers;
 
 mod window_execution_context;
+mod window_scheduling_receivers;
 
 mod window_immutable_prototype_chain;
 
@@ -2444,3 +2447,6 @@ mod hyperlink_audit_owner;
 
 mod fetch_referrer;
 mod sqlite_web_storage;
+
+mod dynamic_inline_scripts;
+mod native_request_url_provenance;

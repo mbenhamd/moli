@@ -334,6 +334,14 @@ impl ProtocolWorkflowState<'_> {
             .register_automation_javascript_dialog_handler(protocol, wait_enabled)
     }
 
+    pub fn register_bidi_javascript_dialog_handler(
+        self,
+        handlers: crate::automation::DevToolsJavaScriptDialogHandlers,
+    ) {
+        self.connection
+            .register_bidi_javascript_dialog_handler(handlers);
+    }
+
     pub fn unregister_automation_javascript_dialog_handler(
         self,
         protocol: crate::automation::FrontendProtocol,
@@ -391,6 +399,10 @@ impl ProtocolWorkflowState<'_> {
 
     pub fn take_scheduler_events(self) -> Vec<CdpSchedulerEvent> {
         self.connection.take_scheduler_events()
+    }
+
+    pub fn take_published_protocol_work(self) -> Vec<crate::ProtocolSchedulerWork> {
+        self.connection.take_published_protocol_work()
     }
 
     pub fn try_complete_protocol_scheduler_work_turn(

@@ -27,7 +27,7 @@ pub(super) fn build_cdp_handle_javascript_dialog_command(
         conn,
         cmd,
         params.accept,
-        params.prompt_text.unwrap_or_default(),
+        Some(params.prompt_text.unwrap_or_default()),
     ))
 }
 
@@ -35,7 +35,7 @@ fn cdp_handle_javascript_dialog_command(
     conn: &CdpConnection,
     cmd: &Cmd<'_>,
     accept: bool,
-    prompt_text: String,
+    prompt_text: Option<String>,
 ) -> DevToolsHandleJavaScriptDialogCommand {
     let (browser_context_id, target_id) = conn
         .target_owner_identity_for_session(cmd.session_id)
@@ -297,11 +297,9 @@ pub(super) fn finish_devtools_handle_javascript_dialog_command(
         })
         .flatten()
         .ok_or_else(no_javascript_dialog_error)?;
-    let user_input = if command_prompt_text.is_empty() {
-        stored_prompt_text.unwrap_or_default()
-    } else {
-        command_prompt_text
-    };
+    let user_input = command_prompt_text
+        .or(stored_prompt_text)
+        .unwrap_or_default();
     let _ = dialog.finish(command.accept, user_input.clone());
     let closed_event = UserPromptClosedEvent {
         target_id: command.context.target_id,
@@ -317,6 +315,34 @@ pub(super) fn finish_devtools_handle_javascript_dialog_command(
         owner,
         closed_event,
     ))
+}
+
+/// Browser-side termination releases the one-shot completion before Native
+/// teardown and records the same close fact used by explicit handling.
+pub(crate) fn dismiss_javascript_dialogs_for_target_close(
+    conn: &mut CdpConnection,
+    owner: &CommandOwnerScope,
+) -> Vec<BackgroundProtocolEvent> {
+    let dialogs = conn
+        .with_target_javascript_dialog_state_for_owner_mut(owner, |state| state.take_all())
+        .unwrap_or_default();
+    let mut events = Vec::new();
+    for dialog in dialogs {
+        if dialog.finish(false, String::new()) {
+            events.extend(broadcast_javascript_dialog_closed(
+                conn,
+                owner,
+                UserPromptClosedEvent {
+                    target_id: dialog.page_owner().target_id().map(Into::into),
+                    frame_id: dialog.source_frame_id().into(),
+                    prompt_type: dialog.dialog_type().to_owned(),
+                    accepted: false,
+                    user_text: String::new(),
+                },
+            ));
+        }
+    }
+    events
 }
 
 fn broadcast_javascript_dialog_closed(
@@ -457,10 +483,31 @@ fn emit_one(
     }
 }
 
-fn source_is_current(conn: &CdpConnection, dialog: &PreparedJavaScriptDialog) -> bool {
-    conn.target_page_output_attachment_is_current(dialog.source_attachment())
+fn dialog_attachment_is_current(
+    conn: &CdpConnection,
+    attachment: &TargetPageProtocolAttachmentIdentity,
+) -> bool {
+    if conn.target_page_output_attachment_is_current(attachment) {
+        return true;
+    }
+    let owner = CommandOwnerScope::for_page_attachment(attachment);
+    // A newly opened auxiliary Window can run a modal dialog before its
+    // initial Page handle is adopted. That adoption waits for the paused
+    // renderer turn, so use the exact initial-build reservation here.
+    conn.runtime_session_owner_slot_for_owner(&owner)
+        .is_some_and(|slot| slot.has_initial_document_page_build_in_progress())
         && conn
-            .runtime_session_owner_slot(dialog.source_attachment().session_id())
+            .pending_target_page_residence_identity_for_owner(&owner)
+            .as_ref()
+            == Some(attachment.page_owner())
+}
+
+fn source_is_current(conn: &CdpConnection, dialog: &PreparedJavaScriptDialog) -> bool {
+    dialog_attachment_is_current(conn, dialog.source_attachment())
+        && conn
+            .runtime_session_owner_slot_for_owner(&CommandOwnerScope::for_page_attachment(
+                dialog.source_attachment(),
+            ))
             .is_some_and(|slot| slot.observes_javascript_dialog_scope(dialog.source_dialog_scope()))
 }
 
@@ -485,9 +532,7 @@ fn emit_to_attachment(
     source_frame_id: String,
     dialog: PreparedJavaScriptDialog,
 ) {
-    if !source_is_current(conn, &dialog)
-        || !conn.target_page_output_attachment_is_current(&destination)
-    {
+    if !source_is_current(conn, &dialog) || !dialog_attachment_is_current(conn, &destination) {
         trace_stale_source(&dialog);
         dialog.dismiss();
         return;
@@ -495,6 +540,7 @@ fn emit_to_attachment(
 
     let event_owner = CommandOwnerScope::for_page_attachment(&destination);
     let destination_page_owner = destination.page_owner().clone();
+    let target_id = destination_page_owner.target_id().map(Into::into);
     let source_url = dialog.source_url().to_owned();
     let message = dialog.message().to_owned();
     let dialog_type = dialog.dialog_type().to_owned();
@@ -529,6 +575,8 @@ fn emit_to_attachment(
         return;
     }
     let subscriptions = audience.iter().map(|(_, generation)| *generation).collect();
+    let dialog_id = dialog.id();
+    let source_document = dialog.source_document();
     // The Page owns the completion; sessions only hold permission to handle it.
     let installed =
         conn.with_target_javascript_dialog_state_for_owner_mut(&event_owner, move |state| {
@@ -549,6 +597,31 @@ fn emit_to_attachment(
             event_session_id.as_deref(),
             opening_event.clone(),
         ));
+    }
+    if let Some(accept) = conn.automation_javascript_dialog_response(&dialog_type) {
+        let command = DevToolsHandleJavaScriptDialogCommand {
+            context: crate::automation::AutomationContext {
+                protocol: crate::automation::FrontendProtocol::WebDriverBidi,
+                session_id: destination.session_id().map(Into::into),
+                target_id,
+                browser_context_id: Some(destination.page_owner().browser_context_id().into()),
+            },
+            accept,
+            prompt_text: Some(String::new()),
+        };
+        match finish_devtools_handle_javascript_dialog_command(conn, command, &event_owner) {
+            Ok(events) => out.extend(events),
+            Err(error) => tracing::warn!(
+                browser_context_id = destination.page_owner().browser_context_id(),
+                target_id = destination.page_owner().target_id(),
+                page_attachment_id = destination.page_owner().page_attachment_id().get(),
+                dialog_id = dialog_id.sequence(),
+                ?source_document,
+                accept,
+                ?error,
+                "automatic JavaScript dialog handling failed"
+            ),
+        }
     }
 }
 
@@ -595,7 +668,9 @@ fn emit_popup_dialogs_for_target(
         return;
     };
     let source_frame_id = conn
-        .target_session_owner_frame_tree_identity(destination.session_id())
+        .target_session_owner_frame_tree_identity_for_owner(
+            &CommandOwnerScope::for_page_attachment(&destination),
+        )
         .map(|(root_frame_id, _, _, _)| root_frame_id)
         .or_else(|| destination.page_owner().target_id().map(str::to_owned));
     let Some(source_frame_id) = source_frame_id else {

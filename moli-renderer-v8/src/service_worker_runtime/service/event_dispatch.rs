@@ -61,12 +61,11 @@ fn navigation_preload_request_for_job(
 
 fn navigation_preload_response_head(
     head: moli_fetch::ResponseHead,
+    request_url: &Url,
 ) -> MaterializedServiceWorkerFetchResponseHead {
-    MaterializedServiceWorkerFetchResponseHead {
+    moli_fetch_types::FetchResponseHead {
+        metadata: head.fetch_metadata(&request_url.into(), moli_fetch::RequestMode::Navigate),
         status_text: head.status_text().to_owned(),
-        final_url: Some(head.final_url),
-        response_type: "default".to_owned(),
-        redirected: head.redirected,
         status: head.status,
         headers: head.headers,
     }
@@ -115,7 +114,7 @@ async fn stream_navigation_preload_response(
     };
 
     let body_source_id = new_network_body_source_id();
-    let response_head = navigation_preload_response_head(raw.head());
+    let response_head = navigation_preload_response_head(raw.head(), &dispatch.request_url);
     if !service.mark_navigation_preload_response_started(dispatch.event_id, &dispatch.owner) {
         cancel_handle.cancel();
         return;
@@ -272,6 +271,11 @@ impl ServiceWorkerRuntimeService {
         native_request: moli_fetch::Request,
     ) -> bool {
         let request = dispatch.request.clone();
+        // Synthetic redirects advance this retained request before a network
+        // fallback can bind the owner's cookie scope on its transport copy.
+        let native_request = dispatch
+            .request_client
+            .bind_browser_site_context(native_request);
         let fetch_job = ServiceWorkerFetchJob {
             request: native_request,
             internal_id: dispatch.internal_id,

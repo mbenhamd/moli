@@ -2,6 +2,13 @@ use super::*;
 use crate::inspector_session::InspectorSessionOutput;
 use crate::runtime::RendererRuntimeInspectorResponseSender;
 
+fn business_messages(messages: Vec<InspectorJson>) -> Vec<Value> {
+    messages
+        .into_iter()
+        .map(InspectorJson::into_value)
+        .collect()
+}
+
 #[test]
 fn inspector_outbound_queue_reports_its_exact_length_until_flushed() {
     let outbound = InspectorOutbound::default();
@@ -25,11 +32,11 @@ fn inspector_outbound_queues_are_agent_local_even_with_the_same_numeric_id() {
     current.push_value(json!({"id": 7, "result": "current"}));
 
     assert_eq!(
-        previous.take_pending_messages(),
+        business_messages(previous.take_pending_messages()),
         vec![json!({"id": 7, "result": "previous"})]
     );
     assert_eq!(
-        current.take_pending_messages(),
+        business_messages(current.take_pending_messages()),
         vec![json!({"id": 7, "result": "current"})]
     );
 }
@@ -45,7 +52,7 @@ fn inspector_protocol_message_has_typed_and_consistent_response_id() {
         Some(moli_page_types::RendererCallId::new(0))
     );
     {
-        let mut value = response.value_mut();
+        let value = response.value_mut();
         value["id"] = json!(-7);
     }
     assert_eq!(
@@ -69,11 +76,17 @@ fn inspector_outbound_snapshot_tail_keeps_preexisting_deferred_output() {
 
     let immediate = outbound.take_messages_after(snap);
 
-    assert_eq!(immediate, vec![json!({"id": 8, "result": "immediate"})]);
+    assert_eq!(
+        business_messages(immediate),
+        vec![json!({"id": 8, "result": "immediate"})]
+    );
     assert_eq!(outbound.len(), 1);
 
     let deferred = outbound.take_pending_messages();
-    assert_eq!(deferred, vec![json!({"id": 7, "result": "deferred"})]);
+    assert_eq!(
+        business_messages(deferred),
+        vec![json!({"id": 7, "result": "deferred"})]
+    );
     assert_eq!(outbound.len(), 0);
 }
 
@@ -88,7 +101,7 @@ fn inspector_outbound_discard_after_snapshot_drops_only_tail() {
 
     assert_eq!(outbound.len(), 1);
     assert_eq!(
-        outbound.take_pending_messages(),
+        business_messages(outbound.take_pending_messages()),
         vec![json!({"id": 7, "result": "deferred"})]
     );
     assert_eq!(outbound.len(), 0);
@@ -108,7 +121,7 @@ fn inspector_outbound_captures_current_dispatch_and_drops_stale_late_response() 
     outbound.push_value(json!({"method": "Runtime.executionContextDestroyed"}));
     let queued = outbound.take_pending_messages();
     assert_eq!(
-        queued,
+        business_messages(queued),
         vec![
             json!({"id": 1, "result": "command-tail"}),
             json!({"method": "Runtime.executionContextDestroyed"}),
@@ -236,7 +249,7 @@ fn runtime_command_output_only_parks_its_own_response_callback() {
     assert!(matches!(
         &current.messages()[0],
         crate::runtime::RendererRuntimeInspectorMessage::Protocol(message)
-            if message["method"] == json!("Runtime.consoleAPICalled")
+            if message.payload().method() == Some("Runtime.consoleAPICalled")
     ));
     assert_eq!(
         current.protocol_response(8),
@@ -319,7 +332,7 @@ fn internal_dispatch_response_does_not_consume_same_id_deferred_frontend_callbac
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
     ));
     assert_eq!(
-        outbound.take_messages_after(snapshot),
+        business_messages(outbound.take_messages_after(snapshot)),
         vec![json!({"id": 900_100_000, "result": {"internal": true}})],
         "an internal dispatch must capture its own response before consulting frontend callbacks"
     );
@@ -382,7 +395,10 @@ fn internal_response_capture_preserves_queued_responses_and_canceled_callbacks()
     assert_eq!(outbound.response_callback_counts(), (0, 1));
     outbound.push_response_value(-1, json!({"id": -1, "result": "canceled"}));
     assert_eq!(outbound.response_callback_counts(), (0, 0));
-    assert_eq!(outbound.take_pending_messages(), vec![queued, notification]);
+    assert_eq!(
+        business_messages(outbound.take_pending_messages()),
+        vec![queued, notification]
+    );
 }
 
 #[test]
@@ -472,7 +488,7 @@ fn replacement_document_binding_does_not_adopt_previous_agent_outbound() {
         "retiring the previous agent must invalidate its undelivered local output"
     );
     assert_eq!(
-        current.take_outbound_messages_for_session(None),
+        business_messages(current.take_outbound_messages_for_session(None)),
         vec![current_message],
         "the replacement agent must expose only its own local output"
     );
@@ -498,8 +514,60 @@ fn dropping_overlapping_peer_binding_does_not_deactivate_current_agent() {
     drop(stale);
 
     assert_eq!(
-        current.take_outbound_messages_for_session(None),
+        business_messages(current.take_outbound_messages_for_session(None)),
         vec![current_message],
         "tearing down an overlapping peer agent must not mutate the current agent"
     );
+}
+
+#[test]
+fn inspector_outbound_raw_utf16_and_response_id_validation_keep_call_authority() {
+    let outbound = InspectorOutbound::default();
+    for (call_id, raw) in [
+        (7, r#"{"id":7,"result":{"value":"\ud800"}}"#),
+        (8, r#"{"id":9,"result":{"value":"\udfff"}}"#),
+    ] {
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        outbound
+            .register_response_callback(RendererRuntimeInspectorResponseSender::new(call_id, tx));
+        outbound.push_response_message(
+            call_id,
+            v8::inspector::StringBuffer::create(v8::inspector::StringView::from(raw.as_bytes())),
+        );
+        let completion = rx.try_recv().expect("every response must settle its call");
+        let response = completion
+            .output
+            .protocol_response_payload(call_id)
+            .unwrap();
+        if call_id == 7 {
+            assert!(!response.is_materialized());
+            assert!(response.to_string().contains(r"\ud800"));
+        } else {
+            assert_eq!(response.value()["error"]["code"], -32603);
+            assert_eq!(response.id_i64(), Some(8));
+        }
+        assert_eq!(outbound.response_callback_counts(), (0, 0));
+    }
+}
+
+#[test]
+fn inspector_response_id_reads_opaque_metadata_and_tracks_explicit_mutation() {
+    let body = format!("{}0{}", "[".repeat(150), "]".repeat(150));
+    let source =
+        InspectorJson::from_slice(format!(r#"{{"id":7,"result":{body}}}"#).as_bytes()).unwrap();
+    let mut message = crate::runtime::RendererRuntimeInspectorProtocolMessage::new(source.clone());
+    assert_eq!(message.renderer_call_id().map(|id| id.get()), Some(7));
+    message.set_frontend_id(u64::MAX);
+    assert_eq!(message.renderer_call_id(), None);
+    assert_eq!(message.payload().id_u64(), Some(u64::MAX));
+    message.set_frontend_id(9);
+    assert_eq!(message.renderer_call_id().map(|id| id.get()), Some(9));
+    assert!(!source.is_materialized());
+    assert!(!message.payload().is_materialized());
+    message.value_mut()["id"] = json!(-7);
+    assert_eq!(message.renderer_call_id().map(|id| id.get()), Some(-7));
+    message.value_mut().as_object_mut().unwrap().remove("id");
+    assert_eq!(message.renderer_call_id(), None);
+    message.value_mut()["id"] = json!(i64::MAX);
+    assert_eq!(message.renderer_call_id(), None);
 }

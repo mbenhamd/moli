@@ -2,7 +2,6 @@ use super::super::init::RequestInitMembers;
 use super::super::input::{
     normalize_request_method, normalize_request_referrer, request_body_already_used_error,
     request_headers_guard_for_mode, request_method_allows_body,
-    try_resolve_request_constructor_url_for_scope,
 };
 use super::super::*;
 use crate::webidl;
@@ -37,12 +36,8 @@ pub(super) fn request_initial_state<'s>(
     child_handle: Option<crate::document_runtime::DomHandle>,
     base_url: Option<url::Url>,
 ) -> Result<RequestConstructionState, webidl::WebIdlError> {
-    let (url_str, inherited, source) = input.materialize(scope)?;
-    let url_resolved =
-        try_resolve_request_constructor_url_for_scope(scope, &url_str, child_handle, base_url)
-            .map_err(|_| {
-                webidl::WebIdlError::custom_message("Failed to construct 'Request': invalid URL")
-            })?;
+    let (url, inherited, source) = input.materialize(scope)?;
+    let url_resolved = url.into_constructor_url(scope, child_handle, base_url)?;
     let method = inherited
         .as_ref()
         .map(|snapshot| snapshot.method.clone())
@@ -143,6 +138,14 @@ pub(super) fn apply_request_init_overrides<'s>(
     parsed: RequestInitMembers<'s>,
     state: &mut RequestConstructionState,
 ) -> Result<(), webidl::WebIdlError> {
+    let has_init_members = parsed.has_any_member();
+    if has_init_members {
+        if state.mode == "navigate" {
+            state.mode = "same-origin".to_owned();
+        }
+        state.referrer = "about:client".to_owned();
+        state.referrer_policy.clear();
+    }
     let method_overridden = parsed.method.is_some();
     if let Some(method) = parsed.method {
         state.method = normalize_request_method(&method)?;
@@ -249,8 +252,11 @@ pub(super) fn apply_request_init_overrides<'s>(
             "Request with a ReadableStream body requires cors or same-origin mode",
         ));
     }
-    let guard = request_headers_guard_for_mode(&state.mode);
-    state.headers = filter_headers_for_guard(&state.headers, guard);
+    // Preserve an internal request's privileged headers for an empty init.
+    if has_init_members {
+        let guard = request_headers_guard_for_mode(&state.mode);
+        state.headers = filter_headers_for_guard(&state.headers, guard);
+    }
     Ok(())
 }
 

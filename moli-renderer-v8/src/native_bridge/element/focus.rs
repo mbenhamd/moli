@@ -11,7 +11,7 @@ use super::geometry::{read_element_metrics, scroll_node_into_view_if_needed};
 use super::rendered_state::{ElementBoxState, ElementRenderedState};
 use super::styles::{StyleMode, style_property_value};
 use super::{
-    construct_click_event, construct_focus_event, construct_interest_event,
+    ClickEventSource, InputEventCoordinates, construct_focus_event, construct_interest_event,
     dispatch_popover_show_events, dispatch_public_event,
     resolved_reflected_element_attribute_handle,
 };
@@ -575,10 +575,11 @@ pub(crate) fn perform_access_key_default_action_for_dispatched_event(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut JsContextHost,
     event: v8::Local<'_, v8::Object>,
+    document: DomHandle,
 ) {
     if !event_boolean_property(scope, event, "altKey")
-        || !event_boolean_property(scope, event, "shiftKey")
-            && !event_boolean_property(scope, event, "ctrlKey")
+        || event_boolean_property(scope, event, "ctrlKey") != cfg!(target_os = "macos")
+        || event_boolean_property(scope, event, "metaKey")
     {
         return;
     }
@@ -588,13 +589,21 @@ pub(crate) fn perform_access_key_default_action_for_dispatched_event(
     if key.chars().count() != 1 {
         return;
     }
-    let Some(target) = access_key_target(unsafe { &*runtime_ptr }, &key) else {
+    let runtime = unsafe { &*runtime_ptr };
+    let Some(target) = access_key_target(runtime, document, &key) else {
         return;
     };
-    let Some(click) = construct_click_event(scope, 0.0, 0.0, 0, 0) else {
-        return;
-    };
-    let _ = dispatch_public_event(scope, runtime_ptr, target, click);
+    let _ = super::activation::dispatch_click_event(
+        scope,
+        runtime_ptr,
+        target,
+        InputEventCoordinates::default(),
+        0,
+        0,
+        0,
+        0,
+        ClickEventSource::UserAgent,
+    );
 }
 
 pub(crate) fn perform_tab_focus_default_action_for_dispatched_event(
@@ -1186,11 +1195,11 @@ fn focusable_adjacent_to_negative_shadow_host(
     None
 }
 
-fn access_key_target(runtime: &JsContextHost, key: &str) -> Option<DomHandle> {
+fn access_key_target(runtime: &JsContextHost, document: DomHandle, key: &str) -> Option<DomHandle> {
     let needle = key.to_ascii_lowercase();
     let mut stack = runtime
         .dom_host()
-        .child_handles(runtime.document_handle())
+        .child_handles(document)
         .collect::<Vec<_>>();
     stack.reverse();
     while let Some(handle) = stack.pop() {
