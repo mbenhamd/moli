@@ -67,6 +67,29 @@ pub(in crate::script_vm) fn key_target_info(
     }
 }
 
+/// The node that receives a trusted keyboard event: the focused area of the
+/// top-level traversable. HTML descends through a focused navigable
+/// container into its content navigable, whose focused area is its Document's
+/// focused element or, when nothing there is focused, its viewport (the body).
+/// Same-runtime frames share one active element, so a focused container
+/// already means nothing inside its Document is focused and one step suffices.
+/// Containers without a same-runtime child Document (out-of-process frames)
+/// stay the target.
+pub(in crate::script_vm) fn keyboard_event_target(runtime: &JsContextHost) -> Option<DomHandle> {
+    let Some(active) = runtime.active_element_handle() else {
+        return runtime.document_focus_fallback_handle();
+    };
+    let Some(child_document) = runtime.child_browsing_context_document_handle(active) else {
+        return Some(active);
+    };
+    let dom = runtime.dom_host();
+    Some(
+        dom.document_body_handle_for_document(child_document)
+            .or_else(|| dom.document_element_handle_for_document(child_document))
+            .unwrap_or(active),
+    )
+}
+
 pub(in crate::script_vm) fn is_space_key(key: &str) -> bool {
     matches!(key, " " | "space" | "spacebar")
 }

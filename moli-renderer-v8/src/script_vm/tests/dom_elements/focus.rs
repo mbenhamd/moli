@@ -336,3 +336,115 @@ fn redispatching_a_saved_focus_event_makes_it_untrusted() {
         .expect("focus redispatch probe should evaluate");
     assert_eq!(result, "ua:true|replayed:false|after:false");
 }
+
+#[test]
+fn key_events_reach_focused_frame_document_body_and_frame_document_has_focus() {
+    let mut vm = new_parsed_test_vm(
+        "https://key-target-focused-frame.test/",
+        r#"<html><body>
+            <input id="outside">
+            <iframe id="frame"></iframe>
+            <div id="host"></div>
+        </body></html>"#,
+    );
+    vm.eval(
+        r#"
+(() => {
+  const frame = document.getElementById('frame');
+  const childDocument = frame.contentDocument;
+  childDocument.open();
+  childDocument.write('<body><p>slide</p></body>');
+  childDocument.close();
+  const name = target => target.id || target.localName;
+  window.__keys = [];
+  window.addEventListener('keydown', e => __keys.push(`top:${e.type}:${name(e.target)}`), true);
+  window.addEventListener('keyup', e => __keys.push(`top:${e.type}:${name(e.target)}`), true);
+  childDocument.addEventListener('keydown', e => __keys.push(`child:${e.type}:${name(e.target)}`), true);
+  childDocument.addEventListener('keyup', e => __keys.push(`child:${e.type}:${name(e.target)}`), true);
+  // Ask the child Document from its own realm, as frame content does.
+  const childHasFocus = frame.contentWindow.Function('return document.hasFocus()');
+  window.__focusState = () => [
+    document.activeElement.id,
+    childDocument.activeElement.localName,
+    document.hasFocus(),
+    childHasFocus(),
+  ].join(',');
+  // A frame inside a shadow tree: the parent Document's activeElement is
+  // the shadow host, not the frame.
+  const shadowFrame = document.createElement('iframe');
+  document.getElementById('host').attachShadow({ mode: 'open' }).append(shadowFrame);
+  const shadowDocument = shadowFrame.contentDocument;
+  shadowDocument.open();
+  shadowDocument.write('<body><p>shadow</p></body>');
+  shadowDocument.close();
+  shadowDocument.addEventListener('keydown', e => __keys.push(`shadow:${e.type}:${name(e.target)}`), true);
+  shadowDocument.addEventListener('keyup', e => __keys.push(`shadow:${e.type}:${name(e.target)}`), true);
+  const shadowHasFocus = shadowFrame.contentWindow.Function('return document.hasFocus()');
+  window.__focusShadowFrame = () => {
+    shadowFrame.focus();
+    return [document.activeElement.id, shadowHasFocus(), childHasFocus()].join(',');
+  };
+  // A classic iframe editor: the focused frame's body is the editing host.
+  window.__focusEditableFrame = () => {
+    childDocument.body.contentEditable = 'true';
+    childDocument.body.innerHTML = '<b>x</b>';
+    frame.focus();
+  };
+  window.__editableFrameKeptMarkup = () =>
+    childDocument.body.querySelector('b') !== null;
+  frame.focus();
+})()
+"#,
+    )
+    .expect("focused frame fixture should initialize");
+
+    let press = |vm: &mut StandaloneScriptVmHarness| {
+        vm.dispatch_key_event("keydown", "ArrowRight", "ArrowRight", "", 1, false, false)
+            .expect("ArrowRight keydown should dispatch");
+        vm.dispatch_key_event("keyup", "ArrowRight", "ArrowRight", "", 1, false, false)
+            .expect("ArrowRight keyup should dispatch");
+        vm.eval("__keys.splice(0).join('|')")
+            .expect("key log should evaluate")
+    };
+
+    let frame_state = vm.eval("__focusState()").expect("frame focus state");
+    let frame_keys = press(&mut vm);
+    vm.eval("document.getElementById('outside').focus()")
+        .expect("outside input should focus");
+    let outside_state = vm.eval("__focusState()").expect("outside focus state");
+    let outside_keys = press(&mut vm);
+    let shadow_state = vm
+        .eval("__focusShadowFrame()")
+        .expect("shadow frame focus state");
+    let shadow_keys = press(&mut vm);
+    vm.eval("__focusEditableFrame()")
+        .expect("editable frame should focus");
+    vm.dispatch_key_event("keydown", "y", "KeyY", "y", 0, false, true)
+        .expect("text keydown should dispatch");
+    vm.dispatch_key_event("keyup", "y", "KeyY", "", 0, false, false)
+        .expect("text keyup should dispatch");
+    let editable_keys = vm
+        .eval("__keys.splice(0).filter(k => k.startsWith('child:')).join('|')")
+        .expect("editable key log should evaluate");
+    let editable_markup = vm
+        .eval("String(__editableFrameKeptMarkup())")
+        .expect("editable markup should evaluate");
+
+    assert_eq!(
+        [
+            frame_state,
+            frame_keys,
+            outside_state,
+            outside_keys,
+            shadow_state,
+            shadow_keys,
+            editable_keys,
+            editable_markup
+        ]
+        .join(" / "),
+        "frame,body,true,true / child:keydown:body|child:keyup:body / \
+         outside,body,true,false / top:keydown:outside|top:keyup:outside / \
+         host,true,false / shadow:keydown:body|shadow:keyup:body / \
+         child:keydown:body|child:keyup:body / true"
+    );
+}
