@@ -402,6 +402,119 @@ addEventListener("scroll", () => fetch("/action-window-scroll-applied"), { once:
         .expect("action-window deadline page should close");
 }
 #[tokio::test(flavor = "multi_thread")]
+async fn queued_wheel_scroll_is_visible_to_the_next_animation_frame() {
+    // In-page code (for example a test runner's RPC) issues no protocol
+    // barrier, so the following animation frame is the first point where
+    // the queued wheel must already have scrolled the page.
+    const FRAME_REQUEST_DELAY_MS: u64 = 300;
+
+    let runtime = initialize_layout_test_runtime();
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default())
+        .expect("default resource request client");
+    let (base_url, frame_observed, release_frame_response, frame_server) =
+        spawn_owner_wake_gated_server_with_content_type(
+            "/animation-frame-observed",
+            "ok",
+            "text/plain; charset=utf-8",
+        )
+        .await;
+    let page_url = url::Url::parse(&format!("{base_url}/page")).expect("page URL");
+    let mut page = create_test_html_page(
+        &runtime,
+        &loader,
+        page_url,
+        r#"<!doctype html>
+<style>html, body { margin: 0; } body { height: 1200px; }</style>
+<div>scrollable</div>"#,
+    )
+    .await;
+    page.run_async_command(RendererPageCommand::SetViewportSurface(Some(
+        crate::protocol_types::ViewportSurface {
+            inner_width: 200,
+            inner_height: 200,
+            outer_width: 200,
+            outer_height: 200,
+            device_pixel_ratio: 1.0,
+            screen_width: 200,
+            screen_height: 200,
+            screen_avail_width: 200,
+            screen_avail_height: 200,
+
+            ..Default::default()
+        },
+    )))
+    .await
+    .expect("animation-frame viewport should update");
+    capture_screenshot_for_renderer_page(&page).await;
+
+    let (scheduled, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: format!(
+                r#"
+globalThis.__lmFrameScrollY = null;
+setTimeout(() => {{
+  requestAnimationFrame(() => requestAnimationFrame(() => {{
+    __lmFrameScrollY = scrollY;
+    fetch("/animation-frame-observed");
+  }}));
+}}, {FRAME_REQUEST_DELAY_MS});
+"scheduled"
+"#
+            ),
+            await_promise: false,
+        })
+        .await
+        .expect("animation-frame probe should schedule");
+    assert_eq!(
+        renderer_json_value(scheduled),
+        Some(serde_json::json!("scheduled"))
+    );
+
+    let admitted_at = std::time::Instant::now();
+    assert!(
+        dispatch_wheel_for_action_window_test(&page, 100.0)
+            .await
+            .handled,
+        "wheel admission should be acknowledged"
+    );
+    assert!(
+        admitted_at.elapsed() < Duration::from_millis(FRAME_REQUEST_DELAY_MS),
+        "fixture timing: the wheel must be admitted before the frames are requested"
+    );
+
+    tokio::time::timeout(Duration::from_secs(3), frame_observed)
+        .await
+        .expect("the second animation frame should run")
+        .expect("animation-frame signal should remain open");
+    assert!(
+        admitted_at.elapsed() < Duration::from_millis(900),
+        "the frames must run before the action-window deadline would apply the wheel"
+    );
+    release_frame_response
+        .send(())
+        .expect("animation-frame response should release once");
+    frame_server
+        .await
+        .expect("animation-frame server should finish");
+
+    let (observed, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "JSON.stringify(__lmFrameScrollY)".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("animation-frame observation should remain readable");
+    assert_eq!(
+        renderer_json_value(observed),
+        Some(serde_json::json!("100")),
+        "animation-frame callbacks must observe wheel input admitted before the frame"
+    );
+
+    page.close_async()
+        .await
+        .expect("animation-frame wheel page should close");
+}
+#[tokio::test(flavor = "multi_thread")]
 async fn wheel_batch_stops_on_document_replacement() {
     let runtime = initialize_layout_test_runtime();
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default())

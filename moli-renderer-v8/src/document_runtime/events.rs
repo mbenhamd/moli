@@ -318,6 +318,10 @@ impl DocumentRuntime {
         self.timeouts.next_ready_timer_deadline(selection)
     }
 
+    pub(crate) fn has_ready_animation_frame_callback(&self) -> bool {
+        self.timeouts.has_ready_animation_frame_callback()
+    }
+
     pub(crate) fn ms_to_next_timeout(&self) -> Option<u64> {
         self.timeouts.ms_to_next()
     }

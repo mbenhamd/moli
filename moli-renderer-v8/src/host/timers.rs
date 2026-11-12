@@ -214,6 +214,13 @@ impl ScheduledTimerTask {
         callback.is_unexpired_idle_callback_at(now_ms)
     }
 
+    fn is_animation_frame_callback(&self) -> bool {
+        matches!(
+            &self.callback,
+            ScheduledTimerCallback::WindowWebIdl(callback) if callback.is_animation_frame()
+        )
+    }
+
     fn matches_selection(&self, selection: RendererPageTimerSelection, now_ms: f64) -> bool {
         match selection {
             RendererPageTimerSelection::AnyReady => true,
@@ -820,6 +827,15 @@ impl HostTimeoutScheduler {
     #[cfg(test)]
     pub(crate) fn has_ready_timer(&self) -> bool {
         self.scheduler.has_ready_timer(Instant::now())
+    }
+
+    /// Whether an animation-frame callback is due, i.e. the page has reached
+    /// a frame whose callbacks must observe input admitted before it.
+    pub(crate) fn has_ready_animation_frame_callback(&self) -> bool {
+        self.scheduler.has_ready_matching(
+            Instant::now(),
+            ScheduledTimerTask::is_animation_frame_callback,
+        )
     }
 
     pub(crate) fn next_ready_timer_deadline(
