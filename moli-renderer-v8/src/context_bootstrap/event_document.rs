@@ -122,34 +122,25 @@ pub(super) fn document_create_event_callback<'s>(
     }
 }
 
-pub(super) fn document_has_focus_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments<'_>,
+pub(super) fn document_has_focus_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
     let document = args.this();
-    let focused = document
+    let has_browsing_context = document
         .get(scope, v8str(scope, "defaultView").into())
-        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
-        .map(|default_view| {
-            default_view
-                .get(scope, v8str(scope, "frameElement").into())
-                .filter(|value| !value.is_null_or_undefined())
-                .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
-                .map(|frame_element| {
-                    frame_element
-                        .get(scope, v8str(scope, "ownerDocument").into())
-                        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
-                        .and_then(|owner_document| {
-                            owner_document.get(scope, v8str(scope, "activeElement").into())
-                        })
-                        .is_some_and(|active_element| {
-                            active_element.strict_equals(frame_element.into())
-                        })
-                })
-                .unwrap_or(true)
-        })
-        .unwrap_or(false);
+        .is_some_and(|default_view| default_view.is_object());
+    // A nested Document has focus while the focused area sits in it or below
+    // it, including when its container is focused with nothing inside.
+    let focused = has_browsing_context
+        && crate::native_bridge::node_runtime_and_handle_from_object_or_detached(scope, document)
+            .is_ok_and(|(runtime_ptr, document_handle)| {
+                crate::native_bridge::document_is_in_focus_chain(
+                    unsafe { &*runtime_ptr },
+                    document_handle,
+                )
+            });
     let focused = focused
         && context_host_ptr_from_global_bridge(scope)
             .is_some_and(|host_ptr| unsafe { &*host_ptr }.document_activity().focused);
