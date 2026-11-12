@@ -601,6 +601,7 @@ impl JsContextHost {
         &mut self,
         fetch_context: super::WindowFetchContext,
         resolver: v8::Global<v8::PromiseResolver>,
+        resource_timing: crate::context_bootstrap::FetchResourceTiming,
         keepalive: bool,
         connect_policy: crate::document_runtime::DocumentConnectPolicySnapshot,
         csp_report_context: crate::network_host::WindowCspReportRequestContext,
@@ -611,8 +612,9 @@ impl JsContextHost {
         network_partition_key: Option<String>,
         policy_context: crate::types::SubresourcePolicyContext,
         mut info: PendingSubresourceFetchInfo,
-    ) {
+    ) -> u64 {
         self.assign_pending_subresource_fetch_identity(&mut info);
+        let internal_id = info.internal_id;
         let disposition = if keepalive {
             ResourceLoadDisposition::Keepalive
         } else {
@@ -641,6 +643,7 @@ impl JsContextHost {
                 continuation: PendingSubresourceContinuation::Fetch(
                     crate::types::PendingWindowFetchContinuation::new(
                         resolver,
+                        resource_timing,
                         keepalive,
                         cache_mode,
                         connect_policy,
@@ -651,6 +654,7 @@ impl JsContextHost {
             },
         );
         self.note_subresource_activity();
+        internal_id
     }
 
     pub(crate) fn record_pending_worker_subresource_fetch(
@@ -886,6 +890,7 @@ impl JsContextHost {
         &mut self,
         fetch_context: super::WindowFetchContext,
         resolver: v8::Global<v8::PromiseResolver>,
+        resource_timing: crate::context_bootstrap::FetchResourceTiming,
         keepalive: bool,
         connect_policy: crate::document_runtime::DocumentConnectPolicySnapshot,
         csp_report_context: crate::network_host::WindowCspReportRequestContext,
@@ -931,6 +936,7 @@ impl JsContextHost {
                 continuation: PendingSubresourceContinuation::Fetch(
                     crate::types::PendingWindowFetchContinuation::new(
                         resolver,
+                        resource_timing,
                         keepalive,
                         cache_mode,
                         connect_policy,
@@ -2901,8 +2907,12 @@ impl JsContextHost {
         internal_id: u64,
         reason: v8::Local<'s, v8::Value>,
         reason_payload: Option<crate::structured_clone::V8StructuredClonePayload>,
-    ) -> bool {
+    ) -> Option<(
+        v8::Global<v8::Context>,
+        crate::context_bootstrap::ResourcePerformanceEntry,
+    )> {
         if let Some(pending) = self.pending_subresource_fetches.remove(&internal_id) {
+            let timing = cancelled_fetch_resource_timing(&pending);
             pending.load.cancel();
             self.browser_context_runtime
                 .abort_service_worker_fetch_with_reason(internal_id, reason_payload.clone());
@@ -2910,10 +2920,11 @@ impl JsContextHost {
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
             );
-            return true;
+            return timing;
         }
 
         if let Some(running) = self.running_subresource_fetches.remove(&internal_id) {
+            let timing = cancelled_fetch_resource_timing(&running.pending);
             running.pending.load.cancel();
             self.browser_context_runtime
                 .abort_service_worker_fetch_with_reason(internal_id, reason_payload.clone());
@@ -2922,10 +2933,11 @@ impl JsContextHost {
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
             );
-            return true;
+            return timing;
         }
 
         if let Some(streaming) = self.streaming_subresource_fetches.remove(&internal_id) {
+            let timing = cancelled_fetch_resource_timing(&streaming.pending);
             streaming.pending.load.cancel();
             self.browser_context_runtime
                 .abort_service_worker_fetch_with_reason(internal_id, reason_payload.clone());
@@ -2945,11 +2957,12 @@ impl JsContextHost {
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
             );
-            return true;
+            return timing;
         }
 
         if let Some(auth) = self.pending_subresource_auths.remove(&internal_id) {
             let pending = auth.pending;
+            let timing = cancelled_fetch_resource_timing(&pending);
             pending.load.cancel();
             self.browser_context_runtime
                 .abort_service_worker_fetch_with_reason(internal_id, reason_payload.clone());
@@ -2957,11 +2970,12 @@ impl JsContextHost {
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
             );
-            return true;
+            return timing;
         }
 
         if let Some(response) = self.pending_subresource_responses.remove(&internal_id) {
             let pending = response.pending;
+            let timing = cancelled_fetch_resource_timing(&pending);
             pending.load.cancel();
             self.browser_context_runtime
                 .abort_service_worker_fetch_with_reason(internal_id, reason_payload);
@@ -2969,10 +2983,10 @@ impl JsContextHost {
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
             );
-            return true;
+            return timing;
         }
 
-        false
+        None
     }
 
     pub(crate) fn record_pending_subresource_continue_event(
@@ -3194,6 +3208,24 @@ impl JsContextHost {
         self.subresource_activity_epoch = self.subresource_activity_epoch.wrapping_add(1);
         self.subresource_last_activity_at = std::time::Instant::now();
     }
+}
+
+// The caller publishes after the host mutation finishes, in the Fetch's
+// retained relevant Realm. Detached keepalive work has no JS destination.
+fn cancelled_fetch_resource_timing(
+    pending: &PendingSubresourceFetchState,
+) -> Option<(
+    v8::Global<v8::Context>,
+    crate::context_bootstrap::ResourcePerformanceEntry,
+)> {
+    let PendingSubresourceContinuation::Fetch(fetch) = &pending.continuation else {
+        return None;
+    };
+    fetch.resolver()?;
+    Some((
+        pending.execution_context.context_global()?.clone(),
+        fetch.resource_timing().failed(&pending.info.url),
+    ))
 }
 
 fn reject_fetch_continuation(

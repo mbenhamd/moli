@@ -627,7 +627,7 @@ pub(super) fn prepare_pending_runtime_inspector_command(
                 receiver,
             }))
         }
-        None => continuation.finish_routed(conn),
+        None => continuation.finish_routed(conn, response_flush),
     }
 }
 
@@ -690,7 +690,7 @@ pub(super) fn push_runtime_protocol_event_or_background_event(
         }
         Err(event) => event,
     };
-    let Some(message) = event.protocol_message().cloned() else {
+    let Some(message) = event.protocol_json().cloned() else {
         plan.push_background_event(event);
         return;
     };
@@ -917,7 +917,7 @@ pub(super) fn prepare_pending_runtime_binding_inspector_command(
                 receiver,
             }))
         }
-        None => continuation.finish_routed(conn),
+        None => continuation.finish_routed(conn, response_flush),
     }
 }
 

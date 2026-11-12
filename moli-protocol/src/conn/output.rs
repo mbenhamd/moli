@@ -1,4 +1,5 @@
 use anyhow::Result;
+use moli_inspector_json::{InspectorJson, PRIVATE_PROTOCOL_PARAM_FIELDS};
 use std::sync::Arc;
 
 use crate::automation::{
@@ -205,7 +206,7 @@ impl RuntimeInspectorResponseReady {
                     .is_some_and(|call_id| call_id.get() == completion.call_id)
                     && completion
                         .output
-                        .protocol_response(completion.call_id)
+                        .protocol_response_payload(completion.call_id)
                         .is_some() =>
             {
                 let attachment_id = completion.renderer_agent_attachment_id();
@@ -235,12 +236,12 @@ impl RuntimeInspectorResponseReady {
             Ok(completion) => {
                 let message =
                     runtime_command_output_response_message(&completion.output, completion.call_id)
-                        .cloned()
-                        .unwrap_or(Value::Null);
+                        .map(InspectorJson::value)
+                        .unwrap_or(&Value::Null);
                 let payload = runtime_inspector_mismatched_completion_payload(
                     command_id,
                     completion.call_id,
-                    &message,
+                    message,
                 );
                 (
                     completion.renderer_agent_attachment_id(),
@@ -286,12 +287,12 @@ impl RuntimeInspectorResponseReady {
             Ok(completion) => {
                 let message =
                     runtime_command_output_response_message(&completion.output, completion.call_id)
-                        .cloned()
-                        .unwrap_or(Value::Null);
+                        .map(InspectorJson::value)
+                        .unwrap_or(&Value::Null);
                 runtime_inspector_mismatched_completion_payload(
                     self.frontend_command_id.get(),
                     completion.call_id,
-                    &message,
+                    message,
                 )
             }
             Err(message) => BackgroundCommandResponsePayload::internal_error(message.to_string()),
@@ -315,7 +316,7 @@ fn rewrite_runtime_command_output_response_id(
             .renderer_call_id()
             .is_some_and(|call_id| call_id.get() == renderer_call_id)
         {
-            message.value_mut()["id"] = json!(frontend_command_id);
+            message.set_frontend_id(frontend_command_id);
             rewritten = true;
             break;
         }
@@ -331,8 +332,8 @@ fn rewrite_runtime_command_output_response_id(
 fn runtime_command_output_response_message(
     output: &RendererRuntimeCommandOutput,
     call_id: i32,
-) -> Option<&Value> {
-    output.protocol_response(call_id)
+) -> Option<&InspectorJson> {
+    output.protocol_response_payload(call_id)
 }
 
 fn runtime_command_output_from_response_payload(
@@ -488,7 +489,7 @@ define_background_protocol_event_payloads!(
 impl BackgroundProtocolEventPayload {
     fn protocol_session_id(&self) -> Option<&str> {
         match self {
-            Self::Protocol(event) => event.message.get("sessionId").and_then(Value::as_str),
+            Self::Protocol(event) => event.message.session_id(),
             Self::CommandResponse(event) => event.session_id.as_deref(),
             Self::NetworkRequestWillBeSentExtraInfo(event) => event.session_id.as_deref(),
             Self::NetworkResponseReceivedExtraInfo(event) => event.session_id.as_deref(),
@@ -573,7 +574,7 @@ pub(crate) enum BackgroundCommandResponsePayloadRef<'a> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BackgroundProtocolMessageEvent {
-    message: Value,
+    message: InspectorJson,
     automation_event: Option<Box<AutomationEvent>>,
 }
 
@@ -1073,14 +1074,19 @@ impl ProtocolDeliveryEnvelope {
         self
     }
 
-    pub fn immediate(message: Value) -> Self {
+    pub fn immediate(message: impl Into<InspectorJson>) -> Self {
+        let message = message.into();
         Self::wrap_protocol(BackgroundProtocolMessageEvent {
             message,
             automation_event: None,
         })
     }
 
-    pub fn immediate_automation_event(message: Value, automation_event: AutomationEvent) -> Self {
+    pub fn immediate_automation_event(
+        message: impl Into<InspectorJson>,
+        automation_event: AutomationEvent,
+    ) -> Self {
+        let message = message.into();
         Self::wrap_protocol(BackgroundProtocolMessageEvent {
             message,
             automation_event: Some(Box::new(automation_event)),
@@ -1124,7 +1130,8 @@ impl ProtocolDeliveryEnvelope {
                     "suggestedFilename": suggested_filename,
                 }),
                 session_id,
-            ),
+            )
+            .into(),
             automation_event: None,
         })
         .bind_to_page_subscription_route(session_id, subscription_generation)
@@ -1148,7 +1155,8 @@ impl ProtocolDeliveryEnvelope {
                     "totalBytes": total_bytes,
                 }),
                 session_id,
-            ),
+            )
+            .into(),
             automation_event: None,
         })
         .bind_to_page_subscription_route(session_id, subscription_generation)
@@ -1982,8 +1990,8 @@ impl ProtocolDeliveryEnvelope {
         };
         match &mut self.payload {
             BackgroundProtocolEventPayload::Protocol(event) => {
-                if event.message.get("sessionId").is_none() {
-                    event.message["sessionId"] = json!(session_id);
+                if event.message.session_id().is_none() {
+                    event.message.set_session_id(Some(session_id));
                 }
             }
             BackgroundProtocolEventPayload::CommandResponse(event) => {
@@ -2225,11 +2233,10 @@ impl ProtocolDeliveryEnvelope {
     }
 
     pub fn is_document_network_response_started(&self) -> bool {
-        let Some(message) = self.protocol_message() else {
+        if self.protocol_method() != Some("Network.responseReceived") {
             return false;
-        };
-        message.get("method").and_then(Value::as_str) == Some("Network.responseReceived")
-            && self.network_resource_type() == Some(DevToolsNetworkResourceType::Document)
+        }
+        self.network_resource_type() == Some(DevToolsNetworkResourceType::Document)
     }
 
     pub fn trace_network_summary(
@@ -2286,11 +2293,11 @@ impl ProtocolDeliveryEnvelope {
             }
             _ => {}
         }
-        let message = self.protocol_message()?;
-        let method = message.get("method")?.as_str()?;
+        let method = self.protocol_method()?;
         if !method.starts_with("Network.") && !method.starts_with("Fetch.") {
             return None;
         }
+        let message = self.protocol_message()?;
         let params = message.get("params")?;
         let request_id = params
             .get("requestId")
@@ -2371,8 +2378,20 @@ impl ProtocolDeliveryEnvelope {
     }
 
     fn protocol_message_network_resource_type(&self) -> Option<DevToolsNetworkResourceType> {
+        let method = self.protocol_method()?;
+        if !matches!(
+            method,
+            "Network.requestWillBeSent"
+                | "Network.responseReceived"
+                | "Network.loadingFailed"
+                | "Network.webSocketFrameError"
+                | "Network.webSocketClosed"
+                | "Fetch.requestPaused"
+                | "Fetch.authRequired"
+        ) {
+            return None;
+        }
         let message = self.protocol_message()?;
-        let method = message.get("method")?.as_str()?;
         let params = message.get("params")?;
         match method {
             "Network.requestWillBeSent" | "Network.responseReceived" | "Network.loadingFailed" => {
@@ -2424,10 +2443,28 @@ impl ProtocolDeliveryEnvelope {
             .then(|| self.into_protocol_message())
     }
 
+    /// CDP transport keeps Inspector field bodies opaque through ID and session routing.
+    pub fn into_cdp_message(self) -> InspectorJson {
+        match self.payload {
+            BackgroundProtocolEventPayload::Protocol(event) => match event.message.into_parsed() {
+                Ok(value) => strip_moli_private_protocol_fields(value).into(),
+                // Raw construction rejects the same private params that Parsed
+                // messages strip here; only Inspector wire fields can bypass it.
+                Err(raw) => raw,
+            },
+            payload => Self {
+                payload,
+                route: self.route,
+            }
+            .into_protocol_message()
+            .into(),
+        }
+    }
+
     pub fn into_protocol_message(self) -> Value {
         match self.payload {
             BackgroundProtocolEventPayload::Protocol(event) => {
-                strip_moli_private_protocol_fields(event.message)
+                strip_moli_private_protocol_fields(event.message.into_value())
             }
             BackgroundProtocolEventPayload::CommandResponse(event) => {
                 (*event).into_protocol_message()
@@ -2579,7 +2616,7 @@ impl ProtocolDeliveryEnvelope {
     pub fn into_parts(self) -> (Value, Option<AutomationEvent>) {
         match self.payload {
             BackgroundProtocolEventPayload::Protocol(event) => (
-                event.message,
+                event.message.into_value(),
                 event
                     .automation_event
                     .map(|automation_event| *automation_event),
@@ -2719,9 +2756,16 @@ impl ProtocolDeliveryEnvelope {
         )
     }
 
-    pub fn protocol_message(&self) -> Option<&Value> {
+    pub fn protocol_json(&self) -> Option<&InspectorJson> {
         match &self.payload {
             BackgroundProtocolEventPayload::Protocol(event) => Some(&event.message),
+            _ => None,
+        }
+    }
+
+    pub fn protocol_message(&self) -> Option<&Value> {
+        match &self.payload {
+            BackgroundProtocolEventPayload::Protocol(event) => Some(event.message.value()),
             BackgroundProtocolEventPayload::CommandResponse(_) => None,
             BackgroundProtocolEventPayload::NetworkRequestWillBeSentExtraInfo(_) => None,
             BackgroundProtocolEventPayload::NetworkResponseReceivedExtraInfo(_) => None,
@@ -2773,9 +2817,7 @@ impl ProtocolDeliveryEnvelope {
 
     pub fn protocol_method(&self) -> Option<&str> {
         match &self.payload {
-            BackgroundProtocolEventPayload::Protocol(event) => {
-                event.message.get("method").and_then(Value::as_str)
-            }
+            BackgroundProtocolEventPayload::Protocol(event) => event.message.method(),
             BackgroundProtocolEventPayload::CommandResponse(_) => None,
             BackgroundProtocolEventPayload::NetworkRequestWillBeSentExtraInfo(_) => {
                 Some("Network.requestWillBeSentExtraInfo")
@@ -2926,9 +2968,7 @@ impl ProtocolDeliveryEnvelope {
 
     pub fn protocol_message_id(&self) -> Option<u64> {
         match &self.payload {
-            BackgroundProtocolEventPayload::Protocol(event) => {
-                event.message.get("id").and_then(Value::as_u64)
-            }
+            BackgroundProtocolEventPayload::Protocol(event) => event.message.id_u64(),
             BackgroundProtocolEventPayload::CommandResponse(event) => event.command_id,
             BackgroundProtocolEventPayload::NetworkRequestWillBeSentExtraInfo(_)
             | BackgroundProtocolEventPayload::NetworkResponseReceivedExtraInfo(_)
@@ -3037,10 +3077,10 @@ impl ProtocolDeliveryEnvelope {
     ) -> bool {
         match &self.payload {
             BackgroundProtocolEventPayload::Protocol(event) => {
-                event.message["method"] == json!("Console.messageAdded")
-                    && event.message["params"]["message"]["source"] == json!(source)
-                    && event.message["params"]["message"]["level"] == json!(level)
-                    && event.message["params"]["message"]["text"] == json!(text)
+                event.message.method() == Some("Console.messageAdded")
+                    && event.message.value()["params"]["message"]["source"] == json!(source)
+                    && event.message.value()["params"]["message"]["level"] == json!(level)
+                    && event.message.value()["params"]["message"]["text"] == json!(text)
             }
             BackgroundProtocolEventPayload::ConsoleMessageAdded(event) => {
                 event.source == source && event.level == level && event.text == text
@@ -3051,7 +3091,9 @@ impl ProtocolDeliveryEnvelope {
 
     pub(crate) fn protocol_params_mut(&mut self) -> Option<&mut Value> {
         match &mut self.payload {
-            BackgroundProtocolEventPayload::Protocol(event) => event.message.get_mut("params"),
+            BackgroundProtocolEventPayload::Protocol(event) => {
+                event.message.value_mut().get_mut("params")
+            }
             BackgroundProtocolEventPayload::CommandResponse(_) => None,
             BackgroundProtocolEventPayload::NetworkRequestWillBeSentExtraInfo(_) => None,
             BackgroundProtocolEventPayload::NetworkResponseReceivedExtraInfo(_) => None,
@@ -4155,14 +4197,11 @@ impl BackgroundTargetCrashedEvent {
 
 impl BackgroundTargetReceivedMessageFromTargetEvent {
     fn into_protocol_message(self) -> Value {
-        let mut nested_message = self.nested_event.into_protocol_message();
+        let mut nested_message = self.nested_event.into_cdp_message();
         if self.strip_implicit_session
-            && nested_message["sessionId"].as_str() == Some(self.target_session_id.as_str())
+            && nested_message.session_id() == Some(self.target_session_id.as_str())
         {
-            nested_message
-                .as_object_mut()
-                .expect("a protocol message is an object")
-                .remove("sessionId");
+            nested_message.set_session_id(None);
         }
         build_event(
             "Target.receivedMessageFromTarget",
@@ -4390,10 +4429,11 @@ fn strip_moli_private_protocol_fields(mut message: Value) -> Value {
     let preserve_blocked_intercepts =
         message.get("method").and_then(Value::as_str) == Some("Fetch.requestPaused");
     if let Some(params) = message.get_mut("params").and_then(Value::as_object_mut) {
-        if !preserve_blocked_intercepts {
-            params.remove("__moliBlockedInterceptors");
+        for key in PRIVATE_PROTOCOL_PARAM_FIELDS {
+            if !preserve_blocked_intercepts || *key != "__moliBlockedInterceptors" {
+                params.remove(*key);
+            }
         }
-        params.remove("__moliFetchRequestId");
     }
     message
 }
@@ -4847,6 +4887,58 @@ mod tests {
 
         assert_eq!(message["id"], json!(frontend_command_id));
         assert_eq!(message["result"]["result"]["value"], json!(42));
+    }
+
+    #[test]
+    fn runtime_inspector_command_output_routes_raw_responses_without_materializing() {
+        let frontend_command_id = u64::MAX;
+        for body in [
+            format!(
+                r#""result":{{"result":{{"type":"string","value":"{}"}}}}"#,
+                "x".repeat(1024 * 1024)
+            ),
+            format!(
+                r#""result":{{"result":{{"type":"object","value":{}0{}}}}}"#,
+                "[".repeat(150),
+                "]".repeat(150)
+            ),
+            r#""error":{"code":-32000,"message":"\ud800"}"#.to_owned(),
+        ] {
+            let payload = moli_inspector_json::InspectorJson::from_slice(
+                format!(r#"{{"id":11,{body}}}"#).as_bytes(),
+            )
+            .unwrap();
+            let response = RuntimeInspectorResponseReady::new_correlated(
+                frontend_command_id,
+                Some("SID-raw-completion"),
+                RendererCallId::new(11),
+                Ok(
+                    RendererRuntimeInspectorAsyncCompletion::from_command_output(
+                        11,
+                        RendererRuntimeCommandOutput::from_inspector_message(
+                            RendererRuntimeInspectorMessage::protocol(payload.clone()),
+                        ),
+                    ),
+                ),
+            );
+
+            let (command_id, output, predecessor) = response.into_renderer_command_output();
+
+            assert_eq!(command_id, frontend_command_id);
+            assert_eq!(predecessor, None);
+            // ID rewriting detaches a shared carrier and clears its view. Keep
+            // the input clone to detect materialization before that rewrite.
+            assert!(!payload.is_materialized());
+            let [RendererRuntimeInspectorMessage::Protocol(message)] = output.messages() else {
+                panic!("completion must preserve its single protocol response");
+            };
+            assert_eq!(message.payload().id_u64(), Some(frontend_command_id));
+            assert!(!message.payload().is_materialized());
+            assert_eq!(
+                message.payload().to_string(),
+                format!(r#"{{"id":{frontend_command_id},{body}}}"#)
+            );
+        }
     }
 
     #[test]
@@ -5854,5 +5946,99 @@ mod tests {
         assert_eq!(message["params"]["requestId"], json!("FETCH-1"));
         assert!(message["params"].get("__moliBlockedInterceptors").is_none());
         assert!(message["params"].get("__moliFetchRequestId").is_none());
+    }
+
+    #[test]
+    fn cdp_output_cannot_bypass_private_field_filtering_with_raw_json() {
+        use moli_inspector_json::{InspectorJson, PRIVATE_PROTOCOL_PARAM_FIELDS};
+
+        for method in ["Network.requestWillBeSent", "Fetch.requestPaused"] {
+            let host = json!({"method":method,"params":{
+                "requestId":"public-id",
+                "__moliFetchRequestId":"private-id",
+                "__moliBlockedInterceptors":["interceptor"]
+            }});
+            assert!(InspectorJson::from_slice(host.to_string().as_bytes()).is_err());
+            let wire = BackgroundProtocolEvent::immediate(host).into_cdp_message();
+            assert_eq!(wire.value()["params"]["requestId"], "public-id");
+            for key in PRIVATE_PROTOCOL_PARAM_FIELDS {
+                assert_eq!(
+                    wire.value()["params"].get(*key).is_some(),
+                    method == "Fetch.requestPaused" && *key == "__moliBlockedInterceptors"
+                );
+            }
+        }
+        let mut inspector = InspectorJson::from_slice(
+            br#"{"method":"Runtime.consoleAPICalled","params":{"type":"log"}}"#,
+        )
+        .unwrap();
+        inspector.value_mut()["params"]["__moliFetchRequestId"] = json!("private-id");
+        let wire = BackgroundProtocolEvent::immediate(inspector).into_cdp_message();
+        assert!(wire.value()["params"].get("__moliFetchRequestId").is_none());
+        let inspector = InspectorJson::from_slice(
+            br#"{"method":"Runtime.consoleAPICalled","params":{"args":[{"value":{"__moliFetchRequestId":"\ud800"}}]}}"#,
+        )
+        .unwrap();
+        let wire = BackgroundProtocolEvent::immediate(inspector).into_cdp_message();
+        assert!(!wire.is_materialized());
+        assert!(
+            wire.to_string()
+                .contains(r#""__moliFetchRequestId":"\ud800""#)
+        );
+    }
+
+    #[test]
+    fn document_response_classification_keeps_unrelated_raw_events_opaque() {
+        let message = moli_inspector_json::InspectorJson::from_slice(
+            br#"{"method":"Debugger.scriptParsed","params":{"description":"\ud800"}}"#,
+        )
+        .unwrap();
+        let event = BackgroundProtocolEvent::immediate(message);
+        assert!(!event.is_document_network_response_started());
+        assert!(!event.protocol_json().unwrap().is_materialized());
+    }
+
+    #[test]
+    fn network_tracing_keeps_unrelated_raw_events_opaque() {
+        let message = moli_inspector_json::InspectorJson::from_slice(
+            br#"{"method":"Runtime.consoleAPICalled","params":{"args":[{"value":"\udfff"}]}}"#,
+        )
+        .unwrap();
+        let event = BackgroundProtocolEvent::immediate(message);
+        assert_eq!(event.trace_network_summary(), None);
+        assert!(!event.protocol_json().unwrap().is_materialized());
+    }
+
+    #[test]
+    fn raw_network_events_keep_document_classification_and_trace_details() {
+        for (method, type_field, resource_type, document_started) in [
+            ("Network.responseReceived", "type", "Document", true),
+            ("Network.responseReceived", "type", "Script", false),
+            ("Fetch.requestPaused", "resourceType", "Document", false),
+        ] {
+            let url_field = if method == "Network.responseReceived" {
+                "response"
+            } else {
+                "request"
+            };
+            let raw = format!(
+                r#"{{"method":"{method}","params":{{"{type_field}":"{resource_type}","requestId":"REQ-1","{url_field}":{{"url":"https://example.test/"}}}}}}"#
+            );
+            let message = moli_inspector_json::InspectorJson::from_slice(raw.as_bytes()).unwrap();
+            let event = BackgroundProtocolEvent::immediate(message);
+            assert_eq!(
+                event.is_document_network_response_started(),
+                document_started
+            );
+            assert_eq!(
+                event.trace_network_summary(),
+                Some((
+                    method,
+                    Some(resource_type),
+                    Some("REQ-1"),
+                    Some("https://example.test/")
+                ))
+            );
+        }
     }
 }

@@ -1,9 +1,22 @@
 use crate::runtime::RendererPointerEventProperties;
-use crate::util::{serialize_v8_iter_array, v8_string};
+use crate::util::{serialize_v8_iter_array, v8_string, v8str};
 use crate::{document_runtime::DomHandle, native_bridge::JsContextHost};
 
 use super::{construct_event, event_constructor};
 use moli_webapi_declare::WebApiObject;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::native_bridge::element) enum ClickEventSource {
+    Pointer,
+    UserAgent,
+    Script,
+}
+
+impl ClickEventSource {
+    pub(in crate::native_bridge::element) fn is_trusted(self) -> bool {
+        self != Self::Script
+    }
+}
 
 #[derive(WebApiObject)]
 #[webapi(plain, data_properties, enumerable)]
@@ -23,7 +36,7 @@ struct MouseEventInitDeclaration<'scope> {
     meta_key: bool,
     shift_key: bool,
     related_target: Option<v8::Local<'scope, v8::Value>>,
-    view: v8::Local<'scope, v8::Object>,
+    view: Option<v8::Local<'scope, v8::Object>>,
 }
 
 #[derive(WebApiObject)]
@@ -453,24 +466,6 @@ impl InputEventCoordinates {
     }
 }
 
-pub(crate) fn construct_mouse_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    x: f64,
-    y: f64,
-    button: i32,
-    buttons: i32,
-) -> Option<v8::Local<'s, v8::Object>> {
-    construct_mouse_event_with_modifiers(
-        scope,
-        event_type,
-        InputEventCoordinates::from_root(x, y),
-        button,
-        buttons,
-        0,
-    )
-}
-
 pub(crate) fn construct_mouse_event_with_modifiers<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     event_type: &str,
@@ -488,6 +483,7 @@ pub(crate) fn construct_mouse_event_with_modifiers<'s>(
         buttons,
         modifiers,
         None,
+        Some(scope.get_current_context().global(scope)),
     )
 }
 
@@ -509,6 +505,7 @@ pub(crate) fn construct_mouse_event_with_detail_and_modifiers<'s>(
         buttons,
         modifiers,
         None,
+        Some(scope.get_current_context().global(scope)),
     )
 }
 
@@ -530,6 +527,7 @@ pub(crate) fn construct_mouse_event_with_related_target_and_modifiers<'s>(
         buttons,
         modifiers,
         related_target,
+        Some(scope.get_current_context().global(scope)),
     )
 }
 
@@ -542,6 +540,32 @@ fn construct_mouse_event_with_detail_and_related_target<'s>(
     buttons: i32,
     modifiers: u8,
     related_target: Option<v8::Local<'s, v8::Value>>,
+    view: Option<v8::Local<'s, v8::Object>>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let init = mouse_event_init(
+        scope,
+        event_type,
+        coordinates,
+        detail,
+        button,
+        buttons,
+        modifiers,
+        related_target,
+        view,
+    )?;
+    construct_event(scope, "MouseEvent", event_type, init)
+}
+
+fn mouse_event_init<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    event_type: &str,
+    coordinates: InputEventCoordinates,
+    detail: i32,
+    button: i32,
+    buttons: i32,
+    modifiers: u8,
+    related_target: Option<v8::Local<'s, v8::Value>>,
+    view: Option<v8::Local<'s, v8::Object>>,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let modifier_keys = modifier_key_state(modifiers);
     let is_boundary = matches!(event_type, "mouseenter" | "mouseleave");
@@ -569,13 +593,13 @@ fn construct_mouse_event_with_detail_and_related_target<'s>(
         modifier_keys.meta,
         modifier_keys.shift,
         related_target,
-        scope.get_current_context().global(scope),
+        view,
     )
     .bind(scope)
     .ok()?;
     init.set_prototype(scope, v8::null(scope).into())?
         .then_some(())?;
-    construct_event(scope, "MouseEvent", event_type, init)
+    Some(init)
 }
 
 pub(crate) fn construct_pointer_event<'s>(
@@ -1017,23 +1041,15 @@ pub(crate) fn construct_interest_event<'s>(
 
 pub(in crate::native_bridge::element) fn construct_click_event<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    x: f64,
-    y: f64,
-    button: i32,
-    buttons: i32,
-) -> Option<v8::Local<'s, v8::Object>> {
-    construct_mouse_event(scope, "click", x, y, button, buttons)
-}
-
-pub(in crate::native_bridge::element) fn construct_click_event_with_detail_and_modifiers<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
     coordinates: InputEventCoordinates,
     detail: i32,
     button: i32,
     buttons: i32,
     modifiers: u8,
+    view: Option<v8::Local<'s, v8::Object>>,
+    source: ClickEventSource,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    construct_mouse_event_with_detail_and_modifiers(
+    let init = mouse_event_init(
         scope,
         "click",
         coordinates,
@@ -1041,7 +1057,21 @@ pub(in crate::native_bridge::element) fn construct_click_event_with_detail_and_m
         button,
         buttons,
         modifiers,
-    )
+        None,
+        view,
+    )?;
+    let interface = if source == ClickEventSource::Pointer {
+        "MouseEvent"
+    } else {
+        // Blink reserves -1 for clicks with no pointing device. PointerEvent's
+        // other defaults describe a synthetic click, unlike physical input.
+        let key = v8str(scope, "pointerId");
+        let pointer_id = v8::Integer::new(scope, -1);
+        init.create_data_property(scope, key.into(), pointer_id.into())?
+            .then_some(())?;
+        "PointerEvent"
+    };
+    construct_event(scope, interface, "click", init)
 }
 
 pub(crate) fn construct_mouse_event_for_target<'s>(

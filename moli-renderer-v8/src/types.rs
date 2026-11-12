@@ -246,6 +246,7 @@ impl PendingSubresourceContinuation {
 
 pub(super) struct PendingWindowFetchContinuation {
     promise: PendingWindowFetchPromise,
+    resource_timing: crate::context_bootstrap::FetchResourceTiming,
     keepalive: bool,
     cache_mode: moli_fetch::RequestCacheMode,
     connect_policy: crate::document_runtime::DocumentConnectPolicySnapshot,
@@ -260,6 +261,7 @@ enum PendingWindowFetchPromise {
 impl PendingWindowFetchContinuation {
     pub(super) fn new(
         resolver: v8::Global<v8::PromiseResolver>,
+        resource_timing: crate::context_bootstrap::FetchResourceTiming,
         keepalive: bool,
         cache_mode: moli_fetch::RequestCacheMode,
         connect_policy: crate::document_runtime::DocumentConnectPolicySnapshot,
@@ -267,6 +269,7 @@ impl PendingWindowFetchContinuation {
     ) -> Self {
         Self {
             promise: PendingWindowFetchPromise::Active(resolver),
+            resource_timing,
             keepalive,
             cache_mode,
             connect_policy,
@@ -276,6 +279,10 @@ impl PendingWindowFetchContinuation {
 
     pub(super) fn cache_mode(&self) -> moli_fetch::RequestCacheMode {
         self.cache_mode
+    }
+
+    pub(super) fn resource_timing(&self) -> &crate::context_bootstrap::FetchResourceTiming {
+        &self.resource_timing
     }
 
     pub(super) fn keepalive(&self) -> bool {
@@ -749,17 +756,49 @@ impl From<std::result::Result<NavigationResponse, String>> for AsyncSubresourceF
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) use moli_fetch_types::FetchResponseType;
+
+/// Fetch delivery is separate from the Response's intrinsic metadata. In
+/// particular, forwarding a network Response through a Service Worker changes
+/// transfer accounting, but must preserve its filtering and timing permission.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum AsyncSubresourceFetchResponseFilter {
-    Basic,
-    Cors,
-    Opaque,
-    OpaqueRedirect,
+    Network(FetchResponseType),
+    ServiceWorker(std::sync::Arc<moli_fetch_types::FetchResponseMetadata>),
+}
+
+impl From<FetchResponseType> for AsyncSubresourceFetchResponseFilter {
+    fn from(response_type: FetchResponseType) -> Self {
+        Self::Network(response_type)
+    }
 }
 
 impl AsyncSubresourceFetchResponseFilter {
-    pub(super) fn is_readable(self) -> bool {
-        matches!(self, Self::Basic | Self::Cors)
+    pub(super) fn service_worker(metadata: moli_fetch_types::FetchResponseMetadata) -> Self {
+        Self::ServiceWorker(std::sync::Arc::new(metadata))
+    }
+
+    pub(super) fn response_type(&self) -> FetchResponseType {
+        match self {
+            Self::Network(kind) => *kind,
+            Self::ServiceWorker(metadata) => match metadata.response_type {
+                FetchResponseType::Default => FetchResponseType::Basic,
+                kind => kind,
+            },
+        }
+    }
+
+    pub(super) fn service_worker_metadata(
+        &self,
+    ) -> Option<&moli_fetch_types::FetchResponseMetadata> {
+        match self {
+            Self::Network(_) => None,
+            Self::ServiceWorker(metadata) => Some(metadata),
+        }
+    }
+
+    pub(super) fn is_readable(&self) -> bool {
+        self.response_type().is_readable()
     }
 }
 
