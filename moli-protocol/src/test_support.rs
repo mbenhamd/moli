@@ -25,6 +25,46 @@ pub fn command_response_flush_observer(
         .expect("test command owns a flush permit")
 }
 
+/// A completed command carrying only scheduler wakes. Adapter tests can retain
+/// this output while the connection still owns all published work.
+pub fn command_output_with_scheduler_events(
+    scheduler_events: Vec<crate::CdpSchedulerEvent>,
+) -> crate::CdpCommandTaskStep {
+    crate::CdpCommandTaskStep::Complete(
+        crate::CdpTurnOutcome::new_with_protocol_events(Vec::new(), scheduler_events)
+            .with_renderer_output_predecessor(None),
+    )
+}
+
+/// Uses the production allocation-and-publication boundary for synthetic
+/// concrete work. A caller cannot inject a separate ordering counter.
+pub fn publish_protocol_work(
+    conn: &mut CdpConnection,
+    build: impl FnOnce(u64) -> ProtocolSchedulerWork,
+) {
+    conn.publish_protocol_work(|sequence| {
+        let work = build(sequence.get());
+        assert_eq!(work.publish_sequence(), sequence);
+        work
+    });
+}
+
+/// A real lifecycle dependency on an existing command permit. The target is
+/// deliberately absent so adapter tests can exercise readiness independently
+/// of Native teardown.
+pub fn publish_retired_target_termination_after_command_output(
+    conn: &mut CdpConnection,
+    target_id: &str,
+    output: crate::CommandResponseFlushContext,
+) {
+    let action = crate::domains::page::PageTargetTerminationOwnerAction::new(
+        conn,
+        crate::conn::CommandOwnerScope::capture(conn, None),
+        target_id.to_owned(),
+    );
+    conn.publish_page_target_termination_after_command_output(action, output);
+}
+
 /// Binds a synthetic Page stream to a retired protocol Page owner, allowing
 /// scheduler tests to project historical output without a live Page.
 pub fn bind_renderer_page_output_stream_to_retired_owner(
@@ -140,12 +180,35 @@ pub fn root_frame_stopped_loading_work(
     )
 }
 
+pub fn renderer_fenced_output_work(
+    sequence: u64,
+    events: Vec<crate::BackgroundProtocolEvent>,
+    predecessors: Vec<moli_core::RendererOutputFence>,
+) -> ProtocolSchedulerWork {
+    ProtocolSchedulerWork::renderer_fenced_output(
+        crate::ProtocolWorkPublishSequence::new(sequence),
+        events,
+        predecessors,
+        None,
+    )
+}
+
 pub fn protocol_work_from_renderer_output(
     mut work: ProtocolSchedulerWork,
     source: moli_core::RendererOutputCursor,
 ) -> ProtocolSchedulerWork {
     work.bind_renderer_output_source(source);
     work
+}
+
+pub fn command_completion_with_scheduler_events(
+    events: Vec<crate::BackgroundProtocolEvent>,
+    scheduler_events: Vec<crate::CdpSchedulerEvent>,
+) -> crate::CdpCommandTaskStep {
+    crate::CdpCommandTaskStep::Complete(
+        crate::CdpTurnOutcome::new_with_protocol_events(events, scheduler_events)
+            .with_renderer_output_predecessor(None),
+    )
 }
 
 pub fn root_frame_stopped_loading_work_for_target(

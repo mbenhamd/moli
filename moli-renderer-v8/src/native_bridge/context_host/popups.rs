@@ -378,6 +378,7 @@ struct LightweightPopupDocumentRecord {
     local_window_id: LightweightPopupLocalWindowId,
     url: Url,
     access_origin: super::window_security_tokens::WindowAccessOrigin,
+    secure_context: bool,
     state: LightweightPopupDocumentState,
     storage_scope: LightweightPopupStorageScope,
     wrapper: Option<v8::Global<v8::Object>>,
@@ -905,6 +906,15 @@ impl JsContextHost {
             &mut initial_policy_container.sandbox,
             opener_sandbox_policy,
         );
+        let creator_scope = opener_endpoint
+            .map(|endpoint| endpoint.dispatch_scope())
+            .unwrap_or_else(|| self.entered_owner_dispatch_scope(scope));
+        let secure_context = if moli_url::is_about_blank(&initial_url) {
+            self.window_is_secure_context(scope, creator_scope)
+                .unwrap_or(false)
+        } else {
+            moli_url::is_potentially_trustworthy_url(&initial_url)
+        };
         let initial_document_state =
             LightweightPopupDocumentState::new(initial_base_url.clone(), initial_policy_container);
         let initial_resource_origin = initial_origin.serialized_origin();
@@ -933,6 +943,7 @@ impl JsContextHost {
                         local_window_id: initial_local_window_id,
                         url: initial_url.clone(),
                         access_origin: initial_origin,
+                        secure_context,
                         state: initial_document_state.clone(),
                         storage_scope,
                         wrapper: None,
@@ -1200,6 +1211,14 @@ impl JsContextHost {
             .map(|record| record.location_url.clone())
     }
 
+    pub(in crate::native_bridge::context_host) fn lightweight_popup_secure_context(
+        &self,
+        popup_id: u64,
+    ) -> Option<bool> {
+        self.lightweight_popup_document_record(popup_id)
+            .map(|document| document.secure_context)
+    }
+
     pub(crate) fn lightweight_popup_document_url(&self, popup_id: u64) -> Option<Url> {
         self.lightweight_popup_document_record(popup_id)
             .map(|document| document.url.clone())
@@ -1452,7 +1471,12 @@ impl JsContextHost {
         popup_id: u64,
     ) -> Option<Url> {
         self.lightweight_popup_document_record(popup_id)
-            .map(|document| document.state.base_url.clone())
+            .map(|document| {
+                document
+                    .handle
+                    .map(|handle| self.document_base_url_for_handle(handle))
+                    .unwrap_or_else(|| document.state.base_url.clone())
+            })
             .or_else(|| {
                 self.lightweight_popup_window(scope, popup_id)
                     .and_then(|window| lightweight_popup_location_href(scope, window))
@@ -1956,6 +1980,10 @@ impl JsContextHost {
         let popup_id = commit.owner.popup_id();
         let committed_document_url = commit.location_url.clone();
         let committed_base_url = commit.state.base_url.clone();
+        let initiator_scope = self.entered_owner_dispatch_scope(scope);
+        let initiator_secure_context = self
+            .window_is_secure_context(scope, initiator_scope)
+            .unwrap_or(false);
         let Some(current_document) = self.lightweight_popup_document_record(popup_id) else {
             return false;
         };
@@ -1968,6 +1996,18 @@ impl JsContextHost {
                 .expect("synthetic popup Document requires its previous exact authority")
                 .clone()
             });
+        let secure_context = match &commit.origin {
+            LightweightPopupDocumentCommitOrigin::RetainCurrent => current_document.secure_context,
+            LightweightPopupDocumentCommitOrigin::InheritExact(_) => initiator_secure_context,
+            LightweightPopupDocumentCommitOrigin::FromNavigationResponse(_)
+                if moli_url::is_about_blank(&committed_document_url) =>
+            {
+                initiator_secure_context
+            }
+            LightweightPopupDocumentCommitOrigin::FromNavigationResponse(_) => {
+                moli_url::is_potentially_trustworthy_url(&committed_document_url)
+            }
+        };
         let retained_access_origin = current_document.access_origin.clone();
         let current_local_window_id = if changed_document {
             self.allocate_lightweight_popup_local_window_id()
@@ -2014,6 +2054,7 @@ impl JsContextHost {
                     local_window_id: current_local_window_id,
                     url: commit.location_url.clone(),
                     access_origin,
+                    secure_context,
                     state: commit.state,
                     storage_scope: commit.storage_scope,
                     wrapper: None,
@@ -5016,6 +5057,8 @@ fn lightweight_popup_document_open_callback<'s>(
             document_handle,
             "",
         );
+        unsafe { &*host_ptr }
+            .reset_meta_content_security_policy_processing_for_document(document_handle);
         set_lightweight_popup_document_write_session(scope, document, true);
     }
     rv.set(document.into());
@@ -5062,6 +5105,8 @@ fn lightweight_popup_document_write_or_writeln_callback<'s>(
             document_handle,
             "",
         );
+        unsafe { &*host_ptr }
+            .reset_meta_content_security_policy_processing_for_document(document_handle);
         set_lightweight_popup_document_write_session(scope, document, true);
     }
     let mut html = String::new();

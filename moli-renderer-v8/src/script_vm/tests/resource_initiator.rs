@@ -2,7 +2,9 @@ use super::*;
 use crate::script_provenance::CompiledStringProvenance;
 
 mod event_handler_getter;
+mod fetch;
 mod geolocation_watch;
+mod parser;
 mod realm_lifetime;
 
 fn execute_with_source(vm: &mut ScriptVm, source: &str, url: &Url, base: &Url) {

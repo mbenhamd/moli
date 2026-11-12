@@ -2,16 +2,19 @@ use std::{collections::HashSet, sync::Arc};
 
 use crate::ContentSecurityPolicyDisposition;
 use ::content_security_policy::{Policy, PolicyDisposition, PolicySource};
+use url::Url;
 
 /// A delivered policy keeps its original text for reports and shares its parsed
 /// directives with inherited Documents, workers, and request snapshots.
 #[derive(Clone, Debug)]
 pub struct ContentSecurityPolicy(Arc<ParsedPolicy>);
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ParsedPolicy {
     serialized: String,
     policy: Policy,
+    self_origin: Option<Url>,
+    report_uri_endpoints: Option<Vec<String>>,
 }
 
 impl ContentSecurityPolicy {
@@ -46,7 +49,12 @@ impl ContentSecurityPolicy {
             directive.is_valid() && !invalid_first_names.contains(&directive.name)
         });
 
-        Self(Arc::new(ParsedPolicy { serialized, policy }))
+        Self(Arc::new(ParsedPolicy {
+            serialized,
+            policy,
+            self_origin: None,
+            report_uri_endpoints: None,
+        }))
     }
 
     /// Parse one HTTP policy while retaining its delivered text for reports.
@@ -63,6 +71,42 @@ impl ContentSecurityPolicy {
 
     pub fn from_meta(serialized: String) -> Self {
         Self::parse(serialized, PolicySource::Meta, PolicyDisposition::Enforce)
+    }
+
+    /// Capture the policy's origin at delivery. Inheriting a policy preserves
+    /// this identity even when sandboxing makes the new Document opaque.
+    pub fn with_self_origin(mut self, source_url: &Url) -> Self {
+        let origin_url = Url::parse(&source_url.origin().ascii_serialization())
+            .unwrap_or_else(|_| source_url.clone());
+        Arc::make_mut(&mut self.0).self_origin = Some(origin_url);
+        self
+    }
+
+    /// Capture the policy's source identity and resolve report destinations
+    /// against the full response URL before the policy can be inherited.
+    pub fn with_delivery_url(mut self, source_url: &Url) -> Self {
+        let endpoints = crate::reporting::resolve_report_uri_endpoints(&self, source_url);
+        self = self.with_self_origin(source_url);
+        Arc::make_mut(&mut self.0).report_uri_endpoints = Some(endpoints);
+        self
+    }
+
+    pub(crate) fn report_uri_endpoints(&self) -> Option<&[String]> {
+        self.0.report_uri_endpoints.as_deref()
+    }
+
+    /// A local policy can borrow its receiver's origin without changing the
+    /// shared policy. A delivered policy always keeps its captured identity.
+    pub(crate) fn effective_self_origin<'a>(
+        &'a self,
+        fallback_origin: Option<&'a Url>,
+        protected_url: &'a Url,
+    ) -> &'a Url {
+        self.0
+            .self_origin
+            .as_ref()
+            .or(fallback_origin)
+            .unwrap_or(protected_url)
     }
 
     pub fn as_str(&self) -> &str {
@@ -102,6 +146,8 @@ impl PartialEq for ContentSecurityPolicy {
         self.as_str() == other.as_str()
             && self.0.policy.source == other.0.policy.source
             && self.0.policy.disposition == other.0.policy.disposition
+            && self.0.self_origin == other.0.self_origin
+            && self.0.report_uri_endpoints == other.0.report_uri_endpoints
     }
 }
 

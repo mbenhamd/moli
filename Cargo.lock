@@ -2936,6 +2936,7 @@ dependencies = [
  "moli-cookie-jar",
  "moli-curl",
  "moli-dns-resolver",
+ "moli-fetch-types",
  "moli-header-field",
  "moli-http-cache",
  "moli-site",
@@ -2957,6 +2958,14 @@ dependencies = [
  "tracing",
  "url",
  "wildcard",
+]
+
+[[package]]
+name = "moli-fetch-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "url",
 ]
 
 [[package]]
@@ -3070,6 +3079,14 @@ dependencies = [
  "strum",
  "tokio",
  "unicode-id-start",
+]
+
+[[package]]
+name = "moli-inspector-json"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3260,6 +3277,7 @@ dependencies = [
  "moli-header-field",
  "moli-image",
  "moli-indexeddb",
+ "moli-inspector-json",
  "moli-layout",
  "moli-page-types",
  "moli-paint",
@@ -3319,6 +3337,7 @@ dependencies = [
  "moli-core",
  "moli-fetch",
  "moli-html-input-type",
+ "moli-inspector-json",
  "moli-protocol",
  "moli-protocol-cdp",
  "moli-protocol-webdriver-bidi",
@@ -3405,6 +3424,7 @@ dependencies = [
  "moli-encoding",
  "moli-encoding-detector",
  "moli-fetch",
+ "moli-fetch-types",
  "moli-file-api",
  "moli-geometry",
  "moli-history",
@@ -3413,6 +3433,7 @@ dependencies = [
  "moli-image",
  "moli-import-map",
  "moli-indexeddb",
+ "moli-inspector-json",
  "moli-layout",
  "moli-local-executor",
  "moli-message-port",
@@ -3571,6 +3592,7 @@ dependencies = [
  "base64 0.22.1",
  "moli-browser-profile",
  "moli-crypto",
+ "moli-fetch-types",
  "moli-header-field",
  "moli-indexeddb",
  "moli-opfs",
@@ -3694,6 +3716,7 @@ dependencies = [
 name = "moli-v8-util"
 version = "0.1.0"
 dependencies = [
+ "moli-inspector-json",
  "moli-v8-test-util",
  "moli-web-errors",
  "serde_json",

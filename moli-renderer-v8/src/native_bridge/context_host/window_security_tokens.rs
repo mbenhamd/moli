@@ -462,6 +462,49 @@ impl JsContextHost {
         self.lightweight_popup_access_origin(popup_id)
     }
 
+    /// Read native context state, including inherited and sandboxed empty
+    /// documents. A mutable API base URL never changes this security state.
+    pub(crate) fn window_is_secure_context(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+        mut owner: OwnerDispatchScope,
+    ) -> Option<bool> {
+        for _ in 0..=self.child_browsing_contexts.len() {
+            match owner {
+                OwnerDispatchScope::Top => {
+                    let context = self.page_default_context(scope)?;
+                    let scope = &mut v8::ContextScope::new(scope, context);
+                    let global = context.global(scope);
+                    return Some(
+                        crate::context_bootstrap::window_realm_secure_context_available(
+                            scope, global,
+                        ),
+                    );
+                }
+                OwnerDispatchScope::Child(handle) => {
+                    let entry = self.child_browsing_contexts.get(&handle)?;
+                    if !entry.security_origin_inherited() {
+                        return entry
+                            .current_document_url()
+                            .map(|url| moli_url::is_potentially_trustworthy_url(&url));
+                    }
+                    // Empty Documents inherit within their actual frame tree.
+                    // A popup is its root; the opener is not an ancestor.
+                    owner = self.owner_dispatch_scope_for_node(handle)?;
+                }
+                OwnerDispatchScope::LightweightPopup(popup_id) => {
+                    return self.lightweight_popup_secure_context(popup_id);
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn window_document_origin(&self, scope: OwnerDispatchScope) -> Option<String> {
+        self.window_access_origin_for_dispatch_scope(scope)
+            .map(|origin| origin.serialized_origin())
+    }
+
     pub(in crate::native_bridge::context_host) fn window_access_origin_for_dispatch_scope(
         &self,
         dispatch_scope: OwnerDispatchScope,

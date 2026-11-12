@@ -247,7 +247,7 @@ pub(crate) use window_accessors::{
 mod window_events;
 mod window_lazy_surface;
 mod window_receiver;
-pub(crate) use window_receiver::is_window_receiver;
+pub(crate) use window_receiver::{is_window_receiver, require_same_origin_window_receiver};
 mod window_runtime;
 
 pub(crate) use form_data_runtime::{
@@ -449,10 +449,10 @@ pub(crate) use self::notification_runtime::{
     notification_options_payload,
 };
 pub(crate) use self::performance_runtime::{
-    ResourcePerformanceEntry, bind_document_performance, bind_window_performance_seed,
-    current_performance_time_origin, increment_performance_event_count,
-    project_document_lifecycle_timing, record_resource_performance_entry,
-    run_resource_timing_buffer_full_task,
+    FetchResourceTiming, ResourcePerformanceEntry, bind_document_performance,
+    bind_window_performance_seed, current_performance_time_origin,
+    increment_performance_event_count, project_document_lifecycle_timing,
+    record_resource_performance_entry, run_resource_timing_buffer_full_task,
 };
 use self::range_live::{
     update_live_ranges_for_character_data_edit, update_live_ranges_for_character_data_reset,

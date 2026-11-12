@@ -1586,6 +1586,7 @@ impl RuntimeOwner {
                     job.current_cookie_context,
                     &job.request.url,
                     &upgraded_url,
+                    &job.request.method,
                 );
                 job.request.redirect_chain.push(https_upgrade_redirect_info(
                     job.current_url.clone(),
@@ -1684,40 +1685,36 @@ impl RuntimeOwner {
         if let Some(next_url) = next_url
             && job.request.transport_follows_redirects()
         {
-            job.request
-                .update_referrer_for_redirect(&response.final_url, &response.headers);
             let redirect_has_extra_info = request_extra_info.is_some() && !response.from_cache;
-            job.request.redirect_chain.push(RedirectInfo {
-                source: crate::RedirectSource::Network,
-                from_url: response.final_url.clone(),
-                to_url: next_url.clone(),
-                status: response.status,
-                headers: response.headers.clone(),
-                network_extra_info_available: redirect_has_extra_info,
-                request_extra_info: None,
-                response_extra_info: request_extra_info.map(|request_extra_info| {
-                    network_response_extra_info(
-                        request_extra_info,
-                        response.status,
-                        response.headers.clone(),
-                        response.cookie_set_reports.clone(),
-                    )
-                }),
-                redirect_has_extra_info,
-                request_cookie_report: None,
-                cookie_set_reports: response.cookie_set_reports.clone(),
-                from_cache: response.from_cache,
-                negotiated_http_version: response.negotiated_http_version,
-            });
-            job.current_cookie_context = advance_cookie_request_context(
+            job.current_cookie_context = commit_redirect_hop(
+                &mut job.request,
                 job.current_cookie_context,
-                &job.request.url,
-                &next_url,
+                &mut job.current_url,
+                &mut job.origin_key,
+                &mut job.redirect_count,
+                RedirectInfo {
+                    source: crate::RedirectSource::Network,
+                    from_url: response.final_url.clone(),
+                    to_url: next_url,
+                    status: response.status,
+                    headers: response.headers.clone(),
+                    network_extra_info_available: redirect_has_extra_info,
+                    request_extra_info: None,
+                    response_extra_info: request_extra_info.map(|request_extra_info| {
+                        network_response_extra_info(
+                            request_extra_info,
+                            response.status,
+                            response.headers.clone(),
+                            response.cookie_set_reports.clone(),
+                        )
+                    }),
+                    redirect_has_extra_info,
+                    request_cookie_report: None,
+                    cookie_set_reports: response.cookie_set_reports.clone(),
+                    from_cache: response.from_cache,
+                    negotiated_http_version: response.negotiated_http_version,
+                },
             );
-            job.request.apply_redirect_status(response.status);
-            job.current_url = next_url;
-            job.origin_key = origin_key_for_url(&job.current_url);
-            job.redirect_count += 1;
             job.http_version = RequestHttpVersion::PreferHttp2;
             return Ok(JobOutcome::Retry(Box::new(job)));
         }
@@ -1896,6 +1893,7 @@ impl RuntimeOwner {
                     job.current_cookie_context,
                     &job.request.url,
                     &upgraded_url,
+                    &job.request.method,
                 );
                 job.request.redirect_chain.push(https_upgrade_redirect_info(
                     job.current_url.clone(),
@@ -1988,40 +1986,36 @@ impl RuntimeOwner {
             {
                 tracing::debug!(url = %job.current_url, "failed to store streaming redirect response in disk cache: {error}");
             }
-            job.request
-                .update_referrer_for_redirect(&final_url, &headers);
             let redirect_has_extra_info = request_extra_info.is_some();
-            job.request.redirect_chain.push(RedirectInfo {
-                source: crate::RedirectSource::Network,
-                from_url: final_url,
-                to_url: next_url.clone(),
-                status,
-                headers: headers.clone(),
-                network_extra_info_available: redirect_has_extra_info,
-                request_extra_info: None,
-                response_extra_info: request_extra_info.map(|request_extra_info| {
-                    network_response_extra_info(
-                        request_extra_info,
-                        status,
-                        headers,
-                        cookie_set_reports.clone(),
-                    )
-                }),
-                redirect_has_extra_info,
-                request_cookie_report,
-                cookie_set_reports,
-                from_cache: false,
-                negotiated_http_version,
-            });
-            job.current_cookie_context = advance_cookie_request_context(
+            job.current_cookie_context = commit_redirect_hop(
+                &mut job.request,
                 job.current_cookie_context,
-                &job.request.url,
-                &next_url,
+                &mut job.current_url,
+                &mut job.origin_key,
+                &mut job.redirect_count,
+                RedirectInfo {
+                    source: crate::RedirectSource::Network,
+                    from_url: final_url,
+                    to_url: next_url,
+                    status,
+                    headers: headers.clone(),
+                    network_extra_info_available: redirect_has_extra_info,
+                    request_extra_info: None,
+                    response_extra_info: request_extra_info.map(|request_extra_info| {
+                        network_response_extra_info(
+                            request_extra_info,
+                            status,
+                            headers,
+                            cookie_set_reports.clone(),
+                        )
+                    }),
+                    redirect_has_extra_info,
+                    request_cookie_report,
+                    cookie_set_reports,
+                    from_cache: false,
+                    negotiated_http_version,
+                },
             );
-            job.request.apply_redirect_status(status);
-            job.current_url = next_url;
-            job.origin_key = origin_key_for_url(&job.current_url);
-            job.redirect_count += 1;
             job.http_version = RequestHttpVersion::PreferHttp2;
             job.easy = Some(easy);
             self.start_streaming_job_or_reply(state, job);
@@ -2221,6 +2215,7 @@ impl RuntimeOwner {
                     job.current_cookie_context,
                     &job.request.url,
                     &upgraded_url,
+                    &job.request.method,
                 );
                 job.request.redirect_chain.push(https_upgrade_redirect_info(
                     job.current_url.clone(),
@@ -2384,40 +2379,36 @@ impl RuntimeOwner {
                 {
                     tracing::debug!(url = %job.current_url, "failed to store raw streaming redirect response in disk cache: {error}");
                 }
-                job.request
-                    .update_referrer_for_redirect(&final_url, &headers);
                 let redirect_has_extra_info = request_extra_info.is_some();
-                job.request.redirect_chain.push(RedirectInfo {
-                    source: crate::RedirectSource::Network,
-                    from_url: final_url,
-                    to_url: next_url.clone(),
-                    status,
-                    headers: headers.clone(),
-                    network_extra_info_available: redirect_has_extra_info,
-                    request_extra_info: None,
-                    response_extra_info: request_extra_info.map(|request_extra_info| {
-                        network_response_extra_info(
-                            request_extra_info,
-                            status,
-                            headers,
-                            cookie_set_reports.clone(),
-                        )
-                    }),
-                    redirect_has_extra_info,
-                    request_cookie_report,
-                    cookie_set_reports,
-                    from_cache: false,
-                    negotiated_http_version,
-                });
-                job.current_cookie_context = advance_cookie_request_context(
+                job.current_cookie_context = commit_redirect_hop(
+                    &mut job.request,
                     job.current_cookie_context,
-                    &job.request.url,
-                    &next_url,
+                    &mut job.current_url,
+                    &mut job.origin_key,
+                    &mut job.redirect_count,
+                    RedirectInfo {
+                        source: crate::RedirectSource::Network,
+                        from_url: final_url,
+                        to_url: next_url,
+                        status,
+                        headers: headers.clone(),
+                        network_extra_info_available: redirect_has_extra_info,
+                        request_extra_info: None,
+                        response_extra_info: request_extra_info.map(|request_extra_info| {
+                            network_response_extra_info(
+                                request_extra_info,
+                                status,
+                                headers,
+                                cookie_set_reports.clone(),
+                            )
+                        }),
+                        redirect_has_extra_info,
+                        request_cookie_report,
+                        cookie_set_reports,
+                        from_cache: false,
+                        negotiated_http_version,
+                    },
                 );
-                job.request.apply_redirect_status(status);
-                job.current_url = next_url;
-                job.origin_key = origin_key_for_url(&job.current_url);
-                job.redirect_count += 1;
                 job.http_version = RequestHttpVersion::PreferHttp2;
                 job.easy = Some(easy);
                 self.start_raw_streaming_job_or_reply(state, job);
@@ -2528,32 +2519,28 @@ impl RuntimeOwner {
         if let Some(next_url) = next_url
             && job.request.transport_follows_redirects()
         {
-            job.request
-                .update_referrer_for_redirect(&final_url, &cached.headers);
-            job.request.redirect_chain.push(RedirectInfo {
-                source: crate::RedirectSource::Network,
-                from_url: final_url,
-                to_url: next_url.clone(),
-                status: cached.status,
-                headers: cached.headers,
-                network_extra_info_available: false,
-                request_extra_info: None,
-                response_extra_info: None,
-                redirect_has_extra_info: false,
-                request_cookie_report,
-                cookie_set_reports: Vec::new(),
-                from_cache: true,
-                negotiated_http_version: None,
-            });
-            job.current_cookie_context = advance_cookie_request_context(
+            job.current_cookie_context = commit_redirect_hop(
+                &mut job.request,
                 job.current_cookie_context,
-                &job.request.url,
-                &next_url,
+                &mut job.current_url,
+                &mut job.origin_key,
+                &mut job.redirect_count,
+                RedirectInfo {
+                    source: crate::RedirectSource::Network,
+                    from_url: final_url,
+                    to_url: next_url,
+                    status: cached.status,
+                    headers: cached.headers,
+                    network_extra_info_available: false,
+                    request_extra_info: None,
+                    response_extra_info: None,
+                    redirect_has_extra_info: false,
+                    request_cookie_report,
+                    cookie_set_reports: Vec::new(),
+                    from_cache: true,
+                    negotiated_http_version: None,
+                },
             );
-            job.request.apply_redirect_status(cached.status);
-            job.current_url = next_url;
-            job.origin_key = origin_key_for_url(&job.current_url);
-            job.redirect_count += 1;
             job.http_version = RequestHttpVersion::PreferHttp2;
             self.start_streaming_job_or_reply(state, job);
             return Ok(());
@@ -2592,32 +2579,28 @@ impl RuntimeOwner {
         if let Some(next_url) = next_url
             && job.request.transport_follows_redirects()
         {
-            job.request
-                .update_referrer_for_redirect(&final_url, &cached.headers);
-            job.request.redirect_chain.push(RedirectInfo {
-                source: crate::RedirectSource::Network,
-                from_url: final_url,
-                to_url: next_url.clone(),
-                status: cached.status,
-                headers: cached.headers,
-                network_extra_info_available: false,
-                request_extra_info: None,
-                response_extra_info: None,
-                redirect_has_extra_info: false,
-                request_cookie_report,
-                cookie_set_reports: Vec::new(),
-                from_cache: true,
-                negotiated_http_version: None,
-            });
-            job.current_cookie_context = advance_cookie_request_context(
+            job.current_cookie_context = commit_redirect_hop(
+                &mut job.request,
                 job.current_cookie_context,
-                &job.request.url,
-                &next_url,
+                &mut job.current_url,
+                &mut job.origin_key,
+                &mut job.redirect_count,
+                RedirectInfo {
+                    source: crate::RedirectSource::Network,
+                    from_url: final_url,
+                    to_url: next_url,
+                    status: cached.status,
+                    headers: cached.headers,
+                    network_extra_info_available: false,
+                    request_extra_info: None,
+                    response_extra_info: None,
+                    redirect_has_extra_info: false,
+                    request_cookie_report,
+                    cookie_set_reports: Vec::new(),
+                    from_cache: true,
+                    negotiated_http_version: None,
+                },
             );
-            job.request.apply_redirect_status(cached.status);
-            job.current_url = next_url;
-            job.origin_key = origin_key_for_url(&job.current_url);
-            job.redirect_count += 1;
             job.http_version = RequestHttpVersion::PreferHttp2;
             self.start_raw_streaming_job_or_reply(state, job);
             return Ok(());
@@ -2632,6 +2615,28 @@ impl RuntimeOwner {
 struct OwnerState {
     closed: bool,
     active_transfers: usize,
+}
+
+/// Commit the shared HTTP-hop state while retaining Request.url as the initial URL.
+/// Body collection, cache storage and transport retries remain with their owners.
+fn commit_redirect_hop(
+    request: &mut Request,
+    cookie_context: NetworkCookieRequestContext,
+    current_url: &mut Url,
+    origin_key: &mut Option<CurlOriginKey>,
+    redirect_count: &mut usize,
+    redirect: RedirectInfo,
+) -> NetworkCookieRequestContext {
+    request.update_referrer_for_redirect(&redirect.from_url, &redirect.headers);
+    request.apply_redirect_status(redirect.status);
+    let next_url = redirect.to_url.clone();
+    let context =
+        advance_cookie_request_context(cookie_context, &request.url, &next_url, &request.method);
+    request.record_redirect(redirect);
+    *current_url = next_url;
+    *origin_key = origin_key_for_url(current_url);
+    *redirect_count += 1;
+    context
 }
 
 #[derive(Debug)]

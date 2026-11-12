@@ -24,18 +24,17 @@ use crate::{
 use super::super::super::JsContextHost;
 use super::super::forms::{FormAssociatedResetCallbackTiming, reset_form_default_action};
 use super::super::{
-    InputEventCoordinates, NodePublicEventDispatchOutcome, TextEditInputType,
+    ClickEventSource, InputEventCoordinates, NodePublicEventDispatchOutcome, TextEditInputType,
     cache_input_files_from_selected_files, closed_details_ancestors_to_reveal,
-    construct_click_event_with_detail_and_modifiers, construct_command_event,
-    construct_drop_input_event, construct_input_event, construct_simple_event,
-    contenteditable_editing_host, dispatch_beforeinput, dispatch_popover_toggle_events,
-    dispatch_public_event, element_attribute, element_has_attribute, form_associated_form_owner,
-    is_disabled_form_control, is_focusable, is_valid_submit_button,
-    label_activation_control_handle, perform_popover_invoker_default_action,
-    perform_summary_click_default_action, replace_text_control_selection,
-    resolve_url_like_attribute, resolved_reflected_element_attribute_handle,
-    scroll_node_into_view_at_start, set_reflected_boolean_attribute, submit_form_with_submit_event,
-    update_focus,
+    construct_click_event, construct_command_event, construct_drop_input_event,
+    construct_input_event, construct_simple_event, contenteditable_editing_host,
+    dispatch_beforeinput, dispatch_popover_toggle_events, dispatch_public_event, element_attribute,
+    element_has_attribute, form_associated_form_owner, is_disabled_form_control, is_focusable,
+    is_valid_submit_button, label_activation_control_handle,
+    perform_popover_invoker_default_action, perform_summary_click_default_action,
+    replace_text_control_selection, resolve_url_like_attribute,
+    resolved_reflected_element_attribute_handle, scroll_node_into_view_at_start,
+    set_reflected_boolean_attribute, submit_form_with_submit_event, update_focus,
 };
 use super::targets::{
     SpecialBrowsingContextTarget, browsing_context_window_for_dispatch_scope,
@@ -735,7 +734,7 @@ fn radio_group_checked_snapshot(
         .collect()
 }
 
-fn dispatch_click_event(
+pub(in crate::native_bridge::element) fn dispatch_click_event(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut JsContextHost,
     handle: DomHandle,
@@ -744,25 +743,36 @@ fn dispatch_click_event(
     button: i32,
     buttons: i32,
     modifiers: u8,
-    trusted: bool,
+    source: ClickEventSource,
 ) -> Option<NodePublicEventDispatchOutcome> {
     let event = {
-        let context = if trusted {
-            crate::native_bridge::node_owner_document_relevant_context(scope, runtime_ptr, handle)?
-        } else {
-            scope.get_current_context()
-        };
+        let document = unsafe { &*runtime_ptr }
+            .dom_host()
+            .owner_document_handle(handle);
+        let view = document.and_then(|document| {
+            crate::native_bridge::document::document_associated_window_for_handle(
+                scope,
+                runtime_ptr,
+                document,
+            )
+        });
+        // The event Realm follows the current node Document, independently of
+        // the Realm of a borrowed click() method and of the nullable view.
+        let context =
+            crate::native_bridge::node_owner_document_relevant_context(scope, runtime_ptr, handle)?;
         let scope = &mut v8::ContextScope::new(scope, context);
-        construct_click_event_with_detail_and_modifiers(
+        construct_click_event(
             scope,
             coordinates,
             detail,
             button,
             buttons,
             modifiers,
+            view,
+            source,
         )?
     };
-    crate::context_bootstrap::set_event_trusted(scope, event, trusted);
+    crate::context_bootstrap::set_event_trusted(scope, event, source.is_trusted());
     Some(dispatch_public_event(scope, runtime_ptr, handle, event))
 }
 
@@ -782,9 +792,10 @@ fn click_handle_internal(
     buttons: i32,
     click_detail: i32,
     modifiers: u8,
-    user_initiated: bool,
+    source: ClickEventSource,
     focus_behavior: ClickFocusBehavior,
 ) -> RendererInputDispatchOutcome {
+    let user_initiated = source.is_trusted();
     let runtime = unsafe { &*runtime_ptr };
     if is_disabled_form_control(runtime, handle)
         || runtime
@@ -852,7 +863,7 @@ fn click_handle_internal(
             button,
             buttons,
             modifiers,
-            user_initiated,
+            source,
         ) && !outcome.allows_default()
         {
             let runtime = unsafe { &mut *runtime_ptr };
@@ -910,7 +921,7 @@ fn click_handle_internal(
             button,
             buttons,
             modifiers,
-            user_initiated,
+            source,
         ) && !outcome.allows_default()
         {
             let runtime = unsafe { &mut *runtime_ptr };
@@ -961,7 +972,7 @@ fn click_handle_internal(
         button,
         buttons,
         modifiers,
-        user_initiated,
+        source,
     ) {
         let _listener_threw = outcome.had_exception();
         if !outcome.allows_default() {
@@ -998,7 +1009,7 @@ fn click_handle_internal(
                             0,
                             0,
                             modifiers,
-                            user_initiated,
+                            source,
                             // Label activation focuses its associated control,
                             // even when the initiating script click does not.
                             ClickFocusBehavior::Apply,
@@ -1157,17 +1168,16 @@ pub(crate) fn activate_handle_via_click(
     button: i32,
     buttons: i32,
 ) -> RendererInputDispatchOutcome {
-    click_handle_internal(
+    activate_handle_via_click_with_detail_and_modifiers(
         scope,
         runtime_ptr,
         handle,
-        InputEventCoordinates::from_root(x, y),
+        x,
+        y,
         button,
         buttons,
         0,
         0,
-        true,
-        ClickFocusBehavior::Apply,
     )
 }
 
@@ -1191,19 +1201,19 @@ pub(crate) fn activate_handle_via_click_with_detail_and_modifiers(
         buttons,
         click_detail,
         modifiers,
-        true,
+        ClickEventSource::Pointer,
         ClickFocusBehavior::Apply,
     )
 }
 
-pub(crate) fn activate_default_submit_button_via_keyboard(
+pub(crate) fn activate_handle_via_keyboard(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut JsContextHost,
     handle: DomHandle,
     modifiers: u8,
 ) -> RendererInputDispatchOutcome {
-    // Implicit submission runs trusted synthetic click activation steps. The
-    // click has detail 0 and does not move focus away from the text control.
+    // Keyboard activation uses a trusted non-pointer click without moving focus.
+    // This also preserves focus on the text control during implicit submission.
     click_handle_internal(
         scope,
         runtime_ptr,
@@ -1213,7 +1223,7 @@ pub(crate) fn activate_default_submit_button_via_keyboard(
         0,
         0,
         modifiers,
-        true,
+        ClickEventSource::UserAgent,
         ClickFocusBehavior::Preserve,
     )
 }
@@ -1240,7 +1250,7 @@ pub(crate) fn activate_handle_after_pointer_release(
         buttons,
         click_detail,
         modifiers,
-        true,
+        ClickEventSource::Pointer,
         ClickFocusBehavior::Preserve,
     )
 }
@@ -1263,7 +1273,7 @@ pub(crate) fn activate_handle_via_synthetic_click(
         buttons,
         0,
         0,
-        false,
+        ClickEventSource::Script,
         ClickFocusBehavior::Preserve,
     )
 }
@@ -1495,7 +1505,11 @@ fn perform_click_default_action(
             0,
             0,
             modifiers,
-            user_initiated,
+            if user_initiated {
+                ClickEventSource::UserAgent
+            } else {
+                ClickEventSource::Script
+            },
             ClickFocusBehavior::Apply,
         );
         return None;

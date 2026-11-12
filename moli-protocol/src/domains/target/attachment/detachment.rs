@@ -415,12 +415,7 @@ mod tests {
             );
             assert!(command_context.take_protocol_events().is_empty());
             assert!(
-                conn.take_scheduler_events()
-                    .into_iter()
-                    .all(|event| !matches!(
-                        event,
-                        crate::conn::CdpSchedulerEvent::ProtocolWorkPublished { .. }
-                    )),
+                conn.take_published_protocol_work().is_empty(),
                 "Target cleanup must not publish the command response as background work"
             );
             (output, command_context.take_renderer_output_dependencies())
@@ -456,9 +451,7 @@ mod tests {
                 let (events, scheduler) = outcome.into_protocol_event_parts();
                 assert!(events.is_empty());
                 for event in scheduler {
-                    let crate::conn::CdpSchedulerEvent::RendererOutputProjectionPrepared {
-                        pending,
-                    } = event
+                    let crate::conn::CdpSchedulerEvent::ProtocolTaskPrepared { pending } = event
                     else {
                         panic!("expected the exact renderer projection");
                     };
