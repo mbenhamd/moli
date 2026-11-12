@@ -1331,10 +1331,10 @@ async fn advance_page_task_executor_until_eval_equals(
     expected: &str,
     context: &str,
 ) {
-    // A selected lifecycle task may perform the first real layout, including
-    // CoreText font discovery on macOS. Give the complete behavior the same
-    // budget as a production lifecycle task, including its follow-up events.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    // This bounds a complete workflow rather than an individual task. Bulk
+    // IndexedDB and resource fixtures can span thousands of SQL completions
+    // or dozens of navigations while the rest of the suite runs in parallel.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let value = page
             .eval(expression)
@@ -2241,6 +2241,7 @@ mod event_receivers;
 mod svg_number_list_native_receivers;
 
 mod geometry_matrix_constructor_union;
+mod geometry_matrix_dictionary_order;
 mod geometry_point_conversion_order;
 mod geometry_point_transform;
 mod headers_list;
@@ -2318,6 +2319,8 @@ mod offline_audio_context_interfaces;
 mod offline_audio_float;
 mod periodic_wave_interfaces;
 mod post_parse;
+
+mod promise_jobs;
 mod queue_microtask;
 
 mod svg_gradient_native_receivers;

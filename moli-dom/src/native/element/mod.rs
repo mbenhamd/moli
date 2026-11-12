@@ -23,7 +23,7 @@ use super::NativeDom;
 use super::node::{NativeNodeId, Node};
 use crate::custom_elements::is_valid_custom_element_name;
 use crate::forms::{
-    InputType, InputValueSanitizationContext, is_valid_number_input_value,
+    ButtonTypeState, InputType, InputValueSanitizationContext, is_valid_number_input_value,
     sanitize_input_value_for_type_with_context,
 };
 
@@ -500,6 +500,10 @@ impl Element {
                         | InputType::Reset
                         | InputType::Image
                 ))
+    }
+
+    pub fn button_type_state(&self) -> ButtonTypeState {
+        ButtonTypeState::from_attribute_value(self.attribute("type"))
     }
 
     pub fn input_value(&self) -> String {
