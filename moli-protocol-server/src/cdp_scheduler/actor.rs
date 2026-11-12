@@ -11,9 +11,9 @@ use std::{
 use anyhow::{Context as _, Result};
 use moli_core::{RendererOutputFence, RendererOutputTransportMessage};
 use moli_protocol::{
-    BackgroundNavigationCompletion, BackgroundProtocolEvent, CdpSchedulerEvent,
-    CommandDispatchContext, CommandWaitLifetime, CompletedCdpCommandDispatch,
-    CompletedPageScreencastCapture, ParsedCdpCommand, PendingCdpCommandDispatch,
+    BackgroundNavigationCompletion, BackgroundProtocolEvent, CommandDispatchContext,
+    CommandWaitLifetime, CompletedCdpCommandDispatch, CompletedPageScreencastCapture,
+    ParsedCdpCommand, PendingCdpCommandDispatch,
     conn::{RuntimeInspectorAsyncCompletionReceiver, RuntimeInspectorResponseReady},
 };
 use serde_json::Value;
@@ -161,7 +161,7 @@ enum SchedulerInput {
 }
 
 struct SchedulerInputReceivers {
-    state_events_ready: std::rc::Rc<tokio::sync::Notify>,
+    state_events_ready: std::sync::Arc<tokio::sync::Notify>,
     protocol_work_completion_rx:
         mpsc::UnboundedReceiver<super::protocol_task::ProtocolWorkCompletion>,
     document_activity_completion_rx:
@@ -928,12 +928,9 @@ async fn flush_background_completion_input(
 
 enum RuntimeDeferredReplyFlushItem {
     Protocol(ProtocolOutputSequence),
-    FinishCommand(RuntimeDeferredReplyCompletedCommand),
-}
-
-struct RuntimeDeferredReplyCompletedCommand {
-    post_flush_scheduler_events: Vec<CdpSchedulerEvent>,
-    output_release_permit: Option<CommandOutputReleasePermit>,
+    FinishCommand {
+        output_release_permit: Option<CommandOutputReleasePermit>,
+    },
 }
 
 struct RuntimeDeferredReplyCompletion {
@@ -989,14 +986,13 @@ impl RuntimeDeferredReplyCompletion {
     ) -> (
         ProtocolOutputSequence,
         Vec<BackgroundProtocolEvent>,
-        RuntimeDeferredReplyCompletedCommand,
+        Option<CommandOutputReleasePermit>,
     ) {
         let (
             completion_output,
             post_renderer_output,
             renderer_output_boundary,
             post_response_events,
-            post_flush_scheduler_events,
             renderer_output_predecessor,
             output_release_permit,
         ) = self.output.into_parts();
@@ -1011,10 +1007,7 @@ impl RuntimeDeferredReplyCompletion {
         (
             completion_output,
             post_response_events,
-            RuntimeDeferredReplyCompletedCommand {
-                post_flush_scheduler_events,
-                output_release_permit,
-            },
+            output_release_permit,
         )
     }
 }
@@ -1140,9 +1133,14 @@ async fn flush_protocol_output_with_runtime_deferred_reply_routing(
                     }
                 }
             },
-            RuntimeDeferredReplyFlushItem::FinishCommand(completed) => {
-                let followup_output =
-                    finish_runtime_deferred_reply_completed_command(scheduler, completed).await;
+            RuntimeDeferredReplyFlushItem::FinishCommand {
+                output_release_permit,
+            } => {
+                let followup_output = finish_runtime_deferred_reply_completed_command(
+                    scheduler,
+                    output_release_permit,
+                )
+                .await;
                 if !followup_output.is_empty() {
                     pending_flush
                         .push_front(RuntimeDeferredReplyFlushItem::Protocol(followup_output));
@@ -1158,11 +1156,13 @@ fn enqueue_runtime_deferred_reply_completion_flush(
     completion: RuntimeDeferredReplyCompletion,
     remaining_output: ProtocolOutputSequence,
 ) {
-    let (completion_output, post_response_events, completed) = completion.into_parts();
+    let (completion_output, post_response_events, output_release_permit) = completion.into_parts();
     if !remaining_output.is_empty() {
         pending_flush.push_front(RuntimeDeferredReplyFlushItem::Protocol(remaining_output));
     }
-    pending_flush.push_front(RuntimeDeferredReplyFlushItem::FinishCommand(completed));
+    pending_flush.push_front(RuntimeDeferredReplyFlushItem::FinishCommand {
+        output_release_permit,
+    });
     if !post_response_events.is_empty() {
         pending_flush.push_front(RuntimeDeferredReplyFlushItem::Protocol(
             ProtocolOutputSequence::from_background_events(post_response_events),
@@ -1173,12 +1173,9 @@ fn enqueue_runtime_deferred_reply_completion_flush(
 
 async fn finish_runtime_deferred_reply_completed_command(
     scheduler: &mut CdpScheduler,
-    completed: RuntimeDeferredReplyCompletedCommand,
+    output_release_permit: Option<CommandOutputReleasePermit>,
 ) -> ProtocolOutputSequence {
-    let mut followup_output = scheduler.finish_command_dispatch_output_flush(
-        completed.post_flush_scheduler_events,
-        completed.output_release_permit,
-    );
+    let mut followup_output = scheduler.finish_command_dispatch_output_flush(output_release_permit);
     followup_output.append(scheduler.complete_ready_protocol_residences_after_command());
     followup_output
 }
@@ -1221,16 +1218,15 @@ async fn fail_runtime_deferred_reply_for_loose_protocol_response(
         .state
         .with_state(|state| state.forget_scheduler_deferred_inspector_reply(pending.pending))
         .expect("live protocol actor state");
-    let command_output = (CommandTurnOutput::new(
-        ProtocolOutputSequence::from_background_event(BackgroundProtocolEvent::command_error(
+    let command_output = (CommandTurnOutput::new(ProtocolOutputSequence::from_background_event(
+        BackgroundProtocolEvent::command_error(
             Some(command_id),
             None,
             -32000,
             "RuntimeDeferredReplyLooseProtocolResponse".to_owned(),
             None,
-        )),
-        Vec::new(),
-    ))
+        ),
+    )))
     .with_output_release_permit(pending.output_release_permit);
     Ok(RuntimeDeferredReplyAdvance::Complete(Box::new(
         RuntimeDeferredReplyCompletion {
@@ -1291,7 +1287,8 @@ async fn flush_runtime_deferred_reply_advance(
             let completion = (*completion)
                 .settle_exact_outputs_before_response(scheduler)
                 .await;
-            let (completion_output, post_response_events, completed) = completion.into_parts();
+            let (completion_output, post_response_events, output_release_permit) =
+                completion.into_parts();
             frontend_router.enqueue_protocol_output_sequence(completion_output);
             if !post_response_events.is_empty()
                 && !flush_protocol_output_with_runtime_deferred_reply_routing(
@@ -1305,7 +1302,8 @@ async fn flush_runtime_deferred_reply_advance(
                 return false;
             }
             let followup_output =
-                finish_runtime_deferred_reply_completed_command(scheduler, completed).await;
+                finish_runtime_deferred_reply_completed_command(scheduler, output_release_permit)
+                    .await;
             if !followup_output.is_empty() {
                 flush_protocol_output_with_runtime_deferred_reply_routing(
                     frontend_router,
@@ -1390,8 +1388,8 @@ fn runtime_deferred_reply_unexpected_pending_output(
     session_id: Option<&str>,
     pending_kind: &str,
 ) -> CommandTurnOutput {
-    CommandTurnOutput::new(
-        ProtocolOutputSequence::from_background_event(BackgroundProtocolEvent::command_error(
+    CommandTurnOutput::new(ProtocolOutputSequence::from_background_event(
+        BackgroundProtocolEvent::command_error(
             command_id,
             session_id,
             -32000,
@@ -1399,9 +1397,8 @@ fn runtime_deferred_reply_unexpected_pending_output(
             Some(json!({
                 "pendingKind": pending_kind,
             })),
-        )),
-        Vec::new(),
-    )
+        ),
+    ))
 }
 
 async fn handle_adapter_scheduler_input(
@@ -1976,7 +1973,6 @@ async fn flush_completed_command_output(
         post_renderer_output,
         renderer_output_boundary,
         post_response_events,
-        post_flush_scheduler_events,
         renderer_output_predecessor,
         output_release_permit,
     ) = output.into_parts();
@@ -1988,7 +1984,6 @@ async fn flush_completed_command_output(
         take_internal_command_response(metadata, &mut protocol_output, frontend_router, scheduler);
     let messages = protocol_output.len();
     let post_response_event_count = post_response_events.len();
-    let post_flush_event_count = post_flush_scheduler_events.len();
     let trace_started = moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
     if trace_started.is_some() {
         tracing::info!(
@@ -1996,7 +1991,6 @@ async fn flush_completed_command_output(
             stage = "command_output_flush_start",
             messages,
             post_response_events = post_response_event_count,
-            post_flush_events = post_flush_event_count,
         );
     }
     if !flush_protocol_output_with_runtime_deferred_reply_routing(
@@ -2060,8 +2054,7 @@ async fn flush_completed_command_output(
     {
         return false;
     }
-    let released_output = scheduler
-        .finish_command_dispatch_output_flush(post_flush_scheduler_events, output_release_permit);
+    let released_output = scheduler.finish_command_dispatch_output_flush(output_release_permit);
     if !released_output.is_empty()
         && !flush_protocol_output_with_runtime_deferred_reply_routing(
             frontend_router,
@@ -2091,7 +2084,6 @@ async fn flush_completed_command_output(
             stage = "command_output_flush_done",
             messages,
             post_response_events = post_response_event_count,
-            post_flush_events = post_flush_event_count,
             elapsed_us = %started.elapsed().as_micros(),
         );
     }
@@ -2604,7 +2596,6 @@ mod tests {
                 dependencies.extend([first, second].map(RendererOutputFence::new_for_test));
                 let output = CommandTurnOutput::new(
                     ProtocolOutputSequence::from_background_event(BackgroundProtocolEvent::command_success(metadata.id, metadata.session_id.as_deref(), json!({}))),
-                    Vec::new(),
                 ).with_renderer_output_dependencies(dependencies)
                     .with_output_release_permit(CommandOutputReleasePermit::new(permit, None));
                 let publication = |cursor| RendererOutputTransportMessage::Publication(RendererOutputPublication::new_for_test(

@@ -85,6 +85,8 @@ async fn arm_popup_route(
     popup_session_id: &str,
     popup_url: &str,
 ) {
+    ctx.wait_for_initial_document_for_target(popup_target_id)
+        .await;
     ctx.with_fixture(|conn| {
         assert!(
             conn.target_has_waiting_for_debugger_session(popup_target_id),
@@ -464,7 +466,11 @@ async fn rust_cdp_playwright_route_abort_underlying_navigation_contract() {
     .await;
     ctx.expect_result(84_007, json!({}), Some(&attached.session_id));
     let navigation = take_response_by_id(&mut ctx, 84_006);
-    assert_eq!(navigation["error"]["message"], "net::ERR_BLOCKED_BY_CLIENT");
+    assert!(navigation["error"].is_null(), "{navigation:?}");
+    assert_eq!(
+        navigation["result"]["errorText"],
+        "net::ERR_BLOCKED_BY_CLIENT"
+    );
     assert!(ctx.sent.iter().any(|message| {
         message["sessionId"] == json!(attached.session_id)
             && message["method"] == json!("Network.loadingFailed")
@@ -907,19 +913,15 @@ async fn queued_popup_navigation_rechecks_a_late_debugger_barrier() {
 
     let work = ctx.with_fixture(|conn| {
         conn.publish_popup_target_navigation_owner_action(action);
-        conn.take_scheduler_events()
+        conn.take_published_protocol_work()
             .into_iter()
-            .find_map(|event| match event {
-                crate::conn::CdpSchedulerEvent::ProtocolWorkPublished { work }
-                    if work.kind()
-                        == crate::ProtocolSchedulerWorkKind::PopupTargetNavigationOwnerAction =>
-                {
-                    Some(work)
-                }
-                _ => None,
+            .find(|work| {
+                work.kind() == crate::ProtocolSchedulerWorkKind::PopupTargetNavigationOwnerAction
             })
             .unwrap()
     });
+    ctx.wait_for_initial_document_for_target(&popup_target_id)
+        .await;
     let outcome = ctx.run_fixture_scheduler_work(work).await;
     assert!(outcome.into_parts().0.is_empty());
     ctx.with_fixture(|conn| {

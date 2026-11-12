@@ -55,8 +55,18 @@ non-yielding WebDriver timeout behavior.
   handles, `document.open()` replacement stale-element behavior, and headless window state surface.
 - WebDriver BiDi `session.status`, `session.new`, `browsingContext.create`,
   exactly one `browsingContext.userPromptOpened`/`userPromptClosed` notification
-  per alert/confirm/prompt, prompt text and one-shot handling followed by live
-  commands in the same session,
+  per alert/confirm/prompt under `ignore`, `accept`, and `dismiss`, JavaScript
+  return values after manual or automatic handling, and one-shot handling
+  followed by live commands in the same session. Alert close events report
+  acknowledgement for both automatic and manual dismissal. Popup dialogs work without
+  a `contextCreated` subscription while their causing script is still pending.
+  With lifecycle events subscribed, popup creation precedes prompt opening under
+  manual handling and automatic acceptance/dismissal. Closing a popup while its
+  prompt is waiting produces one prompt closure before one destruction. A nested popup
+  with a configured preload channel checks parent/child creation order and modal progress.
+  A shared Classic/BiDi session
+  checks that explicit empty, omitted, and replacement BiDi text override text
+  previously stored by Classic. The group also covers
   `session.subscribe`, `browsingContext.navigate`, DOMContentLoaded lifecycle
   events, `input.performActions`, `input.releaseActions`, key actions that trigger a top-level Page
   replacement and remain successful through the replacement lifecycle, element-origin input

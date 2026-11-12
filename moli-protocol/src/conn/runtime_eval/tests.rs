@@ -999,12 +999,8 @@ fn run_deep_protocol_value_test(name: &'static str, test: impl FnOnce() + Send +
 fn take_only_protocol_work(
     conn: &mut CdpConnection,
 ) -> crate::domains::activity::ProtocolSchedulerWork {
-    let scheduler_events = conn.take_scheduler_events();
-    let [CdpSchedulerEvent::ProtocolWorkPublished { work }] = <[_; 1]>::try_from(scheduler_events)
-        .expect("test action must publish exactly one protocol work")
-    else {
-        unreachable!("array pattern fixes the only event kind")
-    };
+    let [work] = <[_; 1]>::try_from(conn.take_published_protocol_work())
+        .expect("test action must publish exactly one protocol work");
     work
 }
 
@@ -1057,9 +1053,9 @@ fn bidi_channel_listener_owner_work_publishes_concrete_scheduler_work() {
     let listener = bidi_channel_listener_residence_for_test(&conn, "SID-active", "wake");
     conn.publish_bidi_channel_listener_start(listener);
 
-    let scheduler_events = conn.take_scheduler_events();
-    let [CdpSchedulerEvent::ProtocolWorkPublished { work }] = scheduler_events.as_slice() else {
-        panic!("listener start must publish one concrete protocol work: {scheduler_events:?}");
+    let publications = conn.take_published_protocol_work();
+    let [work] = publications.as_slice() else {
+        panic!("listener start must publish one concrete protocol work: {publications:?}");
     };
     assert_eq!(
         work.kind(),
@@ -1079,13 +1075,10 @@ fn bidi_channel_actions_keep_causal_publication_order() {
     let owner = listener.owner().clone();
     conn.publish_bidi_channel_listener_start(listener);
     conn.publish_bidi_channel_object_group_release(owner, "webdriver-bidi-channel-ordered");
-    let scheduler_events = conn.take_scheduler_events();
-    let works = scheduler_events
+    let publications = conn.take_published_protocol_work();
+    let works = publications
         .iter()
-        .map(|event| {
-            let CdpSchedulerEvent::ProtocolWorkPublished { work } = event else {
-                panic!("BiDi action must not fall back to source-shaped capture: {event:?}");
-            };
+        .map(|work| {
             (
                 work.publish_sequence().get(),
                 work.bidi_channel_owner_action_kind(),
@@ -1313,6 +1306,71 @@ fn route_inspector_notifications_strip_stale_session_id_without_current_session(
     assert_eq!(message["method"], json!("Runtime.executionContextCreated"));
     assert_eq!(message["params"]["context"]["id"], json!(7));
     assert_eq!(message["params"]["context"]["uniqueId"], json!("realm-7"));
+}
+
+#[test]
+fn raw_inspector_handle_free_notifications_do_not_materialize_business_views() {
+    let mut conn = CdpConnection::default();
+    let owner = CommandOwnerScope::capture(&conn, None);
+    for method in [
+        "Debugger.scriptParsed",
+        "Debugger.scriptFailedToParse",
+        "HeapProfiler.addHeapSnapshotChunk",
+    ] {
+        let raw = format!(
+            r#"{{"method":"{method}","params":{{"scriptId":"1","url":"\ud800","chunk":"snapshot"}}}}"#
+        );
+        let message = InspectorJson::from_slice(raw.as_bytes()).unwrap();
+        let mut responses = Vec::new();
+        let mut notifications = Vec::new();
+        assert!(
+            !conn.route_runtime_inspector_protocol_message_for_owner_with_background_events_into(
+                message.clone(),
+                None,
+                &owner,
+                &mut responses,
+                &mut notifications,
+            )
+        );
+        assert!(responses.is_empty());
+        assert!(
+            !message.is_materialized(),
+            "{method} must not parse and clone a Value"
+        );
+        assert_eq!(notifications.len(), 1);
+        let payload = notifications[0].protocol_json().unwrap();
+        assert!(!payload.is_materialized());
+        assert!(payload.to_string().contains(r"\ud800"));
+    }
+}
+
+#[test]
+fn raw_inspector_unknown_notifications_still_register_remote_object_ownership() {
+    let mut conn = CdpConnection::default();
+    let mut context = BrowserContext::new("BID-raw-notification".to_owned());
+    context.set_active_target_id("TID-raw-notification".to_owned());
+    context.attach_active_session("SID-raw-notification".to_owned());
+    conn.install_browser_context_fixture_for_test(context);
+    let owner = CommandOwnerScope::for_session("SID-raw-notification");
+    let message = InspectorJson::from_slice(br#"{"method":"Runtime.futureNotification","params":{"object":{"objectId":"future-handle"}}}"#).unwrap();
+    let mut responses = Vec::new();
+    let mut notifications = Vec::new();
+    assert!(
+        !conn.route_runtime_inspector_protocol_message_for_owner_with_background_events_into(
+            message,
+            None,
+            &owner,
+            &mut responses,
+            &mut notifications,
+        )
+    );
+    assert!(conn.runtime_remote_object_id_known_for_owner(&owner, "future-handle"));
+    assert!(responses.is_empty());
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(
+        notifications[0].protocol_json().unwrap().session_id(),
+        Some("SID-raw-notification")
+    );
 }
 
 #[test]

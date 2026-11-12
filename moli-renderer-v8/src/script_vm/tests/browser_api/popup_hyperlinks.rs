@@ -204,3 +204,225 @@ async fn popup_hyperlink_opens_a_nested_window_and_relays_messages_to_its_opener
     vm.eval("__firstHyperlinkPopup.__nestedChild.close(); __firstHyperlinkPopup.close();")
         .expect("close nested popup fixtures");
 }
+
+#[test]
+fn windowless_synthetic_clicks_have_null_views_without_changing_event_realms() {
+    let mut vm = new_storage_test_vm("https://windowless-click-view.test/");
+    vm.eval("const root = document.documentElement || document.appendChild(document.createElement('html')); if (!document.body) root.appendChild(document.createElement('body')); document.body.innerHTML='<iframe id=child></iframe>'")
+        .unwrap();
+    assert_eq!(
+        vm.eval(&format!("({})()", include_str!("windowless_click_view.js")))
+            .unwrap(),
+        "[]"
+    );
+}
+
+#[test]
+fn synthetic_clicks_match_pointer_identity_across_realms_and_adoption() {
+    let mut vm = new_storage_test_vm("https://synthetic-click-realms.test/");
+    vm.eval("const root = document.documentElement || document.appendChild(document.createElement('html')); if (!document.body) root.appendChild(document.createElement('body')); document.body.innerHTML='<iframe id=child></iframe>'")
+        .unwrap();
+    assert_eq!(
+        vm.eval(&format!(
+            "({})()",
+            include_str!("synthetic_click_realms.js")
+        ))
+        .unwrap(),
+        "[]"
+    );
+}
+
+#[test]
+fn accesskey_clicks_use_the_focused_document_and_synthetic_pointer_identity() {
+    let mut vm = new_storage_test_vm("https://accesskey-click-realms.test/");
+    vm.eval(&format!(
+        "globalThis.accesskeyUsesControl = {}",
+        cfg!(target_os = "macos")
+    ))
+    .unwrap();
+    vm.eval(
+        r#"
+const root = document.documentElement || document.appendChild(document.createElement('html'));
+if (!document.body) root.appendChild(document.createElement('body'));
+document.body.innerHTML = '<button id=main accesskey=g>main</button><iframe id=child></iframe>';
+const realms = [window, document.getElementById('child').contentWindow];
+realms[1].document.body.innerHTML = '<button id=frame accesskey=g>frame</button>';
+globalThis.accesskeyClicks = [];
+for (let index = 0; index < realms.length; index++) {
+  const w = realms[index];
+  w.document.querySelector('button').addEventListener('click', event => {
+    accesskeyClicks.push([
+      index, event.view === w, Object.getPrototypeOf(event) === w.PointerEvent.prototype,
+      event.pointerId, event.pointerType, event.isPrimary, event.isTrusted, event.detail,
+      event.altKey, event.ctrlKey, event.shiftKey, event.metaKey
+    ]);
+  });
+}
+"#,
+    )
+    .unwrap();
+
+    for owner in 0..2 {
+        for modifiers in [1, 9, 3] {
+            vm.eval(&format!(
+                "accesskeyClicks=[];realms[{owner}].document.querySelector('button').focus()"
+            ))
+            .unwrap();
+            vm.dispatch_key_event("keydown", "g", "KeyG", "", modifiers, false, false)
+                .unwrap();
+            let matches_platform = if cfg!(target_os = "macos") {
+                modifiers == 3
+            } else {
+                modifiers != 3
+            };
+            let expected = if matches_platform {
+                format!("[[{owner},true,true,-1,\"\",false,true,0,false,false,false,false]]")
+            } else {
+                "[]".to_owned()
+            };
+            assert_eq!(
+                vm.eval("JSON.stringify(accesskeyClicks)").unwrap(),
+                expected,
+                "owner {owner}, modifiers {modifiers}"
+            );
+        }
+    }
+
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+  accesskeyClicks = [];
+  for (const w of realms) w.document.querySelector('button').dispatchEvent(
+    new w.KeyboardEvent('keydown', {
+      key: 'g', altKey: true, ctrlKey: accesskeyUsesControl,
+      shiftKey: !accesskeyUsesControl, bubbles: true
+    })
+  );
+  return JSON.stringify(accesskeyClicks);
+})()"#
+        )
+        .unwrap(),
+        "[]"
+    );
+}
+
+#[test]
+fn accesskey_document_is_frozen_before_keydown_adoption() {
+    for owner in 0..2 {
+        for destination in ["other", "windowless"] {
+            for phase in ["capture", "target", "bubble"] {
+                let mut vm = new_storage_test_vm("https://accesskey-adoption.test/");
+                vm.eval(&format!(
+                    "globalThis.sourceOwner={owner};globalThis.destinationKind='{destination}';globalThis.listenerPhase='{phase}'"
+                ))
+                .unwrap();
+                vm.eval(
+                    r#"
+const root = document.documentElement || document.appendChild(document.createElement('html'));
+if (!document.body) root.appendChild(document.createElement('body'));
+document.body.innerHTML = '<button accesskey=g>main</button><iframe id=child></iframe>';
+const realms = [window, document.getElementById('child').contentWindow];
+realms[1].document.body.innerHTML = '<button accesskey=g>child</button>';
+const sourceDocument = realms[sourceOwner].document;
+const destination = destinationKind === 'other' ? realms[1 - sourceOwner].document
+  : sourceDocument.implementation.createHTMLDocument('');
+const source = sourceDocument.body.appendChild(sourceDocument.createElement('input'));
+globalThis.adopted = false;
+globalThis.accesskeyClicks = [];
+for (let index = 0; index < realms.length; index++) {
+  const w = realms[index];
+  w.document.querySelector('button').addEventListener('click', event => {
+    accesskeyClicks.push([
+      index, event.view === w, Object.getPrototypeOf(event) === w.PointerEvent.prototype
+    ]);
+  });
+}
+const listenerTarget = listenerPhase === 'target' ? source : sourceDocument;
+listenerTarget.addEventListener('keydown', () => {
+  destination.body.appendChild(destination.adoptNode(source));
+  adopted = true;
+}, {once: true, capture: listenerPhase === 'capture'});
+source.focus();
+"#,
+                )
+                .unwrap();
+                let modifiers = if cfg!(target_os = "macos") { 3 } else { 9 };
+                vm.dispatch_key_event("keydown", "g", "KeyG", "", modifiers, false, false)
+                    .unwrap();
+                assert_eq!(
+                    vm.eval("JSON.stringify([adopted, source.ownerDocument === destination, accesskeyClicks])")
+                        .unwrap(),
+                    format!("[true,true,[[{owner},true,true]]]"),
+                    "owner {owner}, destination {destination}, phase {phase}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn keyboard_activation_uses_trusted_non_pointer_clicks() {
+    let mut vm = new_storage_test_vm("https://keyboard-click-realms.test/");
+    vm.eval(
+        r#"
+const root = document.documentElement || document.appendChild(document.createElement('html'));
+if (!document.body) root.appendChild(document.createElement('body'));
+document.body.innerHTML = '<iframe id=child></iframe>';
+const realms = [window, document.getElementById('child').contentWindow];
+globalThis.keyboardClicks = [];
+for (let index = 0; index < realms.length; index++) {
+  const w = realms[index];
+  for (const [id, tag, type] of [
+    ['button', 'button', 'button'], ['checkbox', 'input', 'checkbox'],
+    ['radio', 'input', 'radio'], ['anchor', 'a', '']
+  ]) {
+    const element = w.document.createElement(tag);
+    element.id = id;
+    if (type) element.type = type;
+    if (tag === 'a') element.href = '#target';
+    w.document.body.appendChild(element);
+    element.addEventListener('click', event => {
+      keyboardClicks.push([
+        index, id, event.view === w, Object.getPrototypeOf(event) === w.PointerEvent.prototype,
+        event.pointerId, event.pointerType, event.isPrimary, event.isTrusted, event.detail,
+        event.altKey, event.ctrlKey, event.shiftKey, event.metaKey
+      ]);
+      if (tag === 'a') event.preventDefault();
+    });
+  }
+}
+"#,
+    )
+    .unwrap();
+    for owner in 0..2 {
+        for (id, key, code) in [
+            ("button", "Enter", "Enter"),
+            ("button", " ", "Space"),
+            ("checkbox", " ", "Space"),
+            ("radio", " ", "Space"),
+            ("anchor", "Enter", "Enter"),
+        ] {
+            for modifiers in [0, 8] {
+                vm.eval(&format!(
+                    "keyboardClicks=[];globalThis.activatedElement=realms[{owner}].document.getElementById('{id}');activatedElement.checked=false;activatedElement.focus()"
+                ))
+                .unwrap();
+                for event in ["keydown", "keyup"] {
+                    vm.dispatch_key_event(event, key, code, "", modifiers, false, false)
+                        .unwrap();
+                }
+                assert_eq!(
+                    vm.eval("JSON.stringify(keyboardClicks)").unwrap(),
+                    format!(
+                        "[[{owner},\"{id}\",true,true,-1,\"\",false,true,0,false,false,{},false]]",
+                        modifiers == 8
+                    ),
+                    "owner {owner}, element {id}, key {code}, modifiers {modifiers}"
+                );
+                if matches!(id, "checkbox" | "radio") {
+                    assert_eq!(vm.eval("activatedElement.checked").unwrap(), "true");
+                }
+            }
+        }
+    }
+}

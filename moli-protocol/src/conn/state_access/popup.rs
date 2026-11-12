@@ -1,9 +1,5 @@
 use super::ProtocolWorkflowState;
-use crate::conn::{
-    BackgroundProtocolEvent, CommandOwnerScope, FailedInitialDocumentPageBuild,
-    PendingInitialDocumentPageBuild, PreparedPopupTargetRollback,
-};
-use crate::domains::target::{NewPopupTarget, PreparedPopupTarget};
+use crate::conn::{BackgroundProtocolEvent, CommandOwnerScope, FailedInitialDocumentPageBuild};
 
 impl ProtocolWorkflowState<'_> {
     pub(crate) fn finish_popup_navigation(
@@ -43,58 +39,13 @@ impl ProtocolWorkflowState<'_> {
     pub(crate) fn publish_page_output_close(
         self,
         action: crate::domains::page::PageTargetTerminationOwnerAction,
+        output: crate::conn::CommandResponseFlushContext,
     ) {
         if action.is_current_host(self.connection) {
             self.connection
-                .publish_page_target_termination_owner_action(action);
+                .publish_page_target_termination_after_command_output(action, output);
         }
     }
-    pub(crate) fn prepare_popup_output(
-        self,
-        activation: crate::domains::page::PagePreparedPopupActivation,
-    ) -> (
-        String,
-        Option<u64>,
-        Option<PreparedPopupTarget>,
-        Vec<BackgroundProtocolEvent>,
-    ) {
-        activation.prepare_output(self.connection)
-    }
-
-    pub(crate) fn settle_popup_output(
-        self,
-        browser_context_id: String,
-        popup_id: Option<u64>,
-        target_id: Option<String>,
-    ) -> Vec<BackgroundProtocolEvent> {
-        crate::domains::page::settle_popup_output(
-            self.connection,
-            &browser_context_id,
-            popup_id,
-            target_id.as_deref(),
-        )
-    }
-
-    pub(crate) fn start_popup_initial_document(
-        self,
-        target_id: String,
-    ) -> Option<Option<PendingInitialDocumentPageBuild>> {
-        let route = self
-            .connection
-            .target_session_route_for_target_id(&target_id)?;
-        let owner = CommandOwnerScope::for_route(route);
-        match self
-            .connection
-            .start_initial_document_page_ensure_for_owner(&owner)
-        {
-            Ok(pending) => Some(pending),
-            Err(error) => {
-                tracing::debug!(%error, %target_id, "failed to start popup initial document");
-                None
-            }
-        }
-    }
-
     pub(crate) fn fail_popup_initial_document(self, failed: FailedInitialDocumentPageBuild) {
         let error = self
             .connection
@@ -102,29 +53,57 @@ impl ProtocolWorkflowState<'_> {
         tracing::debug!(%error, "failed to await popup initial document");
     }
 
-    pub(crate) fn finish_popup_target(
+    pub(crate) fn finish_popup_initialization(
         self,
-        prepared: NewPopupTarget,
-    ) -> (Option<String>, Vec<BackgroundProtocolEvent>) {
-        let mut events = Vec::new();
-        let target =
-            crate::domains::target::finish_popup_target(self.connection, &mut events, prepared);
-        (target, events)
-    }
-
-    pub(crate) fn prepare_popup_rollback(
-        self,
-        browser_context_id: String,
-        target_id: String,
-    ) -> PreparedPopupTargetRollback {
-        self.connection
-            .prepare_popup_target_rollback(Some(&browser_context_id), &target_id)
-    }
-
-    pub(crate) fn finish_popup_rollback(self, session_ids: Vec<String>) {
-        for session_id in session_ids {
-            self.connection
-                .rollback_attached_session_without_event(&session_id);
+        owner: CommandOwnerScope,
+        host: crate::conn::PageTargetHostIdentity,
+        expected_page: Option<crate::conn::TargetPageResidenceIdentity>,
+        initialized: bool,
+        predecessor: Option<moli_core::RendererOutputCursor>,
+    ) {
+        let conn = self.connection;
+        if conn
+            .page_target_host_identity_for_owner(&owner)
+            .is_none_or(|current| !host.matches(&current))
+            || conn.target_is_closing_for_owner(&owner)
+        {
+            return;
+        }
+        let current_page = conn
+            .pending_target_page_residence_identity_for_owner(&owner)
+            .or_else(|| conn.target_page_residence_identity_for_owner(&owner));
+        if current_page.is_some() && current_page != expected_page {
+            return;
+        }
+        let start = conn.scheduler_state.protocol_work_publication_mark();
+        if initialized && current_page.is_some() {
+            if let Some((_, Some(target_id))) = conn.target_owner_identity_for_owner(&owner) {
+                crate::domains::target::schedule_initial_document_target_url_navigation_after_debugger_barrier_release_for_target(conn, &target_id, &Default::default());
+            }
+        } else {
+            let target_id = conn
+                .target_owner_identity_for_owner(&owner)
+                .and_then(|(_, target)| target);
+            if let Some(target_id) = target_id {
+                let action = crate::domains::page::PageTargetTerminationOwnerAction::new(
+                    conn, owner, target_id,
+                );
+                if let Some(termination) =
+                    crate::domains::page::TargetTermination::prepare(conn, action)
+                {
+                    let pending = crate::conn::PendingProtocolSchedulerWork::for_termination(
+                        termination,
+                        conn.protocol_state_access(),
+                    );
+                    conn.scheduler_state.push_scheduler_event(
+                        crate::conn::CdpSchedulerEvent::ProtocolTaskPrepared { pending },
+                    );
+                }
+            }
+        }
+        if let Some(predecessor) = predecessor {
+            conn.scheduler_state
+                .bind_renderer_delivery_predecessor_since(start, predecessor);
         }
     }
 }

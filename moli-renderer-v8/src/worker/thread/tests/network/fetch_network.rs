@@ -1558,7 +1558,7 @@ async fn worker_fetch_no_cors_opaque_response_blocking_returns_empty_opaque_resp
         let _ = request_tx.send(request);
         stream
             .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"secret\":true}",
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Content-Type-Options: nosniff\r\nTiming-Allow-Origin: *\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"secret\":true}",
             )
             .await
             .expect("write worker no-cors ORB response");
@@ -1578,6 +1578,9 @@ async fn worker_fetch_no_cors_opaque_response_blocking_returns_empty_opaque_resp
                     url: response.url,
                     bodyIsNull: response.body === null,
                     headerCount: Array.from(response.headers).length,
+                    timing: performance.getEntriesByName({fetch_url_literal}).map(entry => [
+                        entry.responseStatus, entry.encodedBodySize, entry.decodedBodySize, entry.transferSize,
+                    ]),
                 }});
             }} catch (error) {{
                 postMessage({{
@@ -1620,7 +1623,7 @@ async fn worker_fetch_no_cors_opaque_response_blocking_returns_empty_opaque_resp
     assert!(request.contains("Sec-Fetch-Mode: no-cors\r\n"));
     assert_eq!(
         post.expect("worker no-cors ORB should post response"),
-        r#"{"fulfilled":true,"type":"opaque","status":0,"url":"","bodyIsNull":true,"headerCount":0}"#
+        r#"{"fulfilled":true,"type":"opaque","status":0,"url":"","bodyIsNull":true,"headerCount":0,"timing":[[0,0,0,0]]}"#
     );
     let record = network.expect("worker no-cors ORB should record network failure");
     assert_eq!(record.url().as_str(), fetch_url);
@@ -2262,4 +2265,103 @@ async fn worker_fetch_projects_cache_modes_to_native_wire_requests() {
         assert_eq!(field("cache-control"), control, "{path}: {head}");
         assert_eq!(field("pragma"), pragma, "{path}: {head}");
     }
+}
+
+#[tokio::test]
+async fn worker_fetch_resource_timing_is_published_in_the_worker_performance_timeline() {
+    ensure_v8();
+    let (base_url, server) = spawn_path_response_http_server(vec![(
+        "/assets/timing.txt",
+        "HTTP/1.1 200 OK",
+        "text/plain",
+        "body".to_owned(),
+        Duration::ZERO,
+    )])
+    .await;
+    let loader = ResourceRequestClient::new(&FetchConfig::default()).unwrap();
+    let mut handle = spawn_worker_with_request_client(
+        r#"
+        (async () => {
+            const url = new URL('./timing.txt', location.href).href;
+            const timing = new Promise(resolve => {
+                const observer = new PerformanceObserver(list => {
+                    const entry = list.getEntries().find(entry => entry.name === url);
+                    if (entry) { observer.disconnect(); resolve(entry); }
+                });
+                observer.observe({type:'resource'});
+            });
+            const body = await (await fetch(url)).text();
+            const entry = await timing;
+            postMessage({body, name:entry.name, type:entry.initiatorType,
+                encoded:entry.encodedBodySize, status:entry.responseStatus,
+                count:performance.getEntriesByName(url).length,
+                native:entry instanceof PerformanceResourceTiming});
+            close();
+        })().catch(error => { postMessage({error:String(error.stack || error)}); close(); });
+    "#
+        .into(),
+        format!("{base_url}/assets/worker.js"),
+        loader,
+    );
+    let result = timeout(TIMEOUT, recv_post_json(&mut handle)).await;
+    handle.terminate_and_join();
+    server.await.expect("worker timing server should finish");
+    let result: serde_json::Value =
+        serde_json::from_str(&result.expect("worker timing should arrive")).unwrap();
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "body":"body", "name":format!("{base_url}/assets/timing.txt"), "type":"fetch",
+            "encoded":4, "status":200, "count":1, "native":true
+        })
+    );
+}
+
+#[tokio::test]
+async fn worker_fetch_resource_timing_overflow_can_clear_and_refill_its_own_buffer() {
+    ensure_v8();
+    let (base, server) = spawn_path_response_http_server(vec![
+        (
+            "/first",
+            "HTTP/1.1 200 OK",
+            "text/plain",
+            "body".to_owned(),
+            Duration::ZERO,
+        ),
+        (
+            "/second",
+            "HTTP/1.1 200 OK",
+            "text/plain",
+            "body".to_owned(),
+            Duration::ZERO,
+        ),
+    ])
+    .await;
+    let mut handle = spawn_worker_with_request_client(r#"
+        (async () => {
+            performance.setResourceTimingBufferSize(1);
+            const full = new Promise(resolve => {
+                performance.onresourcetimingbufferfull = function(event) {
+                    performance.clearResourceTimings();
+                    resolve(this === performance && event.isTrusted);
+                };
+            });
+            await (await fetch('/first')).text();
+            const firstCount = performance.getEntriesByType('resource').length;
+            await (await fetch('/second')).text();
+            const trusted = await full;
+            postMessage({firstCount, trusted,
+                remaining:performance.getEntriesByType('resource').map(e => new URL(e.name).pathname)});
+            close();
+        })().catch(error => { postMessage({error:String(error.stack || error)}); close(); });
+    "#.into(), format!("{base}/worker.js"), ResourceRequestClient::new(&FetchConfig::default()).unwrap());
+    let result = timeout(TIMEOUT, recv_post_json(&mut handle)).await;
+    handle.terminate_and_join();
+    server.await.expect("worker timing server should finish");
+    let result: serde_json::Value =
+        serde_json::from_str(&result.expect("worker buffer-full task should complete")).unwrap();
+    assert_eq!(
+        result,
+        serde_json::json!({"firstCount":1,"trusted":true,"remaining":["/second"]})
+    );
 }

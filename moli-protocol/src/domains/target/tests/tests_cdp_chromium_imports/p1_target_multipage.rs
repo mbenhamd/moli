@@ -1002,12 +1002,21 @@ async fn run_waiting_popup_initial_document_after_resume(
     );
     ctx.sent.clear();
 
-    ctx.process_async(json!({
-        "id": 260_220,
-        "method": "Runtime.runIfWaitingForDebugger",
-        "sessionId": popup_session_id
-    }))
-    .await;
+    let response_flush = ctx
+        .process_command_holding_response_flush_for_test(json!({
+            "id": 260_220,
+            "method": "Runtime.runIfWaitingForDebugger",
+            "sessionId": popup_session_id
+        }))
+        .await;
+    assert!(
+        !ctx.sent
+            .iter()
+            .any(|message| message["method"] == "Fetch.requestPaused"),
+        "the initial popup navigation must stay held until its resume response flushes"
+    );
+    ctx.finish_held_command_response_flush_for_test(response_flush)
+        .await;
     crate::testing::wait_until_scheduler_message(
         ctx,
         "popup document request after debugger resume",
@@ -1725,7 +1734,12 @@ async fn rust_cdp_chromium_target_resetting_opener_clears_popup_opener_reference
         .expect("popup target id")
         .to_owned();
 
-    ctx.remove_active_fixture_target().await;
+    ctx.process_async(json!({"id":260_031,"method":"Target.closeTarget","params":{"targetId":"TID-reset-opener"}})).await;
+    assert!(
+        take_response_by_id(&mut ctx, 260_031)
+            .get("error")
+            .is_none()
+    );
 
     ctx.with_fixture(|conn| {
         assert!(!{

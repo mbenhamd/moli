@@ -3215,6 +3215,493 @@ fn positioned_auto_descendants_paint_after_ordinary_siblings() {
 }
 
 #[test]
+fn ordinary_atomic_inlines_share_paint_and_hit_order_with_their_block_descendants() {
+    let red = PaintColor::new(1.0, 0.0, 0.0, 1.0);
+    let blue = PaintColor::new(0.0, 0.0, 1.0, 1.0);
+    let green = PaintColor::new(0.0, 1.0, 0.0, 1.0);
+    let source = Source(vec![
+        Node::element("root", vec![1]),
+        Node::html_element("label", "label", vec![2]),
+        Node::html_element("atomic", "span", vec![3]),
+        Node::html_element("block-child", "span", vec![]),
+    ]);
+    for display in [
+        LayoutDisplay::InlineBlock,
+        LayoutDisplay::InlineFlex,
+        LayoutDisplay::InlineGrid,
+    ] {
+        let mut styles = Styles(HashMap::from([
+            (0, fixed_size(LayoutDisplay::Block, 320.0, 240.0)),
+            (
+                1,
+                ResolvedLayoutStyle::synthetic(LayoutDisplay::Inline, Style::default(), red),
+            ),
+            (
+                2,
+                ResolvedLayoutStyle::synthetic(
+                    display,
+                    Style {
+                        size: Size {
+                            width: length(100.0),
+                            height: length(60.0),
+                        },
+                        ..Style::default()
+                    },
+                    blue,
+                ),
+            ),
+            (
+                3,
+                ResolvedLayoutStyle::synthetic(
+                    LayoutDisplay::Block,
+                    Style {
+                        size: Size {
+                            width: length(40.0),
+                            height: length(20.0),
+                        },
+                        ..Style::default()
+                    },
+                    green,
+                ),
+            ),
+        ]));
+        for paint in [false, true] {
+            let viewport = LayoutViewport::new(320, 240, 1.0);
+            let request = if paint {
+                LayoutPassRequest::with_paint(viewport, LayoutFlushReason::Test)
+            } else {
+                LayoutPassRequest::new(viewport, LayoutFlushReason::Test)
+            };
+            let output = build_with_request(&source, &mut styles, request);
+            let child = output
+                .box_model_for_source(3)
+                .unwrap()
+                .border
+                .bounding_rect();
+            let point = LayoutPoint::new(child.x + child.width / 2.0, child.y + child.height / 2.0);
+            assert_eq!(
+                output.hit_test(point, false).unwrap().source,
+                3,
+                "{display:?}, paint={paint}"
+            );
+            if let Some(snapshot) = output.paint_snapshot() {
+                let red = solid_fill_index(&snapshot.fragments, red);
+                let blue = solid_fill_index(&snapshot.fragments, blue);
+                let green = solid_fill_index(&snapshot.fragments, green);
+                assert!(
+                    red < blue && blue < green,
+                    "label, atomic background, then ordinary child: {display:?}"
+                );
+                assert_balanced_paint_stack(&snapshot.fragments);
+            }
+        }
+    }
+}
+
+#[test]
+fn ordinary_atomic_inline_keeps_ordinary_descendants_local_and_hoists_positioned_ones() {
+    let red = PaintColor::new(1.0, 0.0, 0.0, 1.0);
+    let blue = PaintColor::new(0.0, 0.0, 1.0, 1.0);
+    let green = PaintColor::new(0.0, 1.0, 0.0, 1.0);
+    for display in [
+        LayoutDisplay::InlineBlock,
+        LayoutDisplay::InlineFlex,
+        LayoutDisplay::InlineGrid,
+    ] {
+        for (position, z_index, floated, expected) in [
+            (LayoutPosition::Static, None, false, 4),
+            (LayoutPosition::Static, None, true, 4),
+            (LayoutPosition::Relative, None, false, 3),
+            (LayoutPosition::Absolute, None, false, 3),
+            (LayoutPosition::Relative, Some(-1), false, 4),
+            (LayoutPosition::Relative, Some(0), false, 3),
+            (LayoutPosition::Relative, Some(1), false, 3),
+        ] {
+            // Floats apply to block children, but not to flex/grid items.
+            if floated && display != LayoutDisplay::InlineBlock {
+                continue;
+            }
+            // Give the absolute child an explicit, non-stacking positioning
+            // ancestor with normal-flow content.
+            let absolute = position == LayoutPosition::Absolute;
+            let source = Source(vec![
+                Node::element("root", vec![1]),
+                Node::html_element("label", "label", vec![2, 4]),
+                Node::html_element("first-atomic", "span", vec![if absolute { 5 } else { 3 }]),
+                Node::html_element("descendant", "span", vec![]),
+                Node::html_element("overlapping-atomic", "span", vec![]),
+                Node::html_element(
+                    "positioning-anchor",
+                    "span",
+                    if absolute { vec![3, 6] } else { vec![] },
+                ),
+                Node::html_element("anchor-content", "span", vec![]),
+            ]);
+            let mut child = ResolvedLayoutStyle::synthetic(
+                LayoutDisplay::Block,
+                Style {
+                    size: Size {
+                        width: length(80.0),
+                        height: length(40.0),
+                    },
+                    inset: Rect {
+                        left: length(0.0),
+                        top: length(0.0),
+                        right: LengthPercentageAuto::auto(),
+                        bottom: LengthPercentageAuto::auto(),
+                    },
+                    ..Style::default()
+                },
+                green,
+            )
+            .with_position(position);
+            if let Some(z_index) = z_index {
+                child = child.with_z_index(z_index);
+            }
+            if floated {
+                child = child.with_float(taffy::Float::Left, taffy::Clear::None);
+            }
+            let mut styles = Styles(HashMap::from([
+                (
+                    0,
+                    fixed_size(LayoutDisplay::Block, 320.0, 240.0)
+                        .with_position(LayoutPosition::Relative),
+                ),
+                (1, resolved(LayoutDisplay::Inline, Style::default())),
+                (
+                    2,
+                    ResolvedLayoutStyle::synthetic(
+                        display,
+                        Style {
+                            size: Size {
+                                width: length(80.0),
+                                height: length(40.0),
+                            },
+                            ..Style::default()
+                        },
+                        blue,
+                    ),
+                ),
+                (3, child),
+                (
+                    5,
+                    fixed_size(LayoutDisplay::Block, 80.0, 40.0)
+                        .with_position(LayoutPosition::Relative),
+                ),
+                (6, fixed_size(LayoutDisplay::Block, 80.0, 40.0)),
+                (
+                    4,
+                    ResolvedLayoutStyle::synthetic(
+                        LayoutDisplay::InlineBlock,
+                        Style {
+                            size: Size {
+                                width: length(80.0),
+                                height: length(40.0),
+                            },
+                            margin: Rect {
+                                left: length(-80.0),
+                                ..Style::<Atom>::default().margin
+                            },
+                            ..Style::default()
+                        },
+                        red,
+                    ),
+                ),
+            ]));
+            for paint in [false, true] {
+                let viewport = LayoutViewport::new(320, 240, 1.0);
+                let request = if paint {
+                    LayoutPassRequest::with_paint(viewport, LayoutFlushReason::Test)
+                } else {
+                    LayoutPassRequest::new(viewport, LayoutFlushReason::Test)
+                };
+                let output = build_with_request(&source, &mut styles, request);
+                let first = output
+                    .box_model_for_source(2)
+                    .unwrap()
+                    .border
+                    .bounding_rect();
+                let over = output
+                    .box_model_for_source(4)
+                    .unwrap()
+                    .border
+                    .bounding_rect();
+                assert_rect(first, over);
+                let point = LayoutPoint::new(over.x + over.width / 2.0, over.y + over.height / 2.0);
+                let descendant = output
+                    .box_model_for_source(3)
+                    .unwrap()
+                    .border
+                    .bounding_rect();
+                assert!(
+                    descendant.contains(point),
+                    "{display:?}, {position:?}, z={z_index:?}, float={floated}: child={descendant:?}, atomic={over:?}, point={point:?}"
+                );
+                assert_eq!(
+                    output.hit_test(point, false).unwrap().source,
+                    expected,
+                    "{display:?}, {position:?}, z={z_index:?}, float={floated}, paint={paint}"
+                );
+                if let Some(snapshot) = output.paint_snapshot() {
+                    let top = snapshot
+                        .fragments
+                        .iter()
+                        .filter_map(PaintFragment::solid_fill)
+                        .map(|(_, color, _)| color)
+                        .rfind(|color| *color == red || *color == blue || *color == green);
+                    assert_eq!(
+                        top,
+                        Some(if expected == 3 { green } else { red }),
+                        "{display:?}, {position:?}, z={z_index:?}, float={floated}"
+                    );
+                    assert_balanced_paint_stack(&snapshot.fragments);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn atomic_inline_local_float_paints_above_later_block_background() {
+    let blue = PaintColor::new(0.0, 0.0, 1.0, 1.0);
+    let green = PaintColor::new(0.0, 1.0, 0.0, 1.0);
+    let source = Source(vec![
+        Node::element("root", vec![1]),
+        Node::element("atomic", vec![2, 3]),
+        Node::element("floating", vec![]),
+        Node::element("block", vec![]),
+    ]);
+    let mut styles = Styles(HashMap::from([
+        (0, fixed_size(LayoutDisplay::Block, 320.0, 240.0)),
+        (1, fixed_size(LayoutDisplay::InlineBlock, 120.0, 80.0)),
+        (
+            2,
+            ResolvedLayoutStyle::synthetic(
+                LayoutDisplay::Block,
+                Style {
+                    size: Size {
+                        width: length(80.0),
+                        height: length(40.0),
+                    },
+                    ..Style::default()
+                },
+                green,
+            )
+            .with_float(taffy::Float::Left, taffy::Clear::None),
+        ),
+        (
+            3,
+            ResolvedLayoutStyle::synthetic(
+                LayoutDisplay::Block,
+                Style {
+                    size: Size {
+                        width: Dimension::auto(),
+                        height: length(80.0),
+                    },
+                    ..Style::default()
+                },
+                blue,
+            ),
+        ),
+    ]));
+    for paint in [false, true] {
+        let viewport = LayoutViewport::new(320, 240, 1.0);
+        let request = if paint {
+            LayoutPassRequest::with_paint(viewport, LayoutFlushReason::Test)
+        } else {
+            LayoutPassRequest::new(viewport, LayoutFlushReason::Test)
+        };
+        let output = build_with_request(&source, &mut styles, request);
+        let floating = output
+            .box_model_for_source(2)
+            .unwrap()
+            .border
+            .bounding_rect();
+        let point = LayoutPoint::new(floating.x + 10.0, floating.y + 10.0);
+        assert!(
+            output
+                .box_model_for_source(3)
+                .unwrap()
+                .border
+                .bounding_rect()
+                .contains(point)
+        );
+        assert_eq!(
+            output.hit_test(point, false).unwrap().source,
+            2,
+            "paint={paint}"
+        );
+        if let Some(snapshot) = output.paint_snapshot() {
+            assert!(
+                solid_fill_index(&snapshot.fragments, blue)
+                    < solid_fill_index(&snapshot.fragments, green)
+            );
+            assert_balanced_paint_stack(&snapshot.fragments);
+        }
+    }
+}
+
+#[test]
+fn atomic_inline_interleaves_with_overlapping_inline_background_and_text() {
+    let blue = PaintColor::new(0.0, 0.0, 1.0, 1.0);
+    let green = PaintColor::new(0.0, 1.0, 0.0, 1.0);
+    for reverse in [false, true] {
+        let source = Source(vec![
+            Node::element("root", if reverse { vec![2, 1] } else { vec![1, 2] }),
+            Node::html_element("atomic", "span", vec![]),
+            Node::html_element("inline", "span", vec![3]),
+            Node::text("text", "XXXXX"),
+        ]);
+        let mut styles = Styles(HashMap::from([
+            (
+                0,
+                fixed_size(LayoutDisplay::Block, 320.0, 240.0).with_text_metrics(40.0, 40.0),
+            ),
+            (
+                1,
+                ResolvedLayoutStyle::synthetic(
+                    LayoutDisplay::InlineBlock,
+                    Style {
+                        size: Size {
+                            width: length(120.0),
+                            height: length(40.0),
+                        },
+                        margin: Rect {
+                            left: length(if reverse { -120.0 } else { 0.0 }),
+                            right: length(if reverse { 0.0 } else { -120.0 }),
+                            ..Style::<Atom>::default().margin
+                        },
+                        ..Style::default()
+                    },
+                    blue,
+                ),
+            ),
+            (
+                2,
+                ResolvedLayoutStyle::synthetic(LayoutDisplay::Inline, Style::default(), green)
+                    .with_text_metrics(40.0, 40.0),
+            ),
+        ]));
+        for paint in [false, true] {
+            let viewport = LayoutViewport::new(320, 240, 1.0);
+            let request = if paint {
+                LayoutPassRequest::with_paint(viewport, LayoutFlushReason::Test)
+            } else {
+                LayoutPassRequest::new(viewport, LayoutFlushReason::Test)
+            };
+            let output = build_with_request(&source, &mut styles, request);
+            let inline = output
+                .box_model_for_source(2)
+                .unwrap()
+                .border
+                .bounding_rect();
+            let atomic = output
+                .box_model_for_source(1)
+                .unwrap()
+                .border
+                .bounding_rect();
+            let point =
+                LayoutPoint::new(inline.x.max(atomic.x) + 10.0, inline.y.max(atomic.y) + 5.0);
+            assert!(
+                inline.contains(point) && atomic.contains(point),
+                "inline={inline:?}, atomic={atomic:?}"
+            );
+            let hit = output.hit_test(point, false).unwrap().source;
+            assert!(
+                if reverse {
+                    hit == 1
+                } else {
+                    hit == 2 || hit == 3
+                },
+                "reverse={reverse}, paint={paint}, hit={hit}"
+            );
+            if let Some(snapshot) = output.paint_snapshot() {
+                let blue = solid_fill_index(&snapshot.fragments, blue);
+                let green = solid_fill_index(&snapshot.fragments, green);
+                let glyphs = snapshot
+                    .fragments
+                    .iter()
+                    .position(|fragment| matches!(fragment, PaintFragment::GlyphRun(_)))
+                    .unwrap();
+                assert!(
+                    green < glyphs,
+                    "the inline background must precede its text"
+                );
+                assert_eq!(blue < green, !reverse);
+                assert_eq!(blue < glyphs, !reverse);
+                assert_balanced_paint_stack(&snapshot.fragments);
+            }
+        }
+    }
+}
+
+#[test]
+fn atomic_inline_interleaves_shaped_text_runs_from_the_same_parent() {
+    let blue = PaintColor::new(0.0, 0.0, 1.0, 1.0);
+    let source = Source(vec![
+        Node::element("root", vec![1, 2, 3]),
+        Node::text("before", "before"),
+        Node::element("atomic", vec![]),
+        Node::text("after", "after"),
+    ]);
+    for width in [120.0, 480.0] {
+        let mut styles = Styles(HashMap::from([
+            (
+                0,
+                fixed_size(LayoutDisplay::Block, width, 240.0).with_text_metrics(40.0, 40.0),
+            ),
+            (
+                2,
+                ResolvedLayoutStyle::synthetic(
+                    LayoutDisplay::InlineBlock,
+                    Style {
+                        size: Size {
+                            width: length(120.0),
+                            height: length(40.0),
+                        },
+                        margin: Rect {
+                            right: length(-120.0),
+                            ..Style::<Atom>::default().margin
+                        },
+                        ..Style::default()
+                    },
+                    blue,
+                ),
+            ),
+        ]));
+        let output = build_with_request(
+            &source,
+            &mut styles,
+            LayoutPassRequest::with_paint(
+                LayoutViewport::new(480, 240, 1.0),
+                LayoutFlushReason::Test,
+            ),
+        );
+        let snapshot = output.paint_snapshot().unwrap();
+        let blue = solid_fill_index(&snapshot.fragments, blue);
+        let mut glyphs = snapshot
+            .fragments
+            .iter()
+            .enumerate()
+            .filter(|(_, fragment)| matches!(fragment, PaintFragment::GlyphRun(_)))
+            .map(|(index, _)| index);
+        let first = glyphs.next().unwrap();
+        let last = glyphs.next_back().unwrap();
+        assert!(first < blue && blue < last, "width={width}");
+        for source in [1, 3] {
+            for id in &output.source_output(source).unwrap().fragments {
+                let fragment = output.fragment(*id).unwrap();
+                assert!(
+                    fragment.paint_order.is_some(),
+                    "every text hit fragment must be published"
+                );
+            }
+        }
+        assert_balanced_paint_stack(&snapshot.fragments);
+    }
+}
+
+#[test]
 fn transforms_and_semantic_paint_order_share_the_hit_test_projection() {
     let source = Source(vec![
         Node::element("root", vec![1, 2]),
@@ -3304,6 +3791,76 @@ fn transforms_and_semantic_paint_order_share_the_hit_test_projection() {
         2,
         "taking paint resources must leave geometry queries intact"
     );
+}
+
+#[test]
+fn atomic_inlines_paint_and_hit_test_above_their_wrapping_inline_box() {
+    let red = PaintColor::new(1.0, 0.0, 0.0, 1.0);
+    let blue = PaintColor::new(0.0, 0.0, 1.0, 1.0);
+    let source = Source(vec![
+        Node::element("root", vec![1]),
+        Node::element("inline", vec![2, 3, 4]),
+        Node::text("before", "before"),
+        Node::element("atomic", Vec::new()),
+        Node::text("after", "after"),
+    ]);
+    let mut styles = Styles::default();
+    styles
+        .0
+        .insert(0, fixed_size(LayoutDisplay::Block, 300.0, 100.0));
+    styles.0.insert(
+        1,
+        ResolvedLayoutStyle::synthetic(LayoutDisplay::Inline, Style::default(), red)
+            .with_text_metrics(20.0, 20.0),
+    );
+    styles.0.insert(
+        3,
+        ResolvedLayoutStyle::synthetic(
+            LayoutDisplay::InlineBlock,
+            Style {
+                size: Size {
+                    width: length(40.0),
+                    height: length(10.0),
+                },
+                ..Style::default()
+            },
+            blue,
+        ),
+    );
+
+    let output = build_with_request(
+        &source,
+        &mut styles,
+        LayoutPassRequest::with_paint(LayoutViewport::new(320, 240, 1.0), LayoutFlushReason::Test),
+    );
+    let fragments = &output.paint_snapshot().unwrap().fragments;
+    let (inline_index, atomic_index) = (
+        solid_fill_index(fragments, red),
+        solid_fill_index(fragments, blue),
+    );
+    let (inline_rect, _, _) = fragments[inline_index].solid_fill().unwrap();
+    let (atomic_rect, _, _) = fragments[atomic_index].solid_fill().unwrap();
+    let center_y = atomic_rect.y + atomic_rect.height / 2.0;
+    assert!(
+        (inline_rect.y..inline_rect.y + inline_rect.height).contains(&center_y),
+        "the atomic box must overlap the inline box: {inline_rect:?} {atomic_rect:?}"
+    );
+    assert!(
+        inline_index < atomic_index,
+        "the inline background must paint behind its atomic child"
+    );
+    assert!(
+        fragments
+            .iter()
+            .rposition(|fragment| matches!(fragment, PaintFragment::GlyphRun(..)))
+            .unwrap()
+            > atomic_index,
+        "the text of the line must paint over the atomic background"
+    );
+
+    let center = LayoutPoint::new(atomic_rect.x + atomic_rect.width / 2.0, center_y);
+    let hit = output.into_tree().hit_test(center, false).unwrap();
+    assert_eq!(hit.source, 3);
 }
 
 #[test]

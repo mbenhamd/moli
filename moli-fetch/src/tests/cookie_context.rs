@@ -11,6 +11,26 @@ use url::Url;
 
 use crate::{Request, RequestCredentialsMode, cookie_header_for_request};
 
+fn follow_cookie_redirect(request: &mut Request, target: &Url) {
+    request
+        .follow_redirect(crate::RedirectInfo {
+            source: crate::RedirectSource::Network,
+            from_url: request.url.clone(),
+            to_url: target.clone(),
+            status: 302,
+            headers: vec![("Location".to_owned(), target.as_str().as_bytes().to_vec())],
+            network_extra_info_available: false,
+            request_extra_info: None,
+            response_extra_info: None,
+            redirect_has_extra_info: false,
+            request_cookie_report: None,
+            cookie_set_reports: vec![],
+            from_cache: false,
+            negotiated_http_version: None,
+        })
+        .unwrap();
+}
+
 #[test]
 fn request_get_uses_top_level_navigation_cookie_context() {
     let request = Request::get("https://example.com/app").unwrap();
@@ -56,7 +76,7 @@ fn browser_site_context_overlay_downgrades_but_never_relaxes_same_site_context()
         .with_request_origin(moli_url::WebOrigin::from_url(&child_url))
         .with_browser_site_context(browser_context.clone());
     assert!(
-        computed.cookie_context.site_context.is_cross_site(),
+        computed.cookie_context.site_context().is_cross_site(),
         "the inherited top-frame site must downgrade a same-origin child request"
     );
 
@@ -72,7 +92,7 @@ fn browser_site_context_overlay_downgrades_but_never_relaxes_same_site_context()
     assert!(
         explicitly_cross_site
             .cookie_context
-            .site_context
+            .site_context()
             .is_cross_site(),
         "a worker sameSiteCookies=none restriction must survive context propagation"
     );
@@ -129,11 +149,11 @@ fn explicit_same_site_override_sets_both_site_context_tracks() {
         .with_same_site_context(NetworkSameSiteContext::CrossSite);
 
     assert_eq!(
-        context.site_context.context,
+        context.site_context().context,
         NetworkSameSiteContext::CrossSite
     );
     assert_eq!(
-        context.site_context.schemeful_context,
+        context.site_context().schemeful_context,
         NetworkSameSiteContext::CrossSite
     );
 }
@@ -303,11 +323,11 @@ fn request_with_initiator_url_treats_same_scheme_sibling_subdomains_as_same_site
     }
 
     assert_eq!(
-        request.cookie_context.site_context.context,
+        request.cookie_context.site_context().context,
         NetworkSameSiteContext::SameSiteStrict
     );
     assert_eq!(
-        request.cookie_context.site_context.schemeful_context,
+        request.cookie_context.site_context().schemeful_context,
         NetworkSameSiteContext::SameSiteStrict
     );
     assert_eq!(
@@ -345,11 +365,11 @@ fn request_with_initiator_url_respects_public_suffix_boundaries() {
     }
 
     assert_eq!(
-        request.cookie_context.site_context.context,
+        request.cookie_context.site_context().context,
         NetworkSameSiteContext::CrossSite
     );
     assert_eq!(
-        request.cookie_context.site_context.schemeful_context,
+        request.cookie_context.site_context().schemeful_context,
         NetworkSameSiteContext::CrossSite
     );
     assert_eq!(
@@ -381,7 +401,7 @@ fn request_with_initiator_url_treats_multi_label_registrable_domains_as_same_sit
     }
 
     assert_eq!(
-        request.cookie_context.site_context.context,
+        request.cookie_context.site_context().context,
         NetworkSameSiteContext::SameSiteStrict
     );
     assert_eq!(
@@ -400,11 +420,11 @@ fn request_with_initiator_url_tracks_schemeless_and_schemeful_site_context_separ
         ));
 
     assert_eq!(
-        request.cookie_context.site_context.context,
+        request.cookie_context.site_context().context,
         NetworkSameSiteContext::SameSiteStrict
     );
     assert_eq!(
-        request.cookie_context.site_context.schemeful_context,
+        request.cookie_context.site_context().schemeful_context,
         NetworkSameSiteContext::CrossSite
     );
 }
@@ -451,7 +471,7 @@ fn request_with_site_for_cookies_url_uses_explicit_browser_context_for_same_site
         cookie_header_for_request(
             &cookie_store,
             &request.url,
-            request.effective_cookie_context(&request.url),
+            request.network_cookie_context(),
         )
         .unwrap(),
         Some("none=1".to_owned())
@@ -496,7 +516,7 @@ fn request_with_top_frame_origin_url_falls_back_when_site_for_cookies_is_absent(
         cookie_header_for_request(
             &cookie_store,
             &request.url,
-            request.effective_cookie_context(&request.url),
+            request.network_cookie_context(),
         )
         .unwrap(),
         Some("lax=1".to_owned())
@@ -551,7 +571,7 @@ fn request_with_cross_scheme_initiator_uses_schemeful_cross_site_semantics() {
         cookie_header_for_request(
             &cookie_store,
             &request.url,
-            request.effective_cookie_context(&request.url),
+            request.network_cookie_context(),
         )
         .unwrap(),
         Some("none=1".to_owned())
@@ -559,16 +579,18 @@ fn request_with_cross_scheme_initiator_uses_schemeful_cross_site_semantics() {
 }
 
 #[test]
-fn request_effective_cookie_context_recomputes_same_site_for_redirect_targets() {
+fn request_cookie_context_recomputes_same_site_for_redirect_targets() {
     let cookie_store = new_shared_browser_cookie_store();
     let response_url = Url::parse("https://other.test/app/index.html").unwrap();
     let redirected_url = Url::parse("https://other.test/app/panel").unwrap();
-    let request = Request::new("GET", "https://example.com/start", None, vec![])
+    let mut request = Request::new("GET", "https://example.com/start", None, vec![])
         .unwrap()
         .with_initiator_url(&Url::parse("https://example.com/index.html").unwrap())
         .with_request_origin(moli_url::WebOrigin::from_url(
             &Url::parse("https://example.com/index.html").unwrap(),
         ));
+
+    follow_cookie_redirect(&mut request, &redirected_url);
 
     {
         let mut jar = cookie_store.lock().unwrap();
@@ -595,7 +617,7 @@ fn request_effective_cookie_context_recomputes_same_site_for_redirect_targets() 
         cookie_header_for_request(
             &cookie_store,
             &redirected_url,
-            request.effective_cookie_context(&redirected_url),
+            request.network_cookie_context(),
         )
         .unwrap(),
         Some("none=1".to_owned())
@@ -603,15 +625,17 @@ fn request_effective_cookie_context_recomputes_same_site_for_redirect_targets() 
 }
 
 #[test]
-fn request_effective_cookie_context_marks_cross_site_redirect_downgrade_in_report() {
+fn request_cookie_context_marks_cross_site_redirect_downgrade_in_report() {
     let redirected_url = Url::parse("https://other.test/app/panel").unwrap();
     let response_url = Url::parse("https://other.test/app/index.html").unwrap();
-    let request = Request::new("GET", "https://example.com/start", None, vec![])
+    let mut request = Request::new("GET", "https://example.com/start", None, vec![])
         .unwrap()
         .with_initiator_url(&Url::parse("https://example.com/index.html").unwrap())
         .with_request_origin(moli_url::WebOrigin::from_url(
             &Url::parse("https://example.com/index.html").unwrap(),
         ));
+    follow_cookie_redirect(&mut request, &redirected_url);
+
     let mut jar = BrowserCookieStore::default();
 
     jar.store_response_headers(
@@ -622,10 +646,8 @@ fn request_effective_cookie_context_marks_cross_site_redirect_downgrade_in_repor
         )],
     );
 
-    let report = jar.cookie_access_report_for_request(
-        &redirected_url,
-        request.effective_cookie_context(&redirected_url),
-    );
+    let report =
+        jar.cookie_access_report_for_request(&redirected_url, request.network_cookie_context());
     let strict = report
         .excluded_cookies
         .iter()
@@ -663,95 +685,97 @@ fn request_effective_cookie_context_marks_cross_site_redirect_downgrade_in_repor
 }
 
 #[test]
-fn request_effective_cookie_context_records_strict_to_lax_redirect_downgrade() {
-    let request = Request::get("https://same.test/app/panel")
+fn request_cookie_context_records_strict_to_lax_redirect_downgrade() {
+    let mut request = Request::get("https://same.test/app/panel")
         .unwrap()
         .with_initiator_url(&Url::parse("https://same.test/index.html").unwrap())
         .with_request_origin(moli_url::WebOrigin::from_url(
             &Url::parse("https://same.test/index.html").unwrap(),
         ));
 
-    let redirected_context =
-        request.effective_cookie_context(&Url::parse("https://cross.test/app/panel").unwrap());
+    let redirected_url = Url::parse("https://cross.test/app/panel").unwrap();
+    follow_cookie_redirect(&mut request, &redirected_url);
+    let redirected_context = request.network_cookie_context();
 
     assert_eq!(
         redirected_context
-            .site_context_metadata
+            .site_context_metadata()
             .schemeful_context
             .redirect_type,
         NetworkSameSiteRedirectType::CrossSiteRedirect
     );
     assert_eq!(
         redirected_context
-            .site_context_metadata
+            .site_context_metadata()
             .context
             .redirect_type,
         NetworkSameSiteRedirectType::CrossSiteRedirect
     );
     assert_eq!(
         redirected_context
-            .site_context_metadata
+            .site_context_metadata()
             .schemeful_context
             .downgrade_type,
         Some(NetworkSameSiteContextDowngradeType::StrictToLax)
     );
     assert_eq!(
         redirected_context
-            .site_context_metadata
+            .site_context_metadata()
             .context
             .downgrade_type,
         Some(NetworkSameSiteContextDowngradeType::StrictToLax)
     );
     assert_eq!(
-        redirected_context.site_context.schemeful_context,
+        redirected_context.site_context().schemeful_context,
         NetworkSameSiteContext::SameSiteLax
     );
 }
 
 #[test]
-fn request_effective_cookie_context_tracks_schemeful_only_redirect_downgrade() {
-    let request = Request::get("https://example.com/app/panel")
+fn request_cookie_context_tracks_schemeful_only_redirect_downgrade() {
+    let mut request = Request::get("https://example.com/app/panel")
         .unwrap()
         .with_initiator_url(&Url::parse("https://example.com/index.html").unwrap())
         .with_request_origin(moli_url::WebOrigin::from_url(
             &Url::parse("https://example.com/index.html").unwrap(),
         ));
 
-    let redirected_context =
-        request.effective_cookie_context(&Url::parse("http://example.com/app/panel").unwrap());
+    let redirected_url = Url::parse("http://example.com/app/panel").unwrap();
+    follow_cookie_redirect(&mut request, &redirected_url);
+    let redirected_context = request.network_cookie_context();
 
     assert_eq!(
-        redirected_context.site_context.context,
+        redirected_context.site_context().context,
         NetworkSameSiteContext::SameSiteStrict
     );
     assert_eq!(
-        redirected_context.site_context.schemeful_context,
+        redirected_context.site_context().schemeful_context,
         NetworkSameSiteContext::SameSiteLax
     );
     assert_eq!(
         redirected_context
-            .site_context_metadata
+            .site_context_metadata()
             .context
             .downgrade_type,
         None
     );
     assert_eq!(
         redirected_context
-            .site_context_metadata
+            .site_context_metadata()
             .schemeful_context
             .downgrade_type,
         Some(NetworkSameSiteContextDowngradeType::StrictToLax)
     );
     assert_eq!(
         redirected_context
-            .site_context_metadata
+            .site_context_metadata()
             .context
             .redirect_type,
         NetworkSameSiteRedirectType::AllSameSiteRedirect
     );
     assert_eq!(
         redirected_context
-            .site_context_metadata
+            .site_context_metadata()
             .schemeful_context
             .redirect_type,
         NetworkSameSiteRedirectType::CrossSiteRedirect
@@ -795,9 +819,14 @@ fn redirect_chain_cookie_context_preserves_cross_site_downgrade_across_later_sam
         request.cookie_context.clone(),
         &request.url,
         &first_redirect_url,
+        &request.method,
     );
-    let final_hop_context =
-        advance_cookie_request_context(first_hop_context, &request.url, &final_url);
+    let final_hop_context = advance_cookie_request_context(
+        first_hop_context,
+        &request.url,
+        &final_url,
+        &request.method,
+    );
 
     assert_eq!(
         cookie_header_for_request(&cookie_store, &final_url, final_hop_context).unwrap(),
@@ -837,7 +866,7 @@ fn top_level_request_with_initiator_url_uses_cross_site_lax_navigation_semantics
         cookie_header_for_request(
             &cookie_store,
             &request.url,
-            request.effective_cookie_context(&request.url),
+            request.network_cookie_context(),
         )
         .unwrap(),
         Some("lax=1".to_owned())
@@ -854,10 +883,10 @@ fn top_level_post_with_initiator_url_uses_lax_method_unsafe_context() {
             &Url::parse("https://example.com/index.html").unwrap(),
         ));
 
-    let effective_context = request.effective_cookie_context(&request.url);
+    let effective_context = request.network_cookie_context();
 
     assert_eq!(
-        effective_context.site_context.schemeful_context,
+        effective_context.site_context().schemeful_context,
         NetworkSameSiteContext::SameSiteLaxMethodUnsafe
     );
 }

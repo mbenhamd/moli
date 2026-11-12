@@ -1354,6 +1354,197 @@ async fn get_node_for_location_uses_real_layout_hit_testing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn get_node_for_location_hits_atomic_input_in_front_of_wrapping_label() {
+    let mut ctx = TestContext::new();
+    load_bc(&mut ctx, "BID-A");
+    navigate_to_data_html_async(
+        &mut ctx,
+        1,
+        "<!doctype html><html><body><form><p><label>Customer name: <input name=custname></label></p></form></body></html>",
+    )
+    .await;
+
+    let input_backend = renderer_backend_node_id_for_live_expression(
+        &mut ctx,
+        2,
+        3,
+        "document.querySelector('input')",
+    )
+    .await;
+    let label_backend = renderer_backend_node_id_for_live_expression(
+        &mut ctx,
+        4,
+        5,
+        "document.querySelector('label')",
+    )
+    .await;
+
+    ctx.process_async(json!({
+        "id": 6,
+        "method": "DOM.getContentQuads",
+        "params": { "backendNodeId": input_backend }
+    }))
+    .await;
+    let quad = take_response_by_id(&mut ctx, 6)["result"]["quads"][0]
+        .as_array()
+        .expect("the input has one content quad")
+        .clone();
+    let x1 = quad[0].as_f64().unwrap_or_default();
+    let y1 = quad[1].as_f64().unwrap_or_default();
+    let x2 = quad[4].as_f64().unwrap_or_default();
+    let y2 = quad[5].as_f64().unwrap_or_default();
+    assert!(
+        x2 > x1 && y2 > y1 + 2.0,
+        "the input box must be non-trivially sized for the baseline repro, got x {x1}..{x2}, y {y1}..{y2}"
+    );
+
+    let cx = ((x1 + x2) / 2.0).round() as i64;
+    let mid_y = ((y1 + y2) / 2.0).round() as i64;
+    let mut id = 10;
+    for y in [(y1 + 1.0).round() as i64, mid_y, (y2 - 1.0).round() as i64] {
+        ctx.process_async(json!({
+            "id": id,
+            "method": "DOM.getNodeForLocation",
+            "params": { "x": cx, "y": y }
+        }))
+        .await;
+        let hit = take_response_by_id(&mut ctx, id);
+        assert_eq!(
+            hit["result"]["backendNodeId"],
+            json!(input_backend),
+            "a point inside the input box at y={y} must hit the input, not the wrapping label"
+        );
+        id += 1;
+    }
+
+    ctx.process_async(json!({
+        "id": id,
+        "method": "DOM.getNodeForLocation",
+        "params": { "x": (x1 - 4.0).max(0.0).round() as i64, "y": mid_y }
+    }))
+    .await;
+    let hit = take_response_by_id(&mut ctx, id);
+    assert_eq!(
+        hit["result"]["backendNodeId"],
+        json!(label_backend),
+        "a point over the label text to the left of the input must still hit the wrapping label"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_node_for_location_preserves_atomic_inline_descendants_and_border_hits() {
+    assert_inline_hit_fixture(
+        include_str!("atomic_inline_hit_test.html"),
+        include_str!("atomic_inline_hit_test.js"),
+        &[
+            "input",
+            "atomic",
+            "inner",
+            "outer-atomic",
+            "inner-atomic",
+            "nested-inner",
+            "atomic-block",
+            "block-child",
+        ],
+        68,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_node_for_location_preserves_atomic_inline_local_and_sibling_paint_order() {
+    assert_inline_hit_fixture(
+        include_str!("atomic_inline_paint_order.html"),
+        include_str!("atomic_inline_paint_order.js"),
+        &[
+            "floating-order",
+            "later-order",
+            "atomic-top-order",
+            "bare-order",
+        ],
+        12,
+    )
+    .await;
+}
+
+async fn assert_inline_hit_fixture(html: &str, script: &str, ids: &[&str], sample_count: usize) {
+    let mut ctx = TestContext::new();
+    load_bc(&mut ctx, "BID-A");
+    navigate_to_data_html_async(&mut ctx, 1, html).await;
+
+    let mut command_id = 2;
+    let mut backend_ids = std::collections::HashMap::new();
+    for &id in ids {
+        let backend_id = renderer_backend_node_id_for_live_expression(
+            &mut ctx,
+            command_id,
+            command_id + 1,
+            &format!("document.getElementById({})", json!(id)),
+        )
+        .await;
+        backend_ids.insert(id, backend_id);
+        command_id += 2;
+    }
+
+    ctx.process_async(json!({
+        "id": command_id,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": format!("({script})()"),
+            "returnByValue": true
+        }
+    }))
+    .await;
+    let response = take_response_by_id(&mut ctx, command_id);
+    let samples = response["result"]["result"]["value"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the hit-test fixture must return samples: {response}"));
+    assert_eq!(samples.len(), sample_count);
+
+    for sample in samples {
+        command_id += 1;
+        let expected = sample["expected"].as_str().unwrap();
+        ctx.process_async(json!({
+            "id": command_id,
+            "method": "DOM.getNodeForLocation",
+            "params": { "x": sample["x"], "y": sample["y"] }
+        }))
+        .await;
+        let hit = take_response_by_id(&mut ctx, command_id);
+        assert_eq!(
+            hit["result"]["backendNodeId"],
+            json!(backend_ids[expected]),
+            "CDP must hit the descendant or atomic border at {sample}: {hit}"
+        );
+        assert_eq!(sample["elementFromPoint"], expected, "{sample}");
+        let expected_elements = sample["expectedElements"].as_str().unwrap_or(expected);
+        assert_eq!(sample["elementsFromPoint"], expected_elements, "{sample}");
+    }
+    if samples.iter().any(|sample| sample["pixel"].is_array()) {
+        use base64::Engine as _;
+        command_id += 1;
+        ctx.process_async(json!({"id": command_id, "method": "Page.captureScreenshot"}))
+            .await;
+        let response = take_response_by_id(&mut ctx, command_id);
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(response["result"]["data"].as_str().unwrap())
+            .unwrap();
+        let image = moli_image::decode_png(&png).unwrap();
+        for sample in samples.iter().filter(|sample| sample["pixel"].is_array()) {
+            let x = sample["x"].as_u64().unwrap() as u32;
+            let y = sample["y"].as_u64().unwrap() as u32;
+            assert!(x < image.width && y < image.height);
+            let offset = ((y * image.width + x) * 4) as usize;
+            assert_eq!(
+                json!(image.rgba[offset..offset + 4]),
+                sample["pixel"],
+                "{sample}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn get_node_for_location_mock_policy_uses_compatibility_geometry() {
     let mut ctx = TestContext::new_with_layout_policy(LayoutPolicy::Mock);
     load_bc(&mut ctx, "BID-A");

@@ -192,15 +192,16 @@ use super::document::{
     detached_shadow_root_selection_value, node_shadow_root_element_from_point_callback,
     node_shadow_root_elements_from_point_callback,
 };
+#[cfg(feature = "ace-protocol")]
+pub(crate) use activation::activate_handle_via_click_with_detail_and_modifiers;
 use activation::navigate_form_target_browsing_context;
 pub(crate) use activation::{
     SpecialBrowsingContextTarget, navigate_existing_browsing_context_target,
     navigate_named_iframe_target,
 };
 pub(crate) use activation::{
-    accepts_drop_default_action, activate_default_submit_button_via_keyboard,
-    activate_handle_after_pointer_release, activate_handle_via_click,
-    activate_handle_via_click_with_detail_and_modifiers, activate_handle_via_synthetic_click,
+    accepts_drop_default_action, activate_handle_after_pointer_release, activate_handle_via_click,
+    activate_handle_via_keyboard, activate_handle_via_synthetic_click,
     dispatched_click_activation_target, finish_legacy_activation_for_dispatched_click,
     perform_auxiliary_link_default_action, perform_click_default_action_for_dispatched_event,
     perform_drop_default_action, prepare_legacy_activation_for_dispatched_click,
@@ -277,6 +278,7 @@ use event_handlers::{
 };
 pub(in crate::native_bridge::element) use events::construct_event;
 pub(crate) use events::construct_focus_event;
+use events::{ClickEventSource, construct_click_event};
 pub(crate) use events::{
     InputEventCoordinates, NodePublicEventDispatchOutcome, TextEditInputType, TouchEventPoint,
     construct_command_event, construct_drag_event_with_related_target, construct_drop_input_event,
@@ -289,7 +291,6 @@ pub(crate) use events::{
     construct_touch_event_with_points, construct_wheel_event_for_target, dispatch_beforeinput,
     dispatch_public_event,
 };
-use events::{construct_click_event, construct_click_event_with_detail_and_modifiers};
 pub(crate) use focus::{
     contenteditable_editing_host, focus_element, focus_live_element_for_inspector,
     perform_access_key_default_action_for_dispatched_event,

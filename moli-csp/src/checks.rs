@@ -174,7 +174,12 @@ pub fn content_security_policy_allows_url_with_redirect_status(
         let Some((_, source_list)) = effective_source_list_with_directive(policy, kind) else {
             return true;
         };
-        source_list_allows(source_list, protected_url, request_url, redirect_status)
+        source_list_allows(
+            source_list,
+            policy.effective_self_origin(None, protected_url),
+            request_url,
+            redirect_status,
+        )
     })
 }
 
@@ -248,7 +253,11 @@ pub fn content_security_policy_frame_ancestors_violation_with_disposition_and_re
         let source_list = normalized_source_list(directive_source_list(policy, FRAME_ANCESTORS)?);
         if ancestor_origins.iter().all(|ancestor_origin| {
             ancestor_origin.as_ref().is_some_and(|ancestor_origin| {
-                frame_ancestor_source_list_allows(&source_list, protected_url, ancestor_origin)
+                frame_ancestor_source_list_allows(
+                    &source_list,
+                    policy.effective_self_origin(None, protected_url),
+                    ancestor_origin,
+                )
             })
         }) {
             return None;
@@ -289,6 +298,7 @@ pub fn content_security_policy_script_element_url_violation_with_redirect_status
     content_security_policy_url_violation_for_checked_url_with_redirect_status_disposition_reporting_endpoints_and_request(
         policies,
         protected_url,
+        None,
         request_url,
         request_url,
         ContentSecurityPolicyResourceKind::DocumentScriptElement,
@@ -312,6 +322,7 @@ pub fn content_security_policy_style_element_url_violation_with_redirect_status_
     content_security_policy_url_violation_for_checked_url_with_redirect_status_disposition_reporting_endpoints_and_request(
         policies,
         protected_url,
+        None,
         request_url,
         request_url,
         ContentSecurityPolicyResourceKind::DocumentStyleElement,
@@ -336,6 +347,7 @@ pub fn content_security_policy_url_violation_for_checked_url_with_redirect_statu
     content_security_policy_url_violation_for_checked_url_with_redirect_status_disposition_reporting_endpoints_and_request(
         policies,
         protected_url,
+        None,
         checked_url,
         blocked_url,
         kind,
@@ -356,10 +368,13 @@ pub enum ContentSecurityPolicyUrlRequest<'a> {
 
 /// Check the current target while reporting the original request URL. Redirect
 /// targets can contain secrets that must not be exposed in violation reports.
+/// An unbound policy can borrow a self-origin fallback for matching; report
+/// attribution and endpoint resolution continue to use the protected URL.
 #[allow(clippy::too_many_arguments)]
 pub fn content_security_policy_url_violation_for_checked_url_with_redirect_status_disposition_reporting_endpoints_and_request(
     policies: &[ContentSecurityPolicy],
     protected_url: &Url,
+    fallback_self_origin: Option<&Url>,
     checked_url: &Url,
     blocked_url: &Url,
     kind: ContentSecurityPolicyResourceKind,
@@ -373,7 +388,7 @@ pub fn content_security_policy_url_violation_for_checked_url_with_redirect_statu
             effective_source_list_with_directive(policy, kind)?;
         if source_list_allows_resource_request(
             source_list,
-            protected_url,
+            policy.effective_self_origin(fallback_self_origin, protected_url),
             checked_url,
             redirect_status,
             request,
