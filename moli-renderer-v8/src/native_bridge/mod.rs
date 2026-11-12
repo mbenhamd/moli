@@ -76,6 +76,7 @@ pub(crate) const ENTERED_CHILD_WINDOW_HANDLE_SLOT: &str = "__moliEnteredChildWin
 pub(crate) use bridge::wrapped_handle_value;
 pub(super) use bridge::*;
 pub(super) use context_host::*;
+pub(crate) use document::document_is_in_focus_chain;
 pub(crate) use document::install_document_template_bindings;
 pub(crate) use element::{
     compute_mock_intersection_client_rect, compute_mock_intersection_scrollport_client_rect,
