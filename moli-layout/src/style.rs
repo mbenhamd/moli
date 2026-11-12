@@ -1773,10 +1773,10 @@ impl ResolvedLayoutStyle {
 
     /// The line count of a computed `line-clamp`/`-webkit-line-clamp`.
     ///
-    /// The pinned Servo Stylo build parses neither `display: -webkit-box` nor
-    /// `-webkit-box-orient`, so the clamp cannot be gated on them as Blink
-    /// does. It applies to the block container that owns the lines, which is
-    /// the css-overflow-4 `line-clamp` model.
+    /// It applies to the block container that owns the lines, which is the
+    /// css-overflow-4 `line-clamp` model. Stylo already turns Blink's
+    /// `display: -webkit-box; -webkit-box-orient: vertical` clamp shape into
+    /// `flow-root` at computed-value time.
     pub(crate) fn line_clamp(&self) -> Option<usize> {
         let computed = self.computed.as_ref()?;
         let lines = computed
@@ -2496,6 +2496,16 @@ fn classify_display(computed: &ComputedValues) -> LayoutDisplay {
             DisplayInside::TableColumn => LayoutDisplay::TableColumn,
             DisplayInside::TableRow => LayoutDisplay::TableRow,
             DisplayInside::TableCell => LayoutDisplay::TableCell,
+            // Legacy `-webkit-box` flex layout is not implemented; lay the
+            // box out as the block formatting context Stylo gives its
+            // line-clamped vertical form.
+            DisplayInside::WebkitBox => {
+                if outside == DisplayOutside::Inline {
+                    LayoutDisplay::InlineBlock
+                } else {
+                    LayoutDisplay::FlowRoot
+                }
+            }
         }
     }
 }
