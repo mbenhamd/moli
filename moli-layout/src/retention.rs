@@ -243,6 +243,7 @@ where
         // taken. Its retained cache answers for descendant geometry that the
         // snapshot never recorded, so a cache hit would leave the subtree at
         // its snapshot values. Neither the box nor its subtree reuses results.
+        let clean_before_static_positions = numeric_clean.clone();
         for index in 0..builder_len {
             if numeric_clean[index]
                 && self.prior.world.boxes[index]
@@ -250,6 +251,26 @@ where
                     .is_some()
             {
                 mark_subtree_unclean(new, LayoutBoxId::from_index(index), &mut numeric_clean);
+            }
+        }
+        // The static position itself belongs to the owner's IFC. Parley only
+        // records it when it lays that IFC out, so an owner that reuses its
+        // numeric result would leave the box unplaced. Carry it across when
+        // the box changed only through the rule above and the same owner
+        // reuses its IFC unchanged.
+        for index in 0..builder_len {
+            if numeric_clean[index] || !clean_before_static_positions[index] {
+                continue;
+            }
+            let Some(position) = self.prior.world.boxes[index].inline_static_position else {
+                continue;
+            };
+            let owner = position.owner.index();
+            if owner < builder_len
+                && numeric_clean[owner]
+                && new.boxes[index].inline_context_owner == Some(position.owner)
+            {
+                new.boxes[index].inline_static_position = Some(position);
             }
         }
         for (index, is_clean) in numeric_clean.iter().enumerate() {

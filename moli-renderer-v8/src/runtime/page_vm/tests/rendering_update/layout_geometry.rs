@@ -1639,6 +1639,52 @@ async fn live_incremental_layout_reuses_main_document_numeric_results_exactly() 
     .expect("float-free incremental differential fixture should run");
 }
 
+// An out-of-flow box inside a block's IFC, as in a slide-preview frame.
+const INCREMENTAL_IFC_ABSPOS_FIXTURE: &str = r#"
+document.head.innerHTML = '<style>html,body{margin:0}#cb{position:relative;width:664px;height:373px}#cb::after{content:""}#abs{position:absolute;inset:0;display:flex}#lead{position:absolute}</style>';
+document.body.innerHTML = '<div id=cb>\n    <div id=abs><span>edit</span></div>\n  </div><div id=cb2>lead text <span id=lead>x</span></div><div id=leaf style="height:10px"></div>';
+'installed'
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_incremental_layout_places_an_ifc_positioned_box_when_its_owner_is_reused() {
+    run_page_vm_async_test(async move {
+        // Only the sibling leaf changes, so the IFC owner reuses its result
+        // and the absolute box still needs its static position.
+        let reused = run_incremental_differential(
+            INCREMENTAL_IFC_ABSPOS_FIXTURE,
+            &[
+                "document.getElementById('leaf').style.height='30px';",
+                "document.getElementById('leaf').style.height='50px';",
+            ],
+        )?;
+        assert!(reused > 0, "the IFC owner reused no numeric results");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("IFC positioned-box fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_incremental_layout_does_not_reuse_a_static_position_whose_box_changed() {
+    run_page_vm_async_test(async move {
+        // The positioned box's own display moves its hypothetical position
+        // after the text run, so the retained static position is stale.
+        run_incremental_differential(
+            INCREMENTAL_IFC_ABSPOS_FIXTURE,
+            &[
+                "document.getElementById('lead').style.display='block';",
+                "document.getElementById('leaf').style.height='30px';",
+                "document.getElementById('lead').style.display='inline';",
+                "document.getElementById('leaf').style.height='50px';",
+            ],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("changed IFC positioned-box fixture should run");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn live_incremental_layout_reuses_after_web_fonts_load_until_a_font_registers() {
     run_page_vm_async_test(async move {
