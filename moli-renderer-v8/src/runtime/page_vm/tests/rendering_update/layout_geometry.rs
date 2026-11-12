@@ -1426,6 +1426,34 @@ document.body.innerHTML = '<div id=a>a</div><div id=b>b</div>';
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn live_geometry_attribute_read_by_generated_content_lays_out_again() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}#t{display:inline-block}#t::before{content:attr(data-x)}</style>';
+document.body.innerHTML = '<span id=t data-x="a"></span>';
+'installed'
+"#,
+        )?;
+        // `content: attr(data-x)` reads the attribute through generated
+        // content, not a selector, so the write must still lay out.
+        let width = "document.getElementById('t').getBoundingClientRect().width";
+        let narrow: f64 = page_vm.vm_mut().eval(width)?.parse()?;
+        page_vm.vm_mut().eval(
+            "document.getElementById('t').setAttribute('data-x', 'a much longer label');'mutated'",
+        )?;
+        let wide: f64 = page_vm.vm_mut().eval(width)?.parse()?;
+        assert!(
+            wide > narrow,
+            "generated content follows the attribute: {narrow} -> {wide}"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("live generated-content attribute fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn live_geometry_computed_auto_inset_follows_the_current_layout_in_one_pass() {
     run_page_vm_async_test(async move {
         let mut page_vm = live_geometry_page(
