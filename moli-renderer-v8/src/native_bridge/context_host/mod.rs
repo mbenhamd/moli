@@ -117,7 +117,11 @@ mod main_document_lifecycle;
 mod media_element_events;
 mod media_loads;
 mod misc_platform_api_tasks;
+mod web_locks;
 pub(crate) use media_loads::PendingMediaLoadTerminalFollowup;
+pub(crate) use web_locks::{
+    NewWebLockRequest, WebLockClient, WebLockClientError, WebLockSettlement,
+};
 mod text_track_loads;
 pub(crate) use text_track_loads::{
     PendingMediaCanPlayFollowup, PendingMediaTextTrackGateRegistration,
@@ -1042,6 +1046,8 @@ pub(crate) struct PageScriptHost {
     message_port_registry: SharedMessagePortRegistry,
     message_port_wrappers: HashMap<MessagePortId, MessagePortWrapperEntry>,
     broadcast_channel_registry: SharedBroadcastChannelRegistry,
+    web_lock_registry: crate::web_locks_runtime::SharedRendererWebLockRegistry,
+    web_locks: web_locks::WebLockHostState,
     shared_worker_client_owner_id: SharedWorkerClientOwnerId,
     child_shared_worker_client_owner_ids: HashMap<DomHandle, SharedWorkerClientOwnerId>,
     shared_worker_clients: SharedWorkerClientEndpointOwner,
@@ -1378,6 +1384,7 @@ impl PageScriptHost {
             .unregister_service_worker_client(self.service_worker_client_id);
         self.close_shared_worker_clients();
         self.close_owned_broadcast_channels();
+        self.release_owned_web_locks();
         self.close_owned_message_ports();
         self.shutdown_workers();
         self.output_journal = None;

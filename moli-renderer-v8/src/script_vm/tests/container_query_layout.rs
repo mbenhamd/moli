@@ -137,16 +137,22 @@ fn class_toggle_on_a_descendant_adds_no_container_iteration() {
     let mut vm = live_vm(STYLES);
     vm.eval("document.getElementById('direct').getBoundingClientRect().height")
         .expect("eval");
+    let before = passes(&vm);
     let result = vm
         .eval(
             r#"(() => {
               const dep = document.getElementById('dep');
-              dep.classList.add('marker');
+              dep.classList.add('color');
               return dep.getBoundingClientRect().height;
             })()"#,
         )
         .expect("eval");
     assert_ne!(result, "0");
+    assert_eq!(
+        passes(&vm),
+        before + 1,
+        "the class a selector reads lays out once"
+    );
     assert_eq!(
         iterations(&vm),
         Some(1),

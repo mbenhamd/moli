@@ -344,7 +344,8 @@ impl PageScriptHost {
     /// until a capture or invalidation replaces it. Under the live-geometry
     /// policy a read lays out again when the published tree's input key no
     /// longer matches the Document, like Blink's forced reflow, and reuses
-    /// the tree while the key is unchanged. A caller that is inspecting the
+    /// the tree while the key is unchanged or only selector-read attributes
+    /// moved without restyling anything. A caller that is inspecting the
     /// published tree keeps reading it unchanged.
     pub(crate) fn ensure_current_layout(&self) -> Result<(), LayoutError> {
         if !self.layout_policy.uses_real_layout() {
@@ -371,8 +372,14 @@ impl PageScriptHost {
         let inputs = self.live_layout_input_key(viewport, None);
         {
             let state = self.document_layout_state.borrow();
+            // A DOM write that reaches layout only through selectors (an
+            // unread `data-*`, `aria-*`, `class` or `id`) moves the DOM version
+            // but leaves the tree valid when no selector restyled anything.
             let current = match &inputs {
-                Some(inputs) => state.latest_layout_is_current(document, inputs),
+                Some(inputs) => {
+                    state.latest_layout_is_current(document, inputs)
+                        || state.latest_layout_is_clean(document, inputs, self.layout_dirty_mark())
+                }
                 None => state.latest_layout(document).is_some(),
             };
             if current {

@@ -76,6 +76,7 @@ const NAVIGATOR_RUNTIME_DATA_KEYS: &[&str] = &[
     "mediaCapabilities",
     "credentials",
     "mediaSession",
+    "locks",
 ];
 const WORKER_NAVIGATOR_INSTALLED_SLOT: &str = "__moliWorkerNavigatorInstalled";
 const WORKER_NAVIGATOR_MATERIALIZING_SLOT: &str = "__moliWorkerNavigatorMaterializing";
@@ -196,6 +197,8 @@ struct NavigatorRuntimeDataPrototypeDeclaration {
     media_capabilities: (),
     #[webapi(accessor_property, getter = navigator_runtime_data_getter_callback, data = callback_data_index_value(scope, 34), receiver = web_api_interfaces::Navigator::is_instance)]
     media_session: (),
+    #[webapi(accessor_property, getter = navigator_runtime_data_getter_callback, data = callback_data_index_value(scope, 35), receiver = web_api_interfaces::Navigator::is_instance)]
+    locks: (),
     #[webapi(accessor_property, getter = navigator_cookie_enabled_getter_callback, receiver = web_api_interfaces::Navigator::is_instance)]
     cookie_enabled: (),
 }
@@ -848,6 +851,7 @@ pub(in crate::context_bootstrap) fn install_navigator_template_bindings<'s>(
     install_media_capabilities_template_bindings(scope, template, interface_name);
     super::credentials::install(scope, template, interface_name);
     super::media_session::install(scope, template, interface_name);
+    super::web_locks::install(scope, template, interface_name);
     let prototype = template.prototype_template(scope);
     match interface_name {
         "MediaDevices" | "MediaDeviceInfo" | "InputDeviceInfo" => {
@@ -900,6 +904,7 @@ fn filter_navigator_secure_context_exposure<'s>(
     if !secure_context {
         delete_object_property(scope, prototype, "clipboard")?;
         delete_object_property(scope, prototype, "credentials")?;
+        delete_object_property(scope, prototype, "locks")?;
         delete_object_property(scope, prototype, "mediaDevices")?;
         delete_object_property(scope, prototype, "storage")?;
         delete_object_property(scope, prototype, "storageBuckets")?;
@@ -1059,6 +1064,7 @@ pub(super) fn build_lazy_navigator_subobject_in_current_realm<'s>(
         }
         NavigatorSubobject::Clipboard => build_clipboard_object(scope)?.into(),
         NavigatorSubobject::Credentials => super::credentials::build_container(scope)?.into(),
+        NavigatorSubobject::Locks => super::web_locks::build(scope)?.into(),
         NavigatorSubobject::MediaSession => {
             super::media_session::build(scope, backing, owner_child, owner_popup)?.into()
         }

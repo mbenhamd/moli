@@ -614,6 +614,7 @@ impl PageScriptHost {
                 self.child_custom_elements.remove(&handle);
                 self.clear_child_window_event_listeners(handle);
                 self.close_broadcast_channels_for_child_context(handle);
+                self.release_web_locks_for_child_context(handle);
                 self.disconnect_shared_worker_clients_for_child_context(handle);
                 self.child_web_storage_opaque_context_nonces.remove(&handle);
                 self.retire_current_child_navigation_commit_task(handle);
@@ -812,6 +813,7 @@ impl PageScriptHost {
             self.child_custom_elements.remove(&handle);
             self.clear_child_window_event_listeners(handle);
             self.close_broadcast_channels_for_child_context(handle);
+            self.release_web_locks_for_child_context(handle);
             self.disconnect_shared_worker_clients_for_child_context(handle);
             self.child_web_storage_opaque_context_nonces.remove(&handle);
         }

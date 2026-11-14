@@ -43,8 +43,16 @@ const RAW_GLOBAL_FUNCTION_ALLOWLIST: &[(&str, usize)] = &[
     // registry. These remaining roots own browser-created abort algorithms.
     // Native abort algorithms reside in the store or its extracted dispatch
     // batch. Dispatch moves the roots; it does not add a Web IDL callback store.
-    ("native_bridge/abort.rs", 2),
+    // The third match is the borrowed key of `AbortStore::forget_abort_algorithm`, which drops a
+    // registered algorithm by handle identity when a Web Locks request retires without a scope.
+    // It stores no root: the handle stays owned by the caller (web_locks.rs, counted below).
+    ("native_bridge/abort.rs", 3),
     ("native_bridge/abort/event.rs", 1),
+    // Web Locks keeps the browser-created abort algorithm it registered on a
+    // request's AbortSignal (signal + algorithm, in the pending request and in
+    // the grant that unregisters it): the same class as native_bridge/abort.rs.
+    // The page-supplied LockGrantedCallback uses WindowWebIdlCallbackFunction.
+    ("native_bridge/context_host/web_locks.rs", 2),
     ("native_bridge/history_queue.rs", 3),
     ("script_vm/frame_script_jobs.rs", 3),
     ("worker/abort.rs", 2),

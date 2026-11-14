@@ -11,6 +11,7 @@ mod navigator_subobjects;
 mod promises;
 mod screen;
 mod visual_viewport;
+mod web_locks;
 mod window_state;
 
 pub(crate) use geolocation::notify_geolocation_override_changed;
@@ -38,6 +39,7 @@ pub(in crate::context_bootstrap) use self::screen::{
 pub(in crate::context_bootstrap) use self::visual_viewport::{
     build_window_visual_viewport, install_visual_viewport_template_bindings,
 };
+pub(crate) use self::web_locks::run_web_lock_task;
 pub(crate) use self::window_state::{
     bind_window_navigator_identity_seed, set_window_navigator_identity,
 };

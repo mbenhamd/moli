@@ -1373,6 +1373,59 @@ document.body.innerHTML = '<div id=a>a</div><div id=b>b</div>';
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn live_geometry_attribute_writes_lay_out_only_when_a_selector_reads_them() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}div{height:50px}</style>';
+document.body.innerHTML = '<div id=a>a</div><div id=b>b</div>';
+'installed'
+"#,
+        )?;
+        let width = "String(document.getElementById('a').getBoundingClientRect().width)";
+        assert_eq!(page_vm.vm_mut().eval(width)?, "800");
+        let passes = layout_passes(&page_vm);
+        // Writes to data-*, aria-* and class that no selector reads move no
+        // layout input, so each forced read reuses the published layout.
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                r#"(() => { const a = document.getElementById('a'); const b = document.getElementById('b');
+                    const widths = [];
+                    for (let i = 0; i < 10; i++) {
+                        a.setAttribute('data-x', String(i));
+                        a.setAttribute('aria-busy', String(i % 2 === 0));
+                        a.className = 'unused' + i;
+                        widths.push(a.getBoundingClientRect().width, b.getBoundingClientRect().top);
+                    }
+                    return widths.join(','); })()"#,
+            )?,
+            "800,50,".repeat(10).trim_end_matches(',')
+        );
+        assert_eq!(layout_passes(&page_vm), passes);
+
+        // Once a selector reads the attribute, the write lays out exactly once.
+        page_vm.vm_mut().eval(
+            "document.head.insertAdjacentHTML('beforeend', '<style>[data-x=\"9\"]{width:300px}</style>');'ruled'",
+        )?;
+        page_vm
+            .vm_mut()
+            .eval("document.getElementById('a').setAttribute('data-x', '8');'reset'")?;
+        assert_eq!(page_vm.vm_mut().eval(width)?, "800");
+        let passes = layout_passes(&page_vm);
+        page_vm
+            .vm_mut()
+            .eval("document.getElementById('a').setAttribute('data-x', '9');'selected'")?;
+        assert_eq!(page_vm.vm_mut().eval(width)?, "300");
+        assert_eq!(layout_passes(&page_vm), passes + 1);
+        assert_eq!(page_vm.vm_mut().eval(width)?, "300");
+        assert_eq!(layout_passes(&page_vm), passes + 1);
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("live attribute fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn live_geometry_computed_auto_inset_follows_the_current_layout_in_one_pass() {
     run_page_vm_async_test(async move {
         let mut page_vm = live_geometry_page(
@@ -1637,6 +1690,184 @@ async fn live_incremental_layout_reuses_main_document_numeric_results_exactly() 
     })
     .await
     .expect("float-free incremental differential fixture should run");
+}
+
+// An out-of-flow box inside a block's IFC, as in a slide-preview frame.
+const INCREMENTAL_IFC_ABSPOS_FIXTURE: &str = r#"
+document.head.innerHTML = '<style>html,body{margin:0}#cb{position:relative;width:664px;height:373px}#cb::after{content:""}#abs{position:absolute;inset:0;display:flex}#lead{position:absolute}</style>';
+document.body.innerHTML = '<div id=cb>\n    <div id=abs><span>edit</span></div>\n  </div><div id=cb2>lead text <span id=lead>x</span></div><div id=leaf style="height:10px"></div>';
+'installed'
+"#;
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_incremental_layout_places_an_ifc_positioned_box_when_its_owner_is_reused() {
+    run_page_vm_async_test(async move {
+        // Only the sibling leaf changes, so the IFC owner reuses its result
+        // and the absolute box still needs its static position.
+        let reused = run_incremental_differential(
+            INCREMENTAL_IFC_ABSPOS_FIXTURE,
+            &[
+                "document.getElementById('leaf').style.height='30px';",
+                "document.getElementById('leaf').style.height='50px';",
+            ],
+        )?;
+        assert!(reused > 0, "the IFC owner reused no numeric results");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("IFC positioned-box fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_incremental_layout_does_not_reuse_a_static_position_whose_box_changed() {
+    run_page_vm_async_test(async move {
+        // The positioned box's own display moves its hypothetical position
+        // after the text run, so the retained static position is stale.
+        run_incremental_differential(
+            INCREMENTAL_IFC_ABSPOS_FIXTURE,
+            &[
+                "document.getElementById('lead').style.display='block';",
+                "document.getElementById('leaf').style.height='30px';",
+                "document.getElementById('lead').style.display='inline';",
+                "document.getElementById('leaf').style.height='50px';",
+            ],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("changed IFC positioned-box fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_incremental_layout_reuses_after_web_fonts_load_until_a_font_registers() {
+    run_page_vm_async_test(async move {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let narrow = encode(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../moli-layout/tests/fixtures/moli-ahem-narrow.ttf"
+        )));
+        let wide = encode(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../moli-layout/tests/fixtures/moli-ahem-wide.ttf"
+        )));
+        let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())?;
+        loader.set_optional_resource_fetch_mask(
+            crate::protocol_types::OptionalResourceFetchMask::FONT,
+        );
+        let mut page_vm = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/live-web-fonts.html")?,
+        );
+        page_vm
+            .vm_mut()
+            .set_layout_policy(moli_page_types::LayoutPolicy::Live);
+        page_vm.set_viewport_surface(Some(live_viewport(800, 0)))?;
+        page_vm.vm_mut().eval(&format!(
+            r#"
+document.head.innerHTML = `<style>
+@font-face {{ font-family:T; src:url(data:font/ttf;base64,{narrow}) format('truetype') }}
+html,body {{ margin:0 }} .t {{ display:inline-block; font:40px T }}
+</style>`;
+document.body.innerHTML = '<div id=rows></div><div id=leaf style="height:10px"></div>';
+const rows = document.getElementById('rows');
+for (let i = 0; i < 20; i++) {{
+  const d = document.createElement('div'); d.innerHTML = '<span class=t>AAAA</span> row ' + i; rows.appendChild(d);
+}}
+globalThis.wideBytes = Uint8Array.from(atob('{wide}'), c => c.charCodeAt(0));
+'installed'
+"#
+        ))?;
+        page_vm
+            .vm_mut()
+            .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+        let width = "String(document.querySelector('.t').getBoundingClientRect().width)";
+        // The narrow CSS face is registered and shapes the text.
+        assert_eq!(page_vm.vm_mut().eval(width)?, "80");
+
+        moli_layout::set_incremental_layout_verify_for_test(true);
+        let result = (|| {
+            let mismatches = moli_layout::incremental_verify_mismatch_count();
+            // Once fonts have settled, a leaf mutation reuses the retained
+            // world, and its geometry equals a full rebuild.
+            for height in [30, 50] {
+                let compared = moli_layout::incremental_verify_comparison_count();
+                let reused = moli_layout::incremental_numeric_reused_total();
+                page_vm.vm_mut().eval(&format!(
+                    "document.getElementById('leaf').style.height='{height}px'; 'ok'"
+                ))?;
+                page_vm.vm_mut().eval(INCREMENTAL_READ_ALL)?;
+                assert!(
+                    moli_layout::incremental_verify_comparison_count() > compared,
+                    "the pass after a leaf mutation reused no retained world"
+                );
+                assert!(moli_layout::incremental_numeric_reused_total() > reused);
+                assert_eq!(moli_layout::incremental_verify_mismatch_count(), mismatches);
+            }
+            // Registering a face that outranks the CSS one changes shaping a
+            // box comparison cannot see: the next pass is full and reads it.
+            let compared = moli_layout::incremental_verify_comparison_count();
+            page_vm.vm_mut().eval(
+                "document.fonts.add(new FontFace('T', wideBytes)); document.getElementById('leaf').style.height='70px'; 'ok'",
+            )?;
+            assert_eq!(page_vm.vm_mut().eval(width)?, "160");
+            assert_eq!(
+                moli_layout::incremental_verify_comparison_count(),
+                compared,
+                "a pass after a font registration reused the retained world"
+            );
+            Ok::<_, anyhow::Error>(())
+        })();
+        moli_layout::set_incremental_layout_verify_for_test(false);
+        result
+    })
+    .await
+    .expect("live web-font retention fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_incremental_layout_matches_a_full_rebuild_inside_inline_positioned_boxes() {
+    run_page_vm_async_test(async move {
+        // `#ov` is positioned inside a container with inline content, so it is
+        // laid out after the numeric snapshot. A text change dirties the
+        // container but leaves `#ov` and its subtree unchanged.
+        run_incremental_differential(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}#cb{position:relative;width:300px;height:200px}#ov{position:absolute;left:0;top:0;width:100%;height:100%}#in{position:absolute;width:100%;height:100%}#leaf{height:40px}</style>';
+document.body.innerHTML = '<div id=cb>lead <span id=tx>text</span><div id=ov><div id=in><div id=leaf></div></div></div></div>';
+'installed'
+"#,
+            &[
+                "document.getElementById('tx').textContent = 'longer text';",
+                "document.getElementById('tx').textContent = 'text';",
+            ],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("inline positioned incremental fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn live_incremental_layout_matches_a_full_rebuild_below_a_changed_inline_positioned_box() {
+    run_page_vm_async_test(async move {
+        // `#tip` is positioned inside a container with inline content. A text
+        // change inside it dirties `#tip`, while its `.icon` subtree is unchanged.
+        run_incremental_differential(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}#cb{position:relative;width:300px}#tip{position:absolute;left:0;top:0;width:120px}.icon{padding:4px}.icon i{display:block;width:16px;height:16px}</style>';
+document.body.innerHTML = '<div id=cb>lead <span>text</span><div id=tip><b id=lbl>1</b><div class=icon><i></i></div></div></div>';
+'installed'
+"#,
+            &[
+                "document.getElementById('lbl').textContent = 'two words';",
+                "document.getElementById('lbl').textContent = '1';",
+            ],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("changed inline positioned box fixture should run");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1949,4 +2180,34 @@ return out.join('|');
     })
     .await
     .expect("line clamp CSSOM fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn webkit_box_line_clamp_computes_like_chromium() {
+    run_page_vm_async_test(async move {
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let mut page_vm = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/webkit-box.html")?,
+        );
+        let result = page_vm.vm_mut().eval(
+            r#"(() => {
+document.head.innerHTML = '<style>#a{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}#b{display:-webkit-box}</style>';
+document.body.innerHTML = '<div id=a></div><div id=b></div>';
+const a = getComputedStyle(document.getElementById('a'));
+const b = getComputedStyle(document.getElementById('b'));
+return [a.display, a.getPropertyValue('-webkit-box-orient'), a.webkitBoxOrient,
+  b.display, b.getPropertyValue('-webkit-box-orient'),
+  CSS.supports('-webkit-box-orient', 'vertical'), CSS.supports('display', '-webkit-box')].join('|');
+})()"#,
+        )?;
+        // Chromium 147: a vertical -webkit-box with -webkit-line-clamp
+        // computes to flow-root; without the clamp it stays -webkit-box.
+        assert_eq!(result, "flow-root|vertical|vertical|-webkit-box|horizontal|true|true");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("webkit-box fixture should run");
 }
