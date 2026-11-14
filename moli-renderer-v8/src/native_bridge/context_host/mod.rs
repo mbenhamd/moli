@@ -40,7 +40,7 @@ use crate::{
             PendingSubresourceAuthState, PendingSubresourceFetchState,
             PendingSubresourceResponseState, PendingWebSocketResponseState,
             RunningSubresourceFetchState, ScriptErrorConstructorKind, ScriptNetworkOutputItem,
-            StreamingSubresourceFetchState, SubresourceResourceType,
+            StreamingSubresourceFetchState,
         },
         util::{
             string_from_utf16_units_lossy, utf16_units, utf16_units_contain_unpaired_surrogate,
@@ -97,6 +97,7 @@ mod frame_document_ready_routes;
 mod hash_changes;
 mod host_environment;
 mod host_loads;
+mod html_serialization;
 mod image_decodes;
 mod image_loads;
 mod image_resources;
@@ -130,7 +131,7 @@ mod message_ports;
 mod messages;
 mod module_owner_tasks;
 mod mouse_click;
-pub(crate) use mouse_click::MouseReleaseFollowUp;
+pub(crate) use mouse_click::{MouseReleaseFollowUp, common_flat_tree_ancestor};
 mod navigation;
 mod navigator_overrides;
 mod opfs_tasks;
@@ -180,7 +181,7 @@ use crate::{
     frame_owner_model::FrameDocumentLoadDeliveryTask, runtime::ServiceWorkerControlState,
     service_worker_runtime::ServiceWorkerClientId,
 };
-pub(crate) use bridge_install::JsContextHostBridgeRef;
+pub(crate) use bridge_install::PageScriptHostBridgeRef;
 pub(crate) use child_documents::{
     ChildDocumentFetch, ChildDocumentLoadApplication, ChildDocumentLoadBodyActivity,
 };
@@ -193,8 +194,8 @@ pub(crate) use child_frame_runtime::{
     throw_cross_origin_location_security_error, throw_cross_origin_type_error,
 };
 pub(crate) use child_frame_snapshots::{
-    ChildBrowsingContextDocumentSnapshot, ChildBrowsingContextFrameSnapshot,
-    ChildBrowsingContextSnapshot, DetachedChildBrowsingContextDocumentSnapshot,
+    ChildBrowsingContextFrameSnapshot, ChildBrowsingContextSnapshot,
+    DetachedChildBrowsingContextDocumentSnapshot,
 };
 use child_frames::ChildBrowsingContextEntry;
 pub(in crate::native_bridge::context_host) use child_frames::ChildParserClassicScriptCandidate;
@@ -276,7 +277,7 @@ pub(crate) type WeakPrebootstrappedChildDefaultContexts =
 
 #[derive(Clone)]
 struct ChildDefaultContextBootstrapConfig {
-    host: Weak<RefCell<JsContextHost>>,
+    host: Weak<RefCell<PageScriptHost>>,
     pending_contexts: WeakPrebootstrappedChildDefaultContexts,
     resource_owner_id: crate::resource_owner::ResourceOwnerId,
     promise_reject_dispatch: crate::script_vm::PromiseRejectDispatchSlot,
@@ -825,14 +826,21 @@ impl PendingImageLoadEvent {
 
 /// The complete PageVm-stamped route set is created at the stable Page source
 /// boundary and installed atomically before a live Window can use Web APIs.
-pub(crate) type JsContextHostPageTaskCapabilities =
+pub(crate) type PageScriptHostTaskCapabilities =
     crate::page_task_queue::RendererPageJsContextTaskSenders;
 
-pub(crate) struct JsContextHost {
+/// Native DOM and Web API host shared by the Window realms of a page's
+/// document execution instance.
+///
+/// This is neither a V8 Context nor an isolate-wide singleton. Its lifetime is
+/// distinct from the navigation-stable `RendererPageScriptEnvironment`.
+pub(crate) struct PageScriptHost {
     pub(crate) session_histories: session_history::RendererSessionHistories,
     pub(crate) pending_history_traversal_admissions:
         super::history_traversal::PendingHistoryTraversalAdmissions,
-    runtime: *mut DocumentRuntime,
+    /// Non-owning pointer kept valid by the execution owner or a retained-host
+    /// handoff of the same boxed runtime.
+    document_runtime: *mut DocumentRuntime,
     layout_policy: moli_page_types::LayoutPolicy,
     scrollbars_hidden: bool,
     document_layout_state: RefCell<layout_state::DocumentLayoutState>,
@@ -859,6 +867,10 @@ pub(crate) struct JsContextHost {
     style_viewport_generation: Cell<u64>,
     root_document_lifecycle: Option<RendererDocumentLifecycleJournalHandle>,
     output_journal: Option<crate::runtime::RendererTurnOutputJournal>,
+    native_interception_output: Option<(
+        crate::runtime::RendererDocumentLifecycleIdentity,
+        crate::network::interception_output::InterceptionOutput,
+    )>,
     page_context_resources_closed: bool,
     context_host_lifecycle: Rc<Cell<crate::util::ContextHostLifecycle>>,
     deferred_context_host_release_queue: crate::script_vm::RendererDeferredContextHostReleaseQueue,
@@ -1026,8 +1038,7 @@ pub(crate) struct JsContextHost {
     next_child_window_event_registration_id: u64,
     event_callbacks: event_callbacks::EventCallbackRegistry,
     browser_context_runtime: crate::runtime::RendererBrowserContextRuntime,
-    browsing_context_name: crate::runtime::RendererBrowsingContextName,
-    auxiliary_window: Option<crate::runtime::RendererAuxiliaryWindow>,
+    window_identity: crate::runtime::RendererPageWindowIdentity,
     page_script_environment: Option<crate::script_vm::WeakRendererPageScriptEnvironment>,
     top_level_navigation_handoff_tx:
         crate::page_task_queue::RendererTopLevelNavigationHandoffSender,
@@ -1099,13 +1110,13 @@ pub(crate) struct JsContextHost {
     next_javascript_dialog_id: u64,
     pending_network_output: Vec<ScriptNetworkOutputItem>,
     focus_change_epoch: u64,
-    next_subresource_network_request_handle: u64,
     subresource_activity_epoch: u64,
     subresource_last_activity_at: std::time::Instant,
-    fetch_subresource_interception_enabled: bool,
-    fetch_subresource_interception_resource_type: Option<SubresourceResourceType>,
+    /// The target policy remains available even when the current Document
+    /// loader has been retired. Documents and dedicated Workers share its
+    /// live interception eligibility, without local fallback values.
+    page_network_policy: crate::network::PageNetworkPolicy,
     active_subresource_requests: usize,
-    next_pending_subresource_fetch_id: u64,
     pending_subresource_fetches: HashMap<u64, PendingSubresourceFetchState>,
     pending_subresource_auths: HashMap<u64, PendingSubresourceAuthState>,
     pending_subresource_responses: HashMap<u64, PendingSubresourceResponseState>,
@@ -1120,7 +1131,7 @@ pub(crate) struct JsContextHost {
     pub(crate) pending_network_body_sources:
         HashMap<NetworkBodySourceId, crate::network_host::PendingNetworkBodySourceState>,
     pub(crate) pending_network_body_clones: HashMap<NetworkBodySourceId, Vec<NetworkBodySourceId>>,
-    page_task_capabilities: OnceCell<JsContextHostPageTaskCapabilities>,
+    page_task_capabilities: OnceCell<PageScriptHostTaskCapabilities>,
     resource_completion_tx: RendererResourceCompletionSender,
     next_worker_id: u64,
     workers: HashMap<DedicatedWorkerId, WorkerConnectionState>,
@@ -1241,17 +1252,17 @@ pub(crate) struct PointerCaptureDispatchEvent {
     pub(crate) target: DomHandle,
 }
 
-impl fmt::Debug for JsContextHost {
+impl fmt::Debug for PageScriptHost {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("JsContextHost")
-            .field("runtime", &self.runtime)
+        f.debug_struct("PageScriptHost")
+            .field("document_runtime", &self.document_runtime)
             .field("bridge", &self.bridge)
             .finish()
     }
 }
 
 #[cfg(test)]
-impl JsContextHost {
+impl PageScriptHost {
     pub(crate) fn child_browsing_context_attribute_bootstrap_for_test(
         &self,
         handle: crate::document_runtime::DomHandle,
@@ -1280,21 +1291,21 @@ impl JsContextHost {
     }
 }
 
-impl Deref for JsContextHost {
+impl Deref for PageScriptHost {
     type Target = DocumentRuntime;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*self.runtime }
+        unsafe { &*self.document_runtime }
     }
 }
 
-impl DerefMut for JsContextHost {
+impl DerefMut for PageScriptHost {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.runtime }
+        unsafe { &mut *self.document_runtime }
     }
 }
 
-impl JsContextHost {
+impl PageScriptHost {
     pub(crate) fn advance_app_manifest_link_change_epoch(&mut self) {
         self.app_manifest_link_change_epoch = self.app_manifest_link_change_epoch.wrapping_add(1);
     }
@@ -1336,10 +1347,13 @@ impl JsContextHost {
     ) {
         assert!(
             self.retained_document_runtime.is_none(),
-            "JsContextHost must adopt its DocumentRuntime at most once"
+            "PageScriptHost must adopt its DocumentRuntime at most once"
         );
         assert!(
-            std::ptr::eq(self.runtime.cast_const(), document_runtime.as_ref()),
+            std::ptr::eq(
+                self.document_runtime.cast_const(),
+                document_runtime.as_ref()
+            ),
             "retained DocumentRuntime transfer must preserve the host raw pointer"
         );
         self.retained_document_runtime = Some(document_runtime);
@@ -1374,6 +1388,9 @@ impl JsContextHost {
         self.close_owned_message_ports();
         self.shutdown_workers();
         self.output_journal = None;
+        if let Some((_, output)) = self.native_interception_output.take() {
+            output.close();
+        }
         self.root_document_lifecycle = None;
         self.child_default_context_bootstrap = None;
         self.command_turn_output = None;
@@ -1382,7 +1399,7 @@ impl JsContextHost {
     }
 }
 
-impl Drop for JsContextHost {
+impl Drop for PageScriptHost {
     fn drop(&mut self) {
         self.close_page_context_resources_for_teardown();
         self.context_host_lifecycle

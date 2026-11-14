@@ -60,7 +60,7 @@ pub(crate) type ScriptVmBootstrapError = Box<(anyhow::Error, DomHost)>;
 /// committed typestate before consuming this token.
 pub(crate) struct MainWindowProxyNavigationCommit {
     context: Option<v8::Global<v8::Context>>,
-    renderer_document_isolate: RendererDocumentIsolateHandle,
+    renderer_document_isolate: RendererIsolateHandle,
     page_id: u64,
 }
 
@@ -671,7 +671,7 @@ use super::{
         execute_module_script_source, register_import_map_source,
     },
     native_bridge::{
-        JsContextHost, RuntimeObservableContextToken, SharedPrebootstrappedChildDefaultContexts,
+        PageScriptHost, RuntimeObservableContextToken, SharedPrebootstrappedChildDefaultContexts,
         node_runtime_and_handle_from_object,
     },
     planning::PreparedScript,
@@ -680,7 +680,10 @@ use super::{
         RendererPageContextCancelSender, RendererPageDiagnosticsSnapshot,
         RendererRuntimeObservableSourceQueue, renderer_page_context_cancel_channel,
     },
-    types::{JsValueSnapshot, ScriptKind, ScriptMode, ScriptSourceKind, SubresourceResourceType},
+    types::{
+        JsValueSnapshot, ScriptKind, ScriptMode, ScriptSourceKind, SubresourceInterceptionClasses,
+        SubresourceResourceType,
+    },
     util::v8_string,
 };
 
@@ -916,7 +919,7 @@ use crate::document_runtime::{DeferredPageTaskLane, FollowupPageTaskDisposition}
 use document_isolate::*;
 pub(crate) use document_isolate::{
     RendererDeferredContextHostReleaseQueue, RendererDocumentIsolateBootstrap,
-    RendererDocumentIsolateHandle, RendererDocumentIsolateReservationAccounting,
+    RendererDocumentIsolateReservationAccounting, RendererIsolateHandle,
     RendererPageScriptEnvironment, ScriptVmDefaultWorldBootstrap,
     WeakRendererPageScriptEnvironment, renderer_document_isolate_accounting_diagnostics,
 };
@@ -942,9 +945,9 @@ type ScriptGlobalsBaseline = Vec<String>;
 struct ScriptGlobalsBaseline;
 
 fn recover_bootstrap_dom_host_from_holder(
-    renderer_document_isolate: RendererDocumentIsolateHandle,
+    renderer_document_isolate: RendererIsolateHandle,
     renderer_document_isolate_teardown: RendererDocumentIsolateTeardown,
-    context_host: Rc<RefCell<JsContextHost>>,
+    context_host: Rc<RefCell<PageScriptHost>>,
     document_runtime: Box<DocumentRuntime>,
 ) -> DomHost {
     drop(context_host);
@@ -955,8 +958,8 @@ fn recover_bootstrap_dom_host_from_holder(
 }
 
 fn register_main_window_execution_context_for_bootstrap(
-    renderer_document_isolate: &RendererDocumentIsolateHandle,
-    context_host: &Rc<RefCell<JsContextHost>>,
+    renderer_document_isolate: &RendererIsolateHandle,
+    context_host: &Rc<RefCell<PageScriptHost>>,
     context: &v8::Global<v8::Context>,
 ) -> Result<()> {
     renderer_document_isolate
@@ -1026,9 +1029,9 @@ pub(super) struct ScriptVm {
     prebootstrapped_child_default_contexts: SharedPrebootstrappedChildDefaultContexts,
     child_document_modulator_store: ChildDocumentModulatorStore,
     root_frame_id: Option<String>,
-    // `JsContextHost` stores a non-owning pointer into `document_runtime`, so it
+    // `PageScriptHost` stores a non-owning pointer into `document_runtime`, so it
     // must be dropped before the runtime field during normal Rust field teardown.
-    _context_host: Rc<RefCell<JsContextHost>>,
+    _context_host: Rc<RefCell<PageScriptHost>>,
     pub(super) document_runtime: ScriptVmDocumentRuntimeOwner,
     post_domcontentloaded_page_task_tx: PageTaskSender,
     page_runtime_wake_tx: PageRuntimeWakeSender,
@@ -1047,11 +1050,9 @@ pub(super) struct ScriptVm {
     /// keeps this conversion on LocalFrameView; retaining the last affine map
     /// lets exit events use the old frame after a new hit enters another one.
     hovered_mouse_root_to_frame: moli_layout::LayoutTransform2D,
-    active_touch_pointer_handle: Option<DomHandle>,
     active_touch_pointer_handles: BTreeMap<i32, DomHandle>,
-    active_touch_event_handle: Option<DomHandle>,
-    active_touch_point: Option<crate::runtime::RendererTouchPoint>,
     active_touch_points: BTreeMap<i32, ActiveTouchPoint>,
+    pending_touch_tap: Option<PendingTouchTap>,
     suppress_next_keypress_after_canceled_raw_keydown: bool,
     suppress_compat_mouse_events: bool,
     active_scrollbar_drag: Option<ActiveScrollbarDrag>,
@@ -1072,7 +1073,7 @@ pub(super) struct ScriptVm {
         Option<crate::page_task_queue::RendererPageTaskTestResidence>,
     // Native and V8 per-document state must drop before the final isolate
     // handle; retained realms then release their host through its GC queue.
-    renderer_document_isolate: RendererDocumentIsolateHandle,
+    renderer_document_isolate: RendererIsolateHandle,
 }
 
 impl moli_layout::GeometryProvider for ScriptVm {
@@ -1087,13 +1088,13 @@ impl moli_layout::GeometryProvider for ScriptVm {
 }
 
 pub(super) struct ScriptVmCommandTurnOutputScope {
-    context_host: Rc<RefCell<JsContextHost>>,
+    context_host: Rc<RefCell<PageScriptHost>>,
     recorder: crate::runtime::RendererCommandTurnOutputRecorder,
     _inspector_scope: ScriptVmInspectorCommandTurnOutputScope,
 }
 
 pub(super) struct ScriptVmOrdinaryPageTurnNavigationHandoffScope {
-    context_host: Rc<RefCell<JsContextHost>>,
+    context_host: Rc<RefCell<PageScriptHost>>,
 }
 
 impl Drop for ScriptVmOrdinaryPageTurnNavigationHandoffScope {
@@ -1123,6 +1124,17 @@ pub(super) struct ActiveTouchPoint {
     pub x: f64,
     pub y: f64,
     pub target: DomHandle,
+    pub is_primary: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct PendingTouchTap {
+    pub id: i32,
+    pub target: DomHandle,
+    pub document: DomHandle,
+    pub start_x: f64,
+    pub start_y: f64,
+    pub suppress_mouse: bool,
 }
 
 pub(super) struct ActiveDragSession {
@@ -1172,6 +1184,10 @@ pub(super) struct ScriptVmRendererDocumentIsolateOps<'a> {
 }
 
 impl ScriptVm {
+    pub(crate) fn page_window_identity(&self) -> crate::runtime::RendererPageWindowIdentity {
+        self._context_host.borrow().window_identity().clone()
+    }
+
     pub(crate) fn document_isolate_identity_for_diagnostics(&self) -> usize {
         self.renderer_document_isolate.identity_key()
     }
@@ -1377,7 +1393,7 @@ impl ScriptVm {
                 let scope = &mut scope.init();
                 let context = unsafe { v8::Local::new(scope, &*context_ptr) };
                 let scope = &mut v8::ContextScope::new(scope, context);
-                let expected_runtime_ptr: *mut JsContextHost = (*context_host).as_ptr();
+                let expected_runtime_ptr: *mut PageScriptHost = (*context_host).as_ptr();
                 page_inspector.with_session_and_outbound(
                     inspector,
                     PageInspectorSessionTarget::Frontend(inspector_session_id),
@@ -1442,7 +1458,7 @@ impl ScriptVm {
     ) -> Option<String> {
         let host = self._context_host.borrow();
         let shadow_root_inclusion = if include_shadow_dom {
-            ShadowRootInclusion::AllAuthorForInspector
+            ShadowRootInclusion::AllAuthor
         } else {
             ShadowRootInclusion::None
         };
@@ -1455,6 +1471,7 @@ impl ScriptVm {
             handle,
             &scripting_enabled_for_node,
             shadow_root_inclusion,
+            crate::dom::native::ShadowRootMarkupProfile::Inspector,
             Some(&should_serialize_registry_attribute),
         )
     }
@@ -2005,6 +2022,7 @@ impl ScriptVmPageRealmBootstrap {
         resource_completion_tx: RendererResourceCompletionSender,
         initial_document_loader_bootstrap: crate::network::context::DocumentResourceLoaderBootstrap,
         browser_context_runtime: RendererBrowserContextRuntime,
+        window_identity: crate::runtime::RendererPageWindowIdentity,
         javascript_dialog_runtime: crate::runtime::RendererJavaScriptDialogRuntime,
         mut renderer_document_isolate_bootstrap: RendererDocumentIsolateBootstrap,
         runtime_inspector_session_restore_snapshots:
@@ -2148,7 +2166,7 @@ impl ScriptVmPageRealmBootstrap {
         }
         let dom_debugger_pause_scheduler = page_inspector.dom_debugger_pause_scheduler();
 
-        let context_host = Rc::new(RefCell::new(JsContextHost::new(
+        let context_host = Rc::new(RefCell::new(PageScriptHost::new(
             document_runtime.as_mut(),
             frame_owner_store,
             bridge_bindings,
@@ -2158,10 +2176,12 @@ impl ScriptVmPageRealmBootstrap {
             top_level_navigation_handoff_tx,
             service_worker_task_tx,
             browser_context_runtime,
+            window_identity,
             javascript_dialog_runtime,
             page_context_cancel_rx,
             top_level_storage_key,
             reserved_service_worker_client_id,
+            initial_document_loader_bootstrap.page_network_policy(),
         )));
         if let Some(domain) = inherited_document_domain {
             context_host
@@ -2174,25 +2194,13 @@ impl ScriptVmPageRealmBootstrap {
             .bind_deferred_context_host_release_queue(
                 renderer_document_isolate.deferred_context_host_release_queue(),
             );
-        if let Some(root_frame_id) = root_frame_id.as_deref() {
-            let name = context_host
-                .borrow()
-                .browser_context_runtime()
-                .browsing_context_name(root_frame_id);
-            if let Some(group) = browsing_context_group {
-                name.set_group(group);
-            }
-            context_host.borrow_mut().bind_browsing_context_name(name);
-            let window = context_host
-                .borrow()
-                .browser_context_runtime()
-                .auxiliary_window(root_frame_id);
-            context_host.borrow_mut().bind_auxiliary_window(window);
-        }
-        if root_frame_id.is_none()
-            && let Some(environment) = renderer_page_script_environment.as_ref()
+        if root_frame_id.is_some()
+            && let Some(group) = browsing_context_group
         {
-            environment.inherit_window_identity(&mut context_host.borrow_mut());
+            context_host
+                .borrow()
+                .browsing_context_name()
+                .set_group(group);
         }
         let main_document_owner = context_host
             .borrow()
@@ -2352,7 +2360,7 @@ impl ScriptVmDefaultWorldBootstrap {
         browser_context_runtime: RendererBrowserContextRuntime,
     ) -> std::result::Result<Self, ScriptVmBootstrapError> {
         let renderer_document_isolate_bootstrap =
-            match RendererDocumentIsolateHandle::new_standalone_without_owner_reservation_for_test(
+            match RendererIsolateHandle::new_standalone_without_owner_reservation_for_test(
                 page_task_tx.v8_foreground_task_sender(),
             ) {
                 Ok(bootstrap) => bootstrap,
@@ -2366,6 +2374,7 @@ impl ScriptVmDefaultWorldBootstrap {
             resource_completion_tx,
             initial_document_loader_bootstrap,
             browser_context_runtime,
+            crate::runtime::RendererPageWindowIdentity::default(),
             crate::runtime::RendererJavaScriptDialogRuntime::default(),
             renderer_document_isolate_bootstrap,
             &[],
@@ -2385,6 +2394,7 @@ impl ScriptVmDefaultWorldBootstrap {
         resource_completion_tx: RendererResourceCompletionSender,
         initial_document_loader_bootstrap: crate::network::context::DocumentResourceLoaderBootstrap,
         browser_context_runtime: RendererBrowserContextRuntime,
+        window_identity: crate::runtime::RendererPageWindowIdentity,
         javascript_dialog_runtime: crate::runtime::RendererJavaScriptDialogRuntime,
         renderer_document_isolate_bootstrap: RendererDocumentIsolateBootstrap,
         runtime_inspector_session_restore_snapshots:
@@ -2408,6 +2418,7 @@ impl ScriptVmDefaultWorldBootstrap {
             resource_completion_tx,
             initial_document_loader_bootstrap,
             browser_context_runtime,
+            window_identity,
             javascript_dialog_runtime,
             renderer_document_isolate_bootstrap,
             runtime_inspector_session_restore_snapshots,
@@ -2422,7 +2433,7 @@ impl ScriptVmDefaultWorldBootstrap {
     }
 
     fn capture_baseline_globals_and_attach_context(
-        renderer_document_isolate: RendererDocumentIsolateHandle,
+        renderer_document_isolate: RendererIsolateHandle,
         isolate: &mut v8::OwnedIsolate,
         inspector: &mut RendererInspectorIsolateBackend,
         page_inspector: &mut DocumentInspectorBinding,
@@ -2526,11 +2537,9 @@ impl ScriptVmDefaultWorldBootstrap {
             pressed_mouse_buttons: 0,
             hovered_mouse_handle: None,
             hovered_mouse_root_to_frame: moli_layout::LayoutTransform2D::IDENTITY,
-            active_touch_pointer_handle: None,
             active_touch_pointer_handles: BTreeMap::new(),
-            active_touch_event_handle: None,
-            active_touch_point: None,
             active_touch_points: BTreeMap::new(),
+            pending_touch_tap: None,
             suppress_next_keypress_after_canceled_raw_keydown: false,
             suppress_compat_mouse_events: false,
             active_scrollbar_drag: None,

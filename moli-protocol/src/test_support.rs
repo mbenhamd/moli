@@ -65,6 +65,20 @@ pub fn publish_retired_target_termination_after_command_output(
     conn.publish_page_target_termination_after_command_output(action, output);
 }
 
+/// Publishes real, Page-owned channel cleanup without installing a V8 proxy.
+/// Scheduler tests exercise its dependencies separately from Native disposal.
+pub fn publish_bidi_channel_cleanup(conn: &mut CdpConnection, group: &str) {
+    let owner = crate::conn::BidiChannelPageOwner::capture_for_owner(
+        conn,
+        crate::conn::CommandOwnerScope::capture(conn, None),
+    )
+    .expect("channel cleanup requires the fixture's current Page owner");
+    let action = crate::conn::BidiChannelOwnerAction::release_object_group(owner, group.to_owned());
+    conn.publish_protocol_work(move |sequence| {
+        ProtocolSchedulerWork::bidi_channel_owner_action(sequence, action)
+    });
+}
+
 /// Binds a synthetic Page stream to a retired protocol Page owner, allowing
 /// scheduler tests to project historical output without a live Page.
 pub fn bind_renderer_page_output_stream_to_retired_owner(
@@ -86,6 +100,66 @@ pub fn bind_renderer_page_output_stream_to_retired_owner(
 pub struct BackgroundNavigationRequestFixture {
     token: DocumentNavigationToken,
     cancellation: moli_fetch::FetchCancelHandle,
+}
+
+/// Holds a real Native owner operation until dropped. The entry receipt lets
+/// tests establish that later lifecycle work cannot run yet, without sleeps.
+pub struct HeldRenderer {
+    entered: tokio::sync::oneshot::Receiver<()>,
+    release: Option<std::sync::mpsc::Sender<()>>,
+    pending: Option<moli_core::page::PendingPageCommand>,
+    response: Option<moli_core::RendererNativeCommandResponseGuard>,
+}
+
+impl HeldRenderer {
+    pub async fn wait_until_entered(&mut self) {
+        (&mut self.entered)
+            .await
+            .expect("Native owner gate entered");
+    }
+}
+
+impl Drop for HeldRenderer {
+    fn drop(&mut self) {
+        self.release.take();
+        self.response.take();
+        self.pending.take();
+    }
+}
+
+pub fn hold_renderer(
+    conn: &mut CdpConnection,
+    context: &crate::automation::AutomationContext,
+) -> HeldRenderer {
+    let owner = conn
+        .command_owner_scope_for_devtools_context(context)
+        .expect("held renderer requires a live target");
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let (pending, response) = conn
+        .loaded_page_mut_for_owner(&owner)
+        .expect("held renderer requires an installed Page")
+        .start_cdp_call(
+            9_000_199,
+            None,
+            moli_core::RendererNativeOperation::then(
+                moli_core::RendererPageCommand::ChildFrameTreeSnapshot,
+                move |_| {
+                    let _ = entered.send(());
+                    let _ = held.recv();
+                    moli_core::RendererNativeOperationStep::Complete(
+                        moli_core::RendererNativeProtocolResponse::success(serde_json::json!({})),
+                    )
+                },
+            ),
+        )
+        .expect("Native owner gate accepted");
+    HeldRenderer {
+        entered: waiting,
+        release: Some(release),
+        pending: Some(pending),
+        response: Some(response),
+    }
 }
 
 impl BackgroundNavigationRequestFixture {
@@ -143,6 +217,26 @@ pub fn settle_background_navigation_request(
     conn.settle_background_navigation_completion(&fixture.token)
 }
 
+/// Installs a dialog on an exact owned Page without running V8. The renderer
+/// completion remains the caller's real one-shot.
+pub fn push_page_javascript_dialog(
+    conn: &mut CdpConnection,
+    context: &crate::automation::AutomationContext,
+    dialog: moli_core::page::RendererPendingJavaScriptDialog,
+) {
+    let owner = conn
+        .command_owner_scope_for_devtools_context(context)
+        .expect("dialog fixture requires a live target");
+    let page = conn
+        .target_page_residence_identity_for_owner(&owner)
+        .or_else(|| conn.pending_target_page_residence_identity_for_owner(&owner))
+        .expect("dialog fixture requires a current or reserved Page");
+    let frame_id = page.target_id().expect("fixture target").to_owned();
+    let dialog = crate::conn::TargetJavaScriptDialog::new(page, frame_id, dialog);
+    conn.with_target_javascript_dialog_state_for_owner_mut(&owner, |state| state.push(dialog))
+        .expect("dialog fixture requires target state");
+}
+
 /// Constructs one nonzero deferred-load observation identity.
 pub fn deferred_main_document_load_observation_id(
     value: u64,
@@ -191,6 +285,14 @@ pub fn renderer_fenced_output_work(
         predecessors,
         None,
     )
+}
+
+pub fn protocol_work_after_renderer_delivery(
+    mut work: ProtocolSchedulerWork,
+    predecessor: moli_core::RendererOutputCursor,
+) -> ProtocolSchedulerWork {
+    work.bind_renderer_delivery_predecessor(predecessor);
+    work
 }
 
 pub fn protocol_work_from_renderer_output(

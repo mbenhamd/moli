@@ -294,10 +294,6 @@ pub(in crate::context_bootstrap) fn worker_constructor_callback<'s>(
                 network_offline: host.network_offline(),
                 blocked_url_patterns: host.blocked_url_patterns().to_vec(),
                 network_partition_key: network_partition_key.clone(),
-                fetch_subresource_interception_enabled: host
-                    .fetch_subresource_interception_enabled(),
-                fetch_subresource_interception_resource_type: host
-                    .fetch_subresource_interception_resource_type(),
             };
             let parent_service_worker_client_id =
                 host.service_worker_client_id_for_worker_owner(owner_scope);
@@ -318,6 +314,7 @@ pub(in crate::context_bootstrap) fn worker_constructor_callback<'s>(
                 resolved_url.to_string(),
                 creator_request_client.clone(),
             )
+            .with_interception_context(host.native_interception_context())
             .with_script_kind(worker_options.worker_type)
             .with_module_credentials_mode(worker_options.credentials_mode.0)
             .with_module_static_import_initiator_url(base_url.clone())
@@ -525,6 +522,7 @@ pub(in crate::context_bootstrap) fn worker_constructor_callback<'s>(
             script_url,
             nested_context.loader.request_client().clone(),
         )
+        .with_interception_context(nested_context.interception_context.clone())
         .with_script_kind(worker_options.worker_type)
         .with_module_credentials_mode(worker_options.credentials_mode.0)
         .with_module_static_import_initiator_url(nested_context.base_url.clone())
@@ -743,14 +741,14 @@ pub(in crate::context_bootstrap) fn resolve_worker_script_url(
 }
 
 pub(in crate::context_bootstrap) fn document_query_encoding_override(
-    host: &crate::native_bridge::JsContextHost,
+    host: &crate::native_bridge::PageScriptHost,
 ) -> Option<&'static encoding_rs::Encoding> {
     form_output_encoding_for_label(host.document_character_set())
         .filter(|encoding| *encoding != encoding_rs::UTF_8)
 }
 
 pub(in crate::context_bootstrap) fn worker_constructor_base_url(
-    host: &crate::native_bridge::JsContextHost,
+    host: &crate::native_bridge::PageScriptHost,
 ) -> Url {
     host.active_child_subresource_request_handle()
         .and_then(|handle| host.child_browsing_context_base_url(handle))
@@ -763,7 +761,7 @@ pub(in crate::context_bootstrap) fn worker_constructor_base_url(
 
 pub(in crate::context_bootstrap) fn worker_creator_secure_context(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &crate::native_bridge::JsContextHost,
+    host: &crate::native_bridge::PageScriptHost,
     child_handle: Option<DomHandle>,
 ) -> bool {
     // Loaded lightweight popups share the opener's V8 realm, but have their

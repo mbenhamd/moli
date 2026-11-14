@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
 use moli_layout::{
     LayoutDetailsSlots, LayoutElementCategory, LayoutElementMetadata, LayoutElementSemantics,
@@ -13,33 +16,36 @@ use crate::{
         flat_children, flat_parent, form_control_data, layout_element_classification, list_data,
         optional_positive_u16_attribute, select_control_data,
     },
-    native_bridge::JsContextHost,
+    native_bridge::{PageScriptHost, element::StyleObservation},
 };
 
 pub(super) struct NativeLayoutSourceView<'a> {
-    runtime: &'a JsContextHost,
+    runtime: &'a PageScriptHost,
     root: DomHandle,
     document: Option<DomHandle>,
-    include_paint_resources: bool,
+    styles: RefCell<StyleObservation<'a>>,
+    paint_resources: bool,
     text_selections: HashMap<DomHandle, LayoutTextSelection>,
 }
 
 impl<'a> NativeLayoutSourceView<'a> {
     #[cfg(test)]
-    pub(super) fn new(runtime: &'a JsContextHost, root: DomHandle) -> Self {
-        Self::with_paint_resources(runtime, root, false)
+    pub(super) fn new(runtime: &'a PageScriptHost, root: DomHandle) -> Self {
+        Self::with_paint_resources(runtime, root, StyleObservation::new(runtime), false)
     }
 
     pub(super) fn with_paint_resources(
-        runtime: &'a JsContextHost,
+        runtime: &'a PageScriptHost,
         root: DomHandle,
-        include_paint_resources: bool,
+        styles: StyleObservation<'a>,
+        paint_resources: bool,
     ) -> Self {
         Self {
             runtime,
             root,
             document: runtime.dom_host().owner_document_handle(root),
-            include_paint_resources,
+            styles: RefCell::new(styles),
+            paint_resources,
             text_selections: document_text_selections(runtime, root),
         }
     }
@@ -250,9 +256,9 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
     fn replaced_image(
         &self,
         node: Self::NodeId,
-        style: &moli_layout::ResolvedLayoutStyle,
+        _style: &moli_layout::ResolvedLayoutStyle,
     ) -> Option<LayoutImageResource> {
-        if !self.include_paint_resources {
+        if !self.paint_resources {
             return None;
         }
         let semantics = self
@@ -270,9 +276,6 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
                     svg: ready.svg,
                 })
             }
-            Some(LayoutReplacedKind::Svg) => {
-                super::inline_svg::replaced_resource(self.host(), node, style)
-            }
             Some(LayoutReplacedKind::Canvas) => {
                 let pixels = self.runtime.canvas_pixels_for_layout(node)?;
                 Some(LayoutImageResource {
@@ -287,7 +290,7 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
     }
 
     fn css_image_resource(&self, resolved_url: &str) -> Option<LayoutImageResource> {
-        if !self.include_paint_resources {
+        if !self.paint_resources {
             return None;
         }
         let parsed = url::Url::parse(resolved_url).ok()?;
@@ -308,10 +311,26 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
             svg: ready.svg,
         })
     }
+
+    fn svg_content(
+        &self,
+        node: DomHandle,
+        style: &moli_layout::ResolvedLayoutStyle,
+        viewport: moli_layout::LayoutSize,
+    ) -> Option<moli_layout::LayoutSvgContent<DomHandle>> {
+        super::inline_svg::layout_content(
+            self.runtime,
+            node,
+            style,
+            viewport,
+            &self.styles,
+            self.paint_resources,
+        )
+    }
 }
 
 fn document_text_selections(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     root: DomHandle,
 ) -> HashMap<DomHandle, LayoutTextSelection> {
     let host = runtime.dom_host();

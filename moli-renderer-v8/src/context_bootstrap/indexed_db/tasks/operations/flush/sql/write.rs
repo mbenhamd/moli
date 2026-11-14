@@ -1,17 +1,16 @@
 use super::*;
-use crate::context_bootstrap::indexed_db::typed_state::sql::sql_transaction_cancellation;
-use crate::context_bootstrap::indexed_db::typed_state::sql::{
-    abort_sql_dispatch, submit_indexed_db_sql_quota_task,
-};
 use crate::context_bootstrap::indexed_db::{
     IndexedDbObjectStoreMetadata, extract_index_keys_from_value, indexed_db_object_store_metadata,
     reserve_vec,
+    typed_state::sql::sql_transaction_cancellation,
+    typed_state::sql::{abort_sql_dispatch, submit_indexed_db_sql_quota_task},
 };
+
 use moli_indexeddb::sqlite::{IndexKeys, PreparedWrite, service::Completion};
 
 struct Write {
     transaction: TransactionHandle,
-    store: moli_indexeddb::IndexedDbName,
+    store: moli_indexeddb::sqlite::StoreId,
     prepared: PreparedObjectStoreWrite,
     metadata: IndexedDbObjectStoreMetadata,
     add_only: bool,
@@ -30,7 +29,7 @@ pub(super) fn prepare<'s>(
         .ok_or_else(|| IndexedDbError::InvalidState("IndexedDB store lost its metadata".into()))?;
     let write = Write {
         transaction: operation.handle,
-        store: operation.store_name,
+        store: operation.store,
         prepared,
         metadata,
         add_only,
@@ -60,7 +59,7 @@ impl Write {
         ) {
             let command = Command::PrepareWrite {
                 transaction,
-                store: self.store.clone(),
+                store: self.store,
                 add_only: self.add_only,
             };
             let completion_client = client.clone();
@@ -214,7 +213,10 @@ impl Write {
                 index.multi_entry,
             )?;
             indexes.push(IndexKeys {
-                name: index.name.clone(),
+                index: self
+                    .metadata
+                    .index_id(name)
+                    .expect("declared index has an ID"),
                 keys,
             });
         }

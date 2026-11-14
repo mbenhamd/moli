@@ -80,8 +80,14 @@ non-yielding WebDriver timeout behavior.
   `emulation.setUserAgentOverride`, `emulation.setLocaleOverride`,
   `emulation.setTimezoneOverride`, `emulation.setNetworkConditions`, storage
   isolation, `storage.setCookie`, `storage.getCookies`, and `session.end`.
-  Twenty-three cross-engine `bidi-network` scenarios cover iframe event ownership,
-  request identity, and subscription initialization. Six keep the foreground tab
+  Twenty-nine cross-engine `bidi-network` scenarios cover iframe event ownership,
+  request identity, subscription initialization, and navigation independence.
+  Six hold Page A's HTTP response at an explicit server barrier while Page B
+  resolves its exact realm and sends two channel messages. A then completes,
+  closes, or accepts a replacement navigation before the held response is
+  released; shared and isolated user contexts are covered. Closing must not
+  revive A, and a late response must not replace its successor Document.
+  Six keep the foreground tab
   active while an unattached background Page inserts, navigates, or nests an
   iframe. They cover shared and separate user contexts, require request/response
   and DOMContentLoaded/load events to identify the loaded child context, and read
@@ -350,3 +356,65 @@ Useful environment variables:
 
 If both debug and release binaries exist, the runner uses the newest one by file
 modification time. Set `MOLI_BIN` when you need an exact binary.
+
+`bidi-progress` is part of the default suite. It pipelines real WebSocket
+commands while an HTTP response, an unresolved Promise, an input pause, or
+another page's prompt remains pending. It checks per-command terminal replies,
+independent cancellation, top-level input-state sharing, and the performActions
+queue. `releaseActions` bypasses the long performActions wait and only releases
+already-dispatched input state. The Classic/attached-BiDi case records the
+shared ChromeDriver boundary and requires settlement after the HTTP gate opens.
+
+The navigation/prompt case opens the old Document's prompt only after the new
+navigation reaches a held HTTP response. Handling must return the real confirm
+result before that response is released, and the navigation must then finish.
+This avoids relying on Chrome's separate behavior of dismissing a prompt that
+was already open when navigation began.
+
+`classic-alert-progress` runs Get/Set/accept/dismiss with no navigation, with an
+existing prompt during a held script navigation, with a prompt arriving after
+the Classic request is sent, and with no prompt. The existing/arriving cases
+must return the actual JavaScript prompt value before the navigation response
+is released. Without a prompt, Classic still waits for navigation and then
+returns `no such alert`. This differs from BiDi's finite prompt handling.
+The same 16 prompt-state cases run against Moli and ChromeDriver. Absence is observed for a
+bounded 250 ms after the HTTP request is written; deterministic Rust tests also
+poll the actual wait before installing a prompt. The navigation response gate
+opens only after the verdict, never to rescue a blocked alert operation. The
+separate prompt trigger opens after the navigation request arrives.
+
+Four additional alert cases set `pageLoad` to 200 ms and keep the navigation
+response withheld through the timeout and recovery checks. Get/Set/accept/dismiss
+must return HTTP 500 `timeout`, stop the pending navigation, and leave the old Document
+and subsequent Classic commands usable. The Get case also keeps a second Page
+navigating and verifies it still loads normally. Deterministic Native tests use
+a paused clock for zero and 200 ms deadlines; admitted scheduler inputs finish
+outside the receive/deadline race.
+
+The release/old/new input-generation case is calibrated against
+Chrome/ChromeDriver 156.0.8078.73. Upstream mapper commit
+[`49622edb`](https://github.com/GoogleChromeLabs/chromium-bidi/commit/49622edb9775aaacbf99ef9afa4b3736cbaaafcf)
+instead serializes perform/release on the same queue. The fixed-version oracle
+does not establish the behavior of newer Chrome versions; this PR preserves
+the tested input behavior.
+
+Three additional groups require explicit selection:
+
+- `bidi-input-layout` requires a layout-enabled endpoint (for example,
+  `moli serve --layout --resource`). It checks child-frame viewport and element
+  origins with actual pointer hit testing; default Mock-mode error checks stay
+  in the existing `bidi` group.
+- `bidi-auth-progress` diagnoses concurrent authentication navigation and Native
+  Fetch context ownership. It currently exposes a separate multi-target Fetch
+  routing limitation in Moli and exits unsuccessfully when that occurs. It is
+  deliberately not counted as a passing command-progress contract.
+- `bidi-layout-freshness` requires a layout endpoint. With no input command in
+  flight, it changes an element from left=20 to left=220, waits for a real
+  animation-frame callback, and checks its geometry. The saved Moli baseline and
+  this branch both expose stale geometry here; the diagnostic fails explicitly.
+
+All progress cases keep their requests and received frames in the result JSON.
+No scenario retries failed commands or opens its HTTP gate to rescue a blocked
+control command. Passing the static pointer-origin tests does not establish
+dynamic geometry freshness; that separate rendering precondition must pass
+before interpreting a moving-element input test.

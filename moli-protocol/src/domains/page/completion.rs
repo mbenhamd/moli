@@ -259,7 +259,7 @@ pub(crate) fn complete_finite(
                     crate::conn::NoDocumentLoaded,
                 ));
             };
-            let html = match page.finish_serialize_html(completion) {
+            let document = match page.finish_serialized_document(completion) {
                 Ok(html) => html,
                 Err(error) => {
                     return PageCommandTaskStep::Complete(CommandOutputPlan::error(
@@ -268,8 +268,9 @@ pub(crate) fn complete_finite(
                     ));
                 }
             };
-            let url = page.final_url().as_str().to_owned();
-            CommandOutputPlan::result(json!({ "data": build_mhtml_snapshot(&url, &html) }))
+            CommandOutputPlan::result(
+                json!({ "data": build_mhtml_snapshot(&document.url, &document.html) }),
+            )
         }
         CompletedPageCommandKind::GetLayoutMetrics { completed } => {
             let completion = match *completed {
@@ -407,7 +408,6 @@ pub(super) async fn complete_using(
                 Err(plan) => plan,
             }
         }
-        CompletedPageCommandKind::StopLoading(prepared) => prepared.run(driver, context).await?,
         CompletedPageCommandKind::Crash(prepared) => (*prepared).run(driver, context).await?,
         CompletedPageCommandKind::Close(prepared) => {
             prepared.run(driver, context).await?;
@@ -428,7 +428,6 @@ fn is_composite(kind: &CompletedPageCommandKind) -> bool {
             | CompletedPageCommandKind::ChildFrameNavigate(_)
             | CompletedPageCommandKind::Navigate(_)
             | CompletedPageCommandKind::ContinueNavigationWithoutRequestPause(_)
-            | CompletedPageCommandKind::StopLoading(_)
             | CompletedPageCommandKind::Crash(_)
             | CompletedPageCommandKind::Close(_)
     )
@@ -480,7 +479,6 @@ impl PendingPageCommandDispatch {
                 | PendingPageCommandKind::ChildFrameNavigate(_)
                 | PendingPageCommandKind::Navigate(_)
                 | PendingPageCommandKind::ContinueNavigationWithoutRequestPause(_)
-                | PendingPageCommandKind::StopLoading(_)
                 | PendingPageCommandKind::Crash(_)
                 | PendingPageCommandKind::Close(_)
         ) {

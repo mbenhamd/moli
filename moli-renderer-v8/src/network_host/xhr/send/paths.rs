@@ -1,17 +1,17 @@
 use super::super::delivery::{queue_xhr_failure_delivery, queue_xhr_response_delivery};
 use super::super::*;
 use super::request::PreparedXhrSendRequest;
-use crate::service_worker_runtime::{
-    ServiceWorkerFetchDispatch, ServiceWorkerFetchRequestMetadata, ServiceWorkerRequestDestination,
-};
+use crate::network_host::controlled_xhr::ControlledXhrContext;
+use crate::service_worker_runtime::{ServiceWorkerFetchDispatch, ServiceWorkerRequestDestination};
 use moli_fetch::{
-    BrowserRequestMetadata, FetchCancelHandle, RequestRedirectMode,
-    should_request_be_blocked_due_to_bad_port,
+    FetchCancelHandle, RequestRedirectMode, should_request_be_blocked_due_to_bad_port,
 };
 
-pub(super) fn record_intercepted_xhr(
+// Standalone ScriptVm's public pending-request API has no protocol journal.
+// Keep that compatibility adapter separate from the native Page loading path.
+pub(super) fn record_compatibility_intercepted_xhr(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     xhr: v8::Local<'_, v8::Object>,
     prepared: PreparedXhrSendRequest,
 ) -> u64 {
@@ -50,7 +50,7 @@ pub(super) fn record_intercepted_xhr(
 
 pub(super) fn dispatch_service_worker_xhr(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     xhr: v8::Local<'_, v8::Object>,
     prepared: &PreparedXhrSendRequest,
 ) -> Option<u64> {
@@ -104,6 +104,7 @@ pub(super) fn dispatch_service_worker_xhr(
             resource_type: SubresourceResourceType::Xhr,
             request_cookie_report: request_cookie_report.clone(),
         },
+        true,
     );
     let request = host.service_worker_fetch_request(
         client_id,
@@ -116,10 +117,7 @@ pub(super) fn dispatch_service_worker_xhr(
         prepared.credentials_mode,
         RequestRedirectMode::Follow,
         None,
-        ServiceWorkerFetchRequestMetadata {
-            use_cors_preflight: prepared.use_cors_preflight,
-            ..ServiceWorkerFetchRequestMetadata::default()
-        },
+        crate::service_worker_runtime::service_worker_fetch_request_metadata(&prepared.request()),
     );
     let dispatch = ServiceWorkerFetchDispatch {
         internal_id,
@@ -156,7 +154,7 @@ pub(super) fn dispatch_service_worker_xhr(
 
 pub(super) fn record_offline_xhr_failure(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     xhr: v8::Local<'_, v8::Object>,
     prepared: PreparedXhrSendRequest,
 ) {
@@ -175,7 +173,7 @@ pub(super) fn record_offline_xhr_failure(
 
 pub(super) fn record_blocked_xhr_failure(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     xhr: v8::Local<'_, v8::Object>,
     prepared: PreparedXhrSendRequest,
 ) {
@@ -194,7 +192,7 @@ pub(super) fn record_blocked_xhr_failure(
 
 pub(super) fn record_policy_blocked_xhr_failure(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     xhr: v8::Local<'_, v8::Object>,
     prepared: PreparedXhrSendRequest,
     message: String,
@@ -218,7 +216,7 @@ pub(super) use self::record_policy_blocked_xhr_failure as record_url_policy_xhr_
 
 pub(super) fn record_bad_port_xhr_failure(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     xhr: v8::Local<'_, v8::Object>,
     prepared: PreparedXhrSendRequest,
 ) {
@@ -240,7 +238,7 @@ pub(super) fn record_bad_port_xhr_failure(
 
 pub(super) fn queue_local_xhr_response(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     xhr: v8::Local<'_, v8::Object>,
     prepared: PreparedXhrSendRequest,
     response: Response,
@@ -250,7 +248,7 @@ pub(super) fn queue_local_xhr_response(
 }
 
 pub(super) fn record_xhr_response_success(
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     prepared: &PreparedXhrSendRequest,
     response: &Response,
 ) {
@@ -283,29 +281,16 @@ pub(super) fn record_xhr_response_success(
 
 pub(super) fn spawn_network_xhr_fetch(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     xhr: v8::Local<'_, v8::Object>,
     prepared: PreparedXhrSendRequest,
     request_client: ResourceRequestClient,
+    control: Option<ControlledXhrContext>,
 ) -> u64 {
-    let request = Request::new_bytes(
-        &prepared.method,
-        prepared.resolved_url.as_str(),
-        prepared.send_body.clone(),
-        prepared.request_headers.clone(),
-    )
-    .expect("xhr request url was already resolved")
-    .with_initiator_url(&prepared.document_url)
-    .with_subresource_request_metadata(moli_fetch::SubresourceRequestMetadata {
-        document_referrer_policy: prepared.document_referrer_policy.clone(),
-        ..Default::default()
-    })
-    .with_request_origin(prepared.request_origin.clone())
-    .with_credentials_mode(prepared.credentials_mode)
-    .with_network_partition_key(prepared.network_partition_key.clone())
-    .with_browser_request_metadata(BrowserRequestMetadata::Xhr)
-    .with_use_cors_preflight(prepared.use_cors_preflight)
-    .with_subframe_context(prepared.frame_id.is_some());
+    let request = prepared
+        .request()
+        .with_request_mode(moli_fetch::RequestMode::Cors)
+        .with_subframe_context(prepared.frame_id.is_some());
 
     let request_cookie_report = observe_subresource_request_cookie_report(
         prepared.resource_loader.request_client(),
@@ -346,9 +331,51 @@ pub(super) fn spawn_network_xhr_fetch(
             resource_type: SubresourceResourceType::Xhr,
             request_cookie_report,
         },
+        control.is_none(),
     );
+    if let Some(control) = control {
+        let (load, info) = host
+            .pending_subresource_native_inputs(internal_id)
+            .expect("registered XHR must retain its resource authority");
+        let completion_tx = host.resource_completion_sender();
+        let runner = request_client.resource_task_runner();
+        let mut controlled = control.load(
+            request,
+            info,
+            load,
+            cancel_handle,
+            prepared.cors_preflight_request_headers,
+        );
+        host.append_live_turn_owner_action(controlled.prepare_initial_pause());
+        runner.spawn(async move {
+            use crate::network_host::controlled_xhr::{
+                ControlledXhrCompletion, ControlledXhrStream,
+            };
+            let completed = controlled
+                .run_with_stream(Some(ControlledXhrStream::new(completion_tx.clone())))
+                .await;
+            let event = match completed {
+                ControlledXhrCompletion::Buffered(completed) => {
+                    crate::types::AsyncSubresourceFetchEvent::InterceptedXhrCompleted(completed)
+                }
+                ControlledXhrCompletion::Streamed {
+                    internal_id,
+                    body_source_id,
+                    result,
+                } => crate::types::AsyncSubresourceFetchEvent::StreamingFinished(
+                    crate::types::AsyncSubresourceStreamingFinished {
+                        internal_id,
+                        body_source_id,
+                        result,
+                    },
+                ),
+            };
+            let _ = completion_tx.send_async_subresource_event(event);
+        });
+        return internal_id;
+    }
     spawn_async_subresource_fetch(
-        prepared.resource_loader.task_runner(),
+        request_client.resource_task_runner(),
         host.resource_completion_sender(),
         request_client,
         request,

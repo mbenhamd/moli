@@ -60,7 +60,6 @@ struct InFlightCommandMetadata {
     id: Option<u64>,
     session_id: Option<String>,
     started: Option<Instant>,
-    executes_page_javascript: bool,
     command_output_session_id: Option<String>,
     internal_response: Option<Rc<RefCell<Option<InternalCommandResponse>>>>,
 }
@@ -134,19 +133,16 @@ impl InFlightWork {
 
 type InFlightCommands = HashMap<u64, InFlightWork>;
 
-fn page_javascript_owner_is_blocked(
-    scheduler: &CdpScheduler,
-    in_flight_commands: &InFlightCommands,
-) -> bool {
+fn embedder_input_is_exclusive(in_flight_commands: &InFlightCommands) -> bool {
     #[cfg(feature = "ace-protocol")]
-    if ace_page_tasks::blocks_page_javascript(in_flight_commands) {
-        return true;
+    {
+        ace_page_tasks::blocks_page_javascript(in_flight_commands)
     }
-    scheduler.has_pending_javascript_dialog()
-        || in_flight_commands
-            .values()
-            .filter_map(InFlightWork::command)
-            .any(|state| state.metadata.executes_page_javascript)
+    #[cfg(not(feature = "ace-protocol"))]
+    {
+        let _ = in_flight_commands;
+        false
+    }
 }
 
 enum SchedulerInput {
@@ -241,7 +237,7 @@ impl SchedulerInputReceivers {
         deferred_runtime_response_rx: &mut mpsc::UnboundedReceiver<RuntimeInspectorResponseReady>,
         has_pending_runtime_deferred_reply: bool,
         adapter_scheduler: &mut ProtocolAdapterScheduler,
-        page_javascript_blocked: bool,
+        embedder_input_exclusive: bool,
     ) -> Option<SchedulerInput> {
         if let Some(input) = self
             .ready_background_inputs_before_runtime_response
@@ -278,7 +274,7 @@ impl SchedulerInputReceivers {
                 maybe_publication = self.renderer_publication_rx.recv() => {
                     maybe_publication.map(SchedulerInput::RendererPublication)
                 }
-                input = adapter_scheduler.recv_input(), if !page_javascript_blocked => {
+                input = adapter_scheduler.recv_input(), if !embedder_input_exclusive => {
                     Some(SchedulerInput::AdapterScheduler(input))
                 }
             }
@@ -306,7 +302,7 @@ impl SchedulerInputReceivers {
                 maybe_response = deferred_runtime_response_rx.recv() => {
                     maybe_response.map(|response| SchedulerInput::DeferredRuntimeInspectorResponse(Box::new(response)))
                 }
-                input = adapter_scheduler.recv_input(), if !page_javascript_blocked => {
+                input = adapter_scheduler.recv_input(), if !embedder_input_exclusive => {
                     Some(SchedulerInput::AdapterScheduler(input))
                 }
             }
@@ -394,9 +390,8 @@ async fn run_cdp_scheduler_actor(
                 task.abort();
             }
         }
-        let page_javascript_blocked =
-            page_javascript_owner_is_blocked(&scheduler, &in_flight_commands);
-        adapter_scheduler.schedule_turn_if_needed(&scheduler, page_javascript_blocked);
+        let embedder_input_exclusive = embedder_input_is_exclusive(&in_flight_commands);
+        adapter_scheduler.schedule_turn_if_needed(&scheduler, embedder_input_exclusive);
         let page_screencast_deadline = scheduler.next_page_screencast_deadline();
         tokio::select! {
             biased;
@@ -506,8 +501,9 @@ async fn run_cdp_scheduler_actor(
                         let token = take_next_in_flight_command_token(&mut next_in_flight_command_token);
                         let control = frontend_control.clone();
                         let router = frontend_router.clone();
+                        let control_work = control.handle_request(request, router);
                         let wait = async move {
-                            control.handle_request(request, router).await;
+                            control_work.await;
                             CompletedActorWork::FrontendControl
                         };
                         let task = spawn_command_wait(CommandWaitIdentity { token, turn: 0 }, wait,
@@ -553,7 +549,7 @@ async fn run_cdp_scheduler_actor(
                 &mut deferred_runtime_response_rx,
                 !pending_runtime_deferred_replies.is_empty(),
                 &mut adapter_scheduler,
-                page_javascript_blocked,
+                embedder_input_exclusive,
             ) => {
                 let Some(input) = maybe_input else {
                     break;
@@ -1139,8 +1135,7 @@ async fn flush_protocol_output_with_runtime_deferred_reply_routing(
                 let followup_output = finish_runtime_deferred_reply_completed_command(
                     scheduler,
                     output_release_permit,
-                )
-                .await;
+                );
                 if !followup_output.is_empty() {
                     pending_flush
                         .push_front(RuntimeDeferredReplyFlushItem::Protocol(followup_output));
@@ -1171,7 +1166,7 @@ fn enqueue_runtime_deferred_reply_completion_flush(
     pending_flush.push_front(RuntimeDeferredReplyFlushItem::Protocol(completion_output));
 }
 
-async fn finish_runtime_deferred_reply_completed_command(
+fn finish_runtime_deferred_reply_completed_command(
     scheduler: &mut CdpScheduler,
     output_release_permit: Option<CommandOutputReleasePermit>,
 ) -> ProtocolOutputSequence {
@@ -1302,8 +1297,7 @@ async fn flush_runtime_deferred_reply_advance(
                 return false;
             }
             let followup_output =
-                finish_runtime_deferred_reply_completed_command(scheduler, output_release_permit)
-                    .await;
+                finish_runtime_deferred_reply_completed_command(scheduler, output_release_permit);
             if !followup_output.is_empty() {
                 flush_protocol_output_with_runtime_deferred_reply_routing(
                     frontend_router,
@@ -1412,7 +1406,6 @@ async fn handle_adapter_scheduler_input(
     let advance = adapter_scheduler.advance_input(scheduler, input);
     let (kind, ok) = match advance {
         ProtocolAdapterSchedulerAdvance::Idle => ("idle", true),
-        ProtocolAdapterSchedulerAdvance::ClientTurnYielded => ("client_turn_yielded", true),
         ProtocolAdapterSchedulerAdvance::ProtocolResidenceCompleted(output) => {
             let ok = flush_protocol_output_with_runtime_deferred_reply_routing(
                 frontend_router,
@@ -1549,7 +1542,6 @@ fn command_metadata(command: &ParsedCdpCommand) -> InFlightCommandMetadata {
         id: Some(request.id()),
         session_id: request.session_id().map(str::to_owned),
         started: moli_trace::cdp_runtime_trace_enabled().then(Instant::now),
-        executes_page_javascript: command.runtime_command_executes_page_javascript(),
         command_output_session_id: command.command_output_session_id().map(str::to_owned),
         internal_response: None,
     }
@@ -1691,7 +1683,11 @@ async fn handle_client_command_with_interleaved_output(
     if let Some(method) = probe_method.as_deref() {
         tracing::info!(method, "CMD_PROBE_COMMAND_RECEIVED");
     }
-    if !blocked_commands.is_empty() && scheduler.command_waits_for_navigation_flush(&command) {
+    if command.renderer_access() == moli_protocol_cdp::CdpRendererCommandAccess::MainThread
+        && blocked_commands
+            .iter()
+            .any(|blocked| blocked.command.session_id() == command.session_id())
+    {
         trace_command(
             &command,
             "command_queued_behind_background_navigation_blocked_command",
@@ -1874,11 +1870,17 @@ async fn drain_blocked_commands_after_navigation_gate(
     blocked_commands: &mut VecDeque<BlockedCommandDispatch>,
     next_in_flight_command_token: &mut u64,
 ) -> bool {
-    loop {
-        let Some(blocked) = blocked_commands.pop_front() else {
-            return true;
-        };
-        if scheduler.command_waits_for_navigation_flush(&blocked.command) {
+    // Preserve each Session's Main-thread admission order, without making a
+    // suspended Session the predecessor of every other Session in this actor.
+    let mut waiting_sessions = std::collections::HashSet::new();
+    for _ in 0..blocked_commands.len() {
+        let blocked = blocked_commands
+            .pop_front()
+            .expect("bounded admission snapshot");
+        let session = blocked.command.session_id().map(str::to_owned);
+        if waiting_sessions.contains(&session)
+            || scheduler.command_waits_for_navigation_flush(&blocked.command)
+        {
             trace_command(
                 &blocked.command,
                 "blocked_command_still_waiting_for_background_navigation",
@@ -1886,8 +1888,9 @@ async fn drain_blocked_commands_after_navigation_gate(
                 None,
                 None,
             );
-            blocked_commands.push_front(blocked);
-            return true;
+            waiting_sessions.insert(session);
+            blocked_commands.push_back(blocked);
+            continue;
         }
         match scheduler.start_command_or_request_background_navigation_flush(&blocked.command) {
             CommandStartAction::NeedsBackgroundNavigationFlush => {
@@ -1898,8 +1901,9 @@ async fn drain_blocked_commands_after_navigation_gate(
                     None,
                     None,
                 );
-                blocked_commands.push_front(blocked);
-                return true;
+                waiting_sessions.insert(session);
+                blocked_commands.push_back(blocked);
+                continue;
             }
             CommandStartAction::Dispatch {
                 step,
@@ -1929,6 +1933,7 @@ async fn drain_blocked_commands_after_navigation_gate(
             }
         }
     }
+    true
 }
 
 async fn flush_completed_command_output(
@@ -2838,7 +2843,6 @@ mod tests {
                             id: Some(42),
                             session_id: None,
                             started: None,
-                            executes_page_javascript: false,
                             command_output_session_id: None,
                             internal_response: None,
                         },
@@ -3024,10 +3028,13 @@ mod tests {
         let mut adapter_scheduler = ProtocolAdapterScheduler::default();
 
         background_event_tx
-            .send(BackgroundProtocolEvent::immediate(json!({
-                "method": "Network.requestWillBeSent",
-                "params": {}
-            })))
+            .send(BackgroundProtocolEvent::inspector_message(
+                json!({
+                    "method": "Network.requestWillBeSent",
+                    "params": {}
+                }),
+                None,
+            ))
             .expect("background event receiver should be alive");
         runtime_response_tx
             .send(RuntimeInspectorResponseReady::new(
@@ -3049,10 +3056,13 @@ mod tests {
         assert!(matches!(first, SchedulerInput::BackgroundEvent(_)));
 
         background_event_tx
-            .send(BackgroundProtocolEvent::immediate(json!({
-                "method": "Network.responseReceived",
-                "params": {}
-            })))
+            .send(BackgroundProtocolEvent::inspector_message(
+                json!({
+                    "method": "Network.responseReceived",
+                    "params": {}
+                }),
+                None,
+            ))
             .expect("background event receiver should remain alive");
         let second = receivers
             .recv(

@@ -8,14 +8,14 @@ use std::time::Instant;
 use crate::{
     document_runtime::DomHandle,
     native_bridge::{
-        JsContextHost,
+        PageScriptHost,
         element::{PreparedAnonymousStyleContext, StyleObservation},
     },
     style_engine::{StyleViewport, StyloAnonymousBoxKind, StyloStyleEnvironment},
 };
 
 pub(super) struct NativeLayoutStyleResolver<'a> {
-    runtime: &'a JsContextHost,
+    runtime: &'a PageScriptHost,
     reads: StyleObservation<'a>,
     anonymous_context: Option<PreparedAnonymousStyleContext<'a>>,
     scripting_enabled: bool,
@@ -51,7 +51,7 @@ struct NativeLayoutStyleResolverProfile {
 
 impl<'a> NativeLayoutStyleResolver<'a> {
     pub(super) fn new(
-        runtime: &'a JsContextHost,
+        runtime: &'a PageScriptHost,
         root: DomHandle,
         document: DomHandle,
         viewport: LayoutViewport,
@@ -76,7 +76,7 @@ impl<'a> NativeLayoutStyleResolver<'a> {
     /// Document's current screen style world, with the element itself as a
     /// block root.
     pub(super) fn for_foreign_object_content(
-        runtime: &'a JsContextHost,
+        runtime: &'a PageScriptHost,
         foreign_object: DomHandle,
         document: DomHandle,
         viewport: LayoutViewport,
@@ -93,7 +93,7 @@ impl<'a> NativeLayoutStyleResolver<'a> {
     }
 
     fn with_prepared_store(
-        runtime: &'a JsContextHost,
+        runtime: &'a PageScriptHost,
         root: DomHandle,
         document: DomHandle,
         viewport: LayoutViewport,
@@ -152,8 +152,8 @@ impl<'a> NativeLayoutStyleResolver<'a> {
     }
 }
 
-fn layout_style_read_scope<'a>(
-    runtime: &'a JsContextHost,
+pub(super) fn layout_style_read_scope<'a>(
+    runtime: &'a PageScriptHost,
     document: DomHandle,
     viewport: LayoutViewport,
     environment_override: Option<StyloStyleEnvironment>,
@@ -177,7 +177,7 @@ fn layout_style_read_scope<'a>(
     }
 }
 
-fn layout_style_viewport(runtime: &JsContextHost, viewport: LayoutViewport) -> StyleViewport {
+fn layout_style_viewport(runtime: &PageScriptHost, viewport: LayoutViewport) -> StyleViewport {
     let screen = runtime.style_viewport();
     StyleViewport::new(
         Some(f64::from(viewport.css_width)),

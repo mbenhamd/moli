@@ -108,7 +108,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 [[package]]
 name = "anyrender"
 version = "0.12.0"
-source = "git+https://github.com/ldm0/anyrender?rev=916ef982d2175081dafc1ba0f7489396124d9496#916ef982d2175081dafc1ba0f7489396124d9496"
+source = "git+https://github.com/ldm0/anyrender?rev=3ff99c18f3806c0064201f10a9cbc15336cfd005#3ff99c18f3806c0064201f10a9cbc15336cfd005"
 dependencies = [
  "kurbo",
  "peniko",
@@ -119,7 +119,7 @@ dependencies = [
 [[package]]
 name = "anyrender_svg"
 version = "0.13.0"
-source = "git+https://github.com/ldm0/anyrender?rev=916ef982d2175081dafc1ba0f7489396124d9496#916ef982d2175081dafc1ba0f7489396124d9496"
+source = "git+https://github.com/ldm0/anyrender?rev=3ff99c18f3806c0064201f10a9cbc15336cfd005#3ff99c18f3806c0064201f10a9cbc15336cfd005"
 dependencies = [
  "anyrender",
  "kurbo",
@@ -130,7 +130,7 @@ dependencies = [
 [[package]]
 name = "anyrender_vello_cpu"
 version = "0.15.0"
-source = "git+https://github.com/ldm0/anyrender?rev=916ef982d2175081dafc1ba0f7489396124d9496#916ef982d2175081dafc1ba0f7489396124d9496"
+source = "git+https://github.com/ldm0/anyrender?rev=3ff99c18f3806c0064201f10a9cbc15336cfd005#3ff99c18f3806c0064201f10a9cbc15336cfd005"
 dependencies = [
  "anyrender",
  "debug_timer",
@@ -2600,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "moli"
-version = "1.1.23"
+version = "1.1.24"
 dependencies = [
  "anyhow",
  "axum",
@@ -3282,6 +3282,7 @@ dependencies = [
  "moli-page-types",
  "moli-paint",
  "moli-protocol-cdp",
+ "moli-protocol-cdp-defs",
  "moli-session-history",
  "moli-shared-worker",
  "moli-site",
@@ -3316,10 +3317,19 @@ dependencies = [
 name = "moli-protocol-cdp"
 version = "0.1.0"
 dependencies = [
+ "brotlic",
  "moli-page-types",
+ "moli-protocol-cdp-defs",
  "moli-time",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "moli-protocol-cdp-defs"
+version = "0.1.0"
+dependencies = [
+ "strum",
 ]
 
 [[package]]
@@ -3340,6 +3350,7 @@ dependencies = [
  "moli-inspector-json",
  "moli-protocol",
  "moli-protocol-cdp",
+ "moli-protocol-cdp-defs",
  "moli-protocol-webdriver-bidi",
  "moli-protocol-webdriver-classic",
  "moli-test-support",
@@ -3446,6 +3457,7 @@ dependencies = [
  "moli-parkable-image",
  "moli-parser",
  "moli-protocol-cdp",
+ "moli-protocol-cdp-defs",
  "moli-script",
  "moli-selector",
  "moli-session-history",
@@ -6395,7 +6407,7 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 [[package]]
 name = "usvg"
 version = "0.48.1"
-source = "git+https://github.com/lexmount/resvg?rev=02b16a3cc3ca4dd019293c45aacf89ca11875ed9#02b16a3cc3ca4dd019293c45aacf89ca11875ed9"
+source = "git+https://github.com/lexmount/resvg?rev=614aaf4d21ca03a4773f1e4d07c6a404407589a2#614aaf4d21ca03a4773f1e4d07c6a404407589a2"
 dependencies = [
  "base64 0.23.1",
  "data-url",

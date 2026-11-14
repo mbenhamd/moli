@@ -26,22 +26,40 @@ fn with_subresource_request_metadata(
     }
 }
 
-fn request_for_pending_subresource(
+pub(super) fn request_for_pending_subresource(
     pending: &PendingSubresourceFetchState,
     request_url: &Url,
     request_method: &str,
     request_headers: moli_fetch::RequestHeaders,
     request_body_bytes: Option<bytes::Bytes>,
 ) -> moli_fetch::Request {
-    if let Some(dispatch) = &pending.dispatch {
-        let mut request = dispatch.request.clone();
+    let captured_request = pending
+        .dispatch
+        .as_ref()
+        .map(|dispatch| &dispatch.request)
+        .or_else(|| {
+            pending
+                .continuation
+                .window_fetch()?
+                .intercepted_request
+                .as_deref()
+        });
+    if let Some(request) = captured_request {
+        let mut request = request.clone();
         request.url = request_url.clone();
         request.method = request_method.to_owned();
         request.cookie_context.set_request_method(request_method);
         request.cookie_context = request
             .cookie_context
             .recompute_site_context_for_request(request_url);
-        request.body = request_body_bytes;
+        request.set_body(
+            request_body_bytes,
+            pending
+                .info
+                .request_body
+                .as_deref()
+                .map(std::sync::Arc::from),
+        );
         request.request_headers = request_headers;
         return request.with_redirect_headers(pending.redirect_headers.clone());
     }
@@ -52,6 +70,13 @@ fn request_for_pending_subresource(
         request_body_bytes,
         request_headers,
         pending.request_origin.clone(),
+    )
+    .with_body_text(
+        pending
+            .info
+            .request_body
+            .as_deref()
+            .map(std::sync::Arc::from),
     )
     .with_redirect_headers(pending.redirect_headers.clone())
     .with_initiator_url(&pending.info.document_url)
@@ -103,6 +128,34 @@ fn request_for_pending_subresource(
     with_subresource_request_metadata(request, pending.info.resource_type)
 }
 
+impl PendingSubresourceFetchState {
+    /// Keep protocol display fields and the captured Window request together.
+    /// Cookie observations belong to each dispatch/redirect decision.
+    pub(super) fn update_request_snapshot(&mut self, request: moli_fetch::Request) {
+        self.info.url = request.url.clone();
+        self.info.method = request.method.clone();
+        self.info.request_headers = request.request_headers.clone();
+        self.info.request_body_bytes = request.body.clone();
+        self.info.request_body = request.body_text().map(|text| text.into_owned());
+        self.redirect_headers = request.redirect_headers().cloned();
+        if let PendingSubresourceContinuation::Fetch(fetch) = &mut self.continuation {
+            fetch.intercepted_request = Some(Box::new(request));
+        }
+    }
+
+    fn apply_request_overrides(&mut self, overrides: moli_fetch::RequestOverrides) {
+        let mut request = request_for_pending_subresource(
+            self,
+            &self.info.url,
+            &self.info.method,
+            self.info.request_headers.clone(),
+            self.info.request_body_bytes.clone(),
+        );
+        overrides.apply(&mut request);
+        self.update_request_snapshot(request);
+    }
+}
+
 impl ScriptVm {
     pub(crate) fn continue_pending_subresource_fetch_body(
         &mut self,
@@ -119,25 +172,18 @@ impl ScriptVm {
             .borrow_mut()
             .take_pending_subresource_fetch(internal_id)
             .ok_or_else(|| anyhow!("unknown pending subresource fetch `{internal_id}`"))?;
-        let headers = headers.map(|override_headers| match override_headers {
-            moli_fetch::RequestHeaderOverride::CurrentRequest {
-                headers,
-                redirect_headers,
-            } => {
-                pending.redirect_headers =
-                    Some(redirect_headers.unwrap_or_else(|| pending.info.request_headers.clone()));
-                headers
-            }
-            moli_fetch::RequestHeaderOverride::RedirectChain(headers) => {
-                pending.redirect_headers = None;
-                headers
-            }
+        let headers_overridden = headers.is_some();
+        pending.apply_request_overrides(moli_fetch::RequestOverrides {
+            url,
+            method,
+            body,
+            headers,
         });
         let PendingSubresourceFetchState {
             dispatch,
             redirect_headers,
             request_origin,
-            mut info,
+            info,
             load,
             execution_context,
             credentials_mode,
@@ -147,19 +193,10 @@ impl ScriptVm {
             continuation,
             deferred_request_started,
         } = pending;
-        // The text snapshot is only for protocol display. Unless the client
-        // explicitly replaces the body, retain the original binary upload.
-        if let Some(body) = &body {
-            info.request_body_bytes = body.clone();
-            info.request_body = body
-                .as_ref()
-                .map(|body| String::from_utf8_lossy(body).into_owned());
-        }
         let pending = match continuation {
             PendingSubresourceContinuation::WebSocket(connection) => {
-                let request_url = url.unwrap_or_else(|| info.url.clone());
-                let headers_overridden = headers.is_some();
-                let request_headers = headers.unwrap_or_else(|| info.request_headers.clone());
+                let request_url = info.url.clone();
+                let request_headers = info.request_headers.clone();
                 self._context_host
                     .borrow_mut()
                     .start_pending_websocket_connection(
@@ -179,10 +216,10 @@ impl ScriptVm {
                 let target = WorkerOwnedFetchTarget::from_continuation(&continuation)
                     .expect("fetch continuation target");
                 let fetch_id = target.fetch_id();
-                let request_url = url.unwrap_or_else(|| info.url.clone());
-                let request_method = method.unwrap_or_else(|| info.method.clone());
+                let request_url = info.url.clone();
+                let request_method = info.method.clone();
                 let request_body = info.request_body.clone();
-                let request_headers = headers.unwrap_or_else(|| info.request_headers.clone());
+                let request_headers = info.request_headers.clone();
                 let continued = self.continue_worker_owned_fetch(
                     target,
                     crate::worker::WorkerPendingFetchContinue {
@@ -237,10 +274,10 @@ impl ScriptVm {
                 let target = WorkerOwnedXhrTarget::from_continuation(&continuation)
                     .expect("xhr continuation target");
                 let xhr_id = target.xhr_id();
-                let request_url = url.unwrap_or_else(|| info.url.clone());
-                let request_method = method.unwrap_or_else(|| info.method.clone());
+                let request_url = info.url.clone();
+                let request_method = info.method.clone();
                 let request_body = info.request_body.clone();
-                let request_headers = headers.unwrap_or_else(|| info.request_headers.clone());
+                let request_headers = info.request_headers.clone();
                 let continued = self.continue_worker_owned_xhr(
                     target,
                     crate::worker::WorkerPendingXhrContinue {
@@ -295,9 +332,9 @@ impl ScriptVm {
                 let target = WorkerOwnedCspReportTarget::from_continuation(&continuation)
                     .expect("CSP report continuation target");
                 let report_id = target.report_id();
-                let request_url = url.unwrap_or_else(|| info.url.clone());
-                let request_method = method.unwrap_or_else(|| info.method.clone());
-                let request_headers = headers.unwrap_or_else(|| info.request_headers.clone());
+                let request_url = info.url.clone();
+                let request_method = info.method.clone();
+                let request_headers = info.request_headers.clone();
                 let continued = self.continue_worker_owned_csp_report(
                     target,
                     crate::worker::WorkerPendingFetchContinue {
@@ -322,11 +359,11 @@ impl ScriptVm {
                 ));
             }
             PendingSubresourceContinuation::CspReport { client_id } => {
-                let request_url = url.unwrap_or_else(|| info.url.clone());
-                let request_method = method.unwrap_or_else(|| info.method.clone());
+                let request_url = info.url.clone();
+                let request_method = info.method.clone();
                 let request_body_bytes = info.request_body_bytes.clone();
                 let request_body = info.request_body.clone();
-                let request_headers = headers.unwrap_or_else(|| info.request_headers.clone());
+                let request_headers = info.request_headers.clone();
                 let pending = PendingSubresourceFetchState {
                     dispatch,
                     redirect_headers: redirect_headers.clone(),
@@ -391,10 +428,10 @@ impl ScriptVm {
                 deferred_request_started,
             },
         };
-        let request_url = url.unwrap_or_else(|| pending.info.url.clone());
-        let request_method = method.unwrap_or_else(|| pending.info.method.clone());
+        let request_url = pending.info.url.clone();
+        let request_method = pending.info.method.clone();
         let request_body = pending.info.request_body.clone();
-        let request_headers = headers.unwrap_or_else(|| pending.info.request_headers.clone());
+        let request_headers = pending.info.request_headers.clone();
         self.continue_pending_subresource_fetch_via_loader(
             pending,
             request_url,
@@ -510,6 +547,12 @@ impl ScriptVm {
             state.request_method.clone(),
             state.request_headers.clone(),
             state.pending.info.request_body_bytes.clone(),
+            state
+                .pending
+                .info
+                .request_body
+                .as_deref()
+                .map(std::sync::Arc::from),
         );
         let prepared = match auth {
             Some(auth) => fetch.set_auth(auth),
@@ -1214,12 +1257,25 @@ impl ScriptVm {
         response_code: u16,
         response_headers: Vec<(String, Vec<u8>)>,
         response_body: RendererSyntheticResponseBody,
+        request_overrides: Option<moli_fetch::RequestOverrides>,
     ) -> Result<AsyncSubresourceCommandExecution<()>> {
-        let pending = self
+        let mut pending = self
             ._context_host
             .borrow_mut()
             .take_pending_subresource_fetch(internal_id)
             .ok_or_else(|| anyhow!("unknown pending subresource fetch `{internal_id}`"))?;
+        if let Some(overrides) = request_overrides {
+            pending.apply_request_overrides(overrides);
+            pending.info.request_cookie_report = None;
+        }
+        if pending.continuation.window_fetch().is_some() {
+            return self.fulfill_intercepted_window_fetch(
+                pending,
+                response_code,
+                response_headers,
+                response_body,
+            );
+        }
         let PendingSubresourceFetchState {
             dispatch,
             redirect_headers: _,
@@ -2194,6 +2250,7 @@ impl ScriptVm {
             response_code,
             response_headers,
             response_body,
+            None,
         )?;
         self.finish_async_subresource_command_for_test(execution)
     }

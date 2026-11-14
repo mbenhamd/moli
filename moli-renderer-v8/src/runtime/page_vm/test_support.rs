@@ -1,3 +1,4 @@
+use crate::types::SubresourceInterceptionClasses;
 use std::{
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicU64, Ordering},
@@ -680,6 +681,7 @@ impl DerefMut for PageVmTaskExecutorTestHarness {
 
 fn minimal_test_page_vm_env_config() -> PageVmEnvConfig {
     PageVmEnvConfig {
+        window_identity: Default::default(),
         web_storage: crate::RendererWebStorageHandles::ephemeral(),
         root_frame_id: None,
         main_document_commit: None,
@@ -699,8 +701,7 @@ fn minimal_test_page_vm_env_config() -> PageVmEnvConfig {
         blocked_url_patterns: Vec::new(),
         indexed_db_manager: None,
         storage_bucket_store: None,
-        fetch_subresource_interception_enabled: false,
-        fetch_subresource_interception_resource_type: None,
+        fetch_subresource_interception_classes: SubresourceInterceptionClasses::NONE,
         layout_configuration: moli_page_types::LayoutConfiguration {
             policy: crate::real_layout_test_policy(),
             scrollbars_hidden: false,

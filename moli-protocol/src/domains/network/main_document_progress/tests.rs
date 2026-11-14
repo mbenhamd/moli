@@ -67,10 +67,17 @@ fn only_cancelled_navigation_preserves_the_document() {
     }
 }
 
+fn dispatched_get_request() -> std::sync::Arc<moli_fetch::DispatchedRequest> {
+    std::sync::Arc::new(moli_fetch::DispatchedRequest {
+        method: "GET".to_owned(),
+        headers: vec![("Accept".to_owned(), "text/html".to_owned())],
+        body: None,
+        body_text: None,
+    })
+}
+
 fn completed_events() -> CompletedMainDocumentNetworkEvents {
     CompletedMainDocumentNetworkEvents::new(
-        "GET".to_owned(),
-        vec![("Accept".to_owned(), "text/html".to_owned())],
         None,
         200,
         vec![("Content-Type".to_owned(), b"text/html".to_vec())],
@@ -132,10 +139,7 @@ fn live_progress_source() -> (
             loader_id: "LOADER-1".to_owned(),
             frame_id: "FRAME-1".to_owned(),
             timestamp: 12.5,
-            initial_request_method: "GET".to_owned(),
-            initial_request_body: None,
             initial_request_headers: vec![("Accept".to_owned(), "text/html".to_owned())].into(),
-            initial_redirect_headers: None,
             initial_request_cookie_report: None,
         },
         receiver,
@@ -150,8 +154,6 @@ fn redirect_progress_tracks_each_hop_without_reapplying_announced_redirects() {
     ] {
         let (mut source, _receiver) = live_progress_source();
         source.announced_redirects = announced;
-        source.initial_request_method = "POST".to_owned();
-        source.initial_request_body = Some(bytes::Bytes::from_static(b"body"));
         source.initial_request_headers = vec![
             ("Content-Type".to_owned(), "text/plain".to_owned()),
             ("X-Temporary".to_owned(), "override".to_owned()),
@@ -159,32 +161,47 @@ fn redirect_progress_tracks_each_hop_without_reapplying_announced_redirects() {
         .into();
         // A client may override the method after an already announced 303.
         // Its headers still revert to the baseline on the next redirect.
-        source.initial_redirect_headers = Some(
+        let baseline = Some(
             vec![
                 ("Content-Type".to_owned(), "text/plain".to_owned()),
                 ("X-Baseline".to_owned(), "retained".to_owned()),
             ]
             .into(),
         );
-        let redirects = statuses
-            .into_iter()
-            .enumerate()
-            .map(|(index, status)| RedirectInfo {
-                source: moli_fetch::RedirectSource::Network,
-                from_url: Url::parse(&format!("http://example.test/{index}")).unwrap(),
-                to_url: Url::parse(&format!("http://example.test/{}", index + 1)).unwrap(),
-                status,
-                headers: Vec::new(),
-                network_extra_info_available: false,
-                request_extra_info: None,
-                response_extra_info: None,
-                redirect_has_extra_info: false,
-                request_cookie_report: None,
-                cookie_set_reports: Vec::new(),
-                from_cache: false,
-                negotiated_http_version: None,
-            })
-            .collect::<Vec<_>>();
+        let mut dispatched =
+            moli_fetch::Request::get_with_url(Url::parse("http://example.test/0").unwrap())
+                .with_redirect_headers(baseline);
+        dispatched.method = "POST".to_owned();
+        dispatched.body = Some(bytes::Bytes::from_static(b"body"));
+        dispatched.request_headers = source.initial_request_headers.clone();
+        let redirects =
+            statuses
+                .into_iter()
+                .enumerate()
+                .map(|(index, status)| {
+                    if index >= announced {
+                        dispatched.apply_redirect_status(status);
+                    }
+                    RedirectInfo {
+                        source: moli_fetch::RedirectSource::Network,
+                        from_url: Url::parse(&format!("http://example.test/{index}")).unwrap(),
+                        to_url: Url::parse(&format!("http://example.test/{}", index + 1)).unwrap(),
+                        status,
+                        headers: Vec::new(),
+                        network_extra_info_available: false,
+                        request_extra_info: None,
+                        dispatched_request: Some(dispatched.capture_dispatched_request(
+                            dispatched.request_headers.to_byte_strings(),
+                        )),
+                        response_extra_info: None,
+                        redirect_has_extra_info: false,
+                        request_cookie_report: None,
+                        cookie_set_reports: Vec::new(),
+                        from_cache: false,
+                        negotiated_http_version: None,
+                    }
+                })
+                .collect::<Vec<_>>();
         let events = source.redirect_request_events(None, &redirects, &Default::default(), false);
         assert_eq!(events.len(), expected.len());
         for (event, method) in events.into_iter().zip(expected) {
@@ -268,6 +285,7 @@ fn failed_redirect_transport_emits_completed_hop_and_final_request_extra_info() 
         )],
         network_extra_info_available: true,
         request_extra_info: None,
+        dispatched_request: Some(dispatched_get_request()),
         response_extra_info: None,
         redirect_has_extra_info: true,
         request_cookie_report: None,
@@ -548,6 +566,7 @@ fn live_progress_source_serializes_through_progress_emissions() {
         )],
         network_extra_info_available: true,
         request_extra_info: None,
+        dispatched_request: Some(dispatched_get_request()),
         response_extra_info: None,
         redirect_has_extra_info: true,
         request_cookie_report: None,
@@ -882,6 +901,101 @@ fn completed_body_http_service_worker_response_does_not_infer_extra_info_from_ur
 }
 
 #[test]
+fn completed_multipart_redirect_keeps_protocol_text_separate_from_upload_bytes() {
+    let text = "--boundary\r\nContent-Disposition: form-data; name=\"field\"\r\n\r\nvalue\r\n--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.bin\"\r\n\r\n\r\n--boundary--\r\n";
+    let mut upload = text.as_bytes().to_vec();
+    let offset = upload.len() - b"\r\n--boundary--\r\n".len();
+    upload.splice(offset..offset, b"UNIQUE-FILE-PAYLOAD\0\xff".iter().copied());
+    let upload = bytes::Bytes::from(upload);
+    for (status, replacement) in [
+        (307, None),
+        (308, None),
+        (307, Some("replacement")),
+        (308, Some("replacement")),
+    ] {
+        let mut request = moli_fetch::Request::new_bytes(
+            "POST",
+            "http://example.test/start",
+            Some(upload.clone()),
+            vec![(
+                "Content-Type".to_owned(),
+                "multipart/form-data; boundary=boundary".to_owned(),
+            )],
+        )
+        .unwrap()
+        .with_body_text(Some(std::sync::Arc::from(text)));
+        if let Some(replacement) = replacement {
+            request.set_body(
+                Some(bytes::Bytes::from_static(replacement.as_bytes())),
+                None,
+            );
+        }
+        let expected_text = replacement.unwrap_or(text);
+        let expected_bytes = replacement
+            .map(|replacement| bytes::Bytes::from_static(replacement.as_bytes()))
+            .unwrap_or_else(|| upload.clone());
+        let mut redirect = RedirectInfo::from(moli_core::page::NavigationRedirect {
+            source: moli_fetch::RedirectSource::Network,
+            from_url: request.url.clone(),
+            to_url: Url::parse("http://example.test/final").unwrap(),
+            status,
+            headers: Vec::new(),
+            network_extra_info_available: false,
+            request_extra_info: None,
+            dispatched_request: None,
+            response_extra_info: None,
+            redirect_has_extra_info: false,
+            request_cookie_report: None,
+            cookie_set_reports: Vec::new(),
+            from_cache: false,
+            negotiated_http_version: None,
+        });
+        request.follow_redirect(redirect.clone()).unwrap();
+        redirect = request.redirect_chain()[0].clone();
+        assert_eq!(
+            redirect.dispatched_request.as_ref().unwrap().body.as_ref(),
+            Some(&expected_bytes)
+        );
+        let (source, _receiver) = live_progress_source();
+        let live = source.redirect_request_events(
+            None,
+            std::slice::from_ref(&redirect),
+            &Default::default(),
+            false,
+        );
+        let MainDocumentNavigationProgressEvent::RequestWillBeSent { request_body, .. } = &live[0]
+        else {
+            panic!("expected the streaming redirect request");
+        };
+        assert_eq!(request_body.as_deref(), Some(expected_text));
+        let mut context = completed_progress_context();
+        context.request_method = "POST".to_owned();
+        context.request_body = Some(text.to_owned());
+        let mut events = completed_events();
+        events.redirect_chain = vec![redirect.into()];
+        let batches = context.event_batches(&events, &request.url, 0);
+        let mut drain = MainDocumentProgressDrain::from_source(
+            MainDocumentProgressSource::completed_body(batches),
+        );
+        drain.mark_output_visible_until(MainDocumentProgressOutputBoundary::BodyFinishedVisible);
+        let out = drain_into_protocol_messages(&mut drain);
+        let requests = out
+            .iter()
+            .filter(|event| event["method"] == "Network.requestWillBeSent")
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["params"]["request"]["postData"], json!(text));
+        for event in &requests[1..] {
+            assert_eq!(
+                event["params"]["request"]["postData"],
+                json!(expected_text),
+                "{status}: {event}"
+            );
+        }
+    }
+}
+
+#[test]
 fn completed_body_http_redirect_emits_correlated_no_cookie_extra_info() {
     let final_url = Url::parse("http://example.test/final").unwrap();
     let mut events = completed_events();
@@ -897,6 +1011,7 @@ fn completed_body_http_redirect_emits_correlated_no_cookie_extra_info() {
         )],
         network_extra_info_available: true,
         request_extra_info: None,
+        dispatched_request: Some(dispatched_get_request()),
         response_extra_info: None,
         redirect_has_extra_info: true,
         request_cookie_report: None,
@@ -996,6 +1111,7 @@ fn completed_body_redirect_without_transport_extra_info_keeps_flag_false() {
         )],
         network_extra_info_available: false,
         request_extra_info: None,
+        dispatched_request: Some(dispatched_get_request()),
         response_extra_info: None,
         redirect_has_extra_info: false,
         request_cookie_report: None,
@@ -1068,6 +1184,7 @@ fn critical_client_hint_restart_keeps_discarded_response_extra_info_separate_fro
         )],
         network_extra_info_available: false,
         request_extra_info: None,
+        dispatched_request: Some(dispatched_get_request()),
         response_extra_info: None,
         redirect_has_extra_info: false,
         request_cookie_report: None,
@@ -1148,6 +1265,7 @@ fn completed_body_uses_negotiated_protocol_for_redirect_and_final_response() {
         )],
         network_extra_info_available: false,
         request_extra_info: None,
+        dispatched_request: Some(dispatched_get_request()),
         response_extra_info: None,
         redirect_has_extra_info: false,
         request_cookie_report: None,
@@ -1229,6 +1347,7 @@ fn cached_completed_body_redirect_emits_cache_event_before_next_request() {
         )],
         network_extra_info_available: false,
         request_extra_info: None,
+        dispatched_request: Some(dispatched_get_request()),
         response_extra_info: None,
         redirect_has_extra_info: false,
         request_cookie_report: None,

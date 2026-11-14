@@ -8,15 +8,14 @@ use crate::automation::{
 };
 use crate::conn::{
     BackgroundNavigationBodyCompletionSink, BackgroundNavigationClaimError, CdpConnection, Cmd,
-    CommandOwnerScope, DEFAULT_LOADER_ID, PendingStreamingDocumentResponseNavigation,
-    monotonic_timestamp_seconds,
+    CommandOwnerScope, PendingStreamingDocumentResponseNavigation,
 };
 use crate::domains::command_output::CommandOutputPlan;
-use crate::domains::{activity, network, page};
+use crate::domains::{activity, page};
 use anyhow::Context as _;
 use moli_core::RendererPageCommand;
 use moli_core::page::{
-    CompletedPageCommand, RendererSyntheticResponseBody, SubresourceResourceType,
+    CompletedResourceCommand, RendererSyntheticResponseBody, SubresourceResourceType,
 };
 use moli_url_policy::BrowserUrlScheme;
 use url::Url;
@@ -37,8 +36,8 @@ use super::state::{
     take_pending_subresource_response_request_for_action_session,
 };
 use super::{
-    FetchCommandOutput, FetchCommandTaskStep, PageFetchCompletion, PendingFetchCommandDispatch,
-    PendingFetchCommandOperation,
+    FetchCommandOutput, FetchCommandTaskStep, PendingFetchCommandDispatch,
+    PendingFetchCommandOperation, ResourceFetchCompletion,
 };
 
 const BLOCKED_BY_CLIENT_ERROR_TEXT: &str = "net::ERR_BLOCKED_BY_CLIENT";
@@ -370,9 +369,9 @@ fn start_devtools_continue_intercepted_request_command(
         return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new_for_owner(
             command_id,
             owner.clone(),
-            PendingFetchCommandOperation::Page {
+            PendingFetchCommandOperation::Resource {
                 pending: pending_page,
-                finish: PageFetchCompletion::ContinueRequest {
+                finish: ResourceFetchCompletion::ContinueRequest {
                     state: Box::new(PendingContinueRequestState::SubresourceFetch { correlation }),
                 },
             },
@@ -486,7 +485,7 @@ fn start_devtools_continue_intercepted_request_command(
 
 pub(super) fn complete_continue_request_command(
     conn: &mut CdpConnection,
-    completed: Result<CompletedPageCommand>,
+    completed: Result<CompletedResourceCommand>,
     state: PendingContinueRequestState,
     out: &mut FetchCommandOutput,
 ) {
@@ -502,7 +501,7 @@ pub(super) fn complete_continue_request_command(
     }
 }
 
-fn finish_continue_subresource_request(completed: Result<CompletedPageCommand>) -> Result<()> {
+fn finish_continue_subresource_request(completed: Result<CompletedResourceCommand>) -> Result<()> {
     let completion = completed?;
     completion
         .into_subresource_continue_outcome()
@@ -608,23 +607,9 @@ fn start_devtools_fail_intercepted_request_command(
                     "RequestNotFound",
                 ));
             }
-            let mut plan = CommandOutputPlan::success();
-            let mut events = Vec::new();
-            let loader_id = conn
-                .current_document_loader_id_for_owner(owner)
-                .unwrap_or_else(|| DEFAULT_LOADER_ID.to_owned());
-            network::emit_loading_failed(
-                &mut events,
-                command_session_id,
-                &pending.network_request_id,
-                &pending.frame_id,
-                &loader_id,
-                monotonic_timestamp_seconds(),
-                &error_text,
-                pending.resource_type.into(),
-            );
-            plan.extend_background_events(events);
-            return FetchCommandTaskStep::Complete(plan);
+            // The parser owner publishes the correlated failure, including
+            // all Network observers, through the normal completion path.
+            return FetchCommandTaskStep::Complete(CommandOutputPlan::success());
         }
         let pending_page = match conn.start_subresource_document_command(
             owner,
@@ -651,9 +636,9 @@ fn start_devtools_fail_intercepted_request_command(
         return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new_for_owner(
             command_id,
             owner.clone(),
-            PendingFetchCommandOperation::Page {
+            PendingFetchCommandOperation::Resource {
                 pending: pending_page,
-                finish: PageFetchCompletion::FailRequest {
+                finish: ResourceFetchCompletion::FailRequest {
                     state: Box::new(PendingFailRequestState::SubresourceFetch {
                         pending: Box::new(pending),
                     }),
@@ -691,9 +676,9 @@ fn start_devtools_fail_intercepted_request_command(
         return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new_for_owner(
             command_id,
             owner.clone(),
-            PendingFetchCommandOperation::Page {
+            PendingFetchCommandOperation::Resource {
                 pending: pending_page,
-                finish: PageFetchCompletion::FailRequest {
+                finish: ResourceFetchCompletion::FailRequest {
                     state: Box::new(PendingFailRequestState::SubresourceResponse {
                         pending: Box::new(pending),
                     }),
@@ -729,11 +714,11 @@ fn start_devtools_fail_intercepted_request_command(
 pub(super) fn complete_fail_request_command(
     conn: &mut CdpConnection,
     owner: &CommandOwnerScope,
-    completed: Result<CompletedPageCommand>,
+    completed: Result<CompletedResourceCommand>,
     state: PendingFailRequestState,
     out: &mut FetchCommandOutput,
 ) {
-    if let Err(error) = completed.and_then(CompletedPageCommand::into_unit_reply) {
+    if let Err(error) = completed.and_then(CompletedResourceCommand::into_unit_reply) {
         out.push_error(-32000, format!("{error:#}"));
         return;
     }
@@ -900,6 +885,17 @@ fn start_devtools_fulfill_intercepted_request_command(
         let websocket_socket_id = pending.websocket_socket_id;
         let register_synthetic_websocket =
             pending.resource_type == SubresourceResourceType::WebSocket && response_code == 101;
+        let (url, method, body, headers) =
+            pending.accumulated_request_stage_continue_modifications();
+        let request_overrides =
+            (url.is_some() || method.is_some() || body.is_some() || headers.is_some()).then(|| {
+                Box::new(moli_fetch::RequestOverrides {
+                    url,
+                    method,
+                    body,
+                    headers,
+                })
+            });
         let pending_page = match conn.start_subresource_document_command(
             owner,
             pending
@@ -908,6 +904,7 @@ fn start_devtools_fulfill_intercepted_request_command(
             pending.document_command_target(),
             RendererPageCommand::FulfillPendingSubresourceFetch {
                 internal_id: pending.internal_id,
+                request_overrides,
                 response_code,
                 response_headers: response_headers.clone(),
                 response_body: decoded_body.unwrap_or_else(RendererSyntheticResponseBody::empty),
@@ -927,9 +924,9 @@ fn start_devtools_fulfill_intercepted_request_command(
         return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new_for_owner(
             command_id,
             owner.clone(),
-            PendingFetchCommandOperation::Page {
+            PendingFetchCommandOperation::Resource {
                 pending: pending_page,
-                finish: PageFetchCompletion::FulfillRequest {
+                finish: ResourceFetchCompletion::FulfillRequest {
                     state: Box::new(PendingFulfillRequestState::SubresourceFetch {
                         pending: Box::new(pending),
                         request_id,
@@ -973,9 +970,9 @@ fn start_devtools_fulfill_intercepted_request_command(
         return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new_for_owner(
             command_id,
             owner.clone(),
-            PendingFetchCommandOperation::Page {
+            PendingFetchCommandOperation::Resource {
                 pending: pending_page,
-                finish: PageFetchCompletion::FulfillRequest {
+                finish: ResourceFetchCompletion::FulfillRequest {
                     state: Box::new(PendingFulfillRequestState::SubresourceResponse {
                         pending: Box::new(pending),
                     }),
@@ -1023,11 +1020,11 @@ fn start_devtools_fulfill_intercepted_request_command(
 pub(super) fn complete_fulfill_request_command(
     conn: &mut CdpConnection,
     owner: &CommandOwnerScope,
-    completed: Result<CompletedPageCommand>,
+    completed: Result<CompletedResourceCommand>,
     state: PendingFulfillRequestState,
     out: &mut FetchCommandOutput,
 ) {
-    if let Err(error) = completed.and_then(CompletedPageCommand::into_unit_reply) {
+    if let Err(error) = completed.and_then(CompletedResourceCommand::into_unit_reply) {
         out.push_error(-32000, format!("{error:#}"));
         return;
     }
@@ -1163,9 +1160,9 @@ pub(super) fn start_dispatch_websocket_message_command(
         conn,
         cmd.id,
         cmd.session_id,
-        PendingFetchCommandOperation::Page {
-            pending,
-            finish: PageFetchCompletion::WebSocket { operation },
+        PendingFetchCommandOperation::Resource {
+            pending: pending.into(),
+            finish: ResourceFetchCompletion::WebSocket { operation },
         },
     ))
 }
@@ -1221,9 +1218,9 @@ pub(super) fn start_close_websocket_command(
         conn,
         cmd.id,
         cmd.session_id,
-        PendingFetchCommandOperation::Page {
-            pending,
-            finish: PageFetchCompletion::WebSocket {
+        PendingFetchCommandOperation::Resource {
+            pending: pending.into(),
+            finish: ResourceFetchCompletion::WebSocket {
                 operation: PendingWebSocketCommandOperation::Close,
             },
         },
@@ -1233,11 +1230,11 @@ pub(super) fn start_close_websocket_command(
 pub(super) fn complete_websocket_page_command(
     conn: &mut CdpConnection,
     owner: &CommandOwnerScope,
-    completed: Result<CompletedPageCommand>,
+    completed: Result<CompletedResourceCommand>,
     operation: PendingWebSocketCommandOperation,
     out: &mut FetchCommandOutput,
 ) {
-    let completion = match completed {
+    let completion = match completed.and_then(CompletedResourceCommand::into_page_command) {
         Ok(completion) => completion,
         Err(error) => {
             out.push_error(-32000, format!("{error:#}"));
@@ -1514,9 +1511,9 @@ fn start_devtools_continue_intercepted_response_command(
         return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new_for_owner(
             command_id,
             owner.clone(),
-            PendingFetchCommandOperation::Page {
+            PendingFetchCommandOperation::Resource {
                 pending: pending_page,
-                finish: PageFetchCompletion::ContinueResponse {
+                finish: ResourceFetchCompletion::ContinueResponse {
                     state: Box::new(PendingContinueResponseState::SubresourceResponse {
                         pending: Box::new(pending),
                     }),
@@ -1568,7 +1565,7 @@ fn continue_response_auth_command(
 pub(super) fn complete_continue_response_command(
     conn: &mut CdpConnection,
     owner: &CommandOwnerScope,
-    completed: Result<CompletedPageCommand>,
+    completed: Result<CompletedResourceCommand>,
     state: PendingContinueResponseState,
     out: &mut FetchCommandOutput,
 ) {

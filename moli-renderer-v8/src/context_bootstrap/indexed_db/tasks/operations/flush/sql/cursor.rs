@@ -1,6 +1,6 @@
 use super::*;
 use crate::context_bootstrap::indexed_db::{
-    IndexedDbCursorIteration, IndexedDbCursorSource, SqlCursorQuery, attach_indexed_db_sql_cursor,
+    IndexedDbCursorIteration, SqlCursorQuery, attach_indexed_db_sql_cursor,
     indexed_db_cursor_state, stage_indexed_db_sql_cursor_page, store_cursor_iteration_result,
     typed_state::sql::sql_transaction_cancellation,
 };
@@ -19,10 +19,9 @@ pub(super) fn prepare<'s>(
 ) -> Result<IndexedDbTransactionOperation, IndexedDbError> {
     let (descriptor, query, target) = match operation.kind {
         IndexedDbTransactionOperation::OpenCursor(input) => {
-            let source = match input.source {
-                IndexedDbCursorSource::ObjectStore => QuerySource::ObjectStore,
-                IndexedDbCursorSource::Index(index) => QuerySource::Index(index.name),
-            };
+            let source =
+                crate::context_bootstrap::indexed_db::indexed_db_index_id(scope, operation.source)
+                    .map_or(QuerySource::ObjectStore, QuerySource::Index);
             let query = Query {
                 blob_references: true,
                 source,
@@ -32,7 +31,6 @@ pub(super) fn prepare<'s>(
                 ..Default::default()
             };
             let descriptor = Rc::new(SqlCursorQuery {
-                store: operation.store_name,
                 query: query.clone(),
             });
             (
@@ -93,7 +91,7 @@ pub(super) fn prepare<'s>(
     };
     let command = Command::Query {
         transaction: operation.handle,
-        store: descriptor.store.clone(),
+        store: operation.store,
         query,
     };
     let client = client.clone();

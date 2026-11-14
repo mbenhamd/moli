@@ -17,6 +17,7 @@ pub use moli_page_types::{
     RendererInspectorProtocolConfiguration, RendererInspectorProtocolConfigurationCommand,
     RendererInspectorSessionRestoreSnapshot, V8InspectorSessionState,
 };
+use moli_protocol_cdp_defs::LocalCdpEvent;
 use moli_shared_worker::SharedWorkerInstanceId;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -507,6 +508,7 @@ pub struct RendererInputDispatchOutcome {
 pub struct RendererPointerEventProperties {
     pub pointer_id: i32,
     pub pointer_type: String,
+    pub is_primary: bool,
     pub pressure: f64,
     pub tangential_pressure: f64,
     pub tilt_x: f64,
@@ -519,6 +521,7 @@ impl Default for RendererPointerEventProperties {
         Self {
             pointer_id: 1,
             pointer_type: "mouse".to_owned(),
+            is_primary: true,
             pressure: 0.0,
             tangential_pressure: 0.0,
             tilt_x: 0.0,
@@ -1227,7 +1230,7 @@ fn runtime_context_restore_event_v8_inspector_message(
                 );
             }
             json!({
-                "method": "Runtime.executionContextCreated",
+                "method": LocalCdpEvent::RuntimeExecutionContextCreated.method(),
                 "params": {
                     "context": {
                         "id": context_id,
@@ -1246,7 +1249,7 @@ fn runtime_context_restore_event_v8_inspector_message(
                 ..
             } = event;
             json!({
-                "method": "Runtime.executionContextDestroyed",
+                "method": LocalCdpEvent::RuntimeExecutionContextDestroyed.method(),
                 "params": {
                     "executionContextId": context_id,
                     "executionContextUniqueId": realm_id,
@@ -1255,7 +1258,7 @@ fn runtime_context_restore_event_v8_inspector_message(
         }
         crate::protocol_types::RuntimeContextRestoreEvent::Cleared(_event) => {
             json!({
-                "method": "Runtime.executionContextsCleared",
+                "method": LocalCdpEvent::RuntimeExecutionContextsCleared.method(),
                 "params": {},
             })
         }
@@ -3244,6 +3247,7 @@ impl RendererRuntimeInspectorResponseChannel {
             }
         };
         Some(RendererRuntimeInspectorResponseSender {
+            abandoned_object_group: None,
             call_id,
             attachment_id,
             destination,
@@ -3428,6 +3432,7 @@ enum RendererRuntimeInspectorResponsePublicationBoundary {
 
 #[derive(Clone)]
 pub struct RendererRuntimeInspectorResponseSender {
+    abandoned_object_group: Option<String>,
     call_id: i32,
     attachment_id: Option<RendererAgentAttachmentId>,
     destination: RendererRuntimeInspectorResponseDestination,
@@ -3443,6 +3448,27 @@ impl std::fmt::Debug for RendererRuntimeInspectorResponseSender {
 }
 
 impl RendererRuntimeInspectorResponseSender {
+    /// Only an internal operation which owns this private group may opt in.
+    /// Frontend CDP object groups are never inferred from request JSON here.
+    pub fn with_abandoned_object_group_cleanup(mut self, group: Option<String>) -> Self {
+        self.abandoned_object_group = group;
+        self
+    }
+
+    pub(crate) fn abandoned_object_group(&self) -> Option<&str> {
+        self.abandoned_object_group.as_deref()
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        match &self.destination {
+            RendererRuntimeInspectorResponseDestination::AdapterReply(lease)
+            | RendererRuntimeInspectorResponseDestination::DevToolsSessionPending(lease)
+            | RendererRuntimeInspectorResponseDestination::DevToolsSession { lease, .. } => {
+                lease.is_open()
+            }
+        }
+    }
+
     pub fn new(call_id: i32, tx: oneshot::Sender<RendererRuntimeInspectorAsyncCompletion>) -> Self {
         RendererRuntimeInspectorResponseChannel {
             delivery: moli_page_types::RendererInspectorResponseDelivery::AdapterReply,
@@ -3556,6 +3582,7 @@ impl RendererRuntimeInspectorResponseSender {
             attachment_id,
             destination,
             publication_boundary,
+            abandoned_object_group: _,
         } = self;
         if let Some(attachment_id) = attachment_id {
             output.bind_renderer_agent_attachment(attachment_id);
@@ -3603,6 +3630,7 @@ impl RendererRuntimeInspectorResponseSender {
             attachment_id: _,
             destination,
             publication_boundary: _,
+            abandoned_object_group: _,
         } = self;
         match destination {
             RendererRuntimeInspectorResponseDestination::AdapterReply(_) => {
@@ -3899,6 +3927,7 @@ mod renderer_runtime_inspector_response_channel_tests {
             attachment_id,
             destination,
             publication_boundary: _,
+            abandoned_object_group: _,
         } = sender;
         let mut output = output(1);
         if let Some(attachment_id) = attachment_id {
@@ -5300,10 +5329,12 @@ pub enum RendererPageCommand {
         reference: RendererDomNodeReference,
         include_shadow_dom: bool,
     },
-    RenderPageDump {
-        options: RendererPageDumpOptions,
+    RenderMarkdown {
+        options: RendererMarkdownOptions,
     },
-    SerializeDocument,
+    SerializeDocument {
+        options: RendererHtmlSerializeOptions,
+    },
     LayoutMetrics,
     PublishLayout,
     PrintToPdf(RendererPrintToPdfRequest),
@@ -5353,6 +5384,7 @@ pub enum RendererPageCommand {
     },
     FulfillPendingSubresourceFetch {
         internal_id: u64,
+        request_overrides: Option<Box<moli_fetch::RequestOverrides>>,
         response_code: u16,
         response_headers: Vec<(String, Vec<u8>)>,
         response_body: RendererSyntheticResponseBody,
@@ -5387,8 +5419,7 @@ pub enum RendererPageCommand {
     },
     PendingSubresourceRequestCount,
     SetFetchSubresourceInterception {
-        enabled: bool,
-        resource_type: Option<crate::SubresourceResourceType>,
+        classes: crate::SubresourceInterceptionClasses,
     },
     ReplaceBrowserResourceRuntime {
         resource_runtime: crate::network::BrowserResourceRuntime,
@@ -5938,8 +5969,8 @@ impl RendererPageCommand {
             }
             Self::OuterHtmlForDocument { .. } => Some("OuterHtmlForDocument"),
             Self::OuterHtmlForNode { .. } => Some("OuterHtmlForNode"),
-            Self::RenderPageDump { .. } => Some("RenderPageDump"),
-            Self::SerializeDocument => Some("SerializeDocument"),
+            Self::RenderMarkdown { .. } => Some("RenderMarkdown"),
+            Self::SerializeDocument { .. } => Some("SerializeDocument"),
             Self::LayoutMetrics => Some("LayoutMetrics"),
             Self::PublishLayout => Some("PublishLayout"),
             Self::PrintToPdf(_) => Some("PrintToPdf"),
@@ -6165,25 +6196,25 @@ pub struct RendererDocumentChildNodeSnapshotEvents {
     pub events: Vec<RendererDocumentChildNodeSnapshotEvent>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RendererPageDumpFormat {
-    Html,
-    Markdown,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RendererPageDumpStripOptions {
+pub struct RendererContentStripOptions {
     pub js: bool,
     pub ui: bool,
     pub css: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RendererPageDumpOptions {
-    pub format: RendererPageDumpFormat,
-    pub strip: RendererPageDumpStripOptions,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RendererHtmlSerializeOptions {
+    pub strip: RendererContentStripOptions,
     pub with_base: bool,
     pub with_frames: bool,
+    /// No default truncation. Limits count final, nested-escaped output bytes.
+    pub max_output_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RendererMarkdownOptions {
+    pub strip: RendererContentStripOptions,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -9,17 +9,18 @@ use crate::{
 };
 
 use super::super::{
-    JsContextHost, node::node_runtime_and_handle_from_object_or_detached, throw_dom_exception,
+    PageScriptHost, node::node_runtime_and_handle_from_object_or_detached, throw_dom_exception,
 };
 use super::toggle_event::queue_element_toggle_event;
 use super::{
-    element_has_attribute, html_element_getter_receiver, html_element_setter_receiver,
-    property_dom_string_value, set_reflected_boolean_attribute,
+    construct_simple_event, dispatch_public_event, element_has_attribute,
+    html_element_getter_receiver, html_element_setter_receiver, property_dom_string_value,
+    set_reflected_boolean_attribute,
 };
 
 pub(crate) fn queue_details_toggle_event_for_attribute_change(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
     namespace: Option<&str>,
     local_name: &str,
@@ -59,7 +60,7 @@ pub(crate) fn queue_details_toggle_event_for_attribute_change(
 
 pub(crate) fn queue_parser_details_toggle_event(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
 ) {
     let runtime = unsafe { &*runtime_ptr };
@@ -80,7 +81,7 @@ pub(crate) fn queue_parser_details_toggle_event(
 
 pub(crate) fn queue_parser_details_toggle_events_in_subtree(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     root: DomHandle,
 ) {
     let mut stack = vec![root];
@@ -97,7 +98,10 @@ struct DialogCloseArgs {
     return_value: Option<String>,
 }
 
-pub(super) fn main_summary_child(runtime: &JsContextHost, details: DomHandle) -> Option<DomHandle> {
+pub(super) fn main_summary_child(
+    runtime: &PageScriptHost,
+    details: DomHandle,
+) -> Option<DomHandle> {
     let details_element = runtime
         .dom_host()
         .node(details)
@@ -115,7 +119,7 @@ pub(super) fn main_summary_child(runtime: &JsContextHost, details: DomHandle) ->
 }
 
 pub(super) fn closed_details_child_participates(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     details: DomHandle,
     child: DomHandle,
 ) -> bool {
@@ -127,7 +131,10 @@ pub(super) fn closed_details_child_participates(
     main_summary_child(runtime, details) == Some(child)
 }
 
-pub(super) fn node_is_hidden_by_closed_details(runtime: &JsContextHost, handle: DomHandle) -> bool {
+pub(super) fn node_is_hidden_by_closed_details(
+    runtime: &PageScriptHost,
+    handle: DomHandle,
+) -> bool {
     let mut branch = handle;
     while let Some(parent) = runtime.dom_host().parent_node(branch) {
         if !closed_details_child_participates(runtime, parent, branch) {
@@ -139,7 +146,7 @@ pub(super) fn node_is_hidden_by_closed_details(runtime: &JsContextHost, handle: 
 }
 
 pub(super) fn closed_details_ancestors_to_reveal(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     target: DomHandle,
 ) -> Vec<DomHandle> {
     let mut ancestors = Vec::new();
@@ -157,7 +164,7 @@ pub(super) fn closed_details_ancestors_to_reveal(
 }
 
 fn details_reveal_flat_tree_parent(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
 ) -> Option<DomHandle> {
     if let Some(slot) = runtime.dom_host().assigned_slot_for_node(handle) {
@@ -186,7 +193,7 @@ fn details_reveal_flat_tree_parent(
     Some(parent)
 }
 
-fn main_summary_details_handle(runtime: &JsContextHost, summary: DomHandle) -> Option<DomHandle> {
+fn main_summary_details_handle(runtime: &PageScriptHost, summary: DomHandle) -> Option<DomHandle> {
     let summary_element = runtime
         .dom_host()
         .node(summary)
@@ -200,7 +207,7 @@ fn main_summary_details_handle(runtime: &JsContextHost, summary: DomHandle) -> O
 
 pub(super) fn perform_summary_click_default_action(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
 ) -> bool {
     let runtime = unsafe { &*runtime_ptr };
@@ -223,7 +230,7 @@ pub(super) fn perform_summary_click_default_action(
 fn dialog_runtime_and_handle_from_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
-) -> anyhow::Result<(*mut JsContextHost, DomHandle)> {
+) -> anyhow::Result<(*mut PageScriptHost, DomHandle)> {
     node_runtime_and_handle_from_object_or_detached(scope, object)
 }
 
@@ -258,7 +265,7 @@ fn dialog_set_open_state<'s>(
 
 fn dialog_set_open_state_for_handle(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
     open: bool,
     modal: bool,
@@ -270,7 +277,7 @@ fn dialog_set_open_state_for_handle(
         .set_dialog_modal(handle, open && modal);
 }
 
-fn dialog_is_modal(runtime: &JsContextHost, handle: DomHandle) -> bool {
+fn dialog_is_modal(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     runtime
         .dom_host()
         .node(handle)
@@ -452,7 +459,7 @@ pub(super) fn dialog_close_callback<'s>(
 
 pub(in crate::native_bridge::element) fn close_dialog_element(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
     return_value: Option<&str>,
 ) -> bool {
@@ -477,7 +484,7 @@ pub(in crate::native_bridge::element) fn close_dialog_element(
 
 fn queue_dialog_close_event(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime: &mut JsContextHost,
+    runtime: &mut PageScriptHost,
     handle: DomHandle,
 ) {
     let _ = runtime.queue_user_interaction_event_task(
@@ -485,4 +492,95 @@ fn queue_dialog_close_event(
         RendererPageUserInteractionEventKind::DialogClose,
         handle,
     );
+}
+
+struct DialogCloseRequest {
+    document: DomHandle,
+    dialog: DomHandle,
+    opening: u64,
+}
+
+impl DialogCloseRequest {
+    fn new(runtime: &PageScriptHost, document: DomHandle) -> Option<Self> {
+        let dialog = runtime
+            .dom_host()
+            .active_modal_dialog_for_document(document)?;
+        let opening = runtime
+            .dom_host()
+            .node(dialog)?
+            .as_element()?
+            .dialog_modal_generation();
+        Some(Self {
+            document,
+            dialog,
+            opening,
+        })
+    }
+
+    fn is_active(&self, runtime: &PageScriptHost) -> bool {
+        runtime.dom_host().is_connected(self.dialog)
+            && runtime.dom_host().owner_document_handle(self.dialog) == Some(self.document)
+            && runtime
+                .dom_host()
+                .node(self.dialog)
+                .and_then(|node| node.as_element())
+                .is_some_and(|element| {
+                    element.dialog_modal()
+                        && element.has_attribute("open")
+                        && element.dialog_modal_generation() == self.opening
+                })
+    }
+
+    fn is_enabled(&self, runtime: &PageScriptHost) -> bool {
+        !runtime
+            .dom_host()
+            .get_attribute_ns(self.dialog, None, "closedby")
+            .is_some_and(|value| value.eq_ignore_ascii_case("none"))
+    }
+}
+
+/// Default action for a trusted `keydown` on Escape: request closure of the
+/// topmost open modal dialog. A cancelable, non-bubbling
+/// `cancel` event is fired at the dialog, and the dialog closes unless the
+/// event is canceled (or the keydown itself was prevented, which the caller
+/// already checks).
+pub(crate) fn perform_dialog_escape_default_action_for_dispatched_event(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    event: v8::Local<'_, v8::Object>,
+    document: DomHandle,
+) {
+    if event_string_property(scope, event, "key").as_deref() != Some("Escape") {
+        return;
+    }
+    let Some(request) = DialogCloseRequest::new(unsafe { &*runtime_ptr }, document) else {
+        return;
+    };
+    if !request.is_enabled(unsafe { &*runtime_ptr }) {
+        return;
+    }
+    let Some(cancel_event) = construct_simple_event(scope, "cancel", false, true, false) else {
+        return;
+    };
+    let outcome = dispatch_public_event(scope, runtime_ptr, request.dialog, cancel_event);
+    // A cancel listener can destroy the original opening and start a new one.
+    // That new opening does not belong to this close request.
+    if outcome.allows_default()
+        && request.is_active(unsafe { &*runtime_ptr })
+        && request.is_enabled(unsafe { &*runtime_ptr })
+    {
+        close_dialog_element(scope, runtime_ptr, request.dialog, None);
+    }
+}
+
+fn event_string_property(
+    scope: &mut v8::PinScope<'_, '_>,
+    event: v8::Local<'_, v8::Object>,
+    name: &str,
+) -> Option<String> {
+    let key = v8_string(scope, name)?;
+    crate::context_bootstrap::event_backing(scope, event)
+        .get(scope, key.into())
+        .and_then(|value| v8::Local::<v8::String>::try_from(value).ok())
+        .map(|value| value.to_rust_string_lossy(scope))
 }

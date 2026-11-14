@@ -1,6 +1,8 @@
 use super::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
+use super::native_xhr::run_cdp_command_with_network_decisions;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_local_fetch_and_xhr_bypass_request_and_response_interception() {
     for request_stage in ["Request", "Response"] {
@@ -1856,6 +1858,762 @@ async fn continue_request_returns_before_delayed_subresource_response() {
     .await;
     let resolved = take_response_by_id(&mut ctx, 36_045);
     assert_eq!(resolved["result"]["result"]["value"], "delayed-body");
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unmatched_substring_pattern_keeps_synchronous_xhr_on_the_network_path() {
+    async fn page() -> impl IntoResponse {
+        (
+            [(CONTENT_TYPE.as_str(), "text/html")],
+            "<!doctype html><html><body>ready</body></html>",
+        )
+    }
+
+    async fn trapped() -> impl IntoResponse {
+        ([(CONTENT_TYPE.as_str(), "text/plain")], "unmatched-body")
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/page", get(page))
+                .route("/api/plain", get(trapped)),
+        )
+        .await
+        .unwrap();
+    });
+
+    let page_url = format!("http://{addr}/page");
+    let mut ctx = TestContext::new();
+    with_loaded_http_document(&mut ctx, &page_url, "SID-1", "TID-1").await;
+    ctx.process_async(json!({
+        "id": 38_600,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1",
+        "params": {
+            "patterns": [
+                { "urlPattern": "*google-analytics.com*", "requestStage": "Request" }
+            ]
+        }
+    }))
+    .await;
+    ctx.expect_result(38_600, json!({}), Some("SID-1"));
+    enable_runtime_async(&mut ctx, "SID-1", 38_601).await;
+
+    // The XHR class is eligible, but this URL does not match the actual
+    // substring rule. It must reach the network without a pause or failure.
+    ctx.process_async(json!({
+        "id": 38_602,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-1",
+        "params": {
+            "expression": r#"(() => {
+  try {
+    const request = new XMLHttpRequest();
+    request.open('GET', '/api/plain', false);
+    request.send();
+    return `sync:${request.status}:${request.responseText}`;
+  } catch (error) {
+    return `sync-error:${error && error.name}`;
+  }
+})()"#
+        }
+    }))
+    .await;
+
+    let observed = take_response_by_id(&mut ctx, 38_602);
+    assert_eq!(
+        observed["result"]["result"]["value"],
+        json!("sync:200:unmatched-body"),
+        "an unmatched synchronous XHR must reach the network; sent={:?}",
+        ctx.sent
+    );
+
+    let paused = ctx
+        .sent
+        .iter()
+        .filter(|message| {
+            message["method"] == json!("Fetch.requestPaused")
+                && message["params"]["request"]["url"]
+                    .as_str()
+                    .is_some_and(|url| url.ends_with("/api/plain"))
+        })
+        .count();
+    assert_eq!(
+        paused, 0,
+        "an unmatched synchronous XHR must not publish a Fetch pause: {:?}",
+        ctx.sent
+    );
+    // Bind the lifecycle assertions to the trap request itself so a fixture
+    // or event-order change cannot satisfy them with an unrelated request.
+    let trap_request_id = ctx
+        .sent
+        .iter()
+        .find_map(|message| {
+            let matches = message["method"] == json!("Network.requestWillBeSent")
+                && message["params"]["request"]["url"]
+                    .as_str()
+                    .is_some_and(|url| url.ends_with("/api/plain"));
+            matches.then(|| message["params"]["requestId"].as_str().unwrap().to_owned())
+        })
+        .expect("the synchronous trap XHR must announce itself over Network");
+    assert!(
+        ctx.sent.iter().any(|message| {
+            message["method"] == json!("Network.loadingFinished")
+                && message["params"]["requestId"].as_str() == Some(trap_request_id.as_str())
+        }),
+        "the synchronous XHR must complete its network lifecycle: {:?}",
+        ctx.sent
+    );
+    assert!(
+        ctx.sent
+            .iter()
+            .all(|message| message["method"] != json!("Network.loadingFailed")),
+        "the synchronous XHR must not fail: {:?}",
+        ctx.sent
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn substring_pattern_request_pause_continues_asynchronous_xhr_onto_the_network() {
+    async fn page() -> impl IntoResponse {
+        (
+            [(CONTENT_TYPE.as_str(), "text/html")],
+            "<!doctype html><html><body>ready</body></html>",
+        )
+    }
+
+    async fn trapped() -> impl IntoResponse {
+        ([(CONTENT_TYPE.as_str(), "text/plain")], "path-trap-body")
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/page", get(page))
+                .route("/js/google-analytics.com.js", get(trapped)),
+        )
+        .await
+        .unwrap();
+    });
+
+    let page_url = format!("http://{addr}/page");
+    let trapped_url = format!("http://{addr}/js/google-analytics.com.js");
+    let mut ctx = TestContext::new();
+    with_loaded_http_document(&mut ctx, &page_url, "SID-1", "TID-1").await;
+    ctx.process_async(json!({
+        "id": 38_620,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1",
+        "params": {
+            "patterns": [
+                { "urlPattern": "*google-analytics.com*", "requestStage": "Request" }
+            ]
+        }
+    }))
+    .await;
+    ctx.expect_result(38_620, json!({}), Some("SID-1"));
+    enable_runtime_async(&mut ctx, "SID-1", 38_621).await;
+
+    // The asynchronous counterpart keeps the full interception contract:
+    // the substring pattern pauses the request even though only its path
+    // carries the marker, and continueRequest re-injects it onto the
+    // network exactly like Chromium.
+    ctx.process_async(json!({
+        "id": 38_622,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-1",
+        "params": {
+            "expression": r#"(() => {
+  globalThis.__lm_path_trap_result = "pending";
+  const request = new XMLHttpRequest();
+  request.open('GET', '/js/google-analytics.com.js', true);
+  request.onload = () => {
+    globalThis.__lm_path_trap_result = `async:${request.status}:${request.responseText}`;
+  };
+  request.onerror = () => {
+    globalThis.__lm_path_trap_result = 'async-error';
+  };
+  request.send();
+  return "scheduled";
+})()"#
+        }
+    }))
+    .await;
+    let observed = take_response_by_id(&mut ctx, 38_622);
+    assert_eq!(
+        observed["result"]["result"]["value"],
+        json!("scheduled"),
+        "the asynchronous probe must schedule: {:?}",
+        ctx.sent
+    );
+
+    let paused = ctx
+        .wait_for_scheduler_message("substring Fetch.requestPaused", |message| {
+            message["method"] == json!("Fetch.requestPaused")
+                && message["params"]["request"]["url"] == json!(trapped_url)
+                && message["params"]["resourceType"] == json!("XHR")
+        })
+        .await;
+    let request_id = paused["params"]["requestId"]
+        .as_str()
+        .expect("substring async XHR pause request id")
+        .to_owned();
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 38_623,
+        "method": "Fetch.continueRequest",
+        "sessionId": "SID-1",
+        "params": { "requestId": request_id }
+    }))
+    .await;
+    ctx.expect_result(38_623, json!({}), Some("SID-1"));
+
+    let resolved = evaluate_until_value_async(
+        &mut ctx,
+        "SID-1",
+        38_624,
+        "globalThis.__lm_path_trap_result !== 'pending' ? globalThis.__lm_path_trap_result : 'pending'",
+        &json!("async:200:path-trap-body"),
+        "substring-paused asynchronous XHR continued onto the network",
+    )
+    .await;
+    assert_eq!(
+        resolved["result"]["result"]["value"], "async:200:path-trap-body",
+        "asynchronous XHR paused by a substring pattern and continued by the client must reach the network"
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn wide_interception_keeps_offline_emulation_for_synchronous_xhr() {
+    let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    async fn page() -> impl IntoResponse {
+        (
+            [(CONTENT_TYPE.as_str(), "text/html")],
+            "<!doctype html><html><body>ready</body></html>",
+        )
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let api_requests = requests.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/page", get(page)).route(
+                "/api",
+                get(move || {
+                    api_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async { "api-body" }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+
+    let page_url = format!("http://{addr}/page");
+    let mut ctx = TestContext::new();
+    with_loaded_http_document(&mut ctx, &page_url, "SID-1", "TID-1").await;
+    ctx.process_async(json!({
+        "id": 38_700,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1",
+        "params": {
+            "patterns": [ { "urlPattern": "*", "requestStage": "Request" } ]
+        }
+    }))
+    .await;
+    ctx.expect_result(38_700, json!({}), Some("SID-1"));
+    ctx.process_async(json!({
+        "id": 38_701,
+        "method": "Network.enable",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    ctx.expect_result(38_701, json!({}), Some("SID-1"));
+    ctx.process_async(json!({
+        "id": 38_702,
+        "method": "Network.emulateNetworkConditions",
+        "sessionId": "SID-1",
+        "params": { "offline": true, "latency": 0, "downloadThroughput": 0, "uploadThroughput": 0 }
+    }))
+    .await;
+    ctx.expect_result(38_702, json!({}), Some("SID-1"));
+    enable_runtime_async(&mut ctx, "SID-1", 38_703).await;
+
+    // Interception covering the XHR class must not let a synchronous XHR
+    // escape offline emulation: the ordinary synchronous path (and the
+    // offline gate it shares with the no-interception case) still applies.
+    ctx.process_async(json!({
+        "id": 38_704,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-1",
+        "params": {
+            "expression": r#"(() => {
+  try {
+    const request = new XMLHttpRequest();
+    request.open('GET', '/api', false);
+    request.send();
+    return `sync:${request.status}:${request.responseText}`;
+  } catch (error) {
+    return `sync-error:${error && error.name}`;
+  }
+})()"#
+        }
+    }))
+    .await;
+
+    let observed = take_response_by_id(&mut ctx, 38_704);
+    assert_eq!(
+        observed["result"]["result"]["value"],
+        json!("sync-error:NetworkError"),
+        "a synchronous XHR under interception and offline emulation must not reach the network; sent={:?}",
+        ctx.sent
+    );
+
+    let request_id = ctx
+        .sent
+        .iter()
+        .find_map(|message| {
+            (message["method"] == "Network.requestWillBeSent"
+                && message["params"]["request"]["url"] == format!("http://{addr}/api"))
+            .then(|| message["params"]["requestId"].as_str().unwrap().to_owned())
+        })
+        .expect("offline XHR request id");
+    assert!(
+        ctx.sent.iter().any(|message| {
+            message["method"] == "Network.loadingFailed"
+                && message["params"]["requestId"] == request_id
+                && message["params"]["errorText"] == "Network emulation offline"
+        }),
+        "offline must be the failure reason: {:?}",
+        ctx.sent
+    );
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn matching_synchronous_xhr_uses_client_decisions_and_disable_restores_network() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let requests = Arc::new(AtomicUsize::new(0));
+    let observed = requests.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route(
+                    "/page",
+                    get(|| async { axum::response::Html("<!doctype html>ready") }),
+                )
+                .route(
+                    "/js/google-analytics.com.js",
+                    axum::routing::post(move || {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        async { "network-body" }
+                    }),
+                ),
+        )
+        .await
+        .unwrap();
+    });
+    for (resource_type, stage, auth) in [
+        (None, "Request", false),
+        (Some("XHR"), "Request", false),
+        (Some("XHR"), "Response", false),
+        (Some("Image"), "Request", true),
+    ] {
+        requests.store(0, Ordering::SeqCst);
+        let mut ctx = TestContext::new();
+        with_loaded_http_document(&mut ctx, &format!("http://{addr}/page"), "SID-1", "TID-1").await;
+        let mut pattern = json!({"urlPattern": "*google-analytics.com*", "requestStage": stage});
+        if let Some(resource_type) = resource_type {
+            pattern["resourceType"] = json!(resource_type);
+        }
+        ctx.process_async(
+            json!({"id":38750,"method":"Fetch.enable","sessionId":"SID-1",
+            "params":{"patterns":[pattern],"handleAuthRequests":auth}}),
+        )
+        .await;
+        ctx.expect_result(38750, json!({}), Some("SID-1"));
+        enable_runtime_async(&mut ctx, "SID-1", 38751).await;
+        ctx.process_async(
+            json!({"id":38755,"method":"Page.navigate","sessionId":"SID-1",
+            "params":{"url":format!("http://{addr}/page?replacement")}}),
+        )
+        .await;
+        assert!(take_response_by_id(&mut ctx, 38755).get("error").is_none());
+        let expression = r#"(() => {
+            try {
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', '/js/google-analytics.com.js', false);
+                xhr.send('payload');
+                return `sync:${xhr.status}:${xhr.responseText}`;
+            } catch (error) { return `sync-error:${error.name}`; }
+        })()"#;
+        ctx.sent.clear();
+        let pauses = run_cdp_command_with_network_decisions(&mut ctx,
+            json!({"id":38752,"method":"Runtime.evaluate","sessionId":"SID-1", "params":{"expression":expression}}),
+            |pause| json!({"id":38756,"method":"Fetch.failRequest","sessionId":"SID-1", "params":{"requestId":pause["params"]["requestId"],"errorReason":"Aborted"}}),
+        ).await;
+        let result = take_response_by_id(&mut ctx, 38752);
+        assert_eq!(
+            result["result"]["result"]["value"],
+            if auth {
+                "sync:200:network-body"
+            } else {
+                "sync-error:NetworkError"
+            },
+            "{result}"
+        );
+        let initial_requests = usize::from(auth || stage == "Response");
+        assert_eq!(requests.load(Ordering::SeqCst), initial_requests);
+        assert_eq!(pauses.len(), usize::from(!auth), "{pauses:?}");
+        if stage == "Response" {
+            assert_eq!(pauses[0]["params"]["responseStatusCode"], 200);
+        }
+        ctx.process_async(json!({"id":38753,"method":"Fetch.disable","sessionId":"SID-1"}))
+            .await;
+        ctx.expect_result(38753, json!({}), Some("SID-1"));
+        ctx.process_async(
+            json!({"id":38754,"method":"Runtime.evaluate","sessionId":"SID-1",
+            "params":{"expression":expression}}),
+        )
+        .await;
+        let result = take_response_by_id(&mut ctx, 38754);
+        assert_eq!(
+            result["result"]["result"]["value"], "sync:200:network-body",
+            "{result}"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), initial_requests + 1);
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn synchronous_worker_xhr_uses_exact_interception_urls() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let allowed = Arc::new(AtomicUsize::new(0));
+    let blocked = Arc::new(AtomicUsize::new(0));
+    let allowed_hits = allowed.clone();
+    let blocked_hits = blocked.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route(
+                    "/page",
+                    get(|| async { axum::response::Html("<!doctype html>ready") }),
+                )
+                .route(
+                    "/allowed",
+                    get(move || {
+                        allowed_hits.fetch_add(1, Ordering::SeqCst);
+                        async { "allowed" }
+                    }),
+                )
+                .route(
+                    "/blocked",
+                    get(move || {
+                        blocked_hits.fetch_add(1, Ordering::SeqCst);
+                        async { "blocked" }
+                    }),
+                ),
+        )
+        .await
+        .unwrap();
+    });
+    let mut ctx = TestContext::new();
+    with_loaded_http_document(&mut ctx, &format!("http://{addr}/page"), "SID-1", "TID-1").await;
+    ctx.process_async(
+        json!({"id":38800,"method":"Fetch.enable","sessionId":"SID-1",
+        "params":{"patterns":[{"urlPattern":"*/blocked"}]}}),
+    )
+    .await;
+    ctx.expect_result(38800, json!({}), Some("SID-1"));
+    enable_runtime_async(&mut ctx, "SID-1", 38801).await;
+    let pauses = run_cdp_command_with_network_decisions(&mut ctx, json!({"id":38802,"method":"Runtime.evaluate","sessionId":"SID-1",
+        "params":{"awaitPromise":true,"expression":format!(r#"new Promise((resolve,reject)=>{{
+            const worker=new Worker(URL.createObjectURL(new Blob([`
+                const results=[];
+                for(const path of ['/allowed','/blocked','/blocked#ignored']) {{
+                    try {{const xhr=new XMLHttpRequest();xhr.open('GET','http://{addr}'+path,false);xhr.send();results.push(xhr.status+':'+xhr.responseText);}}
+                    catch(error){{results.push(error.name);}}
+                }}
+                postMessage(results);
+            `],{{type:'text/javascript'}})));
+            worker.onmessage=event=>{{worker.terminate();resolve(JSON.stringify(event.data));}};
+            worker.onerror=event=>{{worker.terminate();reject(new Error(event.message));}};
+        }})"#)}}), |pause| json!({"id":38803,"method":"Fetch.failRequest","sessionId":"SID-1", "params":{"requestId":pause["params"]["requestId"],"errorReason":"Aborted"}})).await;
+    assert_eq!(pauses.len(), 2, "{pauses:?}");
+    let result = take_response_by_id(&mut ctx, 38802);
+    assert_eq!(
+        result["result"]["result"]["value"], r#"["200:allowed","NetworkError","NetworkError"]"#,
+        "{result}"
+    );
+    assert_eq!(allowed.load(Ordering::SeqCst), 1);
+    assert_eq!(blocked.load(Ordering::SeqCst), 0);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn synchronous_xhr_checks_intercepts_before_following_redirects() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let blocked = Arc::new(AtomicUsize::new(0));
+    let hits = blocked.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route(
+                    "/page",
+                    get(|| async { axum::response::Html("<!doctype html>ready") }),
+                )
+                .route(
+                    "/redirect",
+                    get(|| async {
+                        (
+                            axum::http::StatusCode::FOUND,
+                            [("location", "/blocked")],
+                            "",
+                        )
+                    }),
+                )
+                .route(
+                    "/redirect-fragment",
+                    get(|| async {
+                        (
+                            axum::http::StatusCode::FOUND,
+                            [("location", "/blocked#ignored")],
+                            "",
+                        )
+                    }),
+                )
+                .route(
+                    "/blocked",
+                    get(move || {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        async { "unexpected" }
+                    }),
+                ),
+        )
+        .await
+        .unwrap();
+    });
+    let mut ctx = TestContext::new();
+    with_loaded_http_document(&mut ctx, &format!("http://{addr}/page"), "SID-1", "TID-1").await;
+    ctx.process_async(
+        json!({"id":38810,"method":"Fetch.enable","sessionId":"SID-1",
+        "params":{"patterns":[{"urlPattern":"*/blocked"}]}}),
+    )
+    .await;
+    ctx.expect_result(38810, json!({}), Some("SID-1"));
+    enable_runtime_async(&mut ctx, "SID-1", 38811).await;
+    let pauses = run_cdp_command_with_network_decisions(&mut ctx, json!({"id":38812,"method":"Runtime.evaluate","sessionId":"SID-1",
+        "params":{"expression":r#"JSON.stringify(['/blocked#ignored','/redirect','/redirect-fragment'].map(path => {
+            try {
+                const xhr = new XMLHttpRequest();
+                xhr.open('GET', path, false);
+                xhr.send();
+                return xhr.responseText;
+            } catch (error) { return error.name; }
+        }))"#}}), |pause| json!({"id":38813,"method":"Fetch.failRequest","sessionId":"SID-1", "params":{"requestId":pause["params"]["requestId"],"errorReason":"Aborted"}})).await;
+    assert_eq!(pauses.len(), 3, "{pauses:?}");
+    let result = take_response_by_id(&mut ctx, 38812);
+    assert_eq!(
+        result["result"]["result"]["value"], r#"["NetworkError","NetworkError","NetworkError"]"#,
+        "{result}"
+    );
+    assert_eq!(
+        blocked.load(Ordering::SeqCst),
+        0,
+        "a matching redirect target must not receive the request"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn popup_synchronous_xhr_does_not_inherit_parent_interception() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let hits = Arc::new(AtomicUsize::new(0));
+    let observed = hits.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route(
+                    "/page",
+                    get(|| async { axum::response::Html("<!doctype html>ready") }),
+                )
+                .route(
+                    "/api/data",
+                    get(move || {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        async { "popup-body" }
+                    }),
+                ),
+        )
+        .await
+        .unwrap();
+    });
+    let mut ctx = TestContext::new();
+    with_loaded_http_document(&mut ctx, &format!("http://{addr}/page"), "SID-1", "TID-1").await;
+    ctx.process_async(json!({
+        "id": 38820,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1",
+        "params": {"patterns": [{"urlPattern": "*/api/*"}]}
+    }))
+    .await;
+    ctx.expect_result(38820, json!({}), Some("SID-1"));
+    enable_runtime_async(&mut ctx, "SID-1", 38821).await;
+    // Both sends run in the same JS task, before protocol adoption can update
+    // the new popup's policy. Only the parent target has enabled interception.
+    let pauses = run_cdp_command_with_network_decisions(&mut ctx, json!({
+        "id": 38822,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-1",
+        "params": {"expression": r#"(() => {
+            const url = new URL('/api/data', location.href).href;
+            const send = target => {
+                try {
+                    const xhr = new target.XMLHttpRequest();
+                    xhr.open('GET', url, false);
+                    xhr.send();
+                    return `${xhr.status}:${xhr.responseText}`;
+                } catch (error) { return error.name; }
+            };
+            const parent = send(window);
+            const popup = window.open('about:blank');
+            if (!popup) throw new Error('popup was not created');
+            const child = send(popup);
+            popup.close();
+            return JSON.stringify({parent, child});
+        })()"#}
+    }), |pause| json!({"id":38823,"method":"Fetch.failRequest","sessionId":"SID-1", "params":{"requestId":pause["params"]["requestId"],"errorReason":"Aborted"}})).await;
+    assert_eq!(pauses.len(), 1, "the popup must not pause: {pauses:?}");
+    let result = take_response_by_id(&mut ctx, 38822);
+    assert_eq!(
+        result["result"]["result"]["value"],
+        r#"{"parent":"NetworkError","child":"200:popup-body"}"#,
+        "{result}"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "only the popup reaches /api/data"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn heterogeneous_fetch_enable_patterns_keep_synchronous_xhr_on_the_network_path() {
+    async fn page() -> impl IntoResponse {
+        (
+            [(CONTENT_TYPE.as_str(), "text/html")],
+            "<!doctype html><html><body>ready</body></html>",
+        )
+    }
+
+    async fn api() -> impl IntoResponse {
+        ([(CONTENT_TYPE.as_str(), "text/plain")], "sync-xhr-body")
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/page", get(page))
+                .route("/api", get(api)),
+        )
+        .await
+        .unwrap();
+    });
+
+    let page_url = format!("http://{addr}/page");
+    let mut ctx = TestContext::new();
+    with_loaded_http_document(&mut ctx, &page_url, "SID-1", "TID-1").await;
+    enable_runtime_async(&mut ctx, "SID-1", 38_500).await;
+    ctx.process_async(json!({
+        "id": 38_501,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1",
+        "params": {
+            "patterns": [
+                { "urlPattern": "*", "requestStage": "Request", "resourceType": "Image" },
+                { "urlPattern": "*", "requestStage": "Request", "resourceType": "Media" },
+                { "urlPattern": "*", "requestStage": "Request", "resourceType": "Font" }
+            ]
+        }
+    }))
+    .await;
+    ctx.expect_result(38_501, json!({}), Some("SID-1"));
+
+    ctx.process_async(json!({
+        "id": 38_502,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-1",
+        "params": {
+            "expression": r#"(() => {
+  const xhr = new XMLHttpRequest();
+  xhr.open('GET', '/api', false);
+  let error = null;
+  try { xhr.send(); } catch (caught) { error = caught && caught.name; }
+  return JSON.stringify({ error, status: xhr.status, text: xhr.responseText });
+})()"#
+        }
+    }))
+    .await;
+    let observed = take_response_by_id(&mut ctx, 38_502);
+    assert_eq!(
+        observed["result"]["result"]["value"],
+        json!(r#"{"error":null,"status":200,"text":"sync-xhr-body"}"#),
+        "synchronous XHR must keep its ordinary network path when its class is outside the pattern set"
+    );
+    assert!(
+        ctx.sent
+            .iter()
+            .all(|message| message["method"] != "Fetch.requestPaused"),
+        "unmatched synchronous XHR must not pause: {:?}",
+        ctx.sent
+    );
 
     server.abort();
 }

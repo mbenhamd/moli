@@ -30,6 +30,7 @@ use moli_protocol::{
         root_frame_stopped_loading_work_for_target, settle_background_navigation_request,
     },
 };
+use moli_protocol_cdp_defs::LocalCdpEvent;
 use serde_json::json;
 
 use super::{
@@ -95,6 +96,397 @@ fn navigation_wait_maps_only_observable_document_milestones() {
     assert_eq!(devtools_navigation_lifecycle_milestone(None), None);
 }
 
+#[tokio::test]
+async fn dialog_handling_reaches_its_owner_during_pending_document_admission() {
+    let mut conn = CdpConnection::new();
+    let navigation = arm_background_navigation_request(&mut conn, "LOADER-dialog-control");
+    let target = navigation.target_id().to_owned();
+    let (mut scheduler, protocol_work_completion_rx) = CdpScheduler::new(conn);
+    let mut receivers = super::CdpSchedulerEventReceivers {
+        state_events_ready: Default::default(),
+        protocol_work_completion_rx,
+        document_activity_completion_rx: tokio::sync::mpsc::unbounded_channel().1,
+        background_event_rx: tokio::sync::mpsc::unbounded_channel().1,
+        background_navigation_completion_rx: tokio::sync::mpsc::unbounded_channel().1,
+        renderer_publication_rx: moli_core::renderer_output_transport_channel().1,
+    };
+    let (ready, _ready_rx) = tokio::sync::mpsc::unbounded_channel();
+    let command = AutomationCommand::HandleJavaScriptDialog(
+        moli_protocol::automation::DevToolsHandleJavaScriptDialogCommand {
+            context: AutomationContext {
+                protocol: FrontendProtocol::WebDriverBidi,
+                session_id: None,
+                target_id: Some(target.clone().into()),
+                browser_context_id: None,
+            },
+            accept: true,
+            prompt_text: Some(String::new()),
+        },
+    );
+    let progress = scheduler
+        .start_owned_automation_command_progress(&mut receivers, &ready, command, None)
+        .await
+        .expect("handling an existing dialog must not wait for a replacement Document");
+    let super::AutomationCommandProgress::Complete(execution) = progress else {
+        panic!("dialog handling is a finite owner operation");
+    };
+    assert_eq!(
+        execution.result.unwrap_err().kind,
+        moli_protocol::automation::DevToolsErrorKind::NoSuchAlert,
+        "the real handler must check the target's dialog even while navigation is pending"
+    );
+    assert!(
+        scheduler
+            .state
+            .with_state(|state| state.has_inflight_background_navigation_for_target(&target))
+            .unwrap()
+    );
+    assert!(!navigation.is_cancelled());
+}
+
+fn classic_alert_command(operation: &str, context: AutomationContext) -> AutomationCommand {
+    use moli_protocol::automation::{
+        DevToolsGetJavaScriptDialogCommand, DevToolsHandleJavaScriptDialogCommand,
+        DevToolsSetJavaScriptDialogPromptTextCommand,
+    };
+    match operation {
+        "get" => {
+            AutomationCommand::GetJavaScriptDialog(DevToolsGetJavaScriptDialogCommand { context })
+        }
+        "set" => AutomationCommand::SetJavaScriptDialogPromptText(
+            DevToolsSetJavaScriptDialogPromptTextCommand {
+                context,
+                prompt_text: "Classic text".to_owned(),
+            },
+        ),
+        "accept" | "dismiss" => {
+            AutomationCommand::HandleJavaScriptDialog(DevToolsHandleJavaScriptDialogCommand {
+                context,
+                accept: operation == "accept",
+                prompt_text: None,
+            })
+        }
+        _ => panic!("unknown alert operation"),
+    }
+}
+
+#[tokio::test]
+async fn classic_alert_wait_is_interrupted_by_a_dialog_not_by_a_blanket_exemption() {
+    use moli_core::page::{
+        RendererJavaScriptDialogCompletion, RendererJavaScriptDialogId,
+        RendererJavaScriptDialogSource, RendererPendingJavaScriptDialog,
+    };
+    for operation in ["get", "set", "accept", "dismiss"] {
+        for dialog_already_open in [false, true] {
+            let mut conn = CdpConnection::new();
+            let navigation = arm_background_navigation_request(&mut conn, "LOADER-classic-alert");
+            let context = AutomationContext {
+                protocol: FrontendProtocol::WebDriverClassic,
+                session_id: None,
+                target_id: Some(navigation.target_id().into()),
+                browser_context_id: None,
+            };
+            let completion = RendererJavaScriptDialogCompletion::pending();
+            let page_id = PageId::new_for_testing(77);
+            let dialog = RendererPendingJavaScriptDialog::new(
+                RendererJavaScriptDialogId::new(1),
+                RendererDocumentLifecycleIdentity {
+                    frame: RendererFrameToken { page_id },
+                    document: RendererDocumentToken::new_for_testing(page_id, 1),
+                    epoch: RendererLifecycleEpoch(1),
+                },
+                RendererJavaScriptDialogSource::RootFrame,
+                "about:blank".to_owned(),
+                "prompt".to_owned(),
+                "Classic prompt".to_owned(),
+                String::new(),
+                Some(completion.clone()),
+            );
+            let (mut scheduler, protocol_work_completion_rx) = CdpScheduler::new(conn);
+            let state = scheduler.state.handle();
+            let (document_tx, document_activity_completion_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+            let (background_tx, background_event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (navigation_tx, background_navigation_completion_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+            let (renderer_tx, renderer_publication_rx) =
+                moli_core::renderer_output_transport_channel();
+            let ready = scheduler.state.scheduler_events_ready();
+            let mut receivers = super::CdpSchedulerEventReceivers {
+                state_events_ready: ready.clone(),
+                protocol_work_completion_rx,
+                document_activity_completion_rx,
+                background_event_rx,
+                background_navigation_completion_rx,
+                renderer_publication_rx,
+            };
+            let install = || {
+                state
+                    .with_state(|state| {
+                        state.push_page_javascript_dialog_for_test(&context, dialog);
+                    })
+                    .unwrap();
+                ready.notify_one();
+            };
+            let command = classic_alert_command(operation, context.clone());
+            let execution = if dialog_already_open {
+                install();
+                let wait = scheduler
+                    .execute_automation_command_with_external_load_wait_and_document_residence(
+                        &mut receivers,
+                        command,
+                        Some(std::time::Duration::ZERO),
+                        None,
+                    );
+                tokio::pin!(wait);
+                match futures_util::poll!(&mut wait) {
+                    std::task::Poll::Ready(execution) => execution.execution.result,
+                    std::task::Poll::Pending => {
+                        panic!("{operation} must reach the existing prompt")
+                    }
+                }
+            } else {
+                let wait = scheduler
+                    .execute_automation_command_with_external_load_wait(&mut receivers, command);
+                tokio::pin!(wait);
+                assert!(
+                    futures_util::poll!(&mut wait).is_pending(),
+                    "{operation} must still wait when no prompt exists"
+                );
+                install();
+                match futures_util::poll!(&mut wait) {
+                    std::task::Poll::Ready(execution) => execution,
+                    std::task::Poll::Pending => {
+                        panic!("{operation} must recheck the prompt during navigation wait")
+                    }
+                }
+            };
+            let result = execution.expect("finite alert operation");
+            if operation == "get" {
+                let AutomationResult::JavaScriptDialog(dialog) = result else {
+                    panic!("dialog result")
+                };
+                assert_eq!(dialog.message, "Classic prompt");
+            } else {
+                assert!(matches!(result, AutomationResult::Empty));
+            }
+            assert!(
+                state
+                    .with_state(|state| state
+                        .has_inflight_background_navigation_for_target(navigation.target_id()))
+                    .unwrap()
+            );
+            assert!(!navigation.is_cancelled());
+            if matches!(operation, "get" | "set") {
+                let execution = scheduler
+                    .execute_automation_command_with_external_load_wait(
+                        &mut receivers,
+                        classic_alert_command("accept", context),
+                    )
+                    .await;
+                execution.unwrap();
+            }
+            let response = completion.wait();
+            assert_eq!(response.accepted, operation != "dismiss");
+            assert_eq!(
+                response.user_input,
+                if operation == "set" {
+                    "Classic text"
+                } else {
+                    ""
+                }
+            );
+            assert!(!completion.finish(false, String::new()));
+            drop((document_tx, background_tx, navigation_tx, renderer_tx));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn classic_alert_navigation_deadline_stops_only_the_timed_out_navigation() {
+    use std::time::Duration;
+
+    tokio::task::LocalSet::new().run_until(async {
+        for operation in ["get", "set", "accept", "dismiss"] {
+            for duration in [Duration::ZERO, Duration::from_millis(200)] {
+                let mut conn = CdpConnection::new();
+                let navigation = arm_background_navigation_request(&mut conn, "LOADER-alert-timeout");
+                let context = AutomationContext {
+                    protocol: FrontendProtocol::WebDriverClassic,
+                    session_id: None,
+                    target_id: Some(navigation.target_id().into()),
+                    browser_context_id: None,
+                };
+                let (mut scheduler, protocol_work_completion_rx) = CdpScheduler::new(conn);
+                let (document_tx, document_activity_completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (background_tx, background_event_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (navigation_tx, background_navigation_completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (renderer_tx, renderer_publication_rx) = moli_core::renderer_output_transport_channel();
+                let marker = json!({
+                    "method": "Runtime.consoleAPICalled",
+                    "params": {"type": "log", "args": [], "executionContextId": 1,
+                               "timestamp": 0, "marker": "before-alert-deadline"}
+                });
+                if !duration.is_zero() {
+                    background_tx.send(BackgroundProtocolEvent::immediate_event(
+                        LocalCdpEvent::RuntimeConsoleApiCalled, marker["params"].clone(), None,
+                    )).unwrap();
+                }
+                let mut receivers = super::CdpSchedulerEventReceivers {
+                    state_events_ready: scheduler.state.scheduler_events_ready(),
+                    protocol_work_completion_rx,
+                    document_activity_completion_rx,
+                    background_event_rx,
+                    background_navigation_completion_rx,
+                    renderer_publication_rx,
+                };
+                let started = tokio::time::Instant::now();
+                let execution = tokio::time::timeout(
+                    duration + Duration::from_millis(1),
+                    scheduler.execute_automation_command_with_external_load_wait_and_document_residence(
+                        &mut receivers, classic_alert_command(operation, context), Some(duration), None,
+                    ),
+                ).await.expect("configured page-load deadline must end the wait without navigation input");
+                assert_eq!(tokio::time::Instant::now() - started, duration);
+                assert_eq!(execution.execution.protocol_output.events.iter().filter(|event| event.protocol_message()==Some(&marker)).count(), usize::from(!duration.is_zero()), "selected input output must survive the timeout and cleanup exactly once");
+                assert_eq!(execution.execution.result.unwrap_err().kind, moli_protocol::automation::DevToolsErrorKind::Timeout);
+                assert!(navigation.is_cancelled(), "timeout must stop the held request before returning");
+                assert!(!scheduler.state.with_state(|state| state.has_inflight_background_navigation_for_target(navigation.target_id())).unwrap());
+                drop((document_tx, background_tx, navigation_tx, renderer_tx));
+            }
+        }
+    }).await;
+}
+
+#[tokio::test]
+async fn classic_alert_timeout_does_not_wait_for_a_blocked_native_stop() {
+    use std::time::Duration;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for operation in ["get", "set", "accept", "dismiss"] {
+                let (mut scheduler, mut receivers) =
+                    CdpScheduler::new_with_initial_state_runtime_config(
+                        moli_protocol::CdpInitialStoragePartition::memory(),
+                        moli_core::runtime::NavigationRuntimeConfig::new(
+                            moli_fetch::FetchConfig::default(),
+                            moli_core::OptionalResourceFetchMask::NONE,
+                            true,
+                            moli_core::LayoutPolicy::OnDemand,
+                        ),
+                    );
+                let context = AutomationContext {
+                    protocol: FrontendProtocol::WebDriverClassic,
+                    session_id: None,
+                    target_id: Some(moli_protocol::DEFAULT_CDP_PAGE_TARGET_ID.into()),
+                    browser_context_id: None,
+                };
+                let installed = scheduler
+                    .execute_automation_command_with_protocol_messages(
+                        &mut receivers,
+                        AutomationCommand::Navigate(
+                            moli_protocol::automation::DevToolsNavigateCommand {
+                                context: context.clone(),
+                                url: "about:blank".to_owned(),
+                                referrer: None,
+                                wait: DevToolsNavigationWait::Load,
+                            },
+                        ),
+                    )
+                    .await;
+                installed.result.expect("fixture Page installed");
+                let mut gate = scheduler
+                    .state
+                    .with_state(|state| state.hold_renderer_for_test(&context))
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(30), gate.wait_until_entered())
+                    .await
+                    .unwrap();
+                let navigation = scheduler
+                    .state
+                    .with_state(|state| {
+                        state.arm_background_navigation_for_test(
+                            moli_protocol::DEFAULT_CDP_PAGE_TARGET_ID,
+                            "LOADER-blocked-native-stop",
+                        )
+                    })
+                    .unwrap();
+
+                tokio::time::pause();
+                let duration = Duration::from_millis(200);
+                let execution = tokio::time::timeout(
+                    duration + Duration::from_millis(1),
+                    scheduler
+                        .execute_automation_command_with_external_load_wait_and_document_residence(
+                            &mut receivers,
+                            classic_alert_command(operation, context),
+                            Some(duration),
+                            None,
+                        ),
+                )
+                .await
+                .expect(
+                    "alert timeout must return while both navigation and Native owner remain held",
+                );
+                tokio::time::resume();
+                assert_eq!(
+                    execution.execution.result.unwrap_err().kind,
+                    moli_protocol::automation::DevToolsErrorKind::Timeout
+                );
+                assert!(navigation.is_cancelled());
+
+                let successor = scheduler
+                    .state
+                    .with_state(|state| {
+                        state.arm_background_navigation_for_test(
+                            navigation.target_id(),
+                            "LOADER-after-blocked-native-stop",
+                        )
+                    })
+                    .unwrap();
+                drop(gate);
+                // Drive the supervised cleanup, rather than relying on an old
+                // command waiter to keep polling it after its timeout response.
+                let completed = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    receivers.protocol_work_completion_rx.recv(),
+                )
+                .await
+                .unwrap()
+                .expect("Native cleanup remains supervised");
+                let output = scheduler.complete_protocol_work(completed).unwrap();
+                assert!(
+                    scheduler.protocol_tasks.take_tasks().is_empty(),
+                    "the stopped Page's cleanup must have completed"
+                );
+                assert!(
+                    output.events.iter().all(|event| event
+                        .protocol_message()
+                        .is_none_or(|message| message.get("id").is_none())),
+                    "late cleanup must not emit another command response"
+                );
+                assert!(
+                    !successor.is_cancelled(),
+                    "late cleanup must retain its original navigation identity"
+                );
+                assert!(
+                    scheduler
+                        .state
+                        .with_state(|state| state
+                            .has_inflight_background_navigation_for_target(successor.target_id()))
+                        .unwrap()
+                );
+                assert!(
+                    scheduler
+                        .state
+                        .with_state(|state| state.settle_background_navigation_for_test(&successor))
+                        .unwrap()
+                );
+            }
+        })
+        .await;
+}
+
 fn navigation_started_automation_event() -> AutomationEvent {
     AutomationEvent::NavigationFrame(NavigationFrameEvent {
         target_id: DevToolsTargetId::from("TID-output"),
@@ -123,10 +515,7 @@ fn protocol_output_sequence_preserves_background_event_sidecar() {
     let automation_event = navigation_started_automation_event();
 
     let output = ProtocolOutputSequence::from_background_event(
-        BackgroundProtocolEvent::immediate_automation_event(
-            message.clone(),
-            automation_event.clone(),
-        ),
+        BackgroundProtocolEvent::inspector_message(message.clone(), Some(automation_event.clone())),
     );
     let mut events = output.into_background_events();
     let (actual_message, actual_automation_event) = events
@@ -152,7 +541,7 @@ fn load_ordering_splits_network_observations_from_page_side_effects() {
 }
 
 fn download_will_begin_event(frame_id: &str, guid: &str) -> BackgroundProtocolEvent {
-    BackgroundProtocolEvent::immediate_automation_event(
+    BackgroundProtocolEvent::inspector_message(
         json!({
             "method": "Browser.downloadWillBegin",
             "params": {
@@ -162,12 +551,14 @@ fn download_will_begin_event(frame_id: &str, guid: &str) -> BackgroundProtocolEv
                 "suggestedFilename": "download.bin"
             }
         }),
-        AutomationEvent::BrowserDownloadWillBegin(BrowserDownloadWillBeginEvent {
-            frame_id: DevToolsFrameId::from(frame_id),
-            guid: guid.to_owned(),
-            url: "https://example.test/download".to_owned(),
-            suggested_filename: "download.bin".to_owned(),
-        }),
+        Some(AutomationEvent::BrowserDownloadWillBegin(
+            BrowserDownloadWillBeginEvent {
+                frame_id: DevToolsFrameId::from(frame_id),
+                guid: guid.to_owned(),
+                url: "https://example.test/download".to_owned(),
+                suggested_filename: "download.bin".to_owned(),
+            },
+        )),
     )
 }
 
@@ -200,9 +591,9 @@ fn drain_pending_background_events_preserves_typed_sidecar() {
         }
     });
     let automation_event = navigation_started_automation_event();
-    tx.send(BackgroundProtocolEvent::immediate_automation_event(
+    tx.send(BackgroundProtocolEvent::inspector_message(
         message.clone(),
-        automation_event.clone(),
+        Some(automation_event.clone()),
     ))
     .expect("background event receiver should be open");
 
@@ -255,10 +646,13 @@ fn protocol_output_loose_response_take_ignores_typed_runtime_response() {
 fn protocol_output_loose_response_split_ignores_typed_runtime_response() {
     let mut output = ProtocolOutputSequence::from_background_events(vec![
         runtime_response_ready_event(42),
-        BackgroundProtocolEvent::immediate(json!({
-            "id": 7,
-            "result": {}
-        })),
+        BackgroundProtocolEvent::inspector_message(
+            json!({
+                "id": 7,
+                "result": {}
+            }),
+            None,
+        ),
     ]);
 
     assert!(
@@ -340,7 +734,7 @@ fn network_response_event_for_target(
 
         auth_challenge: None,
     });
-    BackgroundProtocolEvent::immediate_automation_event(message, automation_event)
+    BackgroundProtocolEvent::inspector_message(message, Some(automation_event))
 }
 
 fn network_request_event_for_target(
@@ -355,7 +749,7 @@ fn network_request_event_for_target(
     };
     network_event.status = None;
     network_event.encoded_data_length = None;
-    BackgroundProtocolEvent::immediate_automation_event(
+    BackgroundProtocolEvent::inspector_message(
         json!({
             "method": "Network.requestWillBeSent",
             "params": {
@@ -368,7 +762,7 @@ fn network_request_event_for_target(
                 }
             }
         }),
-        AutomationEvent::NetworkBeforeRequestSent(network_event),
+        Some(AutomationEvent::NetworkBeforeRequestSent(network_event)),
     )
 }
 
@@ -382,7 +776,7 @@ fn network_finished_event_for_target(
     else {
         unreachable!("network response fixture should retain its typed sidecar")
     };
-    BackgroundProtocolEvent::immediate_automation_event(
+    BackgroundProtocolEvent::inspector_message(
         json!({
             "method": "Network.loadingFinished",
             "params": {
@@ -391,12 +785,12 @@ fn network_finished_event_for_target(
                 "encodedDataLength": 0
             }
         }),
-        AutomationEvent::NetworkResponseCompleted(network_event),
+        Some(AutomationEvent::NetworkResponseCompleted(network_event)),
     )
 }
 
 #[test]
-fn mixed_owner_protocol_output_keeps_the_conservative_global_gate() {
+fn mixed_owner_protocol_output_retains_only_its_known_targets() {
     let mut conn = CdpConnection::new();
     let navigation = arm_background_navigation_request(&mut conn, "LOADER-known");
     let target_id = navigation.target_id().to_owned();
@@ -413,21 +807,24 @@ fn mixed_owner_protocol_output_keeps_the_conservative_global_gate() {
                     .navigation_gate_target_ids(&state)
             })
             .unwrap(),
-        [target_id]
+        std::slice::from_ref(&target_id)
     );
 
-    let unresolved = BackgroundProtocolEvent::immediate(json!({
-        "method": "Runtime.consoleAPICalled",
-        "sessionId": "SID-missing",
-        "params": {}
-    }));
+    let unresolved = BackgroundProtocolEvent::inspector_message(
+        json!({
+            "method": "Runtime.consoleAPICalled",
+            "sessionId": "SID-missing",
+            "params": {}
+        }),
+        None,
+    );
     let mixed = ProtocolOutputSequence::from_background_events(vec![known, unresolved]);
-    assert!(
+    assert_eq!(
         owner
             .with_state(|state| mixed.navigation_gate_target_ids(&state))
-            .unwrap()
-            .is_empty(),
-        "an atomic batch with any unresolved owner must remain connection-gated"
+            .unwrap(),
+        [target_id],
+        "an unresolved sibling does not expand a batch's exact Target ownership"
     );
 }
 
@@ -560,12 +957,12 @@ fn delayed_command_wake_cannot_hold_or_reorder_published_work() {
     assert_eq!(context.state(), CommandResponseFlushState::Pending);
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
-        ProtocolSchedulerStep::SatisfyClientTurnPredecessor,
+        ProtocolSchedulerStep::CompleteReadyResidence,
         "ordinary work has no blanket command-output dependency"
     );
 
     for _ in 0..2 {
-        scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
+        scheduler.close_protocol_residence_load_binding_window();
         assert_eq!(
             scheduler.next_protocol_scheduler_step(),
             ProtocolSchedulerStep::CompleteReadyResidence
@@ -616,7 +1013,7 @@ fn lifecycle_work_observes_only_its_existing_command_output_permit() {
         scheduler.next_protocol_scheduler_step(),
         ProtocolSchedulerStep::Wait
     );
-    scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
+    scheduler.close_protocol_residence_load_binding_window();
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
         ProtocolSchedulerStep::Wait
@@ -632,7 +1029,7 @@ fn lifecycle_work_observes_only_its_existing_command_output_permit() {
         Some(1),
         "an independent target need not wait for an earlier command"
     );
-    scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
+    scheduler.close_protocol_residence_load_binding_window();
     let _ = scheduler.complete_next_protocol_residence();
     assert_eq!(scheduler.queues.protocol_residence_len(), 1);
     assert_eq!(
@@ -646,9 +1043,9 @@ fn lifecycle_work_observes_only_its_existing_command_output_permit() {
     assert_eq!(first.state(), CommandResponseFlushState::Flushed);
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
-        ProtocolSchedulerStep::SatisfyClientTurnPredecessor
+        ProtocolSchedulerStep::CompleteReadyResidence
     );
-    scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
+    scheduler.close_protocol_residence_load_binding_window();
     let _ = scheduler.complete_next_protocol_residence();
     assert_eq!(scheduler.queues.protocol_residence_len(), 0);
 }
@@ -683,9 +1080,9 @@ async fn abandoned_command_output_wakes_lifecycle_work_without_reporting_a_flush
     assert_eq!(context.state(), CommandResponseFlushState::Cancelled);
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
-        ProtocolSchedulerStep::SatisfyClientTurnPredecessor
+        ProtocolSchedulerStep::CompleteReadyResidence
     );
-    scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
+    scheduler.close_protocol_residence_load_binding_window();
     let _ = scheduler.complete_next_protocol_residence();
     assert_eq!(
         scheduler.queues.protocol_residence_len(),
@@ -729,7 +1126,7 @@ fn command_dependent_retirement_does_not_block_its_targets_output() {
             let pending = std::mem::take(&mut scheduler.queues.protocol_residences);
             let _ = scheduler.complete_protocol_residence_snapshot(pending);
         } else {
-            scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
+            scheduler.close_protocol_residence_load_binding_window();
             let _ = scheduler.complete_next_protocol_residence();
         }
         assert_eq!(
@@ -743,7 +1140,7 @@ fn command_dependent_retirement_does_not_block_its_targets_output() {
         let _ = scheduler.finish_command_dispatch_output_flush(Some(
             super::CommandOutputReleasePermit::new(permit, None),
         ));
-        scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
+        scheduler.close_protocol_residence_load_binding_window();
         let _ = scheduler.complete_next_protocol_residence();
         assert_eq!(scheduler.queues.protocol_residence_len(), 0);
     }
@@ -814,7 +1211,7 @@ fn renderer_output_publication_waits_for_its_exact_load_predecessors() {
         None,
     );
 
-    queues.satisfy_front_client_turn_predecessor();
+    queues.close_front_load_binding_window();
     let owner = moli_protocol::ProtocolStateOwner::new(CdpConnection::new());
     assert!(
         !owner
@@ -850,7 +1247,7 @@ fn pending_renderer_projection_keeps_its_load_window_while_peer_work_advances() 
     scheduler
         .apply_protocol_work_publications(vec![root_frame_stopped_loading_work(1, "FRAME-peer")]);
     assert_eq!(scheduler.next_ungated_protocol_residence_index(), Some(1));
-    scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
+    scheduler.close_protocol_residence_load_binding_window();
     let snapshot = scheduler.queues.take_external_load_wait_snapshot();
     assert_eq!(snapshot.len(), 1, "peer work may leave the queue");
     assert_eq!(
@@ -869,9 +1266,9 @@ fn pending_renderer_projection_keeps_its_load_window_while_peer_work_advances() 
     );
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
-        ProtocolSchedulerStep::SatisfyClientTurnPredecessor
+        ProtocolSchedulerStep::CloseLoadBindingWindow
     );
-    scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
+    scheduler.close_protocol_residence_load_binding_window();
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
         ProtocolSchedulerStep::CompleteReadyResidence
@@ -922,7 +1319,7 @@ fn renderer_owner_work_waits_for_its_original_projection_and_exact_load() {
     );
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
-        ProtocolSchedulerStep::SatisfyClientTurnPredecessor
+        ProtocolSchedulerStep::CompleteReadyResidence
     );
 }
 
@@ -1017,8 +1414,9 @@ fn fenced_creation_stays_in_the_complete_source_publication() {
     queues.enqueue_protocol_work(protocol_work_from_renderer_output(
         renderer_fenced_output_work(
             1,
-            vec![BackgroundProtocolEvent::immediate(
+            vec![BackgroundProtocolEvent::inspector_message(
                 json!({"method":"Target.targetCreated"}),
+                None,
             )],
             vec![RendererOutputFence::new_for_test(native)],
         ),
@@ -1056,21 +1454,170 @@ fn fenced_creation_stays_in_the_complete_source_publication() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn navigation_tail_waits_for_native_delivery_independently_of_source_facts() {
+    use moli_protocol::test_support::{
+        bind_renderer_page_output_stream_to_retired_owner, protocol_work_after_renderer_delivery,
+        protocol_work_from_renderer_output, renderer_fenced_output_work,
+    };
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for source_attribution in [false, true] {
+                for snapshot in [false, true] {
+                    let source = publication_cursor(&unconstrained_renderer_publication(
+                        PageId::new_for_testing(91),
+                    ));
+                    let native_publication =
+                        unconstrained_renderer_publication(PageId::new_for_testing(92));
+                    let native = publication_cursor(&native_publication);
+                    let load = deferred_main_document_load_observation_id(1);
+                    let mut conn = CdpConnection::new();
+                    bind_renderer_page_output_stream_to_retired_owner(&mut conn, native.stream());
+                    conn.admit_renderer_output(
+                        RendererOutputStreamControl::Opened {
+                            stream: native.stream(),
+                        }
+                        .into(),
+                    );
+                    let (mut scheduler, mut completions) = CdpScheduler::new(conn);
+                    scheduler.queues.enqueue_renderer_output_publication(
+                        source,
+                        ProtocolOutputSequence::from_messages(vec![
+                            json!({"method":"CSS.styleSheetAdded"}),
+                            json!({"method":"CSS.styleSheetRemoved"}),
+                        ]),
+                        Vec::new(),
+                        None,
+                    );
+                    scheduler.queues.enqueue_pending_renderer_output_projection(
+                        native,
+                        vec![load],
+                        None,
+                    );
+                    scheduler
+                        .queues
+                        .append_renderer_output_projection(
+                            native,
+                            ProtocolOutputSequence::from_messages(vec![
+                                json!({"method":"Tracing.dataCollected"}),
+                            ]),
+                        )
+                        .unwrap();
+                    let mut tail = protocol_work_after_renderer_delivery(
+                        renderer_fenced_output_work(
+                            1,
+                            vec![BackgroundProtocolEvent::inspector_message(
+                                json!({"method":"Tracing.tracingComplete"}),
+                                None,
+                            )],
+                            vec![RendererOutputFence::new_for_test(native)],
+                        ),
+                        native,
+                    );
+                    assert!(
+                        tail.renderer_output_source().is_none(),
+                        "navigation completion starts independently"
+                    );
+                    if source_attribution {
+                        tail = protocol_work_from_renderer_output(tail, source);
+                    }
+                    scheduler.apply_protocol_work_publications(vec![tail]);
+                    assert_eq!(
+                        scheduler.queues.protocol_residence_len(),
+                        3,
+                        "a delivery-dependent tail is not merged into source facts"
+                    );
+                    assert_eq!(
+                        scheduler.complete_next_protocol_residence().into_messages(),
+                        [
+                            json!({"method":"CSS.styleSheetAdded"}),
+                            json!({"method":"CSS.styleSheetRemoved"}),
+                        ]
+                    );
+                    assert!(
+                        scheduler
+                            .ingest_renderer_publication_now(native_publication)
+                            .is_empty()
+                    );
+                    assert!(
+                        scheduler
+                            .complete_protocol_work(completions.recv().await.unwrap())
+                            .unwrap()
+                            .is_empty()
+                    );
+                    assert!(
+                        scheduler
+                            .state
+                            .with_state(|state| state.renderer_output_cursor_is_projected(native))
+                            .unwrap()
+                    );
+                    assert_eq!(
+                        scheduler.next_protocol_scheduler_step(),
+                        ProtocolSchedulerStep::Wait
+                    );
+                    assert!(
+                        scheduler.complete_next_protocol_residence().is_empty(),
+                        "projection alone cannot release the navigation tail"
+                    );
+                    scheduler.queues.satisfy_load_predecessor(load);
+                    let commit = if snapshot {
+                        let native_output = scheduler
+                            .queues
+                            .take_renderer_output_predecessor_snapshot(native);
+                        assert_eq!(native_output.len(), 1);
+                        assert_eq!(
+                            scheduler.next_protocol_scheduler_step(),
+                            ProtocolSchedulerStep::Wait
+                        );
+                        assert!(
+                            scheduler.complete_next_protocol_residence().is_empty(),
+                            "snapshot checkout is not Native delivery"
+                        );
+                        scheduler.complete_protocol_residence_snapshot(native_output)
+                    } else {
+                        scheduler.complete_next_protocol_residence()
+                    };
+                    assert_eq!(
+                        commit.into_messages(),
+                        [json!({"method":"Tracing.dataCollected"})]
+                    );
+                    assert_eq!(
+                        scheduler.complete_next_protocol_residence().into_messages(),
+                        [json!({"method":"Tracing.tracingComplete"})]
+                    );
+                    assert_eq!(scheduler.queues.protocol_residence_len(), 0);
+                    assert!(scheduler.complete_next_protocol_residence().is_empty());
+                }
+            }
+        })
+        .await;
+}
+
+fn observable_protocol_work(sequence: u64) -> ProtocolSchedulerWork {
+    moli_protocol::test_support::renderer_fenced_output_work(
+        sequence,
+        vec![BackgroundProtocolEvent::inspector_message(
+            json!({"method":"Tracing.dataCollected", "params":{"sequence":sequence}}),
+            None,
+        )],
+        Vec::new(),
+    )
+}
+
 #[test]
 fn command_output_keeps_its_response_while_admitting_shared_publications() {
     use moli_protocol::test_support::publish_protocol_work;
     let mut conn = CdpConnection::new();
-    publish_protocol_work(&mut conn, |sequence| {
-        root_frame_stopped_loading_work(sequence, "FRAME-source")
-    });
+    publish_protocol_work(&mut conn, observable_protocol_work);
     let response = json!({"id":41,"result":{}});
     let complete = moli_protocol::test_support::command_completion_with_scheduler_events(
-        vec![BackgroundProtocolEvent::immediate(response.clone())],
+        vec![BackgroundProtocolEvent::inspector_message(
+            response.clone(),
+            None,
+        )],
         conn.take_scheduler_events(),
     );
-    publish_protocol_work(&mut conn, |sequence| {
-        root_frame_stopped_loading_work(sequence, "FRAME-peer")
-    });
+    publish_protocol_work(&mut conn, observable_protocol_work);
     let later_wake = conn.take_scheduler_events();
     let (mut scheduler, _tasks) = CdpScheduler::new(conn);
     let super::CommandTaskStep::Complete(output) =
@@ -1092,6 +1639,15 @@ fn command_output_keeps_its_response_while_admitting_shared_publications() {
         2,
         "the command's later wake must not duplicate work"
     );
+    for sequence in [1, 2] {
+        let messages = scheduler.complete_next_protocol_residence().into_messages();
+        assert_eq!(
+            messages,
+            [json!({"method":"Tracing.dataCollected", "params":{"sequence":sequence}})],
+            "coalesced wakes must retain publication order and execute each payload once"
+        );
+    }
+    assert_eq!(scheduler.queues.protocol_residence_len(), 0);
 }
 
 #[test]
@@ -1103,7 +1659,9 @@ fn renderer_output_handoff_keeps_before_and_after_response_order() {
     queues
         .append_renderer_output_projection(
             cursor,
-            ProtocolOutputSequence::from_messages(vec![json!({"method": "Moli.afterResponse"})]),
+            ProtocolOutputSequence::from_messages(vec![
+                json!({"method": "Tracing.tracingComplete"}),
+            ]),
         )
         .unwrap();
     assert!(queues.take_unconstrained_renderer_output(cursor).is_none());
@@ -1118,7 +1676,7 @@ fn renderer_output_handoff_keeps_before_and_after_response_order() {
             .into_messages(),
         vec![
             json!({"method": "Debugger.paused"}),
-            json!({"method": "Moli.afterResponse"})
+            json!({"method": "Tracing.tracingComplete"})
         ]
     );
     assert_eq!(queues.protocol_residence_len(), 0);
@@ -1174,7 +1732,7 @@ fn protocol_work_published_by_held_ingress_inherits_exact_load_predecessor() {
 
     // Even an explicit client-turn yield cannot release work inherited from
     // this still-held source; the exact load observation remains necessary.
-    scheduler.queues.satisfy_client_turn_predecessor_at(1);
+    scheduler.queues.close_load_binding_window_at(1);
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
         ProtocolSchedulerStep::Wait,
@@ -1312,7 +1870,7 @@ fn old_document_timer_output_does_not_wait_behind_replacement_document_load() {
 }
 
 #[test]
-fn client_turn_yield_closes_the_provisional_load_binding_window() {
+fn scheduler_turn_closes_the_provisional_load_binding_window() {
     let publication = post_load_renderer_publication(PageId::new_for_testing(7), 1);
     let cursor = publication_cursor(&publication);
     let candidate = future_load_candidate(&publication);
@@ -1332,7 +1890,7 @@ fn client_turn_yield_closes_the_provisional_load_binding_window() {
         ),
     );
 
-    queues.satisfy_front_client_turn_predecessor();
+    queues.close_front_load_binding_window();
 
     assert_eq!(
         queues.bind_main_document_load_predecessor(unrelated_later_load, &interest),
@@ -1354,14 +1912,14 @@ fn client_turn_yield_closes_the_provisional_load_binding_window() {
 }
 
 #[test]
-fn client_turn_yield_closes_candidate_behind_an_unrelated_front_residence() {
+fn executing_ordinary_work_closes_a_later_provisional_load_binding_window() {
     let publication = post_load_renderer_publication(PageId::new_for_testing(7), 1);
     let cursor = publication_cursor(&publication);
     let candidate = future_load_candidate(&publication);
     let interest = load_interest_for_publication(&publication);
     let unrelated_later_load = deferred_main_document_load_observation_id(1);
     let mut queues = SchedulerQueues::default();
-    queues.enqueue_protocol_work(root_frame_stopped_loading_work(1, "FRAME-1"));
+    queues.enqueue_protocol_work(observable_protocol_work(1));
     queues.enqueue_renderer_output_publication(
         cursor,
         ProtocolOutputSequence::from_messages(vec![json!({"method": "Runtime.consoleAPICalled"})]),
@@ -1369,15 +1927,22 @@ fn client_turn_yield_closes_candidate_behind_an_unrelated_front_residence() {
         Some(candidate),
     );
 
-    queues.satisfy_front_client_turn_predecessor();
+    let (mut scheduler, _completions) = CdpScheduler::new(CdpConnection::new());
+    scheduler.queues = queues;
+    let messages = scheduler.complete_next_protocol_residence().into_messages();
+    assert_eq!(
+        messages,
+        [json!({"method":"Tracing.dataCollected", "params":{"sequence":1}})]
+    );
+    let queues = &mut scheduler.queues;
 
     assert_eq!(
         queues.bind_main_document_load_predecessor(unrelated_later_load, &interest),
         queues.protocol_residence_len(),
-        "yielding for an older front residence must also close every candidate admitted before that client turn"
+        "executing independent queued work closes earlier candidates without a permission-only turn"
     );
     assert!(matches!(
-        queues.protocol_residences.get(1),
+        queues.protocol_residences.front(),
         Some(ProtocolSchedulerResidence::RendererOutputPublication(work))
             if work.load_predecessors.is_empty()
     ));
@@ -1716,7 +2281,7 @@ fn scheduler_holds_concrete_renderer_output_until_its_exact_load_predecessor_fin
         None,
     );
 
-    scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
+    scheduler.close_protocol_residence_load_binding_window();
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
         ProtocolSchedulerStep::Wait,
@@ -1784,15 +2349,15 @@ async fn closed_renderer_transport_fails_an_unprojected_command_fence() {
 }
 
 #[test]
-fn concrete_protocol_output_waits_for_its_client_turn_predecessor() {
+fn ordinary_protocol_work_is_ready_without_a_permission_turn() {
     let (mut scheduler, _protocol_completions) = CdpScheduler::new(CdpConnection::new());
     scheduler.apply_protocol_work_publications(vec![root_frame_stopped_loading_work(1, "FRAME-1")]);
 
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
-        ProtocolSchedulerStep::SatisfyClientTurnPredecessor
+        ProtocolSchedulerStep::CompleteReadyResidence
     );
-    scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
+    scheduler.close_protocol_residence_load_binding_window();
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
         ProtocolSchedulerStep::CompleteReadyResidence
@@ -1861,9 +2426,9 @@ async fn pending_navigation_does_not_suspend_projected_renderer_notifications() 
 
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
-        ProtocolSchedulerStep::SatisfyClientTurnPredecessor
+        ProtocolSchedulerStep::CloseLoadBindingWindow
     );
-    scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
+    scheduler.close_protocol_residence_load_binding_window();
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
         ProtocolSchedulerStep::CompleteReadyResidence
@@ -1956,10 +2521,10 @@ async fn background_navigation_blocks_only_its_target_protocol_residences() {
 
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
-        ProtocolSchedulerStep::SatisfyClientTurnPredecessor,
+        ProtocolSchedulerStep::CompleteReadyResidence,
         "the independent target must advance around target A's navigation"
     );
-    scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
+    scheduler.close_protocol_residence_load_binding_window();
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
         ProtocolSchedulerStep::CompleteReadyResidence
@@ -2046,6 +2611,185 @@ fn replacement_navigation_cancels_and_exactly_settles_the_target_owned_request()
     assert!(!conn.has_inflight_background_navigation());
 }
 
+#[test]
+fn unattributed_fence_wait_does_not_block_an_independent_target() {
+    for snapshot in [false, true] {
+        let unresolved = publication_cursor(&unconstrained_renderer_publication(
+            PageId::new_for_testing(101),
+        ));
+        let conn = CdpConnection::new();
+        let context = conn.default_browser_context_id().to_owned();
+        let (mut scheduler, _tasks) = CdpScheduler::new(conn);
+        scheduler.apply_protocol_work_publications(vec![
+            moli_protocol::test_support::renderer_fenced_output_work(
+                1,
+                Vec::new(),
+                vec![RendererOutputFence::new_for_test(unresolved)],
+            ),
+            root_frame_stopped_loading_work_for_target(
+                2,
+                vec![None],
+                context,
+                "TID-independent".into(),
+                "FRAME-independent".into(),
+                "LOADER-independent".into(),
+            ),
+        ]);
+        if snapshot {
+            let work = std::mem::take(&mut scheduler.queues.protocol_residences);
+            assert!(
+                scheduler
+                    .complete_protocol_residence_snapshot(work)
+                    .is_empty()
+            );
+        } else {
+            assert_eq!(scheduler.next_ungated_protocol_residence_index(), Some(1));
+            assert!(scheduler.complete_next_protocol_residence().is_empty());
+        }
+        assert_eq!(scheduler.queues.protocol_residence_len(), 1);
+        assert!(
+            matches!(scheduler.queues.protocol_residences.front(), Some(ProtocolSchedulerResidence::ProtocolWork { work, .. }) if work.publish_sequence().get()==1)
+        );
+    }
+}
+
+#[test]
+fn channel_cleanup_does_not_wait_for_its_targets_navigation() {
+    for snapshot in [false, true] {
+        let mut conn = CdpConnection::new();
+        let pending = arm_background_navigation_request(&mut conn, "LOADER-pending");
+        moli_protocol::test_support::publish_bidi_channel_cleanup(&mut conn, "retired-channel");
+        let wake = conn.take_scheduler_events();
+        let (mut scheduler, _tasks) = CdpScheduler::new(conn);
+        scheduler.apply_scheduler_events(wake);
+        if snapshot {
+            let work = std::mem::take(&mut scheduler.queues.protocol_residences);
+            assert!(
+                scheduler
+                    .complete_protocol_residence_snapshot(work)
+                    .is_empty()
+            );
+        } else {
+            assert_eq!(scheduler.next_ungated_protocol_residence_index(), Some(0));
+            assert!(scheduler.complete_next_protocol_residence().is_empty());
+        }
+        assert_eq!(scheduler.queues.protocol_residence_len(), 0);
+        assert!(
+            !pending.is_cancelled(),
+            "cleanup does not replace the navigation"
+        );
+    }
+}
+
+#[tokio::test]
+async fn target_retirement_waits_for_its_command_but_not_the_load_it_cancels() {
+    tokio::task::LocalSet::new().run_until(async {
+    for snapshot in [false, true] {
+        let mut conn = CdpConnection::new();
+        let pending = arm_background_navigation_request(&mut conn, "LOADER-pending");
+        let context = conn.default_browser_context_id().to_owned();
+        let target = pending.target_id().to_owned();
+        moli_protocol::test_support::publish_protocol_work(&mut conn, |sequence| {
+            root_frame_stopped_loading_work_for_target(
+                sequence,
+                vec![None],
+                context,
+                target.clone(),
+                "FRAME-pending".into(),
+                "LOADER-pending".into(),
+            )
+        });
+        let (permit, output) = conn.begin_command_response_flush_permit();
+        moli_protocol::test_support::publish_retired_target_termination_after_command_output(
+            &mut conn, &target, output,
+        );
+        let wake = conn.take_scheduler_events();
+        let (mut scheduler, _tasks) = CdpScheduler::new(conn);
+        scheduler.apply_scheduler_events(wake);
+        assert_eq!(scheduler.next_ungated_protocol_residence_index(), None);
+        let _ = scheduler.finish_command_dispatch_output_flush(Some(
+            super::CommandOutputReleasePermit::new(permit, None),
+        ));
+        if snapshot {
+            let work = std::mem::take(&mut scheduler.queues.protocol_residences);
+            let _ = scheduler.complete_protocol_residence_snapshot(work);
+        } else {
+            assert_eq!(scheduler.next_ungated_protocol_residence_index(), Some(1));
+            let _ = scheduler.complete_next_protocol_residence();
+        }
+        assert_eq!(scheduler.queues.protocol_residence_len(), 1);
+        assert!(matches!(scheduler.queues.protocol_residences.front(),
+            Some(ProtocolSchedulerResidence::ProtocolWork { work, .. })
+                if work.is_root_frame_stopped_loading()));
+    }
+    }).await;
+}
+
+#[test]
+fn replacement_navigation_cannot_bypass_its_explicit_delivery_predecessor() {
+    for snapshot in [false, true] {
+        let mut conn = CdpConnection::new();
+        let pending = arm_background_navigation_request(&mut conn, "LOADER-pending");
+        let target = pending.target_id().to_owned();
+        let context = conn.default_browser_context_id().to_owned();
+        let source = publication_cursor(&unconstrained_renderer_publication(
+            PageId::new_for_testing(102),
+        ));
+        let unresolved = publication_cursor(&unconstrained_renderer_publication(
+            PageId::new_for_testing(103),
+        ));
+        let (mut scheduler, _tasks) = CdpScheduler::new(conn);
+        scheduler.queues.enqueue_renderer_output_publication(
+            source,
+            ProtocolOutputSequence::from_background_event(network_response_event_for_target(
+                DevToolsNetworkResourceType::Xhr,
+                "REQ-before-replacement",
+                &target,
+            )),
+            Vec::new(),
+            None,
+        );
+        scheduler.apply_protocol_work_publications(vec![
+            moli_protocol::test_support::protocol_work_from_renderer_output(
+                moli_protocol::test_support::renderer_fenced_output_work(
+                    1,
+                    Vec::new(),
+                    vec![RendererOutputFence::new_for_test(unresolved)],
+                ),
+                source,
+            ),
+            // Sharing a Target alone does not establish execution order. The
+            // navigation depends on delivery of this particular publication.
+            moli_protocol::test_support::protocol_work_after_renderer_delivery(
+                moli_protocol::test_support::retired_location_navigation_work_for_target(
+                    2,
+                    context,
+                    target,
+                    root_document_lifecycle_identity(PageId::new_for_testing(99), 1),
+                ),
+                source,
+            ),
+        ]);
+        if snapshot {
+            let work = std::mem::take(&mut scheduler.queues.protocol_residences);
+            assert!(
+                scheduler
+                    .complete_protocol_residence_snapshot(work)
+                    .is_empty()
+            );
+        } else {
+            assert_eq!(
+                scheduler.next_ungated_protocol_residence_index(),
+                None,
+                "replacing a load does not satisfy an unrelated Renderer fence"
+            );
+            assert!(scheduler.complete_next_protocol_residence().is_empty());
+        }
+        assert_eq!(scheduler.queues.protocol_residence_len(), 2);
+        assert!(!pending.is_cancelled());
+    }
+}
+
 #[tokio::test]
 async fn replacement_navigation_passes_load_blocked_observations_but_checks_its_owner() {
     for (snapshot_drain, inherits_load_predecessor) in
@@ -2113,7 +2857,7 @@ async fn replacement_navigation_passes_load_blocked_observations_but_checks_its_
                     .is_empty()
             );
         } else {
-            scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
+            scheduler.close_protocol_residence_load_binding_window();
             assert!(scheduler.complete_next_protocol_residence().is_empty());
         }
         assert_eq!(
@@ -2417,7 +3161,7 @@ fn foreground_load_wait_network_barrier_keeps_unrelated_raw_events_opaque() {
     );
     let message = moli_inspector_json::InspectorJson::from_slice(raw.as_bytes()).unwrap();
     let events = barrier
-        .route_event(BackgroundProtocolEvent::immediate(message))
+        .route_event(BackgroundProtocolEvent::inspector_message(message, None))
         .into_background_events();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].protocol_method(), Some("Debugger.scriptParsed"));
@@ -2474,4 +3218,45 @@ fn foreground_load_wait_network_barrier_drains_subresources_if_document_response
     assert!(script_output.is_empty());
 
     assert_eq!(output_request_ids(barrier.finish()), ["REQ-script"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn adapter_closes_provisional_load_window_and_delivers_in_the_same_turn() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let publication = post_load_renderer_publication(PageId::new_for_testing(7), 1);
+            let cursor = publication_cursor(&publication);
+            let (mut scheduler, _completions) = CdpScheduler::new(CdpConnection::new());
+            let message =
+                json!({"method":"Runtime.consoleAPICalled", "params":{"marker":"single-turn"}});
+            scheduler.queues.enqueue_renderer_output_publication(
+                cursor,
+                ProtocolOutputSequence::from_messages(vec![message.clone()]),
+                Vec::new(),
+                Some(future_load_candidate(&publication)),
+            );
+            assert_eq!(
+                scheduler.next_protocol_scheduler_step(),
+                ProtocolSchedulerStep::CloseLoadBindingWindow
+            );
+            let mut adapter = super::ProtocolAdapterScheduler::default();
+            adapter.schedule_turn_if_needed(&scheduler, false);
+            let input = adapter.recv_input().await;
+            let super::ProtocolAdapterSchedulerAdvance::ProtocolResidenceCompleted(output) =
+                adapter.advance_input(&mut scheduler, input)
+            else {
+                panic!("one adapter turn closes the binding window and delivers ready output")
+            };
+            assert_eq!(output.into_messages(), [message]);
+            assert_eq!(scheduler.queues.protocol_residence_len(), 0);
+            assert_eq!(
+                scheduler.queues.bind_main_document_load_predecessor(
+                    deferred_main_document_load_observation_id(1),
+                    &load_interest_for_publication(&publication)
+                ),
+                0,
+                "a later unrelated load cannot recover the closed candidate"
+            );
+        })
+        .await;
 }

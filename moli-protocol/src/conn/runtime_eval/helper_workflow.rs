@@ -78,7 +78,6 @@ pub(crate) struct PreparedRuntimeHelper {
     command_id: u64,
     pending: Option<PendingRuntimeProtocolMessageDispatch>,
     cancellation: RuntimeHelperCancellation,
-    object_group: Option<String>,
 }
 
 impl PreparedRuntimeHelper {
@@ -97,7 +96,8 @@ impl PreparedRuntimeHelper {
             .map(str::to_owned);
         let descriptor = RendererCommandDescriptor::for_document_helper(
             json!({"id":command_id,"method":method,"params":params}).to_string(),
-        )?;
+        )?
+        .with_abandoned_object_group_cleanup(object_group.clone());
         let owner = scope.owner();
         let action = method.split_once('.').map_or(method, |(_, action)| action);
         let pending = conn.start_runtime_protocol_message_with_context_resolution_for_owner_with_deferred_response(
@@ -114,7 +114,6 @@ impl PreparedRuntimeHelper {
                 identity: RuntimeHelperIdentity { scope, correlation },
                 access: Some(access),
             },
-            object_group,
         })
     }
 
@@ -163,9 +162,8 @@ impl PreparedRuntimeHelper {
         let receiver = completed.take_deferred_response_receiver();
         let identity = self.cancellation.identity.clone();
         let command_id = self.command_id;
-        let object_group = self.object_group.clone();
         let direct = driver.with_state(move |state| {
-            state.finish_runtime_helper_dispatch(identity, command_id, object_group, completed)
+            state.finish_runtime_helper_dispatch(identity, command_id, completed)
         })??;
         if let Some(response) = direct {
             return Ok(response);
@@ -178,9 +176,8 @@ impl PreparedRuntimeHelper {
             fence.merge_into_same_stream_tail(predecessor);
         }
         let identity = self.cancellation.identity.clone();
-        let object_group = self.object_group.clone();
         driver.with_state(move |state| {
-            state.finish_runtime_helper_response(identity, command_id, object_group, response)
+            state.finish_runtime_helper_response(identity, command_id, response)
         })?
     }
 }
@@ -199,29 +196,12 @@ pub(crate) async fn dispatch_runtime_helper_using(
         .response
 }
 
-fn register_helper_result(
-    conn: &mut CdpConnection,
-    identity: &RuntimeHelperIdentity,
-    object_group: Option<&str>,
-    response: &BackgroundCommandResponsePayload,
-) {
-    if let (Some(group), BackgroundCommandResponsePayload::Success { result }) =
-        (object_group, response)
-    {
-        conn.register_runtime_remote_object_ids_from_value_for_owner_with_group(
-            identity.scope.owner(),
-            result,
-            group,
-        );
-    }
-}
-
 impl RuntimeHelperIdentity {
     pub(crate) fn finish_dispatch(
         &self,
         conn: &mut CdpConnection,
         command_id: u64,
-        object_group: Option<String>,
+
         completed: CompletedRuntimeProtocolMessageDispatch,
     ) -> Result<Option<BackgroundCommandResponsePayload>> {
         anyhow::ensure!(self.scope.is_current(conn), NoDocumentLoaded);
@@ -230,9 +210,7 @@ impl RuntimeHelperIdentity {
             .as_ref()
             .and_then(|output| renderer_command_turn_frontend_protocol_response(output, command_id))
             .map(BackgroundCommandResponsePayload::from_runtime_inspector_message);
-        if let Some(response) = &response {
-            register_helper_result(conn, self, object_group.as_deref(), response);
-        }
+
         Ok(response)
     }
 
@@ -240,7 +218,7 @@ impl RuntimeHelperIdentity {
         &self,
         conn: &mut CdpConnection,
         command_id: u64,
-        object_group: Option<String>,
+
         response: moli_core::RendererRuntimeInspectorAsyncCompletion,
     ) -> Result<BackgroundCommandResponsePayload> {
         anyhow::ensure!(self.scope.is_current(conn), NoDocumentLoaded);
@@ -250,7 +228,7 @@ impl RuntimeHelperIdentity {
             .resolve_runtime_inspector_response_ready(ready)
             .context("internal Runtime helper response lost its exact correlation")?
             .into_command_response_payload();
-        register_helper_result(conn, self, object_group.as_deref(), &response);
+
         Ok(response)
     }
 }

@@ -1,6 +1,5 @@
 use super::{
     context_bootstrap::CHILD_BROWSING_CONTEXT_HANDLE_SLOT as WINDOW_CHILD_CONTEXT_HANDLE_SLOT,
-    context_bootstrap::DOCUMENT_SELECTION_CHANGE_LISTENER_SLOT,
     context_bootstrap::PERFORMANCE_TIME_ORIGIN_SLOT,
     context_bootstrap::ResolvedSimpleEventTarget,
     context_bootstrap::current_performance_time_origin,
@@ -11,12 +10,11 @@ use super::{
     context_bootstrap::increment_performance_event_count,
     context_bootstrap::mark_event_trusted,
     context_bootstrap::performance_slot_number,
-    context_bootstrap::require_same_origin_window_receiver,
     context_bootstrap::resolve_event_target,
     context_bootstrap::trusted_script_string_or_type_error,
     document_runtime::{DocumentContentSecurityPolicyViolation, DomHandle, EventTargetHandle},
     native_bridge::{
-        ComputedStyleDescriptor, ComputedStylePseudoKey, ComputedStyleTargetKey, JsContextHost,
+        ComputedStyleDescriptor, ComputedStylePseudoKey, ComputedStyleTargetKey, PageScriptHost,
         PendingWindowMessage, PendingWindowMessageEndpoint, PendingWindowMessageSource,
         RuntimeObservableContextToken, WindowExecutionContextOwner, WindowTaskTarget,
         active_child_window_handle, active_lightweight_popup_id,
@@ -40,10 +38,9 @@ use super::{
     script_provenance::CompiledStringProvenance,
     util::{
         context_host_from_global_bridge, context_host_ptr_from_global_bridge,
-        context_host_ptr_from_window_object, define_non_enumerable_static_bool_property,
-        get_private_value, script_base_url_from_continuation_data,
-        script_base_url_from_host_defined_options, set_private_value, throw_type_error, v8_string,
-        v8str,
+        context_host_ptr_from_window_object, get_private_value,
+        script_base_url_from_continuation_data, script_base_url_from_host_defined_options,
+        set_private_value, throw_type_error, v8_string, v8str,
     },
     webidl,
 };
@@ -284,16 +281,6 @@ pub(super) fn event_target_add_event_listener_callback<'s>(
     ) else {
         return;
     };
-    if call.event_type == "selectionchange"
-        && target == EventTargetHandle::Node(host.document_handle())
-    {
-        define_non_enumerable_static_bool_property(
-            scope,
-            identity.listener_owner,
-            DOCUMENT_SELECTION_CHANGE_LISTENER_SLOT,
-            true,
-        );
-    }
     if let Some(signal) = signal {
         host.register_abort_target_listener(
             scope,
@@ -310,7 +297,7 @@ pub(super) fn event_target_add_event_listener_callback<'s>(
 }
 
 fn default_passive_value(
-    host: &JsContextHost,
+    host: &PageScriptHost,
     target: EventTargetHandle,
     event_type: &str,
 ) -> bool {
@@ -550,9 +537,6 @@ pub(super) fn window_set_timeout_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_same_origin_window_receiver(scope, args.this(), false) {
-        return;
-    }
     rv.set_uint32(0);
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
         return;
@@ -598,9 +582,6 @@ pub(super) fn window_set_interval_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_same_origin_window_receiver(scope, args.this(), false) {
-        return;
-    }
     rv.set_uint32(0);
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
         return;
@@ -648,7 +629,7 @@ enum WindowTimerHandler {
 
 fn prepare_window_timer_handler<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     value: v8::Local<'s, v8::Value>,
     timer_name: &'static str,
 ) -> Option<WindowTimerHandler> {
@@ -684,7 +665,7 @@ fn prepare_window_timer_handler<'s>(
 
 fn window_timer_provenance<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     receiver: v8::Local<'s, v8::Object>,
 ) -> CompiledStringProvenance {
     let source_url = window_timer_source_url(scope, host_ptr, receiver);
@@ -694,7 +675,7 @@ fn window_timer_provenance<'s>(
 
 fn window_timer_source_url<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     receiver: v8::Local<'s, v8::Object>,
 ) -> Url {
     let host = unsafe { &*host_ptr };
@@ -739,9 +720,6 @@ pub(super) fn window_clear_timer_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_same_origin_window_receiver(scope, args.this(), false) {
-        return;
-    }
     let id_val = args.get(0);
     let id = id_val.number_value(scope).unwrap_or(0.0) as u32;
     cancel_window_timer_for_receiver(scope, args.this(), id);
@@ -752,9 +730,6 @@ pub(super) fn window_cancel_animation_frame_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_same_origin_window_receiver(scope, args.this(), false) {
-        return;
-    }
     let Some(parsed) = webidl::parse_args::<WindowCancelAnimationFrameArgs>(scope, &args) else {
         return;
     };
@@ -766,9 +741,6 @@ pub(super) fn window_cancel_idle_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_same_origin_window_receiver(scope, args.this(), false) {
-        return;
-    }
     let Some(parsed) = webidl::parse_args::<WindowCancelIdleCallbackArgs>(scope, &args) else {
         return;
     };
@@ -795,9 +767,6 @@ pub(super) fn window_request_animation_frame_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_same_origin_window_receiver(scope, args.this(), false) {
-        return;
-    }
     rv.set_uint32(0);
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
         return;
@@ -840,9 +809,6 @@ pub(super) fn window_request_idle_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_same_origin_window_receiver(scope, args.this(), false) {
-        return;
-    }
     rv.set_uint32(0);
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
         return;
@@ -1081,7 +1047,7 @@ pub(crate) fn window_post_message_callback<'s>(
     rv.set_undefined();
 }
 
-pub(crate) fn signal_pending_window_message_reconsideration(host: &JsContextHost) {
+pub(crate) fn signal_pending_window_message_reconsideration(host: &PageScriptHost) {
     let has_pending = host.has_pending_window_messages();
     if has_pending {
         host.signal_pending_window_message_reconsideration();
@@ -1169,7 +1135,7 @@ pub(super) fn window_scroll_by_callback<'s>(
 
 pub(crate) fn scroll_window_to(
     scope: &mut v8::PinScope<'_, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     x: f64,
     y: f64,
 ) {
@@ -1266,7 +1232,7 @@ pub(crate) fn window_get_computed_style_callback<'s>(
 
 pub(crate) fn build_computed_style_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     handle: DomHandle,
     child_window_handle: Option<DomHandle>,
     pseudo_argument: ComputedStylePseudoArgument,
@@ -1556,10 +1522,10 @@ pub(crate) fn run_current_window_message_task(
 
 fn dispatch_current_window_message(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     message: PendingWindowMessage,
 ) -> WindowMessageTaskRunResult {
-    let host_ptr = host as *mut JsContextHost;
+    let host_ptr = host as *mut PageScriptHost;
     let dispatch_scope = message.target.dispatch_scope();
     let (realm_token, target_context) = host
         .window_execution_context(scope, message.target.owner(), dispatch_scope)
@@ -1595,8 +1561,8 @@ enum WindowMessageDispatchOutcome {
 
 fn dispatch_window_message_in_current_target_context(
     scope: &mut v8::PinScope<'_, '_>,
-    host_ptr: *mut JsContextHost,
-    host: &mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
+    host: &mut PageScriptHost,
     message: PendingWindowMessage,
 ) -> WindowMessageDispatchOutcome {
     let target_endpoint =
@@ -1732,7 +1698,7 @@ fn dispatch_window_message_in_current_target_context(
 }
 
 fn window_message_endpoint_origin(
-    host: &JsContextHost,
+    host: &PageScriptHost,
     endpoint: PendingWindowMessageEndpoint,
 ) -> Option<String> {
     match endpoint {
@@ -1751,7 +1717,7 @@ fn window_message_endpoint_origin(
 }
 
 fn window_message_endpoint_security(
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     endpoint: PendingWindowMessageEndpoint,
 ) -> Option<crate::context_bootstrap::RuntimeMessageSourceSecurity> {
     let dispatch = match endpoint {
@@ -1775,7 +1741,7 @@ fn window_message_requires_messageerror(
 }
 
 fn window_message_wasm_eval_csp_violation(
-    host: &JsContextHost,
+    host: &PageScriptHost,
     message: &PendingWindowMessage,
 ) -> Option<(DomHandle, DocumentContentSecurityPolicyViolation)> {
     if !message.data.metadata.contains_wasm_module {
@@ -1792,8 +1758,8 @@ fn window_message_wasm_eval_csp_violation(
 
 fn dispatch_window_message_event<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    host_ptr: *mut JsContextHost,
-    host: &mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
+    host: &mut PageScriptHost,
     target: PendingWindowMessageEndpoint,
     source_identity: PendingWindowMessageSource,
     source_window: Option<v8::Local<'s, v8::Object>>,
@@ -1869,7 +1835,7 @@ fn dispatch_window_message_event<'s>(
 
 fn top_window_message_source_for_target<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    host: &JsContextHost,
+    host: &PageScriptHost,
     target: PendingWindowMessageEndpoint,
 ) -> Option<v8::Local<'s, v8::Value>> {
     let PendingWindowMessageEndpoint::ChildWindow(handle) = target else {
@@ -1894,7 +1860,7 @@ fn top_window_message_source_for_target<'s>(
 
 fn child_window_message_source<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     handle: crate::document_runtime::DomHandle,
 ) -> Option<v8::Local<'s, v8::Object>> {
     host.child_browsing_context_window_proxy_for_accessing_context(scope, handle)
@@ -1941,7 +1907,7 @@ fn set_scroll_position<'s>(
 
 pub(crate) fn dispatch_document_event_for_handle(
     scope: &mut v8::PinScope<'_, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     document_handle: DomHandle,
     event_type: &str,
 ) -> bool {
@@ -1959,7 +1925,7 @@ pub(crate) fn dispatch_document_event_for_handle(
 /// An element's `scroll` and `scrollend` do not bubble; a Document's do.
 pub(crate) fn dispatch_rendering_update_event_for_handle(
     scope: &mut v8::PinScope<'_, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     target_handle: DomHandle,
     event_type: &str,
     bubbles: bool,
@@ -2139,8 +2105,8 @@ fn dom_handle_from_marker_value(
 fn event_target_handle_from_receiver<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     this: v8::Local<'s, v8::Object>,
-    host_ptr: *mut JsContextHost,
-    host: &JsContextHost,
+    host_ptr: *mut PageScriptHost,
+    host: &PageScriptHost,
 ) -> Option<EventTargetHandle> {
     let global = scope.get_current_context().global(scope);
     if this.strict_equals(global.into()) {
@@ -2232,7 +2198,7 @@ fn window_message_endpoint_from_receiver<'s>(
 
 fn current_window_message_source_identity(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &JsContextHost,
+    host: &PageScriptHost,
     endpoint: PendingWindowMessageEndpoint,
 ) -> Option<(
     PendingWindowMessageEndpoint,
@@ -2247,7 +2213,7 @@ fn current_window_message_source_identity(
 
 fn incumbent_related_page_message_source(
     scope: &mut v8::PinScope<'_, '_>,
-    target_host: *mut JsContextHost,
+    target_host: *mut PageScriptHost,
 ) -> Option<(
     (
         PendingWindowMessageEndpoint,
@@ -2283,7 +2249,7 @@ fn incumbent_related_page_message_source(
 
 fn incumbent_window_message_source_identity(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &JsContextHost,
+    host: &PageScriptHost,
 ) -> Option<(
     PendingWindowMessageEndpoint,
     WindowExecutionContextOwner,

@@ -1,6 +1,6 @@
 use crate::content_security_policy::ContentSecurityPolicy;
 
-use super::super::JsContextHost;
+use super::super::PageScriptHost;
 use super::{
     WorkerConnectionState, WorkerExecutionState, WorkerModuleStaticImportPolicySnapshot,
     WorkerRelayTerminalState,
@@ -60,7 +60,7 @@ impl WorkerScriptLoadFailure {
     }
 }
 
-impl JsContextHost {
+impl PageScriptHost {
     pub(crate) fn register_dedicated_worker_outside_settings_load(
         &self,
         dispatch_scope: super::super::OwnerDispatchScope,
@@ -519,15 +519,13 @@ impl JsContextHost {
             network_offline: self.network_offline(),
             blocked_url_patterns: self.blocked_url_patterns().to_vec(),
             network_partition_key,
-            fetch_subresource_interception_enabled: self.fetch_subresource_interception_enabled(),
-            fetch_subresource_interception_resource_type: self
-                .fetch_subresource_interception_resource_type(),
         };
         let mut spawn_options = WorkerSpawnOptions::with_source_and_request_client(
             script_source,
             script_url,
             request_client,
         )
+        .with_interception_context(self.native_interception_context())
         .with_script_kind(script_kind)
         .with_module_credentials_mode(module_credentials_mode)
         .with_referrer_policy(response_referrer_policy)

@@ -1846,6 +1846,68 @@ async fn javascript_dialog_pending_state_is_shared_across_active_attached_sessio
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn current_page_dialog_remains_handleable_while_replacement_is_reserved() {
+    let mut ctx = shared_dialog_context();
+    let current = page_owner_for_test(&mut ctx, Some("SID-primary"));
+    let navigation = ctx.with_fixture(|conn| {
+        let context = conn.browser_context.as_mut().unwrap();
+        let token = context
+            .start_document_navigation_for_target("TID-1", "LOADER-dialog-replacement".into())
+            .unwrap();
+        let navigation = context
+            .page_target_mut("TID-1")
+            .unwrap()
+            .runtime_slot
+            .claim_background_navigation_completion(&token, None)
+            .unwrap();
+        let owner = crate::conn::CommandOwnerScope::capture(conn, Some("SID-primary"));
+        assert_ne!(
+            conn.pending_target_page_residence_identity_for_owner(&owner)
+                .expect("navigation reserves a replacement Page"),
+            current,
+            "the reserved replacement is distinct from the still-current Page"
+        );
+        navigation
+    });
+    let completion = RendererJavaScriptDialogCompletion::pending();
+    push_dialog_for_session(
+        &mut ctx,
+        Some("SID-primary"),
+        renderer_dialog_for_test(
+            Some("TID-1"),
+            "confirm",
+            "current Document during navigation",
+            "",
+            Some(completion.clone()),
+        ),
+    );
+    ctx.with_fixture(|conn| {
+        let context = crate::automation::AutomationContext {
+            protocol: crate::automation::FrontendProtocol::WebDriverClassic,
+            session_id: None,
+            target_id: Some("TID-1".into()),
+            browser_context_id: Some("BID-1".into()),
+        };
+        assert!(conn.has_current_javascript_dialog_for_devtools_context(&context));
+        assert!(!conn.has_current_javascript_dialog_for_devtools_context(
+            &crate::automation::AutomationContext {
+                target_id: Some("TID-missing".into()),
+                ..context
+            }
+        ));
+    });
+    ctx.process_async(json!({
+        "id": 281, "method": "Page.handleJavaScriptDialog",
+        "sessionId": "SID-attached", "params": {"accept": true}
+    }))
+    .await;
+    assert_eq!(take_response_by_id(&mut ctx, 281)["result"], json!({}));
+    assert!(completion.wait().accepted);
+    assert!(!completion.finish(false, String::new()));
+    assert!(!navigation.is_cancelled());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn handle_javascript_dialog_rejects_dialog_without_current_page_residence() {
     let mut ctx = TestContext::new();
     {
@@ -1882,6 +1944,17 @@ async fn handle_javascript_dialog_rejects_dialog_without_current_page_residence(
             },
         )
         .expect("target session state should exist")
+    });
+
+    ctx.with_fixture(|conn| {
+        let context = crate::automation::AutomationContext {
+            protocol: crate::automation::FrontendProtocol::WebDriverClassic,
+            session_id: None,
+            target_id: Some("TID-dialog-missing-frame".into()),
+            browser_context_id: Some("BID-dialog-missing-frame".into()),
+        };
+        assert!(conn.has_pending_javascript_dialog_for_devtools_context(&context));
+        assert!(!conn.has_current_javascript_dialog_for_devtools_context(&context));
     });
 
     ctx.process_async(json!({

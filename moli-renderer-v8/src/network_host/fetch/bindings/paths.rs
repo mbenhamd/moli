@@ -7,11 +7,15 @@ use moli_fetch::{
 
 pub(super) fn record_intercepted_fetch(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     resolver: v8::Local<'_, v8::PromiseResolver>,
     prepared: PreparedWindowFetchRequest,
-) -> u64 {
+) -> Result<u64, String> {
     let cache_mode = prepared.cache_mode();
+    let request = prepared
+        .resource_loader
+        .request_client()
+        .bind_browser_site_context(native_window_fetch_request(&prepared)?);
     let request_cookie_report = observe_subresource_request_cookie_report(
         prepared.resource_loader.request_client(),
         &prepared.document_url,
@@ -20,7 +24,7 @@ pub(super) fn record_intercepted_fetch(
         &prepared.method,
         prepared.credentials_mode,
     );
-    host.record_pending_subresource_fetch(
+    Ok(host.record_pending_subresource_fetch(
         prepared.fetch_context,
         v8::Global::new(scope, resolver),
         prepared.resource_timing,
@@ -30,6 +34,7 @@ pub(super) fn record_intercepted_fetch(
         prepared.credentials_mode,
         prepared.request_mode,
         cache_mode,
+        request,
         prepared.request_origin.clone(),
         prepared.network_partition_key,
         prepared.policy_context,
@@ -47,11 +52,11 @@ pub(super) fn record_intercepted_fetch(
             resource_type: SubresourceResourceType::Fetch,
             request_cookie_report,
         },
-    )
+    ))
 }
 
 pub(super) fn reject_offline_fetch(
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     prepared: PreparedWindowFetchRequest,
 ) -> String {
     let message = "Network emulation offline".to_owned();
@@ -69,7 +74,7 @@ pub(super) fn reject_offline_fetch(
 }
 
 pub(super) fn reject_blocked_fetch(
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     prepared: PreparedWindowFetchRequest,
 ) -> String {
     let message = BLOCKED_BY_CLIENT_ERROR_TEXT.to_owned();
@@ -87,7 +92,7 @@ pub(super) fn reject_blocked_fetch(
 }
 
 pub(super) fn reject_policy_blocked_fetch(
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     prepared: PreparedWindowFetchRequest,
     message: String,
 ) -> String {
@@ -109,7 +114,7 @@ pub(super) use self::reject_policy_blocked_fetch as reject_csp_fetch;
 pub(super) use self::reject_policy_blocked_fetch as reject_url_policy_fetch;
 
 pub(super) fn reject_bad_port_fetch(
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     prepared: PreparedWindowFetchRequest,
 ) -> String {
     debug_assert!(should_request_be_blocked_due_to_bad_port(
@@ -137,7 +142,7 @@ pub(super) fn local_fetch_error_text(error: &LocalUrlError) -> String {
 }
 
 pub(super) fn resolve_local_fetch(
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     prepared: &PreparedWindowFetchRequest,
 ) -> Result<Option<Response>, LocalUrlError> {
     let Some(result) = local_url_response_result(&prepared.resolved_url, &prepared.method) else {
@@ -185,34 +190,13 @@ pub(super) fn resolve_local_fetch(
 
 pub(super) fn spawn_network_fetch(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     resolver: v8::Local<'_, v8::PromiseResolver>,
     prepared: PreparedWindowFetchRequest,
 ) -> Result<u64, String> {
     let cache_mode = prepared.cache_mode();
     let loader = prepared.resource_loader.request_client().clone();
-    let mut request = Request::new_browser(
-        &prepared.method,
-        prepared.resolved_url.clone(),
-        prepared.body.clone(),
-        prepared.request_headers.clone(),
-        prepared.request_origin.clone(),
-    )
-    .with_initiator_url(&prepared.document_url)
-    .with_request_mode(prepared.request_mode)
-    .with_credentials_mode(prepared.credentials_mode)
-    .with_network_partition_key(prepared.network_partition_key.clone())
-    .with_redirect_mode(prepared.redirect_mode)
-    .with_cache_mode(cache_mode)
-    .with_fetch_priority_hint(prepared.priority)
-    .with_fetch_referrer(&prepared.referrer)
-    .map_err(|error| error.to_string())?;
-    if let Some(metadata) = window_fetch_script_metadata(&prepared) {
-        request = request.with_script_fetch_metadata(metadata);
-    }
-    request = request
-        .with_browser_request_metadata(BrowserRequestMetadata::Fetch)
-        .with_subframe_context(prepared.frame_id.is_some());
+    let request = native_window_fetch_request(&prepared)?;
 
     let request_cookie_report = observe_subresource_request_cookie_report(
         prepared.resource_loader.request_client(),
@@ -286,6 +270,34 @@ pub(super) fn spawn_network_fetch(
         request_body_text(&prepared.body),
     );
     Ok(internal_id)
+}
+
+pub(super) fn native_window_fetch_request(
+    prepared: &PreparedWindowFetchRequest,
+) -> Result<Request, String> {
+    let mut request = Request::new_browser(
+        &prepared.method,
+        prepared.resolved_url.clone(),
+        prepared.body.clone(),
+        prepared.request_headers.clone(),
+        prepared.request_origin.clone(),
+    )
+    .with_initiator_url(&prepared.document_url)
+    .with_request_mode(prepared.request_mode)
+    .with_credentials_mode(prepared.credentials_mode)
+    .with_network_partition_key(prepared.network_partition_key.clone())
+    .with_redirect_mode(prepared.redirect_mode)
+    .with_cache_mode(prepared.cache_mode())
+    .with_fetch_priority_hint(prepared.priority)
+    .with_fetch_referrer(&prepared.referrer)
+    .map_err(|error| error.to_string())?;
+    if let Some(metadata) = window_fetch_script_metadata(prepared) {
+        request = request.with_script_fetch_metadata(metadata);
+    }
+    request = request
+        .with_browser_request_metadata(BrowserRequestMetadata::Fetch)
+        .with_subframe_context(prepared.frame_id.is_some());
+    Ok(request)
 }
 
 fn window_fetch_script_metadata(

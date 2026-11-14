@@ -40,7 +40,6 @@ use crate::conn::{
     RendererCommandDescriptor, RuntimeBindingDefinition, RuntimeInspectorAsyncCompletionReceiver,
     RuntimeInspectorResponseReady, ServiceWorkerRuntimeExceptionSnapshot,
     SessionOwnerRuntimeFrontendEnableResult, monotonic_timestamp_seconds,
-    runtime_remote_object_ids_in_map,
 };
 use crate::domains::actions::{ConsoleAction, HeapProfilerAction, RuntimeAction};
 use crate::domains::command_output::{
@@ -79,8 +78,7 @@ use super::{
     },
     command_classification::{
         MainRuntimeCommand, MainRuntimeInspectorCommand, RuntimeBindingCommand,
-        RuntimeDevToolsScriptCommand, RuntimeInspectorPayloadPreparation, WorkerRuntimeCommand,
-        WorkerRuntimeCommandKind,
+        RuntimeDevToolsScriptCommand, WorkerRuntimeCommand, WorkerRuntimeCommandKind,
     },
     evaluate::can_dispatch,
     native::apply_runtime_disable_projection_after_success_for_owner,
@@ -95,9 +93,8 @@ mod node_values;
 mod page_completion;
 mod remote_values;
 pub(crate) use remote_values::{
-    register_devtools_script_result_remote_object,
-    register_devtools_script_result_remote_object_realm,
-    validate_protocol_neutral_runtime_handle_realms,
+    export_devtools_script_result_handles, resolve_protocol_neutral_runtime_handles,
+    validate_protocol_neutral_node_references,
 };
 mod runtime_command_flow;
 pub(crate) use page_completion::{PageRuntimeCommandContinuation, PageRuntimeCompletion};
@@ -126,9 +123,7 @@ pub(crate) struct PendingRuntimeCommandDispatch {
     command_id: Option<u64>,
     action: &'static str,
     owner_scope: CommandOwnerScope,
-    object_group: Option<String>,
-    release_object_ids: Vec<String>,
-    release_object_group: Option<String>,
+
     await_promise: bool,
     wait_for_deferred_reply: bool,
     pending: PendingRuntimeCommandKind,
@@ -138,9 +133,7 @@ pub(crate) struct CompletedRuntimeCommandDispatch {
     command_id: Option<u64>,
     action: &'static str,
     owner_scope: CommandOwnerScope,
-    object_group: Option<String>,
-    release_object_ids: Vec<String>,
-    release_object_group: Option<String>,
+
     await_promise: bool,
     wait_for_deferred_reply: bool,
     completed: CompletedRuntimeCommandKind,
@@ -291,34 +284,6 @@ impl RuntimeInspectorRoutedOutput {
         command_response_succeeded_for_events(&self.events, command_id)
     }
 
-    fn register_object_group_for_success(
-        &self,
-        conn: &mut CdpConnection,
-        owner: &CommandOwnerScope,
-        object_group: Option<&str>,
-    ) {
-        let Some(object_group) = object_group else {
-            return;
-        };
-        for event in &self.events {
-            if let Some((_, _, BackgroundCommandResponsePayloadRef::Success { result })) =
-                event.command_response_payload_ref()
-            {
-                conn.register_runtime_remote_object_ids_from_value_for_owner_with_group(
-                    owner,
-                    result,
-                    object_group,
-                );
-            } else if let Some(message) = event.protocol_message() {
-                conn.register_runtime_remote_object_ids_from_value_for_owner_with_group(
-                    owner,
-                    message,
-                    object_group,
-                );
-            }
-        }
-    }
-
     fn push_ordered_into_plan(self, plan: &mut CommandOutputPlan, command_id: Option<u64>) {
         for event in self.events {
             push_runtime_protocol_event_or_background_event(plan, command_id, event);
@@ -413,9 +378,7 @@ struct RuntimeCommandCompletionMeta {
     command_id: Option<u64>,
     action: &'static str,
     owner_scope: CommandOwnerScope,
-    object_group: Option<String>,
-    release_object_ids: Vec<String>,
-    release_object_group: Option<String>,
+
     await_promise: bool,
     wait_for_deferred_reply: bool,
 }
@@ -426,9 +389,7 @@ impl From<&CompletedRuntimeCommandDispatch> for RuntimeCommandCompletionMeta {
             command_id: completed.command_id,
             action: completed.action,
             owner_scope: completed.owner_scope.clone(),
-            object_group: completed.object_group.clone(),
-            release_object_ids: completed.release_object_ids.clone(),
-            release_object_group: completed.release_object_group.clone(),
+
             await_promise: completed.await_promise,
             wait_for_deferred_reply: completed.wait_for_deferred_reply,
         }
@@ -574,9 +535,7 @@ impl PendingRuntimeCommandDispatch {
             command_id: self.command_id,
             action: self.action,
             owner_scope,
-            object_group: self.object_group,
-            release_object_ids: self.release_object_ids,
-            release_object_group: self.release_object_group,
+
             await_promise: self.await_promise,
             wait_for_deferred_reply: self.wait_for_deferred_reply,
             completed,
@@ -605,9 +564,7 @@ impl PendingRuntimeCommandDispatch {
             command_id: self.command_id,
             action: self.action,
             owner_scope: self.owner_scope,
-            object_group: self.object_group,
-            release_object_ids: self.release_object_ids,
-            release_object_group: self.release_object_group,
+
             await_promise: self.await_promise,
             wait_for_deferred_reply: self.wait_for_deferred_reply,
             completed: match self.pending {
@@ -731,9 +688,7 @@ pub(crate) fn try_start_worker_emulation_command_dispatch(
             command_id: cmd.id,
             action,
             owner_scope: CommandOwnerScope::capture(conn, cmd.session_id),
-            object_group: None,
-            release_object_ids: Vec::new(),
-            release_object_group: None,
+
             await_promise: false,
             wait_for_deferred_reply: false,
             pending,
@@ -846,9 +801,7 @@ pub(crate) fn start_profiler_inspector_command_dispatch(
         command_id: cmd.id,
         action,
         owner_scope,
-        object_group: None,
-        release_object_ids: Vec::new(),
-        release_object_group: None,
+
         await_promise: false,
         wait_for_deferred_reply: false,
         pending: PendingRuntimeCommandKind::Inspector { pending },
@@ -916,7 +869,6 @@ pub(crate) fn start_heap_profiler_inspector_command_dispatch(
     }
 
     let method = heap_profiler_action_protocol_method(action);
-    let object_group = heap_profiler_object_group_for_command_result(cmd, action);
     let owner_scope = CommandOwnerScope::capture(conn, cmd.session_id);
     let pending = match start_pending_runtime_inspector_dispatch_with_delivery(
         conn,
@@ -935,9 +887,7 @@ pub(crate) fn start_heap_profiler_inspector_command_dispatch(
         command_id: cmd.id,
         action: method,
         owner_scope,
-        object_group,
-        release_object_ids: Vec::new(),
-        release_object_group: None,
+
         await_promise: false,
         wait_for_deferred_reply: true,
         pending: PendingRuntimeCommandKind::Inspector { pending },
@@ -1002,9 +952,7 @@ pub(crate) fn start_debugger_inspector_command_dispatch(
         command_id: cmd.id,
         action: "Debugger.inspectorCommand",
         owner_scope,
-        object_group: None,
-        release_object_ids: Vec::new(),
-        release_object_group: None,
+
         await_promise: false,
         wait_for_deferred_reply: false,
         pending: PendingRuntimeCommandKind::Inspector { pending },
@@ -1057,9 +1005,7 @@ pub(crate) fn start_console_inspector_command_dispatch(
         command_id: cmd.id,
         action: console_action_protocol_method(action),
         owner_scope,
-        object_group: None,
-        release_object_ids: Vec::new(),
-        release_object_group: None,
+
         await_promise: false,
         wait_for_deferred_reply: false,
         pending: PendingRuntimeCommandKind::Inspector { pending },
@@ -1083,9 +1029,7 @@ pub(crate) fn start_moli_diagnostics_command_dispatch(
         command_id: cmd.id,
         action: "moliDiagnostics",
         owner_scope: CommandOwnerScope::capture(conn, cmd.session_id),
-        object_group: None,
-        release_object_ids: Vec::new(),
-        release_object_group: None,
+
         await_promise: false,
         wait_for_deferred_reply: false,
         pending: PendingRuntimeCommandKind::MoliDiagnostics(pending),
@@ -1391,18 +1335,6 @@ struct BidiLocalValueDescriptorContext<'a> {
     remote_object_ids: &'a mut Vec<String>,
     preload_channel_handoffs: Option<&'a mut Vec<BidiPreloadChannelHandoff>>,
     preload_channel_error: Option<anyhow::Error>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-enum RuntimeRemoteReferenceKind {
-    Object,
-    Node,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-struct RuntimeRemoteReference {
-    object_id: String,
-    kind: RuntimeRemoteReferenceKind,
 }
 
 enum BidiWindowRemoteResult {
@@ -1730,35 +1662,6 @@ mod protocol_neutral_tests {
                 &mut references,
             );
             assert!(references.is_empty());
-        });
-    }
-
-    #[test]
-    fn devtools_remote_reference_collection_uses_protocol_depth_cap() {
-        run_deep_protocol_value_test("devtools-remote-reference-depth-cap", || {
-            let mut object_ids = Vec::new();
-            super::collect_devtools_remote_object_ids(
-                &json!({ "outer": [{ "objectId": "OBJECT-1" }] }),
-                &mut object_ids,
-            );
-            assert_eq!(object_ids, vec!["OBJECT-1"]);
-
-            let deep_value = deeply_nested_plain_value(
-                json!({ "objectId": "TOO-DEEP" }),
-                MAX_INSPECTOR_PROTOCOL_VALUE_DEPTH + 8,
-            );
-            object_ids.clear();
-            super::collect_devtools_remote_object_ids(&deep_value, &mut object_ids);
-            assert!(object_ids.is_empty());
-
-            let mut references = Vec::new();
-            super::collect_devtools_remote_references(
-                &json!({ "outer": [{ "type": "node", "sharedId": "NODE-1" }] }),
-                &mut references,
-            );
-            assert_eq!(references.len(), 1);
-            assert_eq!(references[0].object_id, "NODE-1");
-            assert_eq!(references[0].kind, super::RuntimeRemoteReferenceKind::Node);
         });
     }
 
@@ -2605,10 +2508,9 @@ mod protocol_neutral_tests {
         browser_context.set_active_target_id("TID-duplicate".to_owned());
         browser_context.attach_active_session("SID-duplicate".to_owned());
         conn.install_browser_context_fixture_for_test(browser_context);
-        conn.try_register_pending_inspector_await_with_object_group_for_owner(
+        conn.try_register_pending_inspector_await_for_owner(
             77,
             &CommandOwnerScope::for_session("SID-duplicate"),
-            Some("original-group"),
         )
         .unwrap();
 
@@ -2840,6 +2742,9 @@ pub(crate) use worker_binding_replay::{
 
 mod worker_completion;
 pub(crate) use worker_completion::{PreparedWorkerRuntimeCommand, WorkerRuntimeContinuation};
+
+#[cfg(test)]
+mod response_handle_tests;
 
 #[cfg(test)]
 fn worker_workflow_fixture() -> CdpConnection {

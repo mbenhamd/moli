@@ -1,6 +1,7 @@
 use super::*;
 use crate::context_bootstrap::navigator_runtime::{
-    SERVICE_WORKER_OWNER_TOKEN_SLOT, service_worker_owner_token_value,
+    SERVICE_WORKER_OWNER_TOKEN_SLOT, service_worker_container_for_window,
+    service_worker_owner_token_value,
 };
 use crate::document_runtime::DomHandle;
 use crate::native_bridge::OwnerDispatchScope;
@@ -373,6 +374,12 @@ pub(in crate::context_bootstrap) fn navigator_service_worker_register_callback<'
     let Some(options) = service_worker_registration_options(scope, &args) else {
         return;
     };
+    // The container owns registration promises and rejection values, including
+    // calls through a register method borrowed from another Window.
+    let Some(context) = args.this().get_creation_context(scope) else {
+        return;
+    };
+    let scope = &mut v8::ContextScope::new(scope, context);
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
         let Some(resolver) = v8::PromiseResolver::new(scope) else {
             return;
@@ -578,7 +585,7 @@ impl ServiceWorkerInternalEventCallbackDispatchEffect {
 
 pub(crate) fn dispatch_service_worker_lifecycle_notification(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut crate::native_bridge::JsContextHost,
+    host: &mut crate::native_bridge::PageScriptHost,
     notification: crate::types::ServiceWorkerLifecycleNotification,
 ) -> ServiceWorkerInternalEventCallbackDispatchEffect {
     let mut callback_effect =
@@ -831,12 +838,7 @@ fn service_worker_container_from_window<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     window: v8::Local<'s, v8::Object>,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let navigator = window
-        .get(scope, v8str(scope, "navigator").into())
-        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())?;
-    navigator
-        .get(scope, v8str(scope, "serviceWorker").into())
-        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+    service_worker_container_for_window(scope, window)
 }
 
 fn service_worker_container_registration_cache<'s>(

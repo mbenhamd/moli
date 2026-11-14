@@ -1402,7 +1402,7 @@ pub(super) fn svg_geometry_element<'s>(
 }
 
 pub(super) fn svg_geometry_element_for_handle(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
 ) -> Option<SvgGeometryElement> {
     let local_name = runtime
@@ -1458,7 +1458,7 @@ pub(super) fn svg_geometry_element_for_handle(
 }
 
 fn svg_computed_path_data(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
 ) -> Option<String> {
     let computed =
@@ -1472,7 +1472,7 @@ fn svg_computed_path_data(
 }
 
 fn svg_geometry_length_attribute_for_handle(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
     attribute: &str,
 ) -> f64 {
@@ -1487,7 +1487,7 @@ fn svg_geometry_length_attribute_for_handle(
 }
 
 fn svg_geometry_rect_radius_attribute_for_handle(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
     attribute: &str,
     fallback_attribute: &str,
@@ -1500,7 +1500,7 @@ fn svg_geometry_rect_radius_attribute_for_handle(
 }
 
 pub(super) fn svg_geometry_optional_length_attribute_for_handle(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
     attribute: &str,
 ) -> Option<f64> {
@@ -1535,7 +1535,7 @@ pub(super) fn svg_graphics_bounding_box<'s>(
 }
 
 pub(super) fn svg_bbox_for_handle(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
     transform: SvgMatrixComponents,
     referenced: bool,
@@ -1613,7 +1613,7 @@ pub(super) fn svg_bbox_for_handle(
 }
 
 fn svg_image_dimensions(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
 ) -> (f64, f64) {
     let width =
@@ -1637,7 +1637,7 @@ fn svg_image_dimensions(
 }
 
 fn svg_use_bounding_box(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
     transform: SvgMatrixComponents,
     reference_stack: &mut Vec<crate::document_runtime::DomHandle>,
@@ -1662,7 +1662,7 @@ fn svg_use_bounding_box(
 }
 
 pub(super) fn svg_transform_for_handle(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
 ) -> SvgMatrixComponents {
     runtime
@@ -1679,7 +1679,7 @@ pub(super) fn svg_transform_for_handle(
 }
 
 pub(super) fn svg_bbox_has_non_rendered_ancestor(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
 ) -> bool {
     let mut current = Some(handle);
@@ -1707,7 +1707,7 @@ pub(super) fn svg_local_name_is_non_rendered_container(local_name: &str) -> bool
 }
 
 fn svg_element_has_display_none(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
 ) -> bool {
     crate::native_bridge::element::computed_style_property_for_handle(runtime, handle, "display")
@@ -3835,7 +3835,7 @@ fn resolve_svg_length_user_value_for_unit<'s>(
 /// Resolves one SVG length token from `handle`'s `attribute` to user units,
 /// using the element's computed font and nearest viewport.
 pub(super) fn svg_attribute_length_to_user_units(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
     attribute: &str,
     token: &str,
@@ -3932,7 +3932,7 @@ fn svg_length_owner_attribute<'s>(
 }
 
 fn svg_length_numeric_context(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
     unit: SvgLengthUnit,
     connected: bool,
@@ -3971,7 +3971,7 @@ fn svg_length_numeric_context(
 }
 
 pub(super) fn svg_computed_pixel_value(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
     property: &str,
 ) -> Option<f64> {
@@ -3982,7 +3982,7 @@ pub(super) fn svg_computed_pixel_value(
 }
 
 fn svg_length_percentage_basis(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
     attribute: &str,
 ) -> f64 {
@@ -4001,7 +4001,7 @@ fn svg_length_percentage_basis(
 }
 
 fn svg_nearest_viewport_dimensions(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
 ) -> Option<(f64, f64)> {
     let dom = runtime.dom_host();

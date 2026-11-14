@@ -1,6 +1,8 @@
 use super::*;
 
 mod json_error_identity;
+mod json_parse;
+mod module_map;
 mod specifiers;
 use crate::worker::handle::WorkerParentErrorEventKind;
 use crate::worker::{WorkerErrorPhase, WorkerScriptResourceKind};

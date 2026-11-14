@@ -46,7 +46,9 @@ use crate::script_vm::{
 };
 #[cfg(test)]
 use crate::script_vm::{MainDocumentLifecycleBody, NonScriptPageTaskExecutionOutcome};
-use crate::types::{ScriptExecutionReport, SubresourceResourceType};
+use crate::types::{
+    ScriptExecutionReport, SubresourceNetworkRequestHandle, SubresourceResourceType,
+};
 use crate::types::{ScriptKind, ScriptMode, ScriptSourceKind, SubresourceRequestInitiatorType};
 
 fn preload_like_resource_initiator_type(resource_type: SubresourceResourceType) -> &'static str {
@@ -2747,6 +2749,39 @@ impl ScriptVm {
         request_initiator_type: SubresourceRequestInitiatorType,
         result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
     ) {
+        self.record_script_subresource_network_result_with_handle(
+            document_url,
+            request_url,
+            request_initiator_type,
+            result,
+            None,
+        );
+    }
+
+    pub(crate) fn record_parser_script_subresource_network_result(
+        &mut self,
+        document_url: Url,
+        request_url: Url,
+        result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
+        request_handle: Option<SubresourceNetworkRequestHandle>,
+    ) {
+        self.record_script_subresource_network_result_with_handle(
+            document_url,
+            request_url,
+            SubresourceRequestInitiatorType::Parser,
+            result,
+            request_handle,
+        );
+    }
+
+    fn record_script_subresource_network_result_with_handle(
+        &mut self,
+        document_url: Url,
+        request_url: Url,
+        request_initiator_type: SubresourceRequestInitiatorType,
+        result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
+        request_handle: Option<SubresourceNetworkRequestHandle>,
+    ) {
         let mut performance_entry =
             crate::context_bootstrap::ResourcePerformanceEntry::from_network_result(
                 request_url.as_str(),
@@ -2771,13 +2806,14 @@ impl ScriptVm {
         }
         self._context_host
             .borrow_mut()
-            .record_get_subresource_network_result_with_initiator(
+            .record_get_subresource_network_result_with_handle(
                 None,
                 document_url,
                 request_url,
                 SubresourceResourceType::Script,
                 request_initiator_type,
                 result,
+                request_handle,
             );
         self.record_resource_performance_entries(vec![performance_entry]);
     }

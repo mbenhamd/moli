@@ -626,8 +626,7 @@ impl RendererOwnerHandle {
         extra_http_headers: moli_fetch::RequestHeaders,
         network_offline: bool,
         blocked_url_patterns: Vec<String>,
-        fetch_subresource_interception_enabled: bool,
-        fetch_subresource_interception_resource_type: Option<crate::SubresourceResourceType>,
+        fetch_subresource_interception_classes: crate::SubresourceInterceptionClasses,
         stage: PageVmInitStage,
     ) -> RendererCreateHtmlPageRequest {
         self.build_create_html_page_request_with_env(
@@ -650,8 +649,7 @@ impl RendererOwnerHandle {
                 extra_http_headers,
                 network_offline,
                 blocked_url_patterns,
-                fetch_subresource_interception_enabled,
-                fetch_subresource_interception_resource_type,
+                fetch_subresource_interception_classes,
                 ..Default::default()
             },
         )
@@ -675,6 +673,7 @@ impl RendererOwnerHandle {
     ) -> RendererCreateHtmlPageRequest {
         let layout_configuration = self.seal_layout_configuration_for_page_creation();
         RendererCreateHtmlPageRequest {
+            window_identity: options.window_identity,
             web_mcp_invocation: None,
             page_reservation,
             root_frame_id: options.root_frame_id,
@@ -703,9 +702,7 @@ impl RendererOwnerHandle {
             blocked_url_patterns: options.blocked_url_patterns,
             indexed_db_manager: options.indexed_db_manager,
             storage_bucket_store: options.storage_bucket_store,
-            fetch_subresource_interception_enabled: options.fetch_subresource_interception_enabled,
-            fetch_subresource_interception_resource_type: options
-                .fetch_subresource_interception_resource_type,
+            fetch_subresource_interception_classes: options.fetch_subresource_interception_classes,
             layout_configuration,
             wpt_extensions_enabled: false,
             stage,
@@ -735,6 +732,7 @@ impl RendererOwnerHandle {
     ) -> RendererCreateStreamingRawPageRequest {
         let layout_configuration = self.seal_layout_configuration_for_page_creation();
         RendererCreateStreamingRawPageRequest {
+            window_identity: options.window_identity,
             web_mcp_invocation: None,
             document_replacement: None,
             root_frame_id: options.root_frame_id,
@@ -763,9 +761,7 @@ impl RendererOwnerHandle {
             blocked_url_patterns: options.blocked_url_patterns,
             indexed_db_manager: options.indexed_db_manager,
             storage_bucket_store: options.storage_bucket_store,
-            fetch_subresource_interception_enabled: options.fetch_subresource_interception_enabled,
-            fetch_subresource_interception_resource_type: options
-                .fetch_subresource_interception_resource_type,
+            fetch_subresource_interception_classes: options.fetch_subresource_interception_classes,
             layout_configuration,
             wpt_extensions_enabled: false,
             stage,
@@ -805,6 +801,7 @@ impl RendererOwnerHandle {
         _owner_local_store: &mut RendererOwnerLocalStore,
     ) -> RenderRuntimeDispatchOutcome {
         let RendererCreateHtmlPageRequest {
+            window_identity,
             web_mcp_invocation,
             page_reservation,
             root_frame_id,
@@ -832,8 +829,7 @@ impl RendererOwnerHandle {
             blocked_url_patterns,
             indexed_db_manager,
             storage_bucket_store,
-            fetch_subresource_interception_enabled,
-            fetch_subresource_interception_resource_type,
+            fetch_subresource_interception_classes,
             layout_configuration,
             wpt_extensions_enabled,
             stage,
@@ -910,6 +906,7 @@ impl RendererOwnerHandle {
                     reserved_service_worker_client.map(RendererReservedServiceWorkerClient::release)
                 };
                 let mut env = PageVmEnvConfig {
+                    window_identity,
                     web_storage,
                     document_start_scripts,
                     runtime_bindings,
@@ -926,8 +923,7 @@ impl RendererOwnerHandle {
                     blocked_url_patterns,
                     indexed_db_manager,
                     storage_bucket_store,
-                    fetch_subresource_interception_enabled,
-                    fetch_subresource_interception_resource_type,
+                    fetch_subresource_interception_classes,
                     layout_configuration,
                     wpt_extensions_enabled,
                     root_frame_id,
@@ -1081,7 +1077,10 @@ impl RendererOwnerHandle {
                 let isolate_allocator =
                     RendererDocumentIsolateAllocator::new(owner_local_context, token.page_id());
                 let (isolate_bootstrap, isolate_reservation) = isolate_allocator
-                    .reserve_renderer_document_isolate(page_runtime_task_source)?;
+                    .reserve_renderer_document_isolate(
+                        page_runtime_task_source,
+                        request.window_identity.clone(),
+                    )?;
                 Ok(RendererPreparedDocumentResidence {
                     request,
                     isolate_allocator,

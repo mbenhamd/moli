@@ -46,6 +46,7 @@ fn synthetic_redirect(from: &Url, to: &Url) -> RedirectInfo {
         headers: vec![("Location".to_owned(), to.as_str().as_bytes().to_vec())],
         network_extra_info_available: false,
         request_extra_info: None,
+        dispatched_request: None,
         response_extra_info: None,
         redirect_has_extra_info: false,
         request_cookie_report: None,
@@ -540,5 +541,62 @@ async fn explicit_request_origin_controls_every_transport_independently_of_initi
         "only requests with the matching origin are dispatched"
     );
     server.shutdown();
+    Ok(())
+}
+
+#[test]
+fn accumulated_interception_edits_preserve_upload_and_header_scope() -> Result<()> {
+    for persistent in [false, true] {
+        let mut request = Request::new(
+            "POST",
+            "https://example.test/source",
+            Some("old".into()),
+            vec![("X-Original".to_owned(), "original".to_owned())],
+        )?;
+        let headers =
+            crate::RequestHeaders::from(vec![("X-Edited".to_owned(), "edited".to_owned())]);
+        crate::RequestOverrides {
+            url: Some(Url::parse("https://example.test/rewritten/source")?),
+            method: Some("PUT".into()),
+            body: Some(Some(bytes::Bytes::from_static(b"new\xff"))),
+            headers: Some(if persistent {
+                headers.into()
+            } else {
+                crate::RequestHeaderOverride::current_request(headers, None)
+            }),
+        }
+        .apply(&mut request);
+        assert_eq!(request.method, "PUT");
+        assert_eq!(request.body.as_deref(), Some(b"new\xff".as_slice()));
+        let mut redirect = synthetic_redirect(
+            &request.url,
+            &Url::parse("https://example.test/rewritten/next")?,
+        );
+        redirect.status = 307;
+        request.follow_redirect(redirect)?;
+        assert_eq!(request.method, "PUT");
+        assert_eq!(request.body.as_deref(), Some(b"new\xff".as_slice()));
+        assert_eq!(
+            request
+                .request_headers
+                .iter()
+                .any(|(name, _)| name == "X-Edited"),
+            persistent
+        );
+        assert_eq!(
+            request
+                .request_headers
+                .iter()
+                .any(|(name, _)| name == "X-Original"),
+            !persistent
+        );
+        crate::RequestOverrides {
+            body: Some(None),
+            ..Default::default()
+        }
+        .apply(&mut request);
+        assert!(request.body.is_none());
+        assert!(request.body_text().is_none());
+    }
     Ok(())
 }

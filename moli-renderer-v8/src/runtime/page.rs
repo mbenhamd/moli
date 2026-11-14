@@ -28,6 +28,8 @@ use super::{
 /// Applied before document-start scripts; live updates use Page commands.
 #[derive(Default)]
 pub struct RendererDocumentOptions {
+    /// Identity captured when accepting a new Page; ignored for replacement Documents.
+    pub window_identity: super::RendererPageWindowIdentity,
     pub indexed_db_manager: Option<crate::context_bootstrap::WeakIndexedDbManager>,
     pub storage_bucket_store: Option<crate::context_bootstrap::SharedStorageBucketStore>,
     pub document_start_scripts: Vec<DocumentStartScript>,
@@ -36,8 +38,7 @@ pub struct RendererDocumentOptions {
     pub document_settings: moli_page_types::DocumentSettings,
     pub network_offline: bool,
     pub blocked_url_patterns: Vec<String>,
-    pub fetch_subresource_interception_enabled: bool,
-    pub fetch_subresource_interception_resource_type: Option<crate::SubresourceResourceType>,
+    pub fetch_subresource_interception_classes: crate::SubresourceInterceptionClasses,
     pub runtime_inspector_session_restore_snapshots: Vec<RendererInspectorSessionRestoreSnapshot>,
     pub root_frame_id: Option<String>,
     pub main_document_commit: Option<crate::RendererMainDocumentCommit>,

@@ -507,7 +507,7 @@ class ProxyAuthFixtureServer:
 class FixtureServer:
     def __init__(self) -> None:
         self.profile_requests: dict[str, dict[str, Any]] = {}
-        self.navigation_redirect_requests: dict[str, list[dict[str, str]]] = {}
+        self.navigation_redirect_requests: dict[str, list[dict[str, Any]]] = {}
         self._counter_lock = threading.Lock()
         self._request_counts: dict[str, int] = {}
         self._resource_request_headers: dict[str, dict[str, str]] = {}
@@ -576,6 +576,9 @@ class FixtureServer:
                 self._dispatch()
 
             def do_POST(self) -> None:
+                self._dispatch()
+
+            def do_PATCH(self) -> None:
                 self._dispatch()
 
             def do_HEAD(self) -> None:
@@ -704,6 +707,16 @@ class FixtureServer:
                     self._send_html("<!doctype html><main>plain ok</main>")
                 elif route == "/fetch-dispatch/page":
                     self._send_html("<!doctype html><main>resource dispatch</main>")
+                elif route in {"/navigation-sw-fallback-start", "/fetch-dispatch/nav-fallback/middle"}:
+                    outer._record_resource_request(self.path, self.headers)
+                    destination = ("middle" if route == "/navigation-sw-fallback-start" else "final")
+                    self._send_common(
+                        HTTPStatus.FOUND, "text/plain", b"",
+                        {"Location": f"/fetch-dispatch/nav-fallback/{destination}?{parsed.query}"},
+                    )
+                elif route == "/fetch-dispatch/nav-fallback/final":
+                    outer._record_resource_request(self.path, self.headers)
+                    self._send_html("<!doctype html><main>network fallback</main>")
                 elif route == "/fetch-dispatch/sw.js":
                     resources = {
                         "font.woff2": ("font/woff2", (REPO_ROOT / "moli-layout/tests/fixtures/moli-ahem.woff2").read_bytes()),
@@ -718,6 +731,11 @@ class FixtureServer:
                       self.addEventListener('activate', event => event.waitUntil(clients.claim()));
                       self.addEventListener('fetch', event => {
                         const url = new URL(event.request.url);
+                        if (url.pathname === '/fetch-dispatch/redirect-sw/start') {
+                          event.respondWith(Response.redirect(
+                            new URL('/navigation-hop/middle' + url.search, url.origin).href, 307));
+                          return;
+                        }
                         if (url.pathname.startsWith('/fetch-dispatch/sw-auth/')) {
                           const status = Number(url.searchParams.get('status') || 401);
                           const header = status === 407 ? 'Proxy-Authenticate' : 'WWW-Authenticate';
@@ -1328,6 +1346,9 @@ class FixtureServer:
                                 "<!doctype html><title>navigation committed</title>"
                                 "<main id='navigation-committed'>replacement</main>"
                             )
+                    except (BrokenPipeError, ConnectionResetError):
+                        # A target closed at this gate cancels its HTTP socket.
+                        pass
                     finally:
                         gate.response_completed.set()
                 elif route == "/navigation-suspension-gate/reset":
@@ -1570,6 +1591,7 @@ class FixtureServer:
                             "method": self.command,
                             "contentType": self.headers.get("Content-Type", ""),
                             "body": _body.decode("utf-8"),
+                            "headers": dict(self.headers),
                         })
                         observed = json.dumps(observations)
                     if route == "/navigation-hop/final":
@@ -1773,6 +1795,12 @@ class FixtureServer:
                     self._send_html(
                         '<!doctype html><a id="download" href="/download" download>download</a>'
                         '<a id="slow-download" href="/slow-download" download>slow</a>'
+                        '<a id="attachment-download" href="/download">attachment</a>'
+                        '<a id="redirect-download" href="/download-redirect">redirect attachment</a>'
+                    )
+                elif route == "/download-redirect":
+                    self._send_common(
+                        HTTPStatus.FOUND, "text/plain", b"", {"Location": "/download"}
                     )
                 elif route == "/download":
                     self._send_download("smoke-download.txt", b"download contents")

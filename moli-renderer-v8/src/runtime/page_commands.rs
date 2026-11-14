@@ -860,15 +860,15 @@ impl PageVm {
             } => Ok(RendererPageReply::OptionalString(
                 self.outer_html_for_node(reference, include_shadow_dom)?,
             )),
-            RendererPageCommand::RenderPageDump { options } => Ok(RendererPageReply::OptionalString(
-                Some(self.render_page_dump(options)),
+            RendererPageCommand::RenderMarkdown { options } => Ok(RendererPageReply::OptionalString(
+                Some(self.render_markdown(options)),
             )),
-            RendererPageCommand::SerializeDocument => {
+            RendererPageCommand::SerializeDocument { options } => {
                 // Capture both from the live document in this handler turn.
                 // Browser admission metadata may precede a queued history update.
                 Ok(RendererPageReply::SerializedDocument {
                     url: self.vm().document_runtime.host_document().url().to_string(),
-                    html: self.serialize_html(),
+                    html: self.serialize_html(options)?,
                 })
             }
             RendererPageCommand::LayoutMetrics => {
@@ -968,6 +968,7 @@ impl PageVm {
             }
             RendererPageCommand::FulfillPendingSubresourceFetch {
                 internal_id,
+                request_overrides,
                 response_code,
                 response_headers,
                 response_body,
@@ -977,6 +978,7 @@ impl PageVm {
                     response_code,
                     response_headers,
                     response_body,
+                    request_overrides.map(|overrides|*overrides),
                 )?;
                 Ok(RendererPageReply::Unit)
             }
@@ -1041,11 +1043,8 @@ impl PageVm {
             RendererPageCommand::PendingSubresourceRequestCount => {
                 Ok(RendererPageReply::Usize(self.pending_subresource_request_count()))
             }
-            RendererPageCommand::SetFetchSubresourceInterception {
-                enabled,
-                resource_type,
-            } => {
-                self.set_fetch_subresource_interception(enabled, resource_type);
+            RendererPageCommand::SetFetchSubresourceInterception { classes } => {
+                self.set_fetch_subresource_interception(classes);
                 Ok(RendererPageReply::Unit)
             }
             RendererPageCommand::ReplaceBrowserResourceRuntime {

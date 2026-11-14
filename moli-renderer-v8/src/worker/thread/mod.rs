@@ -45,6 +45,7 @@ mod runtime_inspector;
 
 pub(crate) use dispatch::dispatch_current_worker_callback_exception;
 pub(crate) use dispatch::perform_callback_cleanup_checkpoint_if_worker;
+pub(in crate::worker) use dispatch::service_worker_respond_with_callback;
 
 use super::networking_tasks::WorkerNetworkingTaskQueue;
 use dispatch::{
@@ -104,14 +105,15 @@ use super::inspector_task_runner::{
     WorkerInspectorTask, WorkerInspectorTaskMode, WorkerInspectorTaskRunner,
 };
 use super::module_runtime::{
-    WorkerBootstrapError, WorkerDynamicModuleImportAdvance, WorkerModuleBootstrapResume,
-    WorkerModuleBootstrapStart, WorkerModuleEvaluationCompletion, WorkerModuleFetchedSource,
-    WorkerModuleGraphFetchBatch, WorkerModuleGraphFetchCompletion, WorkerModuleGraphFetchCspSource,
-    WorkerModuleGraphFetchRequest, WorkerModulePendingBootstrap, WorkerModuleSource,
+    WorkerBootstrapError, WorkerModuleBootstrapResume, WorkerModuleBootstrapStart,
+    WorkerModuleEvaluationCompletion, WorkerModuleFetchedSource, WorkerModuleGraphFetchCompletion,
+    WorkerModuleGraphFetchCspSource, WorkerModuleGraphFetchRequest, WorkerModulePendingBootstrap,
+    WorkerModuleSource, complete_worker_module_graph_fetch,
     evaluate_module_worker_bootstrap_source, install_classic_worker_dynamic_module_runtime,
-    resume_worker_dynamic_module_evaluation, resume_worker_dynamic_module_fetch,
-    run_next_worker_dynamic_module_import, worker_dynamic_module_import_waits_for_fetch,
-    worker_has_pending_dynamic_module_imports, worker_has_runnable_dynamic_module_imports,
+    resume_worker_dynamic_module_evaluation, resume_worker_module_trees,
+    retire_worker_module_runtime, run_next_worker_dynamic_module_import,
+    take_worker_module_graph_fetches, worker_has_pending_dynamic_module_imports,
+    worker_has_runnable_dynamic_module_imports,
 };
 
 const WORKER_STACK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
@@ -180,6 +182,8 @@ pub(crate) struct WorkerSpawnOptions {
     pub(crate) script_source: WorkerScriptSource,
     pub(crate) script_url: String,
     pub(crate) request_client: ResourceRequestClient,
+    pub(crate) interception_context:
+        Option<crate::network::interception_output::ResourceInterceptionContext>,
     pub(crate) script_kind: WorkerScriptKind,
     pub(crate) module_static_import_initiator_url: Option<url::Url>,
     pub(crate) module_credentials_mode: RequestCredentialsMode,
@@ -218,6 +222,7 @@ pub(crate) enum WorkerTestRequestClient {
 #[cfg(test)]
 pub(crate) struct WorkerTestHandle {
     handle: Option<WorkerHandle>,
+    request_client: ResourceRequestClient,
     _request_client_owner: Option<ResourceRequestClientOwner>,
 }
 
@@ -243,6 +248,15 @@ impl std::ops::DerefMut for WorkerTestHandle {
 
 #[cfg(test)]
 impl WorkerTestHandle {
+    pub(crate) fn set_fetch_subresource_interception(
+        &self,
+        classes: crate::SubresourceInterceptionClasses,
+    ) {
+        self.request_client
+            .page_network_policy()
+            .set_subresource_interception(classes);
+    }
+
     pub(crate) fn terminate_and_join(mut self) {
         if let Some(handle) = self.handle.take() {
             handle.terminate_and_join();
@@ -312,6 +326,7 @@ impl WorkerSpawnOptions {
             script_source,
             script_url,
             request_client,
+            interception_context: None,
             script_kind: WorkerScriptKind::Classic,
             module_static_import_initiator_url: None,
             module_credentials_mode: RequestCredentialsMode::SameOrigin,
@@ -428,6 +443,14 @@ impl WorkerSpawnOptions {
         policy_context: crate::types::SubresourcePolicyContext,
     ) -> Self {
         self.policy_context = policy_context;
+        self
+    }
+
+    pub(crate) fn with_interception_context(
+        mut self,
+        context: Option<crate::network::interception_output::ResourceInterceptionContext>,
+    ) -> Self {
+        self.interception_context = context;
         self
     }
 
@@ -601,6 +624,7 @@ fn start_worker_module_graph_fetch(
     completion_tx: mpsc::UnboundedSender<WorkerModuleGraphFetchCompletion>,
 ) {
     let fetch_id = request.fetch_id();
+    let completion_key = request.module_key();
     let (enforce, report, endpoints, resource_kind) = match request.csp_source() {
         WorkerModuleGraphFetchCspSource::StaticModuleGraph => (
             module_static_import_content_security_policies,
@@ -635,8 +659,12 @@ fn start_worker_module_graph_fetch(
     );
     if let Err(error) = csp_context.check_initial_request(request.url()) {
         let _ = completion_tx.send(
-            WorkerModuleGraphFetchCompletion::new(fetch_id, Err(error.to_string()))
-                .with_csp_violations(csp_context.take_violations()),
+            WorkerModuleGraphFetchCompletion::new(
+                fetch_id,
+                request.module_key(),
+                Err(error.to_string()),
+            )
+            .with_csp_violations(csp_context.take_violations()),
         );
         return;
     }
@@ -649,8 +677,12 @@ fn start_worker_module_graph_fetch(
                 .with_browser_request_metadata(browser_request_metadata),
             Err(error) => {
                 let _ = completion_tx.send(
-                    WorkerModuleGraphFetchCompletion::new(fetch_id, Err(error.to_string()))
-                        .with_csp_violations(csp_context.take_violations()),
+                    WorkerModuleGraphFetchCompletion::new(
+                        fetch_id,
+                        request.module_key(),
+                        Err(error.to_string()),
+                    )
+                    .with_csp_violations(csp_context.take_violations()),
                 );
                 return;
             }
@@ -721,7 +753,7 @@ fn start_worker_module_graph_fetch(
                     .with_resource(resource)
                     .with_response_referrer_policy(response_referrer_policy))
             });
-        let completion = WorkerModuleGraphFetchCompletion::new(fetch_id, result)
+        let completion = WorkerModuleGraphFetchCompletion::new(fetch_id, completion_key, result)
             .with_csp_violations(response_csp_context.take_violations());
         let _ = completion_tx_for_callback.send(completion);
     };
@@ -733,6 +765,7 @@ fn start_worker_module_graph_fetch(
         let _ = completion_tx.send(
             WorkerModuleGraphFetchCompletion::new(
                 fetch_id,
+                request.module_key(),
                 Err("worker module dependency fetch rejected during shutdown".to_owned()),
             )
             .with_csp_violations(csp_context.take_violations()),
@@ -746,34 +779,13 @@ fn start_worker_module_graph_fetch(
         let _ = completion_tx.send(
             WorkerModuleGraphFetchCompletion::new(
                 fetch_id,
+                request.module_key(),
                 Err(format!(
                     "failed to start module worker dependency fetch `{}`: {error}",
                     request.url()
                 )),
             )
             .with_csp_violations(csp_context.take_violations()),
-        );
-    }
-}
-
-fn start_worker_module_graph_fetch_batch(
-    requests: WorkerModuleGraphFetchBatch,
-    state: &Rc<RefCell<WorkerGlobalState>>,
-    module_graph_fetch_tx: &mpsc::UnboundedSender<WorkerModuleGraphFetchCompletion>,
-) {
-    for request in requests.iter().cloned() {
-        start_worker_module_graph_fetch(
-            request,
-            state.borrow().loader.clone(),
-            state.borrow().network_partition_key.clone(),
-            state
-                .borrow()
-                .module_static_import_content_security_policies
-                .clone(),
-            state.borrow().content_security_policies.clone(),
-            state.borrow().content_security_report_only_policies.clone(),
-            state.borrow().content_security_reporting_endpoints.clone(),
-            module_graph_fetch_tx.clone(),
         );
     }
 }
@@ -841,18 +853,25 @@ fn flush_one_worker_indexed_db_task(
     drain_worker_dynamic_module_imports(scope, state, module_graph_fetch_tx);
 }
 
-fn handle_worker_dynamic_module_import_advance(
-    advance: WorkerDynamicModuleImportAdvance,
+fn flush_worker_module_fetches(
+    scope: &mut v8::PinScope<'_, '_>,
     state: &Rc<RefCell<WorkerGlobalState>>,
     module_graph_fetch_tx: &mpsc::UnboundedSender<WorkerModuleGraphFetchCompletion>,
 ) {
-    match advance {
-        WorkerDynamicModuleImportAdvance::Complete
-        | WorkerDynamicModuleImportAdvance::WaitingFetches
-        | WorkerDynamicModuleImportAdvance::WaitingEvaluation { .. } => {}
-        WorkerDynamicModuleImportAdvance::NeedFetches(requests) => {
-            start_worker_module_graph_fetch_batch(requests, state, module_graph_fetch_tx);
-        }
+    for request in take_worker_module_graph_fetches(scope) {
+        start_worker_module_graph_fetch(
+            request,
+            state.borrow().loader.clone(),
+            state.borrow().network_partition_key.clone(),
+            state
+                .borrow()
+                .module_static_import_content_security_policies
+                .clone(),
+            state.borrow().content_security_policies.clone(),
+            state.borrow().content_security_report_only_policies.clone(),
+            state.borrow().content_security_reporting_endpoints.clone(),
+            module_graph_fetch_tx.clone(),
+        );
     }
 }
 
@@ -865,10 +884,10 @@ fn drain_worker_dynamic_module_imports(
 ) {
     const MAX_DYNAMIC_IMPORT_DRAIN_STEPS: usize = 1_000;
     for _ in 0..MAX_DYNAMIC_IMPORT_DRAIN_STEPS {
-        let Some(advance) = run_next_worker_dynamic_module_import(scope) else {
+        if !run_next_worker_dynamic_module_import(scope) {
             break;
-        };
-        handle_worker_dynamic_module_import_advance(advance, state, module_graph_fetch_tx);
+        }
+        flush_worker_module_fetches(scope, state, module_graph_fetch_tx);
     }
 }
 
@@ -975,14 +994,6 @@ async fn run_worker_pre_bootstrap_debugger_pause(
                 loader
                     .request_client()
                     .set_blocked_url_patterns(&patterns_for_loader);
-            }
-            Some(WorkerMessage::SetFetchSubresourceInterception {
-                enabled,
-                resource_type,
-            }) => {
-                let mut state = state.borrow_mut();
-                state.fetch_subresource_interception_enabled = enabled;
-                state.fetch_subresource_interception_resource_type = resource_type;
             }
             Some(WorkerMessage::Terminate) => {
                 trace!(url = %script_url, "worker terminated before bootstrap by parent");
@@ -1231,9 +1242,11 @@ fn worker_test_request_client() -> ResourceRequestClientOwner {
 #[cfg(test)]
 pub(crate) fn spawn_test_worker_with_options(mut options: WorkerSpawnOptions) -> WorkerTestHandle {
     let request_client_owner = options.test_request_client_owner.take();
+    let request_client = options.request_client.clone();
     let handle = spawn_worker_with_options(options);
     WorkerTestHandle {
         handle: Some(handle),
+        request_client,
         _request_client_owner: request_client_owner,
     }
 }
@@ -1248,6 +1261,7 @@ pub(crate) fn spawn_worker_with_options(options: WorkerSpawnOptions) -> WorkerHa
         script_source,
         script_url,
         request_client,
+        interception_context,
         script_kind,
         module_static_import_initiator_url,
         module_credentials_mode,
@@ -1282,6 +1296,7 @@ pub(crate) fn spawn_worker_with_options(options: WorkerSpawnOptions) -> WorkerHa
     let devtools =
         WorkerDevToolsHandle::new(parent_to_worker_tx.clone(), Arc::clone(&isolate_handle));
     let worker_inspector_tasks = devtools.inspector_tasks().clone();
+    let network_cancel = devtools.network_cancel_handle();
     let termination_requested = Arc::new(AtomicBool::new(false));
     let worker_termination_requested = Arc::clone(&termination_requested);
 
@@ -1300,6 +1315,8 @@ pub(crate) fn spawn_worker_with_options(options: WorkerSpawnOptions) -> WorkerHa
                 script_source,
                 script_url,
                 request_client,
+                interception_context,
+                network_cancel,
                 script_kind,
                 module_static_import_initiator_url,
                 module_credentials_mode,
@@ -1432,6 +1449,8 @@ async fn worker_main(
     script_source: WorkerScriptSource,
     script_url: String,
     request_client: ResourceRequestClient,
+    interception_context: Option<crate::network::interception_output::ResourceInterceptionContext>,
+    network_cancel: moli_fetch::FetchCancelHandle,
     script_kind: WorkerScriptKind,
     module_static_import_initiator_url: Option<url::Url>,
     module_credentials_mode: RequestCredentialsMode,
@@ -1578,6 +1597,8 @@ async fn worker_main(
         message_agent_cluster,
     );
     let state = Rc::new(RefCell::new(WorkerGlobalState {
+        interception_context,
+        network_cancel,
         message_source_security,
         common: Rc::new(crate::common_runtime::CommonRuntimeState::default()),
         resource_timing_buffers: crate::native_bridge::SharedResourceTimingBufferRegistry::new(),
@@ -1605,10 +1626,6 @@ async fn worker_main(
         blocked_url_patterns: network_policy.blocked_url_patterns,
         network_partition_key: network_policy.network_partition_key,
         policy_context,
-        fetch_subresource_interception_enabled: network_policy
-            .fetch_subresource_interception_enabled,
-        fetch_subresource_interception_resource_type: network_policy
-            .fetch_subresource_interception_resource_type,
         fetch_completion_tx,
         pending_fetches: std::collections::HashMap::new(),
         pending_network_body_sources: std::collections::HashMap::new(),
@@ -1793,7 +1810,7 @@ async fn worker_main(
         let referrer_policy = { state.borrow().referrer_policy.clone() };
 
         // ── Evaluate the worker script ─────────────────────────────────────
-        match evaluate_worker_bootstrap_script(
+        let start = evaluate_worker_bootstrap_script(
             scope,
             &script_source,
             &script_url,
@@ -1802,15 +1819,14 @@ async fn worker_main(
             module_credentials_mode,
             referrer_policy,
             module_evaluation_tx.clone(),
-        ) {
+        );
+        flush_worker_module_fetches(scope, &state, &module_graph_fetch_tx);
+        match start {
             WorkerBootstrapStart::Complete => {
                 bootstrap_completion.mark_success(worker_bootstrap_success(scope, global, &state));
             }
-            WorkerBootstrapStart::Pending(pending) => {
-                if let Some(requests) = pending.pending_requests().cloned() {
-                    start_worker_module_graph_fetch_batch(requests, &state, &module_graph_fetch_tx);
-                }
-                pending_module_bootstrap = Some(pending);
+            WorkerBootstrapStart::Pending(bootstrap) => {
+                pending_module_bootstrap = Some(bootstrap);
             }
             WorkerBootstrapStart::Failed { error, phase } => {
                 let (report, exception, parent_event_kind) = *error;
@@ -2766,14 +2782,6 @@ async fn worker_main(
                     .request_client()
                     .set_blocked_url_patterns(&patterns_for_loader);
             }
-            WorkerLoopWake::Message(Some(WorkerMessage::SetFetchSubresourceInterception {
-                enabled,
-                resource_type,
-            })) => {
-                let mut state = state.borrow_mut();
-                state.fetch_subresource_interception_enabled = enabled;
-                state.fetch_subresource_interception_resource_type = resource_type;
-            }
             WorkerLoopWake::Message(Some(WorkerMessage::ContinuePendingFetch(request))) => {
                 continue_pending_worker_fetch(&state, request);
             }
@@ -3066,91 +3074,63 @@ async fn worker_main(
                 let ctx = v8::Local::new(scope, &context);
                 let scope = &mut v8::ContextScope::new(scope, ctx);
                 let global = ctx.global(scope);
-                if worker_dynamic_module_import_waits_for_fetch(scope, completion.fetch_id()) {
+                if let Some(outcome) = complete_worker_module_graph_fetch(scope, &completion) {
                     for violation in completion.csp_violations() {
                         let loader = state.borrow().loader.clone();
                         dispatch_worker_csp_violation_event(scope, &loader, violation);
                     }
-                    if let Some(advance) = resume_worker_dynamic_module_fetch(scope, *completion) {
-                        handle_worker_dynamic_module_import_advance(
-                            advance,
-                            &state,
-                            &module_graph_fetch_tx,
-                        );
-                        drain_worker_dynamic_module_imports(scope, &state, &module_graph_fetch_tx);
-                    }
-                } else if pending_module_bootstrap.is_some() {
-                    for violation in completion.csp_violations() {
-                        let loader = state.borrow().loader.clone();
-                        dispatch_worker_csp_violation_event(scope, &loader, violation);
-                    }
-                    let bootstrap_fetch_matches = pending_module_bootstrap
-                        .as_ref()
-                        .and_then(|bootstrap| bootstrap.pending_requests())
-                        .is_some_and(|requests| requests.contains_fetch_id(completion.fetch_id()));
-                    let module_script_resource = if bootstrap_fetch_matches {
-                        completion
-                            .result()
-                            .ok()
-                            .and_then(|source| source.resource().cloned())
-                    } else {
-                        None
-                    };
-                    let resume = pending_module_bootstrap
-                        .as_mut()
-                        .expect("checked pending module bootstrap")
-                        .resume(scope, *completion);
-                    if let Some(resource) = module_script_resource {
+                    let resume =
+                        resume_worker_module_trees(scope, pending_module_bootstrap.as_deref_mut());
+                    flush_worker_module_fetches(scope, &state, &module_graph_fetch_tx);
+                    if outcome.bootstrap_client
+                        && let Ok(source) = completion.result()
+                        && let Some(resource) = source.resource().cloned()
+                    {
                         report_service_worker_module_script_resource(&state, resource);
                     }
-                    match resume {
-                        WorkerModuleBootstrapResume::Complete => {
-                            pending_module_bootstrap = None;
-                            bootstrap_completion
-                                .mark_success(worker_bootstrap_success(scope, global, &state));
-                            perform_worker_microtask_checkpoint_and_report_pending_promise_rejections(scope);
-                            drain_worker_dynamic_module_imports(
-                                scope,
-                                &state,
-                                &module_graph_fetch_tx,
-                            );
-                            forward_worker_script_loaded(&runtime_inspector, &parent_tx);
-                        }
-                        WorkerModuleBootstrapResume::NeedFetches(requests) => {
-                            start_worker_module_graph_fetch_batch(
-                                requests,
-                                &state,
-                                &module_graph_fetch_tx,
-                            );
-                        }
-                        WorkerModuleBootstrapResume::WaitingFetches => {}
-                        WorkerModuleBootstrapResume::WaitingEvaluation => {}
-                        WorkerModuleBootstrapResume::Failed(error) => {
-                            let (report, exception, parent_event_kind) = *error;
-                            let exception =
-                                exception.as_ref().map(|value| v8::Local::new(scope, value));
-                            let global = ctx.global(scope);
-                            bootstrap_completion.mark_failure(
-                                &report,
-                                &script_url,
-                                parent_event_kind,
-                                WorkerErrorPhase::Bootstrap,
-                                WorkerErrorSource::Runtime,
-                            );
-                            dispatch_worker_exception_with_phase(
-                                scope,
-                                global,
-                                report,
-                                exception,
-                                parent_event_kind,
-                                WorkerErrorPhase::Bootstrap,
-                                &parent_tx,
-                                &script_url,
-                            );
-                            forward_worker_script_loaded(&runtime_inspector, &parent_tx);
-                            break;
+                    if let Some(resume) = resume {
+                        match resume {
+                            WorkerModuleBootstrapResume::Complete => {
+                                pending_module_bootstrap = None;
+                                bootstrap_completion
+                                    .mark_success(worker_bootstrap_success(scope, global, &state));
+                                perform_worker_microtask_checkpoint_and_report_pending_promise_rejections(scope);
+                                drain_worker_dynamic_module_imports(
+                                    scope,
+                                    &state,
+                                    &module_graph_fetch_tx,
+                                );
+                                forward_worker_script_loaded(&runtime_inspector, &parent_tx);
+                            }
+                            WorkerModuleBootstrapResume::WaitingEvaluation => {}
+                            WorkerModuleBootstrapResume::Failed(error) => {
+                                let (report, exception, parent_event_kind) = *error;
+                                let exception =
+                                    exception.as_ref().map(|value| v8::Local::new(scope, value));
+                                let global = ctx.global(scope);
+                                bootstrap_completion.mark_failure(
+                                    &report,
+                                    &script_url,
+                                    parent_event_kind,
+                                    WorkerErrorPhase::Bootstrap,
+                                    WorkerErrorSource::Runtime,
+                                );
+                                dispatch_worker_exception_with_phase(
+                                    scope,
+                                    global,
+                                    report,
+                                    exception,
+                                    parent_event_kind,
+                                    WorkerErrorPhase::Bootstrap,
+                                    &parent_tx,
+                                    &script_url,
+                                );
+                                forward_worker_script_loaded(&runtime_inspector, &parent_tx);
+                                break;
+                            }
                         }
                     }
+                    drain_worker_dynamic_module_imports(scope, &state, &module_graph_fetch_tx);
                 } else {
                     let result_summary = completion
                         .result()
@@ -3161,7 +3141,7 @@ async fn worker_main(
                                 source.source().len()
                             )
                         })
-                        .unwrap_or_else(|error| format!("error {error}"));
+                        .unwrap_or_else(|error| format!("error {}", error.message));
                     trace!(
                         url = %script_url,
                         fetch_id = completion.fetch_id(),
@@ -3201,14 +3181,6 @@ async fn worker_main(
                             );
                             forward_worker_script_loaded(&runtime_inspector, &parent_tx);
                         }
-                        WorkerModuleBootstrapResume::NeedFetches(requests) => {
-                            start_worker_module_graph_fetch_batch(
-                                requests,
-                                &state,
-                                &module_graph_fetch_tx,
-                            );
-                        }
-                        WorkerModuleBootstrapResume::WaitingFetches => {}
                         WorkerModuleBootstrapResume::WaitingEvaluation => {}
                         WorkerModuleBootstrapResume::Failed(error) => {
                             let (report, exception, parent_event_kind) = *error;
@@ -3325,6 +3297,10 @@ async fn worker_main(
     // routes are destroyed. Ordinary transports are cancelled here;
     // explicitly keepalive loads are reduced to browser-runtime network-only
     // records and therefore cannot retain this WorkerGlobalScope.
+    // Drop persistent rejection values while their isolate is alive, including
+    // completions queued by a module that called close() before rejecting.
+    module_evaluation_rx.close();
+    while module_evaluation_rx.try_recv().is_ok() {}
     inspector_task_runner.dispose(crate::runtime::WorkerInspectorError::Exited);
     let resource_loader = state.borrow().loader.clone();
     resource_loader.begin_detach();
@@ -3336,6 +3312,7 @@ async fn worker_main(
         let scope = pin!(v8::HandleScope::new(isolate));
         let scope = &mut scope.init();
         let ctx = v8::Local::new(scope, &context);
+        retire_worker_module_runtime(ctx);
         crate::context_bootstrap::retire_indexed_db_context(ctx);
         runtime_inspector.context_destroyed(ctx);
     }
@@ -3527,7 +3504,7 @@ impl From<WorkerModuleBootstrapStart> for WorkerBootstrapStart {
     fn from(start: WorkerModuleBootstrapStart) -> Self {
         match start {
             WorkerModuleBootstrapStart::Complete => Self::Complete,
-            WorkerModuleBootstrapStart::Pending(pending) => Self::Pending(pending),
+            WorkerModuleBootstrapStart::Pending(bootstrap) => Self::Pending(bootstrap),
             WorkerModuleBootstrapStart::Failed(error) => Self::Failed {
                 error,
                 phase: WorkerErrorPhase::Bootstrap,
@@ -3598,3 +3575,5 @@ fn evaluate_classic_worker_bootstrap_script(
 
 #[cfg(test)]
 mod tests;
+
+pub(in crate::worker) use self::dispatch::service_worker_wait_until_callback;

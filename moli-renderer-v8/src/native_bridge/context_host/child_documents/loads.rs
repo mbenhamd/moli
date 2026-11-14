@@ -1,4 +1,4 @@
-use super::super::{ChildBrowsingContextBootstrap, JsContextHost, OwnerDispatchScope};
+use super::super::{ChildBrowsingContextBootstrap, OwnerDispatchScope, PageScriptHost};
 use super::{
     ChildDocumentNavigationInitiator, PendingChildDocumentNavigation,
     configure_child_document_navigation_request,
@@ -6,6 +6,8 @@ use super::{
 };
 #[cfg(test)]
 use crate::referrer_policy::response_referrer_policy_from_headers;
+#[cfg(test)]
+use crate::types::SubresourceInterceptionClasses;
 use crate::{
     content_security_policy::{
         ContentSecurityPolicyViolationEventFields, send_content_security_policy_reports,
@@ -81,7 +83,7 @@ impl AppliedChildDocumentLoadCompletion {
     }
 }
 
-impl JsContextHost {
+impl PageScriptHost {
     pub(in crate::native_bridge::context_host) fn clear_pending_child_document_loads_for_handle(
         &mut self,
         handle: DomHandle,
@@ -487,8 +489,8 @@ impl JsContextHost {
                     // The protected response never receives a Document when enforcement blocks
                     // it, so there is no target on which to dispatch a DOM event. Keep the
                     // violation observable to DevTools on the embedding frame owner instead.
-                    // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-                    unsafe { &mut *self.runtime }
+                    // SAFETY: PageScriptHost is owned by the ScriptVm that owns this DocumentRuntime.
+                    unsafe { &mut *self.document_runtime }
                         .record_content_security_policy_inspector_issue(Some(handle), violation);
                     let fields =
                         ContentSecurityPolicyViolationEventFields::from_url_violation(violation);
@@ -681,7 +683,6 @@ impl JsContextHost {
                     };
                 };
                 entry.clear_cached_snapshot();
-                entry.clear_completed_document_network();
                 self.reject_replaced_service_worker_child_client_navigation(
                     handle,
                     format!("Cannot navigate to URL: {error}"),
@@ -697,13 +698,25 @@ impl JsContextHost {
         let mut parser_stop_action = None;
         let mut owner_transition = None;
         if let Some(snapshot) = snapshot_to_install.as_ref() {
-            let window_commit = self.plan_child_document_window_commit(
-                handle,
-                snapshot,
-                window_commit_preflight,
-                DocumentCreationKind::Navigation,
-                Some(loader_id),
-            );
+            // Publish navigation start, main-resource Network facts and commit
+            // as one owner action before parsing can publish descendants.
+            let document_network = completed_document_network.as_ref().map(|network| {
+                crate::protocol_types::ChildFrameDocumentNetworkActivitySnapshot {
+                    frame_id: network_attribution.frame_id().to_owned(),
+                    parent_frame_id: network_attribution.parent_frame_id().map(ToOwned::to_owned),
+                    loader_id: network_attribution.loader_id().to_owned(),
+                    snapshot: network.clone(),
+                }
+            });
+            let window_commit = self
+                .plan_child_document_window_commit(
+                    handle,
+                    snapshot,
+                    window_commit_preflight,
+                    DocumentCreationKind::Navigation,
+                    Some(loader_id),
+                )
+                .with_document_network(document_network);
             let Some(install) = self.install_child_browsing_context_current_document_from_snapshot(
                 scope,
                 handle,
@@ -712,6 +725,9 @@ impl JsContextHost {
                 false,
                 Some(pending.resource_loader.clone()),
             ) else {
+                if let Some(network) = completed_document_network {
+                    self.record_child_document_load_network(&network_attribution, network);
+                }
                 return ChildDocumentLoadApplication::Applied {
                     followup: None,
                     body_activity,
@@ -726,17 +742,16 @@ impl JsContextHost {
                 let frame_owner_resource_timing = pending
                     .frame_owner_resource_timing
                     .take()
-                    .zip(completed_document_network.clone())
+                    .zip(completed_document_network)
                     .map(|(timing, network)| timing.complete(current_owner, network));
                 entry.bind_completed_frame_owner_resource_timing(frame_owner_resource_timing);
-                entry.bind_completed_document_network(current_owner, completed_document_network);
             }
             self.promote_pending_service_worker_child_client(handle);
         } else {
             if replaces_existing_document {
                 self.disconnect_shared_worker_clients_for_child_context(handle);
             }
-            self.clear_child_window_document_event_state(scope, handle);
+            self.clear_child_window_event_listeners(handle);
             self.replace_child_custom_elements_registry_for_document_commit(scope, handle);
             self.clear_child_browsing_context_current_document(handle);
             self.clear_pending_service_worker_child_client(handle);
@@ -953,19 +968,24 @@ impl ChildDocumentFetch {
         method: String,
         headers: moli_fetch::RequestHeaders,
         body: Option<bytes::Bytes>,
+        body_text: Option<std::sync::Arc<str>>,
     ) {
         if let Some(interception) = self.request.as_mut() {
-            interception.apply_request_override(url, method, headers, body, redirect_headers);
+            interception.apply_request_override(
+                url,
+                method,
+                headers,
+                body,
+                body_text,
+                redirect_headers,
+            );
             let request = interception.request();
             if let Some(info) = self.network_info.as_mut() {
                 info.url = request.url.clone();
                 info.method = request.method.clone();
                 info.request_headers = request.request_headers.clone();
                 info.request_body_bytes = request.body.clone();
-                info.request_body = request
-                    .body
-                    .as_ref()
-                    .map(|body| String::from_utf8_lossy(body).into_owned());
+                info.request_body = request.body_text().map(|text| text.into_owned());
             }
         }
     }
@@ -1273,7 +1293,11 @@ mod tests {
             .unwrap()
             .finish()
             .unwrap();
-            vm.set_fetch_subresource_interception(true, Some(SubresourceResourceType::Document));
+            vm.set_fetch_subresource_interception(
+                SubresourceInterceptionClasses::for_resource_type(
+                    SubresourceResourceType::Document,
+                ),
+            );
             let host = vm.context_host_weak_for_test().upgrade().unwrap();
             let mut host = host.borrow_mut();
             let initiating_owner = host.current_main_document_task_owner().unwrap();

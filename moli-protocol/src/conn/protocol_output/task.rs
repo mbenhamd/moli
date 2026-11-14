@@ -178,6 +178,23 @@ impl CompletedProtocolSchedulerWork {
 }
 
 impl PendingProtocolSchedulerWork {
+    /// Transfer an admitted workflow to the adapter supervisor. Its native
+    /// waits and output authority no longer belong to the initiating command.
+    pub(crate) fn publish_workflow(
+        conn: &mut CdpConnection,
+        workflow: PreparedCommandWorkflow,
+        target_id: Option<String>,
+    ) {
+        let pending = Self {
+            work: PendingProtocolWork::Workflow(super::workflow::PendingProtocolWorkflow::prepare(
+                workflow, target_id,
+            )),
+            access: conn.protocol_state_access(),
+        };
+        conn.scheduler_state
+            .push_scheduler_event(crate::conn::CdpSchedulerEvent::ProtocolTaskPrepared { pending });
+    }
+
     /// Commit browser selection now; supervise only its Native synchronization.
     pub(crate) fn publish_popup_activation(
         conn: &mut CdpConnection,
@@ -364,7 +381,7 @@ impl CdpConnection {
                     };
                     if let Some(pending) = pending {
                         let mut events = Vec::new();
-                        pending.run(&mut events, context.context_mut()).await;
+                        pending.run(&mut events).await;
                         context.context_mut().protocol_events_mut().extend(events);
                     }
                     context.complete(crate::domains::command_output::CommandOutputPlan::default())
@@ -700,8 +717,7 @@ mod tests {
             panic!("the original work retains its channel kind");
         };
         let realm = crate::automation::DevToolsRealmId::from("original-realm");
-        let fact = BackgroundProtocolEvent::immediate_automation_event(
-            json!({"method":"Moli.scriptMessage","params":{}}),
+        let fact = BackgroundProtocolEvent::automation_only(
             crate::automation::AutomationEvent::ScriptMessage(
                 crate::automation::ScriptMessageEvent {
                     target_id: Some("TID-popup-first".into()),
@@ -715,6 +731,7 @@ mod tests {
                 },
             ),
         );
+        assert!(!fact.has_protocol_wire_message());
         let expected = fact.clone();
         let actual = channel.pending.clone();
         // Model an already materialized typed fact in the native turn prefix.
@@ -807,8 +824,9 @@ mod tests {
             })
         });
         let cursor = RendererOutputCursor::new_for_test(stream, 2);
-        let fact = BackgroundProtocolEvent::immediate(
-            json!({"method":"Moli.originalFact","params":{"targetId":"TID-fenced-fact"}}),
+        let fact = BackgroundProtocolEvent::inspector_message(
+            json!({"method":"Tracing.dataCollected","params":{"targetId":"TID-fenced-fact"}}),
+            None,
         );
         ctx.with_fixture(|conn| {
             conn.publish_renderer_fenced_protocol_output(

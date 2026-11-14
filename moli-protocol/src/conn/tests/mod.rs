@@ -34,6 +34,7 @@ use moli_core::{
     runtime::{NavigationEngine, NavigationRuntimeConfig},
 };
 use moli_fetch::FetchConfig;
+use moli_protocol_cdp_defs::LocalCdpEvent;
 use moli_shared_worker::SharedWorkerInstanceId;
 use serde_json::json;
 use std::sync::{
@@ -621,14 +622,17 @@ fn navigation_gate_resolves_websocket_events_to_their_session_target() {
     target_b.attach_active_session("SID-B");
     conn.push_inactive_browser_context_fixture_for_test(target_b);
 
-    let target_b_websocket = BackgroundProtocolEvent::immediate(json!({
-        "method": "Network.webSocketClosed",
-        "sessionId": "SID-B",
-        "params": {
-            "requestId": "REQ-B",
-            "timestamp": 1.0
-        }
-    }));
+    let target_b_websocket = BackgroundProtocolEvent::inspector_message(
+        json!({
+            "method": "Network.webSocketClosed",
+            "sessionId": "SID-B",
+            "params": {
+                "requestId": "REQ-B",
+                "timestamp": 1.0
+            }
+        }),
+        None,
+    );
 
     assert!(target_b_websocket.should_wait_for_background_navigation_completion());
     assert!(conn.has_inflight_background_navigation());
@@ -644,6 +648,57 @@ fn navigation_gate_resolves_websocket_events_to_their_session_target() {
 }
 
 #[test]
+fn navigation_gate_keeps_worker_sessions_out_of_unrelated_page_loads() {
+    use crate::conn::CdpSessionRoute;
+    let mut conn = CdpConnection::new();
+    let mut context = BrowserContext::new("BID-worker-gate".to_owned());
+    context.set_active_target_id("TID-page");
+    context.attach_active_session("SID-page");
+    let navigation = context
+        .start_document_navigation_for_active_target("LOADER-page".to_owned())
+        .unwrap();
+    context
+        .active_page_target_mut()
+        .runtime_slot
+        .page_slot_mut()
+        .claim_background_navigation_completion(&navigation, None)
+        .unwrap();
+    conn.install_browser_context_fixture_for_test(context);
+    for route in [
+        CdpSessionRoute::DedicatedWorkerTarget {
+            browser_context_id: "BID-worker-gate".into(),
+            target_id: "TID-dedicated".into(),
+        },
+        CdpSessionRoute::SharedWorkerTarget {
+            browser_context_id: "BID-worker-gate".into(),
+            target_id: "TID-shared".into(),
+        },
+        CdpSessionRoute::ServiceWorkerTarget {
+            browser_context_id: "BID-worker-gate".into(),
+            target_id: "TID-service".into(),
+        },
+    ] {
+        let target_id = route.target_id().unwrap().to_owned();
+        conn.register_session_route_for_test("SID-worker", route);
+        let event = BackgroundProtocolEvent::immediate_event(
+            LocalCdpEvent::NetworkResponseReceived,
+            json!({
+                "requestId":"worker-script", "type":"Script", "response":{"url":"https://example.test/worker.js", "status":200}
+            }),
+            Some("SID-worker"),
+        );
+        assert!(event.should_wait_for_background_navigation_completion());
+        assert!(conn.has_inflight_background_navigation());
+        assert_eq!(
+            conn.background_navigation_target_id_for_event(&event)
+                .as_deref(),
+            Some(target_id.as_str())
+        );
+        assert!(!conn.has_inflight_background_navigation_for_target(&target_id));
+    }
+}
+
+#[test]
 fn navigation_background_event_queue_drains_current_token() {
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("CTX-nav".to_owned());
@@ -653,7 +708,7 @@ fn navigation_background_event_queue_drains_current_token() {
         .expect("active target should produce navigation token");
     conn.install_browser_context_fixture_for_test(browser_context);
     let message = build_event(
-        "Page.frameStartedLoading",
+        LocalCdpEvent::PageFrameStartedLoading,
         json!({ "frameId": "TID-nav" }),
         None,
     );
@@ -1512,14 +1567,10 @@ async fn memory_diagnostics_splits_pending_inspector_await_counts_by_target_owne
         browser_context.replace_loaded_page(Some(active_page));
         browser_context.active_page_target_mut().devtools_sessions
             [moli_page_types::DevToolsSessionKey::Primary]
-            .register_pending_inspector_await(10_001, Some("SID-pending-await-active"), None);
+            .register_pending_inspector_await(10_001, Some("SID-pending-await-active"));
         browser_context.active_page_target_mut().devtools_sessions
             [moli_page_types::DevToolsSessionKey::Primary]
-            .register_pending_inspector_await(
-                10_002,
-                Some("SID-pending-await-active"),
-                Some("active-group"),
-            );
+            .register_pending_inspector_await(10_002, Some("SID-pending-await-active"));
 
         let mut background = super::PageTargetHost::with_url(
             "TID-pending-await-bg".to_owned(),
@@ -1528,7 +1579,7 @@ async fn memory_diagnostics_splits_pending_inspector_await_counts_by_target_owne
         );
         background.replace_loaded_page(Some(background_page));
         background.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
-            .register_pending_inspector_await(20_001, Some("SID-pending-await-bg"), None);
+            .register_pending_inspector_await(20_001, Some("SID-pending-await-bg"));
         browser_context.insert_page_target_host(background);
 
         let shared_worker_instance_id = SharedWorkerInstanceId::from_u64(30_001);
@@ -1545,7 +1596,6 @@ async fn memory_diagnostics_splits_pending_inspector_await_counts_by_target_owne
             "SID-pending-await-sw",
             30_001,
             Some("SID-pending-await-sw"),
-            None,
         );
         browser_context
             .shared_worker_targets
@@ -1566,7 +1616,6 @@ async fn memory_diagnostics_splits_pending_inspector_await_counts_by_target_owne
             "SID-pending-await-service-worker",
             40_001,
             Some("SID-pending-await-service-worker"),
-            None,
         );
         browser_context
             .service_worker_targets
@@ -1650,12 +1699,12 @@ fn navigation_background_event_queue_drops_stale_token() {
         .expect("active target should produce current token");
     conn.install_browser_context_fixture_for_test(browser_context);
     let stale_message = build_event(
-        "Page.frameStartedLoading",
+        LocalCdpEvent::PageFrameStartedLoading,
         json!({ "frameId": "TID-nav", "loaderId": "LOADER-1" }),
         None,
     );
     let current_message = build_event(
-        "Page.frameStartedLoading",
+        LocalCdpEvent::PageFrameStartedLoading,
         json!({ "frameId": "TID-nav", "loaderId": "LOADER-2" }),
         None,
     );
@@ -1689,17 +1738,17 @@ fn navigation_background_event_queue_preserves_order_for_current_token() {
     conn.install_browser_context_fixture_for_test(browser_context);
 
     let stale_message = build_event(
-        "Page.frameStartedLoading",
+        LocalCdpEvent::PageFrameStartedLoading,
         json!({ "frameId": "TID-nav-order", "loaderId": "LOADER-1" }),
         None,
     );
     let current_first_message = build_event(
-        "Page.frameStartedLoading",
+        LocalCdpEvent::PageFrameStartedLoading,
         json!({ "frameId": "TID-nav-order", "loaderId": "LOADER-2", "step": 1 }),
         None,
     );
     let current_second_message = build_event(
-        "Page.frameStoppedLoading",
+        LocalCdpEvent::PageFrameStoppedLoading,
         json!({ "frameId": "TID-nav-order", "loaderId": "LOADER-2", "step": 2 }),
         None,
     );
@@ -1735,7 +1784,7 @@ fn navigation_background_event_sender_preserves_typed_sidecar_for_current_token(
         .expect("active target should produce current navigation token");
     conn.install_browser_context_fixture_for_test(browser_context);
     let message = build_event(
-        "Page.frameStartedNavigating",
+        LocalCdpEvent::PageFrameStartedNavigating,
         json!({
             "frameId": "TID-nav-typed",
             "loaderId": "LOADER-typed",
@@ -1758,10 +1807,7 @@ fn navigation_background_event_sender_preserves_typed_sidecar_for_current_token(
 
     conn.send_navigation_background_protocol_event(
         current,
-        BackgroundProtocolEvent::immediate_automation_event(
-            message.clone(),
-            automation_event.clone(),
-        ),
+        BackgroundProtocolEvent::inspector_message(message.clone(), Some(automation_event.clone())),
     );
 
     let background_event = rx

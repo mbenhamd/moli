@@ -6,7 +6,7 @@ use std::{collections::hash_map::Entry, future::Future, pin::Pin};
 use moli_page_types::{FrontendCommandId, RendererCallId, RendererInspectorResponseDelivery};
 use moli_protocol_cdp::CdpRendererCommandReplayDispatch;
 use moli_shared_worker::SharedWorkerInstanceId;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::automation::{
     AutomationEvent, DevToolsFrameId, DevToolsRealmId, DevToolsRemoteValue,
@@ -16,9 +16,8 @@ use moli_core::{
     RendererOutputFence, RendererRuntimeCommandCausalIdentity,
     RendererRuntimeInspectorResponseSender,
     page::{
-        MAX_INSPECTOR_PROTOCOL_VALUE_DEPTH, RendererAgentAttachmentId, RendererCommandTurnOutput,
-        RendererInspectorCommandRoute, RendererRuntimeCommandOutput,
-        RendererRuntimeInspectorMessage, RendererRuntimeRealmInfo,
+        RendererAgentAttachmentId, RendererCommandTurnOutput, RendererInspectorCommandRoute,
+        RendererRuntimeCommandOutput, RendererRuntimeInspectorMessage, RendererRuntimeRealmInfo,
     },
 };
 
@@ -43,8 +42,6 @@ pub(crate) enum RuntimeInspectorError {
     UnknownMethod,
     #[error("InvalidParams")]
     InvalidParams,
-    #[error("Cannot find object with given id")]
-    CannotFindObject,
     #[error("ConsoleCommandCompletionFailed: {0}")]
     ConsoleCompletion(&'static str),
     #[error("SessionResponseSenderMissing")]
@@ -69,8 +66,6 @@ pub(crate) enum RuntimeInspectorError {
 
 type RuntimeInspectorResponseReceiver = RuntimeInspectorAsyncCompletionReceiver;
 
-const SHARED_WORKER_RUNTIME_REMOTE_OBJECT_CLEANUP_COMMAND_ID_BASE: u64 = 900_600_000;
-const BIDI_SCRIPT_RESULT_OBJECT_GROUP: &str = "webdriver-bidi";
 const BIDI_CHANNEL_OBJECT_GROUP_PREFIX: &str = "webdriver-bidi-channel-";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -203,30 +198,6 @@ fn runtime_inspector_frontend_response(
     })
 }
 
-#[derive(Debug)]
-enum RuntimeRemoteObjectOwnerIdentity {
-    Page {
-        browser_context_id: String,
-        target_id: Option<String>,
-        devtools_session_id: Option<String>,
-    },
-    SharedWorker {
-        browser_context_id: String,
-        instance_id: SharedWorkerInstanceId,
-        session_id: String,
-    },
-    DedicatedWorker {
-        browser_context_id: String,
-        instance_id: u64,
-        session_id: String,
-    },
-    ServiceWorker {
-        browser_context_id: String,
-        version_id: u64,
-        session_id: String,
-    },
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SharedWorkerRuntimeTargetRoute {
     browser_context_id: String,
@@ -255,7 +226,6 @@ enum BidiChannelListenerRoute {
 pub(crate) struct OwnerRuntimeResponse {
     command_id: u64,
     owner: CommandOwnerScope,
-    object_group: Option<String>,
     message: InspectorJson,
     bidi_channel_listener: Option<BidiChannelListenerResidence>,
 }
@@ -311,7 +281,6 @@ impl OwnerRuntimeResponse {
         Self {
             command_id,
             owner: owner.clone(),
-            object_group: entry.object_group().map(str::to_owned),
             message: message.into(),
             bidi_channel_listener: entry.bidi_channel_listener().cloned(),
         }
@@ -323,10 +292,6 @@ impl OwnerRuntimeResponse {
 
     fn owner(&self) -> &CommandOwnerScope {
         &self.owner
-    }
-
-    fn object_group(&self) -> Option<&str> {
-        self.object_group.as_deref()
     }
 
     fn bidi_channel_listener(&self) -> Option<&BidiChannelListenerResidence> {
@@ -911,6 +876,7 @@ fn push_terminated_renderer_call_error_background_events(
 fn bidi_channel_listener_call_function_json(
     command_id: u64,
     listener: &PendingBidiChannelListener,
+    result_group: &str,
 ) -> String {
     let serialization_options = listener
         .properties()
@@ -927,7 +893,7 @@ fn bidi_channel_listener_call_function_json(
         "objectId": listener.channel_handle().as_str(),
         "awaitPromise": true,
         "returnByValue": !matches!(listener.properties().ownership, DevToolsResultOwnership::Root),
-        "objectGroup": BIDI_SCRIPT_RESULT_OBJECT_GROUP,
+        "objectGroup": result_group,
         "serializationOptions": serialization_options,
     });
     json!({
@@ -960,8 +926,8 @@ pub(crate) use execution_contexts::runtime_realm_inventory_using;
 mod inspector_awaits;
 mod inspector_routing;
 mod protocol_dispatch;
-mod remote_objects;
 mod replay;
+mod runtime_contexts;
 mod worker_cleanup;
 pub(crate) use replay::{
     CompletedRendererCallReplay, PendingRendererCallReplay, PreparedRendererNavigationFinish,
@@ -1020,61 +986,6 @@ fn protocol_global_realm_id(
         return native_realm_id;
     };
     format!("{owner_id}:{native_realm_id}")
-}
-
-fn collect_runtime_remote_object_ids(
-    mut object_ids: Vec<String>,
-    mut stack: Vec<(&Value, usize)>,
-) -> Vec<String> {
-    while let Some((value, remaining_tree_depth)) = stack.pop() {
-        let Some(next_tree_depth) = remaining_tree_depth.checked_sub(1) else {
-            continue;
-        };
-        match value {
-            Value::Object(map) => {
-                for key in ["objectId", "promiseObjectId", "errorObjectId"] {
-                    if let Some(object_id) = map.get(key).and_then(Value::as_str) {
-                        object_ids.push(object_id.to_owned());
-                    }
-                }
-                for child in map.values() {
-                    stack.push((child, next_tree_depth));
-                }
-            }
-            Value::Array(values) => {
-                for child in values {
-                    stack.push((child, next_tree_depth));
-                }
-            }
-            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-        }
-    }
-    object_ids.sort();
-    object_ids.dedup();
-    object_ids
-}
-
-pub(crate) fn runtime_remote_object_ids_in_value(value: &Value) -> Vec<String> {
-    collect_runtime_remote_object_ids(
-        Vec::new(),
-        vec![(value, MAX_INSPECTOR_PROTOCOL_VALUE_DEPTH)],
-    )
-}
-
-pub(crate) fn runtime_remote_object_ids_in_map(map: &Map<String, Value>) -> Vec<String> {
-    let mut object_ids = Vec::new();
-    for key in ["objectId", "promiseObjectId", "errorObjectId"] {
-        if let Some(object_id) = map.get(key).and_then(Value::as_str) {
-            object_ids.push(object_id.to_owned());
-        }
-    }
-    let Some(next_tree_depth) = MAX_INSPECTOR_PROTOCOL_VALUE_DEPTH.checked_sub(1) else {
-        return object_ids;
-    };
-    collect_runtime_remote_object_ids(
-        object_ids,
-        map.values().map(|value| (value, next_tree_depth)).collect(),
-    )
 }
 
 #[cfg(test)]

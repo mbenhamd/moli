@@ -1421,3 +1421,322 @@ async fn websocket_bidi_storage_cookie_commands_execute_through_devtools_runtime
     let _ = socket.close(None).await;
     protocol_server.abort();
 }
+
+#[tokio::test]
+async fn websocket_bidi_completed_synchronous_xhr_never_reports_a_response_pause() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let hits = Arc::new(AtomicUsize::new(0));
+    let observed = hits.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let fixture = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route(
+                    "/",
+                    get(|| async { axum::response::Html("<!doctype html>ready") }),
+                )
+                .route(
+                    "/api",
+                    get(move || {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        async { "network" }
+                    }),
+                ),
+        )
+        .await
+        .unwrap();
+    });
+    let (cdp_addr, server) = spawn_test_protocol_server().await;
+    let (mut socket, _) = connect_async(format!("ws://{cdp_addr}/session"))
+        .await
+        .unwrap();
+    assert_eq!(
+        send_bidi_command(&mut socket, 1, "session.new", json!({})).await["type"],
+        "success"
+    );
+    let create = send_bidi_command(
+        &mut socket,
+        2,
+        "browsingContext.create",
+        json!({"type":"tab"}),
+    )
+    .await;
+    let context = create["result"]["context"].as_str().unwrap().to_owned();
+    assert_eq!(
+        send_bidi_command(
+            &mut socket,
+            3,
+            "browsingContext.navigate",
+            json!({"context":context,"url":format!("http://{addr}/"),"wait":"complete"})
+        )
+        .await["type"],
+        "success"
+    );
+    assert_eq!(send_bidi_command(&mut socket,4,"session.subscribe",json!({
+        "events":["network.responseStarted","network.responseCompleted","network.fetchError"],"contexts":[context]
+    })).await["type"],"success");
+    let intercept = send_bidi_command_response(
+        &mut socket,
+        5,
+        "network.addIntercept",
+        json!({"phases":["responseStarted"],"contexts":[context]}),
+    )
+    .await;
+    assert_eq!(intercept["type"], "success", "{intercept}");
+    // Renderer-owned URLs deliberately bypass Fetch interception. Their
+    // complete response records still must not be labelled as resumable.
+    let url = "data:text/plain,local-body";
+    socket.send(WsMessage::Text(json!({"id":6,"method":"script.evaluate","params":{
+        "target":{"context":context},"awaitPromise":false,
+        "expression":format!("(() => {{const xhr=new XMLHttpRequest();xhr.open('GET',{url:?},false);xhr.send();return xhr.responseText;}})()")
+    }}).to_string().into())).await.unwrap();
+    let mut messages = recv_until_id(&mut socket, 6).await;
+    if !messages.iter().any(|message| {
+        message["method"] == "network.responseCompleted"
+            && message["params"]["request"]["url"] == url
+    }) {
+        messages.extend(
+            recv_until_match(&mut socket, |message| {
+                message["method"] == "network.responseCompleted"
+                    && message["params"]["request"]["url"] == url
+            })
+            .await,
+        );
+    }
+    let reply = messages.iter().find(|message| message["id"] == 6).unwrap();
+    assert_eq!(reply["result"]["result"]["value"], "local-body", "{reply}");
+    for method in ["network.responseStarted", "network.responseCompleted"] {
+        let event = messages
+            .iter()
+            .find(|message| {
+                message["method"] == method && message["params"]["request"]["url"] == url
+            })
+            .expect("synchronous XHR lifecycle event");
+        assert_eq!(event["params"]["isBlocked"], false, "{event}");
+        assert!(event["params"].get("intercepts").is_none(), "{event}");
+    }
+    // The response really pauses while the script remains synchronously in
+    // send(). Its decision travels independently of the Page command queue.
+    socket.send(WsMessage::Text(json!({"id":7,"method":"script.evaluate","params":{
+        "target":{"context":context},"awaitPromise":false,
+        "expression":"(() => {const xhr=new XMLHttpRequest();xhr.open('GET','/api',false);xhr.send();return xhr.responseText;})()"
+    }}).to_string().into())).await.unwrap();
+    let paused = recv_until_match(&mut socket, |message| {
+        message["method"] == "network.responseStarted"
+            && message["params"]["request"]["url"] == format!("http://{addr}/api")
+    })
+    .await;
+    let pause = paused
+        .iter()
+        .find(|message| {
+            message["method"] == "network.responseStarted"
+                && message["params"]["request"]["url"] == format!("http://{addr}/api")
+        })
+        .unwrap();
+    assert_eq!(pause["params"]["isBlocked"], true, "{pause}");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    socket
+        .send(WsMessage::Text(
+            json!({"id":70,"method":"network.continueResponse",
+                "params":{"request":pause["params"]["request"]["request"]}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let mut completed = recv_until_id(&mut socket, 7).await;
+    if !completed.iter().any(|message| message["id"] == 70) {
+        completed.extend(recv_until_id(&mut socket, 70).await);
+    }
+    assert_eq!(
+        completed
+            .iter()
+            .find(|message| message["id"] == 70)
+            .unwrap()["type"],
+        "success"
+    );
+    assert_eq!(
+        completed.iter().find(|message| message["id"] == 7).unwrap()["result"]["result"]["value"],
+        "network"
+    );
+    let removed = send_bidi_command_response(
+        &mut socket,
+        8,
+        "network.removeIntercept",
+        json!({"intercept":intercept["result"]["intercept"]}),
+    )
+    .await;
+    assert_eq!(removed["type"], "success", "{removed}");
+    let reply = send_bidi_command_response(&mut socket,9,"script.evaluate",json!({
+        "target":{"context":context},"awaitPromise":false,
+        "expression":"(() => {const xhr=new XMLHttpRequest();xhr.open('GET','/api',false);xhr.send();return xhr.responseText;})()"
+    })).await;
+    assert_eq!(reply["result"]["result"]["value"], "network", "{reply}");
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    let _ = socket.close(None).await;
+    abort_test_cdp_server(server).await;
+    fixture.abort();
+}
+
+#[tokio::test]
+async fn websocket_bidi_string_pattern_fragments_preserve_real_xhr_pauses() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let hits = Arc::new(AtomicUsize::new(0));
+    let observed = hits.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let fixture = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route(
+                    "/",
+                    get(|| async { axum::response::Html("<!doctype html>ready") }),
+                )
+                .route(
+                    "/api",
+                    get(move || {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        async { "fragment-body" }
+                    }),
+                ),
+        )
+        .await
+        .unwrap();
+    });
+    let (cdp_addr, server) = spawn_test_protocol_server().await;
+    let (mut socket, _) = connect_async(format!("ws://{cdp_addr}/session"))
+        .await
+        .unwrap();
+    assert_eq!(
+        send_bidi_command_response(&mut socket, 1, "session.new", json!({})).await["type"],
+        "success"
+    );
+    let created = send_bidi_command_response(
+        &mut socket,
+        2,
+        "browsingContext.create",
+        json!({"type":"tab"}),
+    )
+    .await;
+    let context = created["result"]["context"].as_str().unwrap().to_owned();
+    let navigated = send_bidi_command_response(
+        &mut socket,
+        3,
+        "browsingContext.navigate",
+        json!({"context":context,"url":format!("http://{addr}/"),"wait":"complete"}),
+    )
+    .await;
+    assert_eq!(navigated["type"], "success", "{navigated}");
+    let subscribed = send_bidi_command_response(
+        &mut socket,
+        4,
+        "session.subscribe",
+        json!({"events":["network.beforeRequestSent","network.responseCompleted","network.fetchError"],"contexts":[context]}),
+    )
+    .await;
+    assert_eq!(subscribed["type"], "success", "{subscribed}");
+    let api = format!("http://{addr}/api");
+    let added = send_bidi_command_response(
+        &mut socket,
+        5,
+        "network.addIntercept",
+        json!({"phases":["beforeRequestSent"],"contexts":[context],
+            "urlPatterns":[{"type":"string","pattern":format!("{api}#ref")}]}),
+    )
+    .await;
+    assert_eq!(added["type"], "success", "{added}");
+    let intercept = added["result"]["intercept"].clone();
+
+    for (index, fragment) in ["", "#ref", "#different"].into_iter().enumerate() {
+        let evaluate_id = 10 + index as u64 * 2;
+        let continue_id = evaluate_id + 1;
+        let url = format!("{api}{fragment}");
+        socket
+            .send(WsMessage::Text(
+                json!({
+                    "id":evaluate_id,"method":"script.evaluate","params":{
+                        "target":{"context":context},"awaitPromise":true,
+                        "expression":format!(r#"new Promise((resolve, reject) => {{
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('GET', {url:?}, true);
+                    xhr.onload = () => resolve(`${{xhr.status}}:${{xhr.responseText}}`);
+                    xhr.onerror = () => reject(new Error('XHR network error'));
+                    xhr.send();
+                }})"#)
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        // Observe either a real pause or a terminal result, so a missed rule
+        // fails on the actual response instead of waiting for a nonexistent pause.
+        let messages = recv_until_match(&mut socket, |message| {
+            (message["method"] == "network.beforeRequestSent"
+                && message["params"]["isBlocked"] == true)
+                || message["method"] == "network.responseCompleted"
+                || message["method"] == "network.fetchError"
+                || message["id"] == evaluate_id
+        })
+        .await;
+        let paused = messages
+            .iter()
+            .find(|message| {
+                message["method"] == "network.beforeRequestSent"
+                    && message["params"]["isBlocked"] == true
+            })
+            .unwrap_or_else(|| panic!("XHR {url} did not pause: {messages:?}"));
+        assert_eq!(paused["params"]["intercepts"], json!([intercept]));
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            index,
+            "{url} reached the server before continueRequest"
+        );
+        assert!(messages.iter().all(|message| message["id"] != evaluate_id));
+        let request = paused["params"]["request"]["request"].clone();
+
+        socket
+            .send(WsMessage::Text(
+                json!({
+                    "id":continue_id,"method":"network.continueRequest","params":{"request":request}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let mut resumed = recv_until_id(&mut socket, continue_id).await;
+        if !resumed.iter().any(|message| message["id"] == evaluate_id) {
+            resumed.extend(recv_until_id(&mut socket, evaluate_id).await);
+        }
+        let completed = |message: &serde_json::Value| {
+            message["method"] == "network.responseCompleted"
+                && message["params"]["request"]["request"] == request
+        };
+        if !resumed.iter().any(completed) {
+            resumed.extend(recv_until_match(&mut socket, completed).await);
+        }
+        let continued = bidi_message_by_id(&resumed, continue_id);
+        assert_eq!(continued["type"], "success", "{continued}");
+        let result = bidi_message_by_id(&resumed, evaluate_id);
+        assert_eq!(
+            result["result"]["result"]["value"], "200:fragment-body",
+            "{result}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), index + 1);
+    }
+    let _ = socket.close(None).await;
+    abort_test_cdp_server(server).await;
+    fixture.abort();
+}

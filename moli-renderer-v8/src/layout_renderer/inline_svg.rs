@@ -1,26 +1,30 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
 // This is a narrow port of Blitz's inline-SVG replaced-element bridge. The
-// live SVG subtree remains owned by NativeDom; a fresh paint pass serializes
-// it into one bounded, immutable `usvg::Tree`. No SVG child layout tree or
-// cross-pass resource cache is retained here.
+// live SVG subtree remains owned by NativeDom; a layout pass serializes its
+// original XML into one bounded, immutable `usvg::Tree`. Only numeric source
+// geometry survives with the outer frozen layout; paint retains the image.
 //
-// Because the tree is reparsed in isolation, every inherited input that
-// affects paint must be projected onto the serialized root: paint group,
-// resolved `currentColor`, root font, and the inherited text longhands. A
-// value left behind is not "slightly different styling"; usvg drops nodes it
-// cannot resolve, so `<text>` disappears from the output entirely.
+// The isolated tree also needs document CSS: sample the computed SVG paint
+// and text inputs separately, after matching selectors on original attributes.
+// Geometry and paint share one decode and the same font shaping.
 
-use std::sync::Arc;
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use moli_layout::{LayoutImageResource, PaintColor, ReplacedMetrics, ResolvedLayoutStyle};
 use style::color::ColorSpace;
+use style::properties::{LonghandId, PropertyId};
 use style::values::computed::{SVGPaint, SVGPaintKind};
 use style_traits::ToCss;
 
 use crate::{
     document_runtime::DomHandle,
-    dom::native::{DomHost, Element},
+    dom::native::Element,
+    native_bridge::{PageScriptHost, element::StyleObservation},
 };
 
 const SVG_NAMESPACE_ATTRIBUTE: &str = " xmlns=\"http://www.w3.org/2000/svg\"";
@@ -41,59 +45,183 @@ pub(super) fn replaced_metrics(element: &Element) -> ReplacedMetrics {
     }
 }
 
-pub(super) fn replaced_resource(
-    host: &DomHost,
-    node: DomHandle,
-    style: &ResolvedLayoutStyle,
-) -> Option<LayoutImageResource> {
-    let declarations = computed_root_declarations(style);
-    let source_limit = moli_image::MAX_ENCODED_SVG_BYTES
-        .saturating_sub(declarations.len())
-        .saturating_sub(SERIALIZED_SOURCE_FIXED_INJECTION_RESERVE);
-    let source = match host.dom().outer_html_with_limit(node, source_limit) {
-        Ok(Some(source)) => source,
-        Ok(None) => return None,
-        Err(error) => {
-            tracing::debug!(
-                node = node.index(),
-                error = ?error,
-                "fresh inline SVG serialization exceeded its input budget"
-            );
-            return None;
-        }
-    };
-    let Some(source) = prepare_source(source, &declarations) else {
-        tracing::debug!(
-            node = node.index(),
-            "inline SVG serialization did not produce an SVG root"
-        );
-        return None;
-    };
-    let svg = match moli_image::decode_svg_image(source.as_bytes()) {
-        Ok(svg) => Arc::new(svg),
-        Err(error) => {
-            tracing::debug!(
-                node = node.index(),
-                error = ?error,
-                "fresh inline SVG resource parse failed"
-            );
-            return None;
-        }
-    };
-    // Inline SVG box sizing comes from Stylo's width/height presentation
-    // hints. The vector object's own dimensions must use the same resolved
-    // root font context, so use the parsed tree size rather than the
-    // context-free metadata probe (which deliberately cannot resolve `em`).
-    let tree_size = svg.tree().size();
-    Some(LayoutImageResource {
-        intrinsic_width: tree_size.width(),
-        intrinsic_height: tree_size.height(),
-        pixels: None,
-        svg: Some(svg),
-    })
+#[cfg(test)]
+thread_local! { static PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+#[cfg(test)]
+pub(crate) fn parse_count() -> usize {
+    PARSE_COUNT.with(std::cell::Cell::get)
 }
 
-fn prepare_source(mut source: String, declarations: &str) -> Option<String> {
+pub(super) fn layout_content(
+    runtime: &PageScriptHost,
+    root: DomHandle,
+    root_style: &ResolvedLayoutStyle,
+    viewport: moli_layout::LayoutSize,
+    reads: &RefCell<StyleObservation<'_>>,
+    paint: bool,
+) -> Option<moli_layout::LayoutSvgContent<DomHandle>> {
+    if viewport.width <= 0.0 || viewport.height <= 0.0 {
+        return None;
+    }
+    let host = runtime.dom_host();
+    // Admit the original XML, before adding any embedding information.
+    let source = host
+        .dom()
+        .outer_html_with_limit(
+            root,
+            moli_image::MAX_ENCODED_SVG_BYTES
+                .saturating_sub(SERIALIZED_SOURCE_FIXED_INJECTION_RESERVE),
+        )
+        .ok()
+        .flatten()?;
+    let source = prepare_source(source)?;
+    let mut elements = Vec::new();
+    let mut pending = vec![(root, None)];
+    let mut referenced_ids = HashSet::new();
+    while let Some((node, parent)) = pending.pop() {
+        let parent = if let Some(element) = host.node(node).and_then(|node| node.as_element()) {
+            if element.is_svg_element("use") {
+                let href = element.attribute("href").or_else(|| {
+                    element
+                        .attributes()
+                        .iter()
+                        .find(|attribute| {
+                            attribute.namespace() == "http://www.w3.org/1999/xlink"
+                                && attribute.local_name() == "href"
+                        })
+                        .map(|attribute| attribute.value())
+                });
+                if let Some(id) = href.and_then(|href| href.strip_prefix('#')) {
+                    referenced_ids.insert(id);
+                }
+            }
+            let index = elements.len();
+            elements.push((node, parent));
+            Some(index)
+        } else {
+            parent
+        };
+        pending.extend(
+            host.dom()
+                .html_serialization_child_ids_reversed(node)
+                .map(|node| (node, parent)),
+        );
+    }
+    let mut profiles = HashMap::<String, moli_image::SvgElementStyle>::new();
+    let mut styles = Vec::with_capacity(elements.len());
+    let mut referenced_scope = vec![false; elements.len()];
+    for (index, (node, parent)) in elements.iter().copied().enumerate() {
+        let element = host
+            .node(node)
+            .and_then(|node| node.as_element())
+            .expect("serialized SVG element");
+        referenced_scope[index] = index != 0
+            && (parent.is_some_and(|parent| referenced_scope[parent])
+                || element.is_svg_element("defs")
+                || element
+                    .attribute("id")
+                    .is_some_and(|id| referenced_ids.contains(id)));
+        if referenced_scope[index] || element.namespace() != "http://www.w3.org/2000/svg" {
+            styles.push(None);
+            continue;
+        }
+        let mut declarations = if node == root {
+            let mut declarations = computed_svg_declarations(root_style);
+            // The outer CSS box already owns its transform and opacity.
+            append_serialized_declaration(&mut declarations, "transform", "none");
+            append_serialized_declaration(&mut declarations, "opacity", "1");
+            for (name, value) in [("width", viewport.width), ("height", viewport.height)] {
+                append_serialized_declaration(&mut declarations, name, &format!("{value}px"));
+            }
+            declarations
+        } else {
+            let Some(computed) = reads.borrow_mut().read(node).computed_values() else {
+                styles.push(None);
+                continue;
+            };
+            let style = ResolvedLayoutStyle::from_stylo(computed);
+            let mut declarations = computed_svg_declarations(&style);
+            let computed = style.stylo_computed_values().expect("resolved SVG style");
+            for (name, value) in [
+                ("display", computed.clone_display().to_css_string()),
+                ("visibility", computed.clone_visibility().to_css_string()),
+                ("opacity", computed.clone_opacity().to_css_string()),
+                ("text-anchor", computed.clone_text_anchor().to_css_string()),
+            ] {
+                append_serialized_declaration(&mut declarations, name, &value);
+            }
+            declarations
+        };
+        if let Some(profile) = profiles.get(&declarations) {
+            styles.push(Some(profile.clone()));
+        } else {
+            let properties =
+                moli_css_parse::parse_declaration_list(&declarations, Default::default())
+                    .into_iter()
+                    .map(|property| {
+                        moli_image::SvgStyleProperty::new(property.name, &property.value)
+                    })
+                    .collect::<Vec<_>>();
+            let profile: moli_image::SvgElementStyle = Arc::from(properties);
+            profiles.insert(std::mem::take(&mut declarations), profile.clone());
+            styles.push(Some(profile));
+        }
+    }
+    #[cfg(test)]
+    PARSE_COUNT.with(|count| count.set(count.get() + 1));
+    let scene = match moli_image::decode_inline_svg_scene(
+        source.as_bytes(),
+        &styles,
+        (viewport.width, viewport.height),
+    ) {
+        Ok(scene) => scene,
+        Err(error) => {
+            tracing::debug!(
+                node = root.index(),
+                ?error,
+                "inline SVG scene decode failed"
+            );
+            return None;
+        }
+    };
+    let objects = scene
+        .objects
+        .into_iter()
+        .filter_map(|geometry| {
+            if geometry.element_index == 0 {
+                return None;
+            }
+            let (source, _) = *elements.get(geometry.element_index)?;
+            let [x, y, width, height] = geometry.bounds;
+            let [a, b, c, d, e, f] = geometry.transform;
+            let map = |x, y| moli_layout::LayoutPoint::new(a * x + c * y + e, b * x + d * y + f);
+            Some((
+                source,
+                moli_layout::LayoutQuad {
+                    points: [
+                        map(x, y),
+                        map(x + width, y),
+                        map(x + width, y + height),
+                        map(x, y + height),
+                    ],
+                },
+            ))
+        })
+        .collect();
+    let image = paint.then(|| {
+        let size = scene.image.tree().size();
+        LayoutImageResource {
+            intrinsic_width: size.width(),
+            intrinsic_height: size.height(),
+            pixels: None,
+            svg: Some(Arc::new(scene.image)),
+        }
+    });
+    Some(moli_layout::LayoutSvgContent { image, objects })
+}
+
+fn prepare_source(mut source: String) -> Option<String> {
     if !source.starts_with("<svg")
         || !source
             .as_bytes()
@@ -111,23 +239,6 @@ fn prepare_source(mut source: String, declarations: &str) -> Option<String> {
         source.insert_str(4, SVG_NAMESPACE_ATTRIBUTE);
     }
 
-    // `outerHTML` carries authored SVG presentation attributes and internal
-    // styles, but external document CSS is not serialized. Project the root's
-    // already-resolved inherited inputs as final inline declarations so
-    // descendant `currentColor` paint and relative SVG lengths see the same
-    // root context as NativeDom/Stylo.
-    // Appending an important declaration also wins over an earlier authored
-    // declaration in the same serialized style attribute; the sampled value
-    // is already the final computed value, so this does not re-run cascade.
-    let root_end = source.find('>')?;
-    if let Some(style_start) = source[..root_end].find(" style=\"") {
-        let value_start = style_start + " style=\"".len();
-        let value_end = value_start + source[value_start..root_end].find('"')?;
-        source.insert_str(value_end, &format!(";{declarations}"));
-    } else {
-        source.insert_str(root_end, &format!(" style=\"{declarations}\""));
-    }
-
     // HTML serialization uses this named entity while XML has no predefined
     // `nbsp` entity. Numeric spelling preserves the character for usvg.
     if source.contains("&nbsp;") {
@@ -136,8 +247,16 @@ fn prepare_source(mut source: String, declarations: &str) -> Option<String> {
     Some(source)
 }
 
-fn computed_root_declarations(style: &ResolvedLayoutStyle) -> String {
-    let mut declarations = inherited_context_declarations(style.current_color(), style.font_size());
+fn computed_svg_declarations(style: &ResolvedLayoutStyle) -> String {
+    // Stylo stores CSS lengths after effective zoom. This scene uses SVG user
+    // units; the outer viewport applies zoom when publishing quads and paint.
+    // Graphics-local zoom also does not transform SVG coordinates.
+    let font_size = style
+        .stylo_computed_values()
+        .map_or(style.font_size(), |computed| {
+            computed.effective_zoom.unzoom(style.font_size())
+        });
+    let mut declarations = inherited_context_declarations(style.current_color(), font_size);
     let Some(computed) = style.stylo_computed_values() else {
         return declarations;
     };
@@ -145,8 +264,8 @@ fn computed_root_declarations(style: &ResolvedLayoutStyle) -> String {
     // Blink paints every SVG LayoutObject from its ComputedStyle. Moli's
     // bounded usvg bridge instead serializes the live subtree, so document
     // stylesheets are no longer present when usvg reparses it. Snapshot the
-    // root's inherited SVG paint group into that isolated document. Child
-    // declarations still override inherited values normally.
+    // element's computed paint group into the isolated scene as final values,
+    // without changing the XML that author selectors match.
     let current_color = computed.clone_color();
     append_svg_paint(
         &mut declarations,
@@ -160,6 +279,21 @@ fn computed_root_declarations(style: &ResolvedLayoutStyle) -> String {
         &computed.clone_stroke(),
         &current_color,
     );
+    // Share CSSOM's typed length resolution: remove effective zoom from
+    // absolute lengths, while leaving percentages (including calc terms)
+    // relative to the unzoomed SVG viewport.
+    for property in [
+        LonghandId::StrokeWidth,
+        LonghandId::StrokeDasharray,
+        LonghandId::StrokeDashoffset,
+    ] {
+        if let Some(value) = crate::style_engine::serialize_resolved_computed_property(
+            computed,
+            PropertyId::NonCustom(property.into()),
+        ) {
+            append_serialized_declaration(&mut declarations, property.name(), &value);
+        }
+    }
     for (name, value) in [
         (
             "fill-opacity",
@@ -169,18 +303,6 @@ fn computed_root_declarations(style: &ResolvedLayoutStyle) -> String {
         (
             "stroke-opacity",
             computed.clone_stroke_opacity().to_css_string(),
-        ),
-        (
-            "stroke-width",
-            computed.clone_stroke_width().to_css_string(),
-        ),
-        (
-            "stroke-dasharray",
-            computed.clone_stroke_dasharray().to_css_string(),
-        ),
-        (
-            "stroke-dashoffset",
-            computed.clone_stroke_dashoffset().to_css_string(),
         ),
         (
             "stroke-linecap",
@@ -211,10 +333,8 @@ fn computed_root_declarations(style: &ResolvedLayoutStyle) -> String {
     append_serialized_declaration(
         &mut declarations,
         "font-family",
-        // Stylo quotes a family name with double quotes and these declarations
-        // land inside a double-quoted `style` attribute of an XML document, so
-        // the value needs XML escaping; usvg decodes it back to authored text.
-        &escape_serialized_value(&computed.clone_font_family().to_css_string()),
+        // Kept out of XML attributes, including quoted family names.
+        &computed.clone_font_family().to_css_string(),
     );
     append_serialized_declaration(
         &mut declarations,
@@ -281,27 +401,6 @@ fn append_serialized_declaration(declarations: &mut String, name: &str, value: &
     declarations.push(':');
     declarations.push_str(value);
     declarations.push_str(" !important;");
-}
-
-/// Escapes a declaration value for a double-quoted `style` attribute of the
-/// serialized XML document.
-///
-/// usvg parses the serialized subtree as XML, where an unescaped `"` would end
-/// the attribute and a bare `&` would start an entity. Only the characters
-/// that can appear in an authored font family (or a quoted CSS value) need
-/// this; the other declarations are numeric or identifier-only.
-fn escape_serialized_value(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '"' => escaped.push_str("&quot;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            other => escaped.push(other),
-        }
-    }
-    escaped
 }
 
 fn rgba_css(color: PaintColor) -> String {

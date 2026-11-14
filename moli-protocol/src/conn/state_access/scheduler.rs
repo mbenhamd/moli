@@ -24,6 +24,14 @@ impl ProtocolWorkflowState<'_> {
     }
 
     #[cfg(feature = "test-support")]
+    pub fn hold_renderer_for_test(
+        self,
+        context: &crate::automation::AutomationContext,
+    ) -> crate::test_support::HeldRenderer {
+        crate::test_support::hold_renderer(self.connection, context)
+    }
+
+    #[cfg(feature = "test-support")]
     pub fn arm_background_navigation_for_test(
         self,
         target_id: &str,
@@ -42,6 +50,15 @@ impl ProtocolWorkflowState<'_> {
         navigation: &crate::test_support::BackgroundNavigationRequestFixture,
     ) -> bool {
         crate::test_support::settle_background_navigation_request(self.connection, navigation)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn push_page_javascript_dialog_for_test(
+        self,
+        context: &crate::automation::AutomationContext,
+        dialog: moli_core::page::RendererPendingJavaScriptDialog,
+    ) {
+        crate::test_support::push_page_javascript_dialog(self.connection, context, dialog);
     }
 
     #[cfg(feature = "test-support")]
@@ -250,6 +267,14 @@ impl ProtocolWorkflowState<'_> {
             .has_pending_javascript_dialog_for_devtools_context(context)
     }
 
+    pub fn has_current_javascript_dialog_for_devtools_context(
+        &self,
+        context: &crate::automation::AutomationContext,
+    ) -> bool {
+        self.connection
+            .has_current_javascript_dialog_for_devtools_context(context)
+    }
+
     pub fn page_screencast_subscription_status(
         self,
         registration: &PageScreencastRegistration,
@@ -367,6 +392,36 @@ impl ProtocolWorkflowState<'_> {
         command: AutomationCommand,
     ) -> AutomationCommandTaskStep {
         self.connection.start_automation_command_dispatch(command)
+    }
+
+    pub fn automation_page_host_scope(
+        self,
+        context: &crate::automation::AutomationContext,
+    ) -> Option<crate::conn::ProtocolPageHostScope> {
+        self.connection.automation_page_host_scope(context)
+    }
+
+    pub fn automation_page_host_can_start_operation(
+        self,
+        scope: &crate::conn::ProtocolPageHostScope,
+    ) -> bool {
+        self.connection
+            .automation_page_host_can_start_operation(scope)
+    }
+
+    pub fn start_automation_command_with_navigation_admission(
+        self,
+        command: AutomationCommand,
+    ) -> Result<AutomationCommandTaskStep, Box<PendingAutomationCommandAdmission>> {
+        self.connection
+            .start_automation_command_with_navigation_admission(command)
+    }
+
+    pub fn resume_automation_command_admission(
+        self,
+        pending: Box<PendingAutomationCommandAdmission>,
+    ) -> Result<AutomationCommandTaskStep, Box<PendingAutomationCommandAdmission>> {
+        self.connection.resume_automation_command_admission(pending)
     }
 
     pub fn start_automation_command_dispatch_with_background_command_id(

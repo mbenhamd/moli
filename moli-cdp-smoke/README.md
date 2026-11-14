@@ -1,6 +1,6 @@
 # moli-cdp-smoke
 
-This is a standalone CDP smoke project for moli. The default suite uses Playwright and raw CDP because those dependencies are managed by `uv`; the Puppeteer group uses the pinned `puppeteer-core` development dependency in this directory. Optional agent-browser, chrome-remote-interface, cdp-use, and Stagehand groups exercise their real published clients when the corresponding local dependencies are installed. High-value protocol contracts should also be mirrored as focused Rust tests near their owning `moli-protocol` boundary so they run under `cargo nextest`.
+This is a standalone CDP smoke project for moli. The default suite uses Playwright and raw CDP, plus pinned Node clients installed with `npm ci`: Puppeteer and the `protocol-schema` group. The latter uses chrome-remote-interface to fetch the live `/json/protocol` description, generate methods and event subscriptions, navigate a page while observing Target, Network, and Page events, and read Tracing results through ReportEvents and ReturnAsStream (with IO.read). It checks every observed notification against the live schema, including inner events from a non-flat Target session. CI runs this group in the full suite. Optional agent-browser, broader chrome-remote-interface workflows, cdp-use, and Stagehand groups exercise their real published clients when the corresponding local dependencies are installed. High-value protocol contracts should also be mirrored as focused Rust tests near their owning `moli-protocol` boundary so they run under `cargo nextest`.
 
 The suite covers real CDP-client workflows: `connect_over_cdp`, concurrent browser and direct-page clients, multiple pages and contexts, navigation, history, `Page.setDocumentContent`, popup target creation, JavaScript dialog events, Network/Fetch routing, workers, WebSocket, file upload, downloads, locator/input flows, DOM/handle flows, Chromium-derived CDP protocol samples, Playwright-upstream-derived route/CDPSession samples, screenshots, `Page.printToPDF`, viewport, and storage/profile behavior. It is not a replacement for unit tests. Its job is to answer whether moli is usable as a Playwright/Puppeteer-style CDP endpoint.
 
@@ -14,6 +14,12 @@ The `protocol` group also opens prompts with two attached Page sessions. Each
 session receives one opening and one closing notification; either session can
 handle the prompt and resume the original evaluation with its supplied text.
 
+The `download` group clicks ordinary attachment links with Playwright pointer
+input, both directly and through a redirect. The click must finish, the download
+must save its complete contents with the response's suggested filename, and the
+source Document must remain usable. Separate controls cover the `download`
+attribute and cancellation of a streaming download.
+
 The default `fetch-font` group enables mixed Font/Image patterns before
 navigation and loads the fixture's valid WOFF2 through CSS `@font-face` and
 `FontFace.load()`. Six font scenarios cover request-stage continue, fulfill,
@@ -26,6 +32,23 @@ pinned Chromium 145.0.7632.6 on 2026-11-07 also observed a failed initial font
 attempt followed by a new interception ID with the same Network ID. The group
 settles each interception and still requires exactly one successful response
 body at response stage and one Network terminal per request.
+
+A synchronous XHR control in Window and DedicatedWorker requests the same
+Font-matching URL under mixed Font/Image/Media patterns. Its class remains
+outside interception eligibility:
+it must return the exact binary response with no Fetch pause and one origin hit.
+The Window control also requires one correlated successful Network terminal;
+Chromium reports Worker Network events on the Worker target rather than the
+Page session. Renderer regressions separately
+require an ordinary route before a native interception controller is created.
+Matching synchronous XHR remains interceptable through the native path.
+
+Eligibility is live target state shared by Documents and dedicated/nested
+Workers, including accepted request views; popup targets start independently.
+Loader retirement does not replace it with a local fallback. Buffered native
+XHR retains its original raw-byte capture for Network consumers while the
+Window/Worker JS boundary materializes a response. Memory-allocation identity,
+disk extent lifetime, non-UTF-8 bytes and release are checked by Rust regressions.
 
 The default `fetch-media` group drives real audio, video and text-track element
 loads. Eleven scenarios cover single Media filters, mixed Image/Media/Font
@@ -388,6 +411,13 @@ All scenarios use local fixture documents, match the navigation's loader and
 and exactly one terminal per command, retain the full wire transcript, and use
 protocol events/responses instead of sleeps or retries.
 
+Five additional cases intercept a real navigation at the Fetch Request stage.
+Before releasing that request, an independent Page must execute, a replacement
+navigation must load, or `Page.stopLoading`, `Page.close`, and
+`Target.closeTarget` must complete. Stopping retains the old Document, replacement
+retains the new URL, and closing must emit the target's destruction. Every
+intercepted navigation still owes exactly one terminal response.
+
 Six mutation cases explicitly preserve Moli's current VM entry boundary:
 `DOM.setAttributeValue`, `DOM.removeNode`, `DOM.scrollIntoViewIfNeeded`,
 `CSS.setStyleSheetText`, `Page.setDocumentContent`, and
@@ -396,7 +426,7 @@ during ordinary pause in Chromium. This is a Moli implementation limitation,
 not a CDP requirement; supporting nested mutation later must deliberately update
 this expectation. CSS editing checks effective computed color, since Chromium
 changes CSSOM without rewriting the style element's DOM text. The group is
-calibrated against `/usr/bin/chromium` 145.0.7632.116 and can run unchanged using
+calibrated against Chromium 156.0.8078.73 and can run unchanged using
 `uv run moli-cdp-smoke --group cdp-ordering --endpoint URL`. Run a bounded stress
 check with `--group cdp-ordering --repeat 20 --jobs 4`; any failed run fails the
 suite.
@@ -671,6 +701,24 @@ headed Debian Chromium 145.0.7632.116 through CDP. It checks the full trusted
 `keydown -> keypress -> beforeinput -> input -> keyup` sequence for Playwright
 typing, cancellation at keypress, the distinct `rawKeyDown` and `char` paths,
 and the absence of keyboard events for `Input.insertText`.
+
+The modifier regression for [#2864](https://github.com/lexmount/moli/issues/2864)
+was calibrated against headless Chrome 156.0.8078.73, including the reported
+Playwright 1.65 client. It covers input, textarea, and contenteditable controls:
+Playwright Alt/Control/Meta shortcuts do not insert text, Shift remains active
+on its own keydown, ordinary combos have exactly one event for each press/release, and
+intentional modifier autorepeat remains observable. It also checks the actual
+Shift+ArrowLeft text selection in input/textarea and each event's
+`getModifierState()` flags.
+
+`Alt+a` produces four keyboard events (Alt down, a down, a up, Alt up), and the
+issue's `Shift+Shift;Shift+ArrowLeft;` log also occurs in Chrome: the first
+`Shift+` is the logger's prefix, not another dispatched event. Playwright's
+literal `Shift+a` inserts `a`; physical `Shift+KeyA` inserts `A`. The regression
+distinguishes both. Explicit CDP `keyDown`/`char` with Alt and supplied text can
+still insert that text, whereas `rawKeyDown` cannot. `Input.insertText` also
+remains usable while Alt is held; shortcut filtering must not erase these
+separate character-input paths.
 
 The default `webgl-viewport` group was calibrated on 2026-09-07 against
 Debian `/usr/bin/chromium` 145.0.7632.116. It uses the same fixture as the
@@ -1186,3 +1234,30 @@ defaults use Mock layout with optional resources and debugger pauses disabled.
 ## Relationship to the Node smoke
 
 The repository still keeps `scripts/playwright-cdp-smoke.mjs`. The Python/uv project is the forward maintenance path. The Node script remains temporarily as a reference implementation until the Python suite has proven equivalent coverage.
+
+`protocol-progress` runs in the default raw-CDP suite. It holds two independent
+navigation responses, queues commands on both Sessions, and releases only the
+second response. The second Session must dispatch its commands in order without
+waiting for the first Session. Shared- and isolated-BrowserContext prompt cases
+hold Page A modal while Page B emits unsolicited timer/console, iframe and
+network output. They issue no Page B command that could accidentally flush its
+journal. Each case records the complete wire trace and checks original command
+and Session identities.
+
+The group also checks a same-target, two-Session `_self` utility call: the
+original result must precede actual realm retirement, while navigation-start
+and request facts may already be visible. A script-created popup self-close
+checks one Target destruction and continued opener progress; its direct
+WebSocket may retire before the closing script's reply arrives.
+
+Run bounded stress with `--group protocol-progress --repeat 20 --jobs 4`;
+Chromium uses the same assertions with `--browser chromium`. A failed repetition
+fails the run. Worker Network routing can additionally be inspected with
+`MOLI_CDP_RUNTIME_TRACE=1` and `--group workers`: a known Worker Session must
+retain its own Target instead of entering the unowned global navigation gate.
+
+`tracing-wire` checks both outcomes of back-to-back start/end commands. If
+startup is interrupted, the end response precedes the specific start error;
+if startup has already completed, the successful start response precedes end.
+Both responses precede trace data and `tracingComplete`. Sending two separate
+WebSocket messages alone does not establish that startup is still pending.
