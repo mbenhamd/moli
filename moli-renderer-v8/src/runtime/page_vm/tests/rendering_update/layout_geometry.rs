@@ -1373,6 +1373,59 @@ document.body.innerHTML = '<div id=a>a</div><div id=b>b</div>';
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn live_geometry_attribute_writes_lay_out_only_when_a_selector_reads_them() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = live_geometry_page(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}div{height:50px}</style>';
+document.body.innerHTML = '<div id=a>a</div><div id=b>b</div>';
+'installed'
+"#,
+        )?;
+        let width = "String(document.getElementById('a').getBoundingClientRect().width)";
+        assert_eq!(page_vm.vm_mut().eval(width)?, "800");
+        let passes = layout_passes(&page_vm);
+        // Writes to data-*, aria-* and class that no selector reads move no
+        // layout input, so each forced read reuses the published layout.
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                r#"(() => { const a = document.getElementById('a'); const b = document.getElementById('b');
+                    const widths = [];
+                    for (let i = 0; i < 10; i++) {
+                        a.setAttribute('data-x', String(i));
+                        a.setAttribute('aria-busy', String(i % 2 === 0));
+                        a.className = 'unused' + i;
+                        widths.push(a.getBoundingClientRect().width, b.getBoundingClientRect().top);
+                    }
+                    return widths.join(','); })()"#,
+            )?,
+            "800,50,".repeat(10).trim_end_matches(',')
+        );
+        assert_eq!(layout_passes(&page_vm), passes);
+
+        // Once a selector reads the attribute, the write lays out exactly once.
+        page_vm.vm_mut().eval(
+            "document.head.insertAdjacentHTML('beforeend', '<style>[data-x=\"9\"]{width:300px}</style>');'ruled'",
+        )?;
+        page_vm
+            .vm_mut()
+            .eval("document.getElementById('a').setAttribute('data-x', '8');'reset'")?;
+        assert_eq!(page_vm.vm_mut().eval(width)?, "800");
+        let passes = layout_passes(&page_vm);
+        page_vm
+            .vm_mut()
+            .eval("document.getElementById('a').setAttribute('data-x', '9');'selected'")?;
+        assert_eq!(page_vm.vm_mut().eval(width)?, "300");
+        assert_eq!(layout_passes(&page_vm), passes + 1);
+        assert_eq!(page_vm.vm_mut().eval(width)?, "300");
+        assert_eq!(layout_passes(&page_vm), passes + 1);
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("live attribute fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn live_geometry_computed_auto_inset_follows_the_current_layout_in_one_pass() {
     run_page_vm_async_test(async move {
         let mut page_vm = live_geometry_page(
