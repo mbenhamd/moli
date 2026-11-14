@@ -120,13 +120,13 @@ curl-sys = { git = "https://github.com/lexmount/curl-rust", rev = "0392e12475d8d
 cookie = { git = "https://github.com/ldm0/cookie-rs", branch = "priority" }
 v8 = { path = "vendor/v8-152.2.0" }
 deno_v8 = { path = "vendor/deno_v8-0.3.0" }
-selectors = { git = "https://github.com/mbenhamd/stylo", rev = "6a2949833f0278cbff5c1b371935bafa388459cb" }
-servo_arc = { git = "https://github.com/mbenhamd/stylo", rev = "6a2949833f0278cbff5c1b371935bafa388459cb" }
-stylo = { git = "https://github.com/mbenhamd/stylo", rev = "6a2949833f0278cbff5c1b371935bafa388459cb" }
-stylo_atoms = { git = "https://github.com/mbenhamd/stylo", rev = "6a2949833f0278cbff5c1b371935bafa388459cb" }
-stylo_dom = { git = "https://github.com/mbenhamd/stylo", rev = "6a2949833f0278cbff5c1b371935bafa388459cb" }
-stylo_static_prefs = { git = "https://github.com/mbenhamd/stylo", rev = "6a2949833f0278cbff5c1b371935bafa388459cb" }
-stylo_traits = { git = "https://github.com/mbenhamd/stylo", rev = "6a2949833f0278cbff5c1b371935bafa388459cb" }
+selectors = { git = "https://github.com/mbenhamd/stylo", rev = "9512129b6f88b475fc3e35472697c62f5a51016f" }
+servo_arc = { git = "https://github.com/mbenhamd/stylo", rev = "9512129b6f88b475fc3e35472697c62f5a51016f" }
+stylo = { git = "https://github.com/mbenhamd/stylo", rev = "9512129b6f88b475fc3e35472697c62f5a51016f" }
+stylo_atoms = { git = "https://github.com/mbenhamd/stylo", rev = "9512129b6f88b475fc3e35472697c62f5a51016f" }
+stylo_dom = { git = "https://github.com/mbenhamd/stylo", rev = "9512129b6f88b475fc3e35472697c62f5a51016f" }
+stylo_static_prefs = { git = "https://github.com/mbenhamd/stylo", rev = "9512129b6f88b475fc3e35472697c62f5a51016f" }
+stylo_traits = { git = "https://github.com/mbenhamd/stylo", rev = "9512129b6f88b475fc3e35472697c62f5a51016f" }
 svgtypes = { git = "https://github.com/lexmount/svgtypes", branch = "moli" }
 # Resolve SVG relative font weights using the CSS inherited-weight ranges.
 usvg = { git = "https://github.com/lexmount/resvg", rev = "02b16a3cc3ca4dd019293c45aacf89ca11875ed9" }
