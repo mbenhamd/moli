@@ -131,7 +131,7 @@ impl PageScriptHost {
     /// an iframe), so every Host borrow here ends before that call.
     pub(crate) fn dispatch_authorized_web_lock_task(
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         target: WindowDocumentTaskTarget,
         kind: RendererPageMiscPlatformApiTaskKind,
         request: crate::web_locks_runtime::WebLockRequestId,
