@@ -130,10 +130,10 @@ stylo_traits = { git = "https://github.com/mbenhamd/stylo", rev = "ed8e815e4c3be
 svgtypes = { git = "https://github.com/lexmount/svgtypes", branch = "moli" }
 # Resolve SVG relative font weights using the CSS inherited-weight ranges.
 usvg = { git = "https://github.com/lexmount/resvg", rev = "02b16a3cc3ca4dd019293c45aacf89ca11875ed9" }
-taffy = { git = "https://github.com/mbenhamd/taffy", rev = "a303f35847a093dc3dfd07defa03484079c5f8b5" }
+taffy = { git = "https://github.com/mbenhamd/taffy", rev = "5976d56ad9a78b3a256cdfbe19aa445f5d8bb340" }
 
 [patch."https://github.com/DioxusLabs/taffy"]
-taffy = { git = "https://github.com/mbenhamd/taffy", rev = "a303f35847a093dc3dfd07defa03484079c5f8b5" }
+taffy = { git = "https://github.com/mbenhamd/taffy", rev = "5976d56ad9a78b3a256cdfbe19aa445f5d8bb340" }
 
 [workspace.lints.clippy]
 disallowed_methods = "deny"
