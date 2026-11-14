@@ -339,7 +339,7 @@ where
     // against the converged world rather than on every container-query
     // iteration.
     let phase_started = Instant::now();
-    let object_geometry = prepare_svg_content(&mut world, source);
+    let object_geometry = prepare_svg_content(&mut world, source, services);
     numeric_layout_elapsed += phase_started.elapsed();
     let phase_started = Instant::now();
     let mut embedded_frames = HashMap::new();
@@ -497,8 +497,10 @@ where
 fn prepare_svg_content<S: LayoutSource>(
     world: &mut crate::LayoutWorld<S::NodeId>,
     source: &S,
+    services: &mut DocumentLayoutServices,
 ) -> Vec<crate::LayoutObjectGeometry<S::NodeId>> {
     let mut objects = Vec::new();
+    let mut fonts = None;
     for (index, layout_box) in world.boxes.iter_mut().enumerate() {
         if !layout_box
             .element_semantics()
@@ -529,7 +531,8 @@ fn prepare_svg_content<S: LayoutSource>(
                 / zoom)
                 .max(0.0),
         );
-        if let Some(content) = source.svg_content(node, &layout_box.style, viewport) {
+        let fonts = fonts.get_or_insert_with(|| services.svg_fonts());
+        if let Some(content) = source.svg_content(node, &layout_box.style, viewport, fonts) {
             layout_box.replaced_image = content.image;
             objects.extend(content.objects.into_iter().map(|(source, quad)| {
                 crate::LayoutObjectGeometry {

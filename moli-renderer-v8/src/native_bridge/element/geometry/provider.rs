@@ -131,10 +131,25 @@ pub(crate) fn read_client_rects(
     runtime: &PageScriptHost,
     source: DomHandle,
 ) -> Result<Vec<ClientRect>, LayoutError> {
+    // Real layout publishes SVG object geometry with the scene, so its answer
+    // stays frozen with every other read of that publication. The screen-CTM
+    // computation from live attributes only covers SVG content the
+    // publication has no geometry for.
+    if runtime.layout_policy().uses_real_layout() && screen_svg_content(runtime, source) {
+        let published = read_layout_client_rects(runtime, source)?;
+        if !published.is_empty() {
+            return Ok(published);
+        }
+    }
     if let Some(rects) = read_svg_content_client_rects(runtime, source)? {
         return Ok(rects);
     }
     read_css_box_client_rects(runtime, source)
+}
+
+fn screen_svg_content(runtime: &PageScriptHost, source: DomHandle) -> bool {
+    crate::context_bootstrap::svg_runtime::screen::svg_layout_viewport_root(runtime, source)
+        .is_some()
 }
 
 /// Client rects of a source that has CSS boxes: in the Document's pass, or,

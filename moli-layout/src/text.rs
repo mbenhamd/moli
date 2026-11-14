@@ -925,6 +925,8 @@ pub struct DocumentLayoutServices {
     /// Type-erased world from the previous live pass. Single owner, cleared
     /// whenever fonts or the layout policy change what shaping would produce.
     retained_world: Option<Box<dyn std::any::Any>>,
+    /// Inline SVG text faces, rebuilt only when the web-font inputs move.
+    svg_fonts: Option<(WebFontRetentionKey, moli_image::SvgFonts)>,
     #[cfg(test)]
     font_collection_rebuilds: usize,
 }
@@ -965,6 +967,7 @@ impl DocumentLayoutServices {
             font_epoch: 0,
             text_layout_passes: 0,
             retained_world: None,
+            svg_fonts: None,
             #[cfg(test)]
             font_collection_rebuilds: 0,
         }
@@ -982,6 +985,7 @@ impl DocumentLayoutServices {
             font_epoch: 0,
             text_layout_passes: 0,
             retained_world: None,
+            svg_fonts: None,
             #[cfg(test)]
             font_collection_rebuilds: 0,
         }
@@ -1037,6 +1041,40 @@ impl DocumentLayoutServices {
             epoch: self.font_epoch,
             order: self.web_font_order.clone(),
         }
+    }
+
+    /// The faces inline SVG text resolves against: this view's web fonts
+    /// under their `@font-face` names, plus platform fonts when the policy
+    /// allows them. Unicode ranges are not applied; usvg selects whole faces.
+    pub(crate) fn svg_fonts(&mut self) -> moli_image::SvgFonts {
+        let key = self.web_font_retention_key();
+        if let Some((cached, fonts)) = &self.svg_fonts
+            && *cached == key
+        {
+            return fonts.clone();
+        }
+        let fonts = if self.web_fonts.is_empty() && self.system_font_policy.is_enabled() {
+            moli_image::SvgFonts::system()
+        } else {
+            moli_image::SvgFonts::with_web_fonts(
+                ordered_web_fonts(&self.web_fonts, &self.web_font_order)
+                    .into_iter()
+                    .map(|(_, font)| moli_image::SvgWebFont {
+                        family: font.face.family_name().to_owned(),
+                        data: std::sync::Arc::new(font.sfnt_bytes.clone()),
+                        weight: font.face.weight(),
+                        stretch: font.face.stretch(),
+                        style: font.face.style().map(|style| match style {
+                            WebFontStyle::Normal => moli_image::SvgWebFontStyle::Normal,
+                            WebFontStyle::Italic => moli_image::SvgWebFontStyle::Italic,
+                            WebFontStyle::Oblique(_) => moli_image::SvgWebFontStyle::Oblique,
+                        }),
+                    }),
+                self.system_font_policy.is_enabled(),
+            )
+        };
+        self.svg_fonts = Some((key, fonts.clone()));
+        fonts
     }
 
     fn note_web_font_change(&mut self) {
@@ -1398,6 +1436,7 @@ impl DocumentLayoutServices {
             font_epoch: self.font_epoch,
             text_layout_passes: 0,
             retained_world: None,
+            svg_fonts: None,
             #[cfg(test)]
             font_collection_rebuilds: 0,
         };

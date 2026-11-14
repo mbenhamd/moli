@@ -317,12 +317,14 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
         node: DomHandle,
         style: &moli_layout::ResolvedLayoutStyle,
         viewport: moli_layout::LayoutSize,
+        fonts: &moli_image::SvgFonts,
     ) -> Option<moli_layout::LayoutSvgContent<DomHandle>> {
         super::inline_svg::layout_content(
             self.runtime,
             node,
             style,
             viewport,
+            fonts,
             &self.styles,
             self.paint_resources,
         )

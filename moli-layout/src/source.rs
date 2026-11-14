@@ -653,11 +653,14 @@ pub trait LayoutSource {
     /// Resolves inline SVG after its CSS viewport has completed numeric layout.
     /// Object quads use unzoomed CSS pixels relative to the SVG content origin.
     /// The returned geometry and optional paint resource belong to this pass.
+    /// `fonts` holds the Document's active web fonts, so SVG text shapes with
+    /// the faces CSS text selects.
     fn svg_content(
         &self,
         _node: Self::NodeId,
         _style: &ResolvedLayoutStyle,
         _viewport: crate::LayoutSize,
+        _fonts: &moli_image::SvgFonts,
     ) -> Option<LayoutSvgContent<Self::NodeId>> {
         None
     }

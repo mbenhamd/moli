@@ -40,14 +40,107 @@ const DEFAULT_OBJECT_HEIGHT: f32 = 150.0;
 
 /// Font faces available to one SVG text parse plus the family that unstyled
 /// `<text>` falls back to.
-struct SvgFonts {
+///
+/// Cloning shares the face database, so an embedding document can keep one
+/// combined set across layout passes.
+#[derive(Clone)]
+pub struct SvgFonts {
     database: Arc<usvg::fontdb::Database>,
     /// An installed family, used wherever `fontdb`'s advertised default is
     /// absent from the machine.
     default_family: String,
 }
 
+/// One `@font-face` an embedding document has loaded, with its descriptors.
+///
+/// `data` is the decoded SFNT. Missing descriptors keep the font's own
+/// metadata, as they do for CSS text.
+pub struct SvgWebFont {
+    pub family: String,
+    pub data: Arc<dyn AsRef<[u8]> + Send + Sync>,
+    pub weight: Option<f32>,
+    /// Percentage, `100.0` being normal width.
+    pub stretch: Option<f32>,
+    pub style: Option<SvgWebFontStyle>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SvgWebFontStyle {
+    Normal,
+    Italic,
+    Oblique,
+}
+
 impl SvgFonts {
+    /// The platform faces SVG images use when no document fonts apply.
+    pub fn system() -> Self {
+        SVG_FONTS.clone()
+    }
+
+    /// Adds a document's web fonts, named by their `@font-face` family, to
+    /// the platform faces (when `system_fonts`) for its inline SVG text.
+    ///
+    /// A platform face whose family a web font names is left out: CSS font
+    /// matching never reaches the installed family once `@font-face` defines
+    /// it. Platform faces stay first so per-character fallback keeps
+    /// preferring them, as it does for CSS text.
+    pub fn with_web_fonts(
+        web_fonts: impl IntoIterator<Item = SvgWebFont>,
+        system_fonts: bool,
+    ) -> Self {
+        let web_fonts = web_fonts.into_iter().collect::<Vec<_>>();
+        let mut database = usvg::fontdb::Database::new();
+        if system_fonts {
+            let system = &SVG_FONTS.database;
+            for face in system.faces() {
+                let shadowed = face.families.iter().any(|(family, _)| {
+                    web_fonts
+                        .iter()
+                        .any(|font| font.family.eq_ignore_ascii_case(family))
+                });
+                if !shadowed {
+                    database.push_face_info(face.clone());
+                }
+            }
+            database.set_serif_family(system.family_name(&usvg::fontdb::Family::Serif));
+            database.set_sans_serif_family(system.family_name(&usvg::fontdb::Family::SansSerif));
+            database.set_monospace_family(system.family_name(&usvg::fontdb::Family::Monospace));
+            database.set_cursive_family(system.family_name(&usvg::fontdb::Family::Cursive));
+            database.set_fantasy_family(system.family_name(&usvg::fontdb::Family::Fantasy));
+        }
+        for font in web_fonts {
+            // Parse the face metadata once, then register it under the CSS
+            // family name with the rule's descriptors.
+            let mut parsed = usvg::fontdb::Database::new();
+            let Some(id) = parsed
+                .load_font_source(usvg::fontdb::Source::Binary(font.data))
+                .first()
+                .copied()
+            else {
+                continue;
+            };
+            let Some(mut face) = parsed.face(id).cloned() else {
+                continue;
+            };
+            face.families = vec![(font.family, usvg::fontdb::Language::English_UnitedStates)];
+            if let Some(weight) = font.weight {
+                face.weight = usvg::fontdb::Weight(weight.round().clamp(1.0, 1000.0) as u16);
+            }
+            if let Some(stretch) = font.stretch {
+                face.stretch = stretch_from_percentage(stretch);
+            }
+            if let Some(style) = font.style {
+                face.style = match style {
+                    SvgWebFontStyle::Normal => usvg::fontdb::Style::Normal,
+                    SvgWebFontStyle::Italic => usvg::fontdb::Style::Italic,
+                    SvgWebFontStyle::Oblique => usvg::fontdb::Style::Oblique,
+                };
+            }
+            database.push_face_info(face);
+        }
+        Self::from_database(database)
+    }
+
     fn from_database(database: usvg::fontdb::Database) -> Self {
         // An empty database cannot shape anything; keep usvg's own default so
         // the failure mode stays "unsupported content is omitted" instead of
@@ -157,6 +250,24 @@ fn fontdb_stretch(stretch: usvg::FontStretch) -> usvg::fontdb::Stretch {
         usvg::FontStretch::ExtraExpanded => usvg::fontdb::Stretch::ExtraExpanded,
         usvg::FontStretch::UltraExpanded => usvg::fontdb::Stretch::UltraExpanded,
     }
+}
+
+/// Maps a CSS `font-stretch` percentage to the nearest keyword width.
+fn stretch_from_percentage(percentage: f32) -> usvg::fontdb::Stretch {
+    use usvg::fontdb::Stretch;
+    [
+        (56.25, Stretch::UltraCondensed),
+        (68.75, Stretch::ExtraCondensed),
+        (81.25, Stretch::Condensed),
+        (93.75, Stretch::SemiCondensed),
+        (106.25, Stretch::Normal),
+        (118.75, Stretch::SemiExpanded),
+        (137.5, Stretch::Expanded),
+        (175.0, Stretch::ExtraExpanded),
+    ]
+    .into_iter()
+    .find_map(|(limit, stretch)| (percentage < limit).then_some(stretch))
+    .unwrap_or(Stretch::UltraExpanded)
 }
 
 fn fontdb_style(style: usvg::FontStyle) -> usvg::fontdb::Style {
@@ -309,6 +420,7 @@ pub fn decode_inline_svg_scene(
     bytes: &[u8],
     styles: &[Option<SvgElementStyle>],
     viewport: (f32, f32),
+    fonts: &SvgFonts,
 ) -> Result<SvgScene, SvgDecodeError> {
     check_encoded_budget(bytes)?;
     let source = std::str::from_utf8(bytes).map_err(|_| SvgDecodeError::InvalidUtf8)?;
@@ -342,7 +454,6 @@ pub fn decode_inline_svg_scene(
         .enumerate()
         .map(|(index, node)| (node.id(), index))
         .collect::<HashMap<_, _>>();
-    let fonts = &SVG_FONTS;
     let options = usvg::Options {
         fontdb: fonts.database.clone(),
         font_family: fonts.default_family.clone(),
@@ -542,7 +653,8 @@ mod tests {
         let source = br##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><defs><clipPath id="empty"/></defs><rect x="10" y="20" width="30" height="40" clip-path="url(#empty)"/></svg>"##;
         let profile: SvgElementStyle = Arc::from([SvgStyleProperty::new("fill", "red")]);
         let styles = [None, None, None, Some(profile)];
-        let mut scene = decode_inline_svg_scene(source, &styles, (100.0, 100.0)).unwrap();
+        let mut scene =
+            decode_inline_svg_scene(source, &styles, (100.0, 100.0), &SvgFonts::system()).unwrap();
         let shape = scene
             .objects
             .iter()
@@ -558,7 +670,7 @@ mod tests {
             "numeric geometry is moved out, never duplicated in the retained paint tree"
         );
         assert!(matches!(
-            decode_inline_svg_scene(source, &[], (100.0, 100.0)),
+            decode_inline_svg_scene(source, &[], (100.0, 100.0), &SvgFonts::system()),
             Err(SvgDecodeError::StyleElementCount { .. })
         ));
     }

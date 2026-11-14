@@ -58,6 +58,7 @@ pub(super) fn layout_content(
     root: DomHandle,
     root_style: &ResolvedLayoutStyle,
     viewport: moli_layout::LayoutSize,
+    fonts: &moli_image::SvgFonts,
     reads: &RefCell<StyleObservation<'_>>,
     paint: bool,
 ) -> Option<moli_layout::LayoutSvgContent<DomHandle>> {
@@ -174,6 +175,7 @@ pub(super) fn layout_content(
         source.as_bytes(),
         &styles,
         (viewport.width, viewport.height),
+        fonts,
     ) {
         Ok(scene) => scene,
         Err(error) => {
