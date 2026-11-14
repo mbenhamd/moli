@@ -1362,7 +1362,7 @@ mod dependency_tests {
     use super::*;
 
     #[test]
-    fn sticky_resolves_a_scroll_space_outside_its_layout_parent_chain() {
+    fn sticky_ignores_a_scroller_outside_its_containing_block_chain() {
         fn box_for(id: usize) -> crate::world::LayoutBox<usize> {
             LayoutWorld::new_box(
                 Some(id),
@@ -1432,10 +1432,13 @@ mod dependency_tests {
             })
             .collect();
         projection.build_coordinate_spaces().unwrap();
+        // The sticky box's tree parent is the scroller, but its containing
+        // block is the root, so it does not scroll with the scroller and
+        // sticks to the root scrollport instead: 0 + top 10, as Chromium does.
         let sticky = &projection.coordinate_spaces[2].layout;
         assert_eq!(
             sticky.local_to_viewport.map_point(LayoutPoint::ZERO).y,
-            50.0
+            10.0
         );
         // The output pass borrows the numeric world and never patches locations.
         assert_eq!(world.boxes[1].final_layout.location.y, 0.0);

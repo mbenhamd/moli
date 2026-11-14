@@ -77,7 +77,12 @@ where
     if layout_box.style.position() != crate::LayoutPosition::Sticky {
         return Ok(None);
     }
-    let mut ancestor = layout_box.parent;
+    // The scroll container is the nearest scroll-container ancestor on the
+    // containing-block chain (Blink's ContainingScrollContainer follows
+    // Container()), not on the box-tree chain: an abspos box whose containing
+    // block lies outside a scroller does not scroll with it, so a sticky box
+    // inside it sticks to the outer scrollport.
+    let mut ancestor = layout_box.layout_parent;
     let mut scroll_container = world.root;
     let mut remaining = world.boxes.len();
     while let Some(candidate) = ancestor {
@@ -98,7 +103,7 @@ where
             scroll_container = candidate;
             break;
         }
-        ancestor = candidate_box.parent;
+        ancestor = candidate_box.layout_parent;
     }
     let scrollport = scroll_extents[scroll_container.index()].scrollport;
     let layout = layout_box.final_layout;
