@@ -1796,6 +1796,28 @@ document.body.innerHTML = '<div id=cb>lead <span id=tx>text</span><div id=ov><di
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn live_incremental_layout_matches_a_full_rebuild_below_a_changed_inline_positioned_box() {
+    run_page_vm_async_test(async move {
+        // `#tip` is positioned inside a container with inline content. A text
+        // change inside it dirties `#tip`, while its `.icon` subtree is unchanged.
+        run_incremental_differential(
+            r#"
+document.head.innerHTML = '<style>html,body{margin:0}#cb{position:relative;width:300px}#tip{position:absolute;left:0;top:0;width:120px}.icon{padding:4px}.icon i{display:block;width:16px;height:16px}</style>';
+document.body.innerHTML = '<div id=cb>lead <span>text</span><div id=tip><b id=lbl>1</b><div class=icon><i></i></div></div></div>';
+'installed'
+"#,
+            &[
+                "document.getElementById('lbl').textContent = 'two words';",
+                "document.getElementById('lbl').textContent = '1';",
+            ],
+        )?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("changed inline positioned box fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn live_geometry_scrolls_a_node_adopted_back_from_a_foreign_document() {
     run_page_vm_async_test(async move {
         let mut page_vm = live_geometry_page(
