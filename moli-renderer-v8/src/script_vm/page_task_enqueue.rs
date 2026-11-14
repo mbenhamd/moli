@@ -755,6 +755,10 @@ impl ScriptVm {
         self.document_runtime.next_ready_timeout_deadline(selection)
     }
 
+    pub(crate) fn has_ready_animation_frame_callback(&self) -> bool {
+        self.document_runtime.has_ready_animation_frame_callback()
+    }
+
     pub(crate) fn next_timeout_deadline(&self) -> Option<Instant> {
         self.document_runtime.next_timeout_deadline()
     }

@@ -43,6 +43,9 @@ pub enum ActionBarrier {
     Screenshot,
     Screencast,
     Explicit,
+    /// The page is about to run animation-frame callbacks; pending input must
+    /// be visible to them, as it is in a browser's rendering update.
+    AnimationFrame,
 }
 
 /// One retained input with its original admission metadata.
