@@ -17,7 +17,7 @@ pub fn canonicalize_fill_style(raw: &str) -> Option<String> {
         }
         return Some(canonical_rgba(red, green, blue, alpha));
     }
-    None
+    parse_srgb_color_function(&value).map(|color| color.serialize())
 }
 
 pub fn fill_style_rgba(style: &str) -> [u8; 4] {
@@ -34,7 +34,78 @@ pub fn fill_style_rgba(style: &str) -> [u8; 4] {
     if value == "transparent" {
         return [0, 0, 0, 0];
     }
+    if let Some(color) = parse_srgb_color_function(&value) {
+        return color.rgba();
+    }
     [0, 0, 0, 255]
+}
+
+/// A CSS Color 4 `color(srgb r g b [/ alpha])` value. `None` is a `none`
+/// component, which paints as zero but keeps its keyword when serialized.
+///
+/// Computed `color-mix()` and other non-legacy sRGB colors serialize in this
+/// form, so canvas styles copied from `getComputedStyle()` must accept it.
+struct SrgbColor {
+    channels: [Option<f64>; 3],
+    alpha: Option<f64>,
+}
+
+impl SrgbColor {
+    fn serialize(&self) -> String {
+        let component =
+            |value: Option<f64>| value.map_or_else(|| "none".to_owned(), |value| value.to_string());
+        let [red, green, blue] = self.channels.map(component);
+        match self.alpha {
+            Some(alpha) if alpha >= 1.0 => format!("color(srgb {red} {green} {blue})"),
+            alpha => format!("color(srgb {red} {green} {blue} / {})", component(alpha)),
+        }
+    }
+
+    fn rgba(&self) -> [u8; 4] {
+        let byte =
+            |value: Option<f64>| (value.unwrap_or(0.0).clamp(0.0, 1.0) * 255.0).round() as u8;
+        let [red, green, blue] = self.channels.map(byte);
+        [red, green, blue, byte(self.alpha)]
+    }
+}
+
+fn parse_srgb_color_function(value: &str) -> Option<SrgbColor> {
+    let body = value.strip_prefix("color(")?.strip_suffix(')')?;
+    let (components, alpha) = match body.split_once('/') {
+        Some((components, alpha)) => (components, Some(alpha.trim())),
+        None => (body, None),
+    };
+    let mut tokens = components.split_ascii_whitespace();
+    if tokens.next()? != "srgb" {
+        return None;
+    }
+    let red = parse_srgb_component(tokens.next()?)?;
+    let green = parse_srgb_component(tokens.next()?)?;
+    let blue = parse_srgb_component(tokens.next()?)?;
+    if tokens.next().is_some() {
+        return None;
+    }
+    let alpha = match alpha {
+        Some(alpha) if alpha.split_ascii_whitespace().count() != 1 => return None,
+        Some(alpha) => parse_srgb_component(alpha)?.map(|alpha| alpha.clamp(0.0, 1.0)),
+        None => Some(1.0),
+    };
+    Some(SrgbColor {
+        channels: [red, green, blue],
+        alpha,
+    })
+}
+
+/// Parses one `<number> | <percentage> | none` component; `Some(None)` is `none`.
+fn parse_srgb_component(token: &str) -> Option<Option<f64>> {
+    if token == "none" {
+        return Some(None);
+    }
+    let value = match token.strip_suffix('%') {
+        Some(percent) => percent.parse::<f64>().ok()? / 100.0,
+        None => token.parse::<f64>().ok()?,
+    };
+    value.is_finite().then_some(Some(value))
 }
 
 fn hex_color_rgba(value: &str) -> Option<[u8; 4]> {
