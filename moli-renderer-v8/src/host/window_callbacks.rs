@@ -81,6 +81,13 @@ impl ScheduledWindowWebIdlCallback {
         }
     }
 
+    pub(super) const fn is_animation_frame(&self) -> bool {
+        matches!(
+            self.kind,
+            WindowWebIdlCallbackTaskKind::AnimationFrame { .. }
+        )
+    }
+
     pub(super) fn is_geolocation_watch<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
