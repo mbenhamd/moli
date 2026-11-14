@@ -36,6 +36,8 @@ where
     /// Viewport scroll policy as the builder produced it, before numeric
     /// preparation revealed scrollbars or rewrote the root and defining body.
     pub(crate) viewport_policy: crate::world::ViewportScrollPolicy,
+    /// Web fonts this world was shaped with.
+    pub(crate) web_fonts: crate::text::WebFontRetentionKey,
 }
 
 /// Which boxes in a fresh world may take products from a retained world.
@@ -234,6 +236,42 @@ where
         for (index, layout_box) in new.boxes.iter().enumerate().take(builder_len) {
             if crate::table::is_table_root_kind(layout_box.kind) && !numeric_clean[index] {
                 mark_subtree_unclean(new, LayoutBoxId::from_index(index), &mut numeric_clean);
+            }
+        }
+        // A positioned box with an IFC static position is laid out by
+        // `finish_inline_positioned_layout`, after the numeric snapshot was
+        // taken. Its retained cache answers for descendant geometry that the
+        // snapshot never recorded, so a cache hit would leave the subtree at
+        // its snapshot values. Neither the box nor its subtree reuses results,
+        // also when the box itself changed: its clean descendants would still
+        // answer from the cache.
+        let clean_before_static_positions = numeric_clean.clone();
+        for index in 0..builder_len {
+            if self.prior.world.boxes[index]
+                .inline_static_position
+                .is_some()
+            {
+                mark_subtree_unclean(new, LayoutBoxId::from_index(index), &mut numeric_clean);
+            }
+        }
+        // The static position itself belongs to the owner's IFC. Parley only
+        // records it when it lays that IFC out, so an owner that reuses its
+        // numeric result would leave the box unplaced. Carry it across when
+        // the box changed only through the rule above and the same owner
+        // reuses its IFC unchanged.
+        for index in 0..builder_len {
+            if numeric_clean[index] || !clean_before_static_positions[index] {
+                continue;
+            }
+            let Some(position) = self.prior.world.boxes[index].inline_static_position else {
+                continue;
+            };
+            let owner = position.owner.index();
+            if owner < builder_len
+                && numeric_clean[owner]
+                && new.boxes[index].inline_context_owner == Some(position.owner)
+            {
+                new.boxes[index].inline_static_position = Some(position);
             }
         }
         for (index, is_clean) in numeric_clean.iter().enumerate() {

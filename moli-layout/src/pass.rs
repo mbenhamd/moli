@@ -245,10 +245,14 @@ where
     // check can put the resolver back after its own full pass.
     let mut applied_sizes: Option<Vec<(S::NodeId, crate::LayoutQueryContainerSize)>> = None;
     // Web fonts change shaping through registration and per-pass face order,
-    // neither of which a box comparison can see, so they keep the full path.
-    let can_retain = request.retain_world && services.web_font_count() == 0;
+    // neither of which a box comparison can see, so a world shaped under
+    // other web-font inputs is dropped.
+    let can_retain = request.retain_world;
+    let web_fonts = services.web_font_retention_key();
     let mut retained: Option<RetainedLayout<S::NodeId>> = if can_retain {
-        services.take_retained_world()
+        services
+            .take_retained_world::<RetainedLayout<S::NodeId>>()
+            .filter(|prior| prior.web_fonts == web_fonts)
     } else {
         services.clear_retained_world();
         None
@@ -327,6 +331,7 @@ where
                 viewport: request.viewport,
                 environment: request.environment,
                 viewport_policy: built_policy,
+                web_fonts: web_fonts.clone(),
             });
         }
     };
@@ -408,6 +413,7 @@ where
             viewport: request.viewport,
             environment: request.environment,
             viewport_policy: built_policy,
+            web_fonts,
         });
     }
     if used_retained_world && verify_incremental_layout() {
