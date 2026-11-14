@@ -54,6 +54,18 @@ static COMPUTED_LONGHAND_METADATA: LazyLock<ComputedLonghandMetadata> = LazyLock
     if stylo_property_is_enabled_for_style_rule("-webkit-line-clamp") {
         longhands.push("-webkit-line-clamp");
     }
+    // Chromium's `-webkit-box-*` longhands are Stylo aliases of the hidden
+    // `-moz-box-*` longhands.
+    for alias in [
+        "-webkit-box-align",
+        "-webkit-box-direction",
+        "-webkit-box-orient",
+        "-webkit-box-pack",
+    ] {
+        if stylo_property_is_enabled_for_style_rule(alias) {
+            longhands.push(alias);
+        }
+    }
     longhands.sort_unstable_by(|left, right| canonical_property_order(left, right));
     longhands.dedup();
     let first_vendor_index = longhands

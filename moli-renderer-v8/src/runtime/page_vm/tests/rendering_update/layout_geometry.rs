@@ -2003,3 +2003,33 @@ return out.join('|');
     .await
     .expect("line clamp CSSOM fixture should run");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn webkit_box_line_clamp_computes_like_chromium() {
+    run_page_vm_async_test(async move {
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let mut page_vm = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/webkit-box.html")?,
+        );
+        let result = page_vm.vm_mut().eval(
+            r#"(() => {
+document.head.innerHTML = '<style>#a{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}#b{display:-webkit-box}</style>';
+document.body.innerHTML = '<div id=a></div><div id=b></div>';
+const a = getComputedStyle(document.getElementById('a'));
+const b = getComputedStyle(document.getElementById('b'));
+return [a.display, a.getPropertyValue('-webkit-box-orient'), a.webkitBoxOrient,
+  b.display, b.getPropertyValue('-webkit-box-orient'),
+  CSS.supports('-webkit-box-orient', 'vertical'), CSS.supports('display', '-webkit-box')].join('|');
+})()"#,
+        )?;
+        // Chromium 147: a vertical -webkit-box with -webkit-line-clamp
+        // computes to flow-root; without the clamp it stays -webkit-box.
+        assert_eq!(result, "flow-root|vertical|vertical|-webkit-box|horizontal|true|true");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("webkit-box fixture should run");
+}

@@ -3,6 +3,10 @@
 // test-only fixture aligned with the Stylo fork's former Gecko-gate coverage.
 pub(crate) const FORMER_GECKO_GATED_SUPPORTED_PROPERTIES: &[&str] = &[
     "-webkit-line-clamp",
+    "-webkit-box-align",
+    "-webkit-box-direction",
+    "-webkit-box-orient",
+    "-webkit-box-pack",
     "anchor-name",
     "anchor-scope",
     "clip-rule",
