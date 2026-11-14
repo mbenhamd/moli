@@ -8,6 +8,33 @@ use super::*;
 
 mod target_message;
 
+#[test]
+fn raw_inspector_notifications_retain_bytes_without_schema_gating() {
+    let router = CdpFrontendRouter::new();
+    let (sink, mut writer) = CdpSocketSink::with_stalled_writer_for_test(2);
+    router
+        .register_browser_frontend(5, "SID-browser".into(), sink)
+        .unwrap();
+    for text in [
+        r#"{"method":"Runtime.consoleAPICalled","sessionId":"SID-browser","params":{"args":[{"value":"\ud800"}]}}"#,
+        r#"{"method":"Runtime.someUnknownEvent","sessionId":"SID-browser","params":{"args":[{"value":"\udfff"}]}}"#,
+    ] {
+        let raw = InspectorJson::from_slice(text.as_bytes()).unwrap();
+        let mut expected = raw.clone();
+        expected.set_session_id(None);
+        let event =
+            moli_protocol::conn::BackgroundProtocolEvent::inspector_message(raw.clone(), None);
+        assert!(event.has_protocol_wire_message());
+        assert!(router.enqueue_protocol_output_sequence(
+            ProtocolOutputSequence::from_background_events(vec![event])
+        ));
+        assert_eq!(writer.take_text(), expected.to_string());
+        assert!(!raw.is_materialized());
+        assert!(writer.is_open());
+        assert!(writer.is_empty());
+    }
+}
+
 fn test_sink() -> CdpSocketSink {
     CdpSocketSink::for_test()
 }

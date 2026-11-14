@@ -2,14 +2,14 @@
 //! queue. Index backfill holds that entry across all bounded record round trips.
 
 use crate::context_bootstrap::indexed_db::{
-    INDEXED_DB_TRANSACTION_ABORTED_SLOT, INDEXED_DB_TRANSACTION_FINISHED_SLOT, IndexInfo,
-    IndexedDbError, IndexedDbTransactionOperation, Key, KeyConversionError, TransactionHandle,
-    ValueDecodeSession, extract_index_keys_from_value, finish_transaction_abort,
-    object_bool_property, request_error_object, schedule_internal_transaction_operation,
+    IndexInfo, IndexedDbError, IndexedDbTransactionOperation, Key, KeyConversionError,
+    TransactionHandle, ValueDecodeSession, extract_index_keys_from_value, finish_transaction_abort,
+    indexed_db_transaction_status, request_error_object, schedule_internal_transaction_operation,
     typed_state::sql::{
         ensure_sql_transaction_rollback, sql_transaction_cancellation, submit_indexed_db_sql_task,
     },
 };
+
 use moli_indexeddb::sqlite::{
     Query, Seek,
     service::{Command, CommandResult, Completion, DatabaseClient},
@@ -17,7 +17,8 @@ use moli_indexeddb::sqlite::{
 
 struct Backfill {
     transaction: TransactionHandle,
-    store: moli_indexeddb::IndexedDbName,
+    store: moli_indexeddb::sqlite::StoreId,
+    index_id: moli_indexeddb::sqlite::IndexId,
     index: IndexInfo,
 }
 
@@ -31,7 +32,7 @@ impl Backfill {
     ) -> bool {
         let command = Command::Query {
             transaction: self.transaction,
-            store: self.store.clone(),
+            store: self.store,
             query: Query {
                 blob_references: true,
                 seek: after.map(|key| Seek {
@@ -143,8 +144,8 @@ impl Backfill {
                 };
                 let command = Command::BackfillIndex {
                     transaction: self.transaction,
-                    store: self.store.clone(),
-                    name: self.index.name.clone(),
+                    store: self.store,
+                    index: self.index_id,
                     primary_key: after.clone(),
                     keys,
                 };
@@ -183,7 +184,11 @@ pub(in crate::context_bootstrap::indexed_db) fn schedule_schema_operation<'s>(
     transaction: v8::Local<'s, v8::Object>,
     client: DatabaseClient,
     command: Command,
-    backfill: Option<(moli_indexeddb::IndexedDbName, IndexInfo)>,
+    backfill: Option<(
+        moli_indexeddb::sqlite::StoreId,
+        moli_indexeddb::sqlite::IndexId,
+        IndexInfo,
+    )>,
 ) -> Result<(), IndexedDbError> {
     let handle = crate::context_bootstrap::indexed_db::transaction_handle_from_value(
         scope,
@@ -192,9 +197,10 @@ pub(in crate::context_bootstrap::indexed_db) fn schedule_schema_operation<'s>(
     .ok_or_else(|| {
         IndexedDbError::TransactionInactive("Schema operation lost its transaction".into())
     })?;
-    let backfill = backfill.map(|(store, index)| Backfill {
+    let backfill = backfill.map(|(store, index_id, index)| Backfill {
         transaction: handle,
         store,
+        index_id,
         index,
     });
     let operation = IndexedDbTransactionOperation::sql(move |scope, target| {
@@ -258,9 +264,8 @@ fn finish<'s>(scope: &mut v8::PinScope<'s, '_>, target: v8::Local<'s, v8::Object
 }
 
 fn stopped<'s>(scope: &mut v8::PinScope<'s, '_>, target: v8::Local<'s, v8::Object>) -> bool {
-    object_bool_property(scope, target, INDEXED_DB_TRANSACTION_ABORTED_SLOT).unwrap_or(false)
-        || object_bool_property(scope, target, INDEXED_DB_TRANSACTION_FINISHED_SLOT)
-            .unwrap_or(false)
+    indexed_db_transaction_status(scope, target)
+        .is_some_and(|state| state.aborted || state.finished)
 }
 
 fn abort<'s>(

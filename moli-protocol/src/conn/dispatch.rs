@@ -431,11 +431,17 @@ impl CdpConnection {
         command: crate::automation::AutomationCommand,
         params: serde_json::Value,
         id: u64,
+        cleanup_group: Option<String>,
         context: &mut CommandDispatchContext,
     ) -> CdpCommandTaskStep {
         let session_id = owner.session_id().map(str::to_owned);
         match crate::domains::runtime::start_protocol_neutral_runtime_inspector_command(
-            self, owner, command, params, id,
+            self,
+            owner,
+            command,
+            params,
+            id,
+            cleanup_group,
         ) {
             Ok(crate::domains::runtime::RuntimeCommandTaskStep::Pending(pending)) => {
                 self.pending_step(PendingCdpCommandDispatchKind::Runtime(pending))
@@ -813,18 +819,7 @@ impl CdpConnection {
         // A command's agent readiness is independent of the publication that
         // created its Target. Join the existing build; never create a second
         // installer or make modal handling / close wait for adoption.
-        let method = req.method();
-        let needs_page = (method.starts_with("Runtime.")
-            && !matches!(method, "Runtime.terminateExecution" | "Runtime.disable"))
-            || matches!(
-                method,
-                "Page.enable"
-                    | "Page.navigate"
-                    | "Page.getFrameTree"
-                    | "Page.getResourceTree"
-                    | "Page.createIsolatedWorld"
-            );
-        if needs_page {
+        if command.requires_initial_document_adoption() {
             let owner = CommandOwnerScope::capture(self, req.session_id());
             if let Some(waiter) = self
                 .runtime_session_owner_slot_for_owner(&owner)

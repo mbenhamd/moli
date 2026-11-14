@@ -8,17 +8,16 @@ use super::super::{
         v8_string, v8str,
     },
 };
-use super::JsContextHost;
 use super::node::{
-    element_name_for_owner_document, node_is_document, node_is_element,
-    node_runtime_and_handle_from_object, node_runtime_and_handle_from_object_or_detached,
-    node_text_content_getter_function, require_element_getter_receiver,
-    require_element_setter_receiver, set_text_content_in_reaction_scope,
-    throw_incompatible_getter_receiver, throw_incompatible_method_receiver,
-    throw_incompatible_setter_receiver,
+    current_or_live_delegate_node_arg_handle, element_name_for_owner_document, node_is_document,
+    node_is_element, node_runtime_and_handle_from_object,
+    node_runtime_and_handle_from_object_or_detached, node_text_content_getter_function,
+    require_element_getter_receiver, require_element_setter_receiver,
+    set_text_content_in_reaction_scope, throw_incompatible_getter_receiver,
+    throw_incompatible_method_receiver, throw_incompatible_setter_receiver,
 };
-use crate::document_runtime::DomHandle;
-use crate::web_api_interfaces;
+use super::{PageScriptHost, wrapped_handle_value};
+use crate::{custom_elements, document_runtime::DomHandle, web_api_interfaces, webidl};
 use moli_webapi_declare::{WebApiFunctionTemplate, WebApiTemplateValue};
 
 #[cfg(feature = "ace-protocol")]
@@ -192,20 +191,23 @@ use super::document::{
     detached_shadow_root_selection_value, node_shadow_root_element_from_point_callback,
     node_shadow_root_elements_from_point_callback,
 };
+#[cfg(test)]
+pub(crate) use activation::activate_handle_via_click;
 #[cfg(feature = "ace-protocol")]
 pub(crate) use activation::activate_handle_via_click_with_detail_and_modifiers;
 use activation::navigate_form_target_browsing_context;
 pub(crate) use activation::{
-    SpecialBrowsingContextTarget, navigate_existing_browsing_context_target,
-    navigate_named_iframe_target,
+    SpecialBrowsingContextTarget, TextInputSource, navigate_existing_browsing_context_target,
+    navigate_named_iframe_target, perform_text_input,
 };
 pub(crate) use activation::{
-    accepts_drop_default_action, activate_handle_after_pointer_release, activate_handle_via_click,
-    activate_handle_via_keyboard, activate_handle_via_synthetic_click,
-    dispatched_click_activation_target, finish_legacy_activation_for_dispatched_click,
-    perform_auxiliary_link_default_action, perform_click_default_action_for_dispatched_event,
-    perform_drop_default_action, prepare_legacy_activation_for_dispatched_click,
-    replace_contenteditable_selection, scroll_to_url_fragment_or_top,
+    accepts_drop_default_action, activate_handle_after_pointer_release,
+    activate_handle_after_touch_release, activate_handle_via_keyboard,
+    activate_handle_via_synthetic_click, dispatched_click_activation_target,
+    finish_legacy_activation_for_dispatched_click, perform_auxiliary_link_default_action,
+    perform_click_default_action_for_dispatched_event, perform_drop_default_action,
+    prepare_legacy_activation_for_dispatched_click, replace_contenteditable_selection,
+    scroll_to_document_fragment_target, scroll_to_url_fragment_or_top,
     select_contenteditable_contents,
 };
 pub(super) use activation::{input_show_picker_callback, node_click_callback};
@@ -258,6 +260,7 @@ use details_dialog::{
     perform_summary_click_default_action,
 };
 pub(crate) use details_dialog::{
+    perform_dialog_escape_default_action_for_dispatched_event,
     queue_details_toggle_event_for_attribute_change, queue_parser_details_toggle_event,
     queue_parser_details_toggle_events_in_subtree,
 };
@@ -287,20 +290,20 @@ pub(crate) use events::{
     construct_mouse_event_with_related_target_for_target, construct_pointer_event,
     construct_pointer_event_with_modifiers, construct_pointer_event_with_related_target,
     construct_pointer_event_with_related_target_and_modifiers, construct_simple_event,
-    construct_submit_event, construct_toggle_event, construct_touch_event,
-    construct_touch_event_with_points, construct_wheel_event_for_target, dispatch_beforeinput,
-    dispatch_public_event,
+    construct_submit_event, construct_toggle_event, construct_touch_event_with_points,
+    construct_wheel_event_for_target, dispatch_beforeinput, dispatch_public_event,
 };
+pub(crate) use focus::is_disabled_form_control;
+use focus::is_focusable;
 pub(crate) use focus::{
     contenteditable_editing_host, focus_element, focus_live_element_for_inspector,
-    perform_access_key_default_action_for_dispatched_event,
+    initial_contenteditable_caret, perform_access_key_default_action_for_dispatched_event,
     perform_hover_interest_default_action_for_dispatched_event, perform_mouse_focus_default_action,
     perform_tab_focus_default_action_for_dispatched_event, post_parse_autofocus_is_pending,
     process_post_parse_autofocus, reset_focus_from_previous_handle,
     reset_focus_from_previous_handle_with_previous_focus_within, schedule_focus_blur_if_needed,
-    update_focus,
+    update_focus, update_focus_preserving_selection,
 };
-use focus::{is_disabled_form_control, is_focusable};
 pub(super) use focus::{node_blur_callback, node_focus_callback};
 pub(super) use forms::{
     button_command_for_element_getter_function, button_command_for_element_setter_function,
@@ -421,7 +424,7 @@ pub use geometry::ClientRect;
 #[cfg(test)]
 pub(crate) use geometry::observable_scrollbar_hit_test;
 pub(crate) use geometry::{
-    InputSurfaceHit, apply_scroll_observable_effects, input_surface_hit_test,
+    InputHit, InputSurfaceHit, apply_scroll_observable_effects, input_surface_hit_test,
     observable_caret_position, observable_deep_hit_test, observable_document_metrics,
     observable_event_offset, observable_geometry_batch, observable_geometry_query,
     observable_input_hit_test, observable_sources_with_fragments,
@@ -680,7 +683,7 @@ use url_attributes::{
 
 pub(in crate::native_bridge) fn set_live_element_attribute_appending_to_current_reaction_queue(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
     name: &str,
     value: &str,
@@ -725,7 +728,7 @@ pub(in crate::native_bridge) fn set_live_element_attribute_appending_to_current_
 
 pub(in crate::native_bridge) fn set_live_element_attribute_ns_appending_to_current_reaction_queue(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
     namespace: Option<&str>,
     prefix: Option<&str>,
@@ -781,7 +784,7 @@ pub(in crate::native_bridge) fn set_live_element_attribute_ns_appending_to_curre
 
 pub(in crate::native_bridge) fn remove_live_element_attribute_appending_to_current_reaction_queue(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
     name: &str,
 ) -> bool {
@@ -822,7 +825,7 @@ pub(in crate::native_bridge) fn remove_live_element_attribute_appending_to_curre
 
 fn clear_detached_iframe_context_before_navigation_attribute_change(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
     name: &str,
     next_value: Option<&str>,
@@ -846,7 +849,7 @@ fn clear_detached_iframe_context_before_navigation_attribute_change(
 
 pub(in crate::native_bridge) fn remove_live_element_attribute_ns_appending_to_current_reaction_queue(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
     namespace: Option<&str>,
     local_name: &str,
@@ -984,7 +987,7 @@ fn element_getter_receiver<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     receiver: v8::Local<'s, v8::Object>,
     member: &str,
-) -> Option<(*mut JsContextHost, DomHandle)> {
+) -> Option<(*mut PageScriptHost, DomHandle)> {
     let Ok((runtime_ptr, handle)) =
         node_runtime_and_handle_from_object_or_detached(scope, receiver)
     else {
@@ -1001,7 +1004,7 @@ fn element_setter_receiver<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     receiver: v8::Local<'s, v8::Object>,
     member: &str,
-) -> Option<(*mut JsContextHost, DomHandle)> {
+) -> Option<(*mut PageScriptHost, DomHandle)> {
     let Ok((runtime_ptr, handle)) =
         node_runtime_and_handle_from_object_or_detached(scope, receiver)
     else {
@@ -1020,7 +1023,7 @@ pub(in crate::native_bridge::element) fn html_element_getter_receiver<'s>(
     interface: &'static str,
     member: &'static str,
     local_name: &'static str,
-) -> Option<(*mut JsContextHost, DomHandle)> {
+) -> Option<(*mut PageScriptHost, DomHandle)> {
     let Ok((runtime_ptr, handle)) =
         node_runtime_and_handle_from_object_or_detached(scope, receiver)
     else {
@@ -1043,7 +1046,7 @@ pub(in crate::native_bridge::element) fn html_element_setter_receiver<'s>(
     interface: &'static str,
     member: &'static str,
     local_name: &'static str,
-) -> Option<(*mut JsContextHost, DomHandle)> {
+) -> Option<(*mut PageScriptHost, DomHandle)> {
     let Ok((runtime_ptr, handle)) =
         node_runtime_and_handle_from_object_or_detached(scope, receiver)
     else {
@@ -1064,7 +1067,7 @@ pub(in crate::native_bridge::element) fn html_media_element_getter_receiver<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     receiver: v8::Local<'s, v8::Object>,
     member: &'static str,
-) -> Option<(*mut JsContextHost, DomHandle)> {
+) -> Option<(*mut PageScriptHost, DomHandle)> {
     let Ok((runtime_ptr, handle)) =
         node_runtime_and_handle_from_object_or_detached(scope, receiver)
     else {
@@ -1085,7 +1088,7 @@ pub(in crate::native_bridge::element) fn html_media_element_setter_receiver<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     receiver: v8::Local<'s, v8::Object>,
     member: &'static str,
-) -> Option<(*mut JsContextHost, DomHandle)> {
+) -> Option<(*mut PageScriptHost, DomHandle)> {
     let Ok((runtime_ptr, handle)) =
         node_runtime_and_handle_from_object_or_detached(scope, receiver)
     else {
@@ -1106,7 +1109,7 @@ pub(in crate::native_bridge::element) fn html_media_element_method_receiver<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     receiver: v8::Local<'s, v8::Object>,
     method: &'static str,
-) -> Option<(*mut JsContextHost, DomHandle)> {
+) -> Option<(*mut PageScriptHost, DomHandle)> {
     let Ok((runtime_ptr, handle)) =
         node_runtime_and_handle_from_object_or_detached(scope, receiver)
     else {
@@ -1127,7 +1130,7 @@ fn document_element_or_shadow_root_getter_receiver<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     receiver: v8::Local<'s, v8::Object>,
     member: &str,
-) -> Option<(*mut JsContextHost, DomHandle)> {
+) -> Option<(*mut PageScriptHost, DomHandle)> {
     let Ok((runtime_ptr, handle)) =
         node_runtime_and_handle_from_object_or_detached(scope, receiver)
     else {
@@ -1678,12 +1681,214 @@ fn aria_string_attribute_setter_callback<'s>(
     rv.set_undefined();
 }
 
-fn aria_element_reference_slot(attribute: &str) -> String {
-    format!("__moliAriaElementReference:{attribute}")
+fn aria_element_reference_array_cache_slot(attribute: &str) -> String {
+    format!("__moliAriaElementReferenceArrayCache:{attribute}")
 }
 
 fn aria_element_reference_is_singular(attribute: &str) -> bool {
     attribute == "aria-activedescendant"
+}
+
+struct AriaElementReferenceValue<'s> {
+    object: v8::Local<'s, v8::Object>,
+    runtime_ptr: *mut PageScriptHost,
+    handle: DomHandle,
+}
+
+impl<'s> webidl::WebIdlConverter<'s> for AriaElementReferenceValue<'s> {
+    type Options = ();
+
+    fn convert(
+        scope: &mut v8::PinScope<'s, '_>,
+        value: v8::Local<'s, v8::Value>,
+        _context: webidl::Context,
+        _options: &Self::Options,
+    ) -> std::result::Result<Self, webidl::WebIdlError> {
+        let object = v8::Local::<v8::Object>::try_from(value).map_err(|_| {
+            webidl::WebIdlError::custom_message("ARIA element references must be Elements.")
+        })?;
+        let (runtime_ptr, handle) = node_runtime_and_handle_from_object_or_detached(scope, object)
+            .map_err(|_| {
+                webidl::WebIdlError::custom_message("ARIA element references must be Elements.")
+            })?;
+        if !node_is_element(unsafe { &*runtime_ptr }, handle) {
+            return Err(webidl::WebIdlError::custom_message(
+                "ARIA element references must be Elements.",
+            ));
+        }
+        Ok(Self {
+            object,
+            runtime_ptr,
+            handle,
+        })
+    }
+}
+
+fn aria_element_reference_handle_for_owner(
+    scope: &mut v8::PinScope<'_, '_>,
+    owner_runtime_ptr: *mut PageScriptHost,
+    reference: AriaElementReferenceValue<'_>,
+) -> Option<DomHandle> {
+    current_or_live_delegate_node_arg_handle(scope, owner_runtime_ptr, reference.object.into())
+        .filter(|handle| node_is_element(unsafe { &*owner_runtime_ptr }, *handle))
+        .or_else(|| (reference.runtime_ptr == owner_runtime_ptr).then_some(reference.handle))
+}
+
+fn aria_element_reference_is_in_valid_scope(
+    runtime: &PageScriptHost,
+    owner: DomHandle,
+    candidate: DomHandle,
+) -> bool {
+    if !node_is_element(runtime, candidate) {
+        return false;
+    }
+    let Some(candidate_root) = runtime.dom_host().root_node_handle(candidate) else {
+        return false;
+    };
+    let Some(mut owner_root) = runtime.dom_host().root_node_handle(owner) else {
+        return false;
+    };
+    loop {
+        if candidate_root == owner_root {
+            return true;
+        }
+        if !runtime.dom_host().is_shadow_root(owner_root) {
+            return false;
+        }
+        let Some(host) = runtime.dom_host().shadow_root_host(owner_root) else {
+            return false;
+        };
+        let Some(next_root) = runtime.dom_host().root_node_handle(host) else {
+            return false;
+        };
+        owner_root = next_root;
+    }
+}
+
+fn aria_element_by_id_including_disconnected(
+    runtime: &PageScriptHost,
+    owner: DomHandle,
+    id: &str,
+) -> Option<DomHandle> {
+    if id.is_empty() {
+        return None;
+    }
+    let root = runtime.dom_host().root_node_handle(owner)?;
+    let mut stack = vec![root];
+    while let Some(candidate) = stack.pop() {
+        if node_is_element(runtime, candidate)
+            && runtime.dom_host().get_attribute(candidate, "id").as_deref() == Some(id)
+        {
+            return Some(candidate);
+        }
+        stack.extend(runtime.dom_host().child_handles_reversed(candidate));
+    }
+    None
+}
+
+fn aria_element_reference_content_handles(
+    runtime: &PageScriptHost,
+    owner: DomHandle,
+    attribute: &str,
+) -> Option<Vec<DomHandle>> {
+    let value = runtime.dom_host().get_attribute(owner, attribute)?;
+    if aria_element_reference_is_singular(attribute) {
+        return Some(
+            aria_element_by_id_including_disconnected(runtime, owner, &value)
+                .into_iter()
+                .collect(),
+        );
+    }
+    Some(
+        value
+            .split([' ', '\t', '\n', '\r', '\u{000c}'])
+            .filter(|token| !token.is_empty())
+            .filter_map(|token| aria_element_by_id_including_disconnected(runtime, owner, token))
+            .collect(),
+    )
+}
+
+fn aria_element_reference_handles(
+    runtime: &PageScriptHost,
+    owner: DomHandle,
+    attribute: &str,
+) -> Option<Vec<DomHandle>> {
+    match runtime
+        .dom_host()
+        .explicit_element_references(owner, attribute)
+    {
+        Some(references) => Some(
+            references
+                .into_iter()
+                .filter(|candidate| {
+                    aria_element_reference_is_in_valid_scope(runtime, owner, *candidate)
+                })
+                .collect(),
+        ),
+        None => aria_element_reference_content_handles(runtime, owner, attribute),
+    }
+}
+
+fn aria_element_reference_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    handle: DomHandle,
+) -> Option<v8::Local<'s, v8::Value>> {
+    wrapped_handle_value(scope, runtime_ptr, handle)
+}
+
+fn aria_element_reference_array_values<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    handles: Vec<DomHandle>,
+) -> Option<Vec<v8::Local<'s, v8::Value>>> {
+    handles
+        .into_iter()
+        .map(|handle| aria_element_reference_value(scope, runtime_ptr, handle))
+        .collect()
+}
+
+fn aria_cached_frozen_element_array<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    receiver: v8::Local<'s, v8::Object>,
+    attribute: &str,
+    values: &[v8::Local<'s, v8::Value>],
+) -> v8::Local<'s, v8::Array> {
+    let receiver = moli_webapi_declare::web_api_object_target(scope, receiver).unwrap_or(receiver);
+    let slot = aria_element_reference_array_cache_slot(attribute);
+    if let Some(cached) = get_private_value(scope, receiver, &slot)
+        .and_then(|value| v8::Local::<v8::Array>::try_from(value).ok())
+        && cached.length() as usize == values.len()
+    {
+        let mut equal = true;
+        for (index, expected) in values.iter().copied().enumerate() {
+            if !cached
+                .get_index(scope, index as u32)
+                .is_some_and(|actual| actual.strict_equals(expected))
+            {
+                equal = false;
+                break;
+            }
+        }
+        if equal {
+            return cached;
+        }
+    }
+    let array = v8::Array::new_with_elements(scope, values);
+    let _ = array.set_integrity_level(scope, v8::IntegrityLevel::Frozen);
+    set_private_value(scope, receiver, &slot, array.into());
+    array
+}
+
+fn clear_aria_element_reference_array_cache<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    receiver: v8::Local<'s, v8::Object>,
+    attribute: &str,
+) {
+    let receiver = moli_webapi_declare::web_api_object_target(scope, receiver).unwrap_or(receiver);
+    let slot = aria_element_reference_array_cache_slot(attribute);
+    let undefined = v8::undefined(scope);
+    set_private_value(scope, receiver, &slot, undefined.into());
 }
 
 fn aria_element_reference_attribute_getter_callback<'s>(
@@ -1695,18 +1900,85 @@ fn aria_element_reference_attribute_getter_callback<'s>(
         rv.set_null();
         return;
     };
-    let slot = aria_element_reference_slot(&attribute);
-    let Some(backing) = super::node::node_backing_object(scope, args.this()) else {
+    let Some((runtime_ptr, owner)) = element_getter_receiver(scope, args.this(), &attribute) else {
         return;
     };
-    if let Some(value) = get_private_value(scope, backing, &slot) {
-        rv.set(value);
+    let Some(handles) = aria_element_reference_handles(unsafe { &*runtime_ptr }, owner, &attribute)
+    else {
+        clear_aria_element_reference_array_cache(scope, args.this(), &attribute);
+        rv.set_null();
+        return;
+    };
+    if aria_element_reference_is_singular(&attribute) {
+        match handles
+            .into_iter()
+            .next()
+            .and_then(|handle| aria_element_reference_value(scope, runtime_ptr, handle))
+        {
+            Some(value) => rv.set(value),
+            None => rv.set_null(),
+        }
         return;
     }
-    if aria_element_reference_is_singular(&attribute) {
+    let Some(values) = aria_element_reference_array_values(scope, runtime_ptr, handles) else {
         rv.set_null();
-    } else {
-        rv.set(v8::Array::new(scope, 0).into());
+        return;
+    };
+    let array = aria_cached_frozen_element_array(scope, args.this(), &attribute, &values);
+    rv.set(array.into());
+}
+
+fn set_explicit_aria_element_references(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    owner: DomHandle,
+    attribute: &str,
+    handles: Vec<DomHandle>,
+) {
+    custom_elements::with_custom_element_reaction_scope(scope, runtime_ptr, |scope| {
+        let _ = unsafe { &mut *runtime_ptr }.set_attribute_appending_to_current_reaction_queue(
+            scope,
+            runtime_ptr,
+            owner,
+            attribute,
+            "",
+        );
+        let _ = unsafe { &mut *runtime_ptr }
+            .dom_host_mut()
+            .set_explicit_element_references(owner, attribute, handles);
+    });
+}
+
+fn clear_explicit_aria_element_references(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    owner: DomHandle,
+    attribute: &str,
+) {
+    custom_elements::with_custom_element_reaction_scope(scope, runtime_ptr, |scope| {
+        let _ = unsafe { &mut *runtime_ptr }.remove_attribute_appending_to_current_reaction_queue(
+            scope,
+            runtime_ptr,
+            owner,
+            attribute,
+        );
+    });
+}
+
+fn converted_aria_element_reference<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+) -> Option<AriaElementReferenceValue<'s>> {
+    match webidl::convert::<AriaElementReferenceValue<'s>>(
+        scope,
+        value,
+        webidl::Context::argument("Element ARIA element reflection", 1),
+    ) {
+        Ok(reference) => Some(reference),
+        Err(error) => {
+            webidl::throw_error(scope, &error);
+            None
+        }
     }
 }
 
@@ -1719,23 +1991,51 @@ fn aria_element_reference_attribute_setter_callback<'s>(
         rv.set_undefined();
         return;
     };
-    let slot = aria_element_reference_slot(&attribute);
-    let Some(backing) = super::node::node_backing_object(scope, args.this()) else {
+    let Some((runtime_ptr, owner)) = element_setter_receiver(scope, args.this(), &attribute) else {
         return;
     };
-    set_private_value(scope, backing, &slot, args.get(0));
-    let Ok((runtime_ptr, handle)) =
-        node_runtime_and_handle_from_object_or_detached(scope, args.this())
-    else {
+    let value = args.get(0);
+    if value.is_null_or_undefined() {
+        clear_explicit_aria_element_references(scope, runtime_ptr, owner, &attribute);
         rv.set_undefined();
         return;
+    }
+    if aria_element_reference_is_singular(&attribute) {
+        let Some(reference) = converted_aria_element_reference(scope, value) else {
+            return;
+        };
+        let handles = aria_element_reference_handle_for_owner(scope, runtime_ptr, reference)
+            .into_iter()
+            .collect();
+        set_explicit_aria_element_references(scope, runtime_ptr, owner, &attribute, handles);
+        rv.set_undefined();
+        return;
+    }
+    let sequence = match webidl::convert::<webidl::Sequence<AriaElementReferenceValue<'s>>>(
+        scope,
+        value,
+        webidl::Context::argument("Element ARIA element reflection", 1),
+    ) {
+        Ok(sequence) => sequence,
+        Err(error) => {
+            webidl::throw_error(scope, &error);
+            return;
+        }
     };
-    let _ = unsafe { &mut *runtime_ptr }.set_attribute(scope, runtime_ptr, handle, &attribute, "");
+    let mut handles = Vec::with_capacity(sequence.0.len());
+    for reference in sequence.0 {
+        if let Some(handle) = aria_element_reference_handle_for_owner(scope, runtime_ptr, reference)
+            && !handles.contains(&handle)
+        {
+            handles.push(handle);
+        }
+    }
+    set_explicit_aria_element_references(scope, runtime_ptr, owner, &attribute, handles);
     rv.set_undefined();
 }
 
 fn element_reference_is_in_valid_scope(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     owner: DomHandle,
     candidate: DomHandle,
 ) -> bool {
@@ -1766,7 +2066,7 @@ fn element_reference_is_in_valid_scope(
 }
 
 fn element_by_id_including_disconnected(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     owner: DomHandle,
     id: &str,
 ) -> Option<DomHandle> {
@@ -1790,7 +2090,7 @@ fn element_by_id_including_disconnected(
 }
 
 pub(in crate::native_bridge::element) fn reflected_element_attribute_handle(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     owner: DomHandle,
     attribute: &str,
 ) -> Option<DomHandle> {
@@ -1814,7 +2114,7 @@ pub(in crate::native_bridge::element) fn reflected_element_attribute_handle(
 }
 
 pub(in crate::native_bridge::element) fn resolved_reflected_element_attribute_handle(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     owner: DomHandle,
     attribute: &str,
 ) -> Option<DomHandle> {

@@ -7,7 +7,10 @@ use anyhow::{Result, anyhow};
 use moli_fetch::{Request, RequestCacheMode, url_pattern_matches};
 use parking_lot::Mutex;
 
-use crate::{protocol_types::OptionalResourceFetchMask, types::SubresourceResourceType};
+use crate::{
+    protocol_types::OptionalResourceFetchMask,
+    types::{SubresourceInterceptionClasses, SubresourceResourceType},
+};
 
 const BLOCKED_BY_CLIENT_ERROR_TEXT: &str = "net::ERR_BLOCKED_BY_CLIENT";
 static NEXT_MEMORY_CACHE_PARTITION_ID: AtomicU64 = AtomicU64::new(0);
@@ -92,6 +95,7 @@ impl PageNetworkConditionsState {
 pub struct PageNetworkPolicy {
     state: Arc<Mutex<PageNetworkPolicyState>>,
     network_conditions: Arc<Mutex<PageNetworkConditionsState>>,
+    subresource_interception: Arc<Mutex<SubresourceInterceptionClasses>>,
 }
 
 impl Default for PageNetworkPolicy {
@@ -99,6 +103,7 @@ impl Default for PageNetworkPolicy {
         Self {
             state: Arc::new(Mutex::new(PageNetworkPolicyState::default())),
             network_conditions: Arc::new(Mutex::new(PageNetworkConditionsState::default())),
+            subresource_interception: Arc::default(),
         }
     }
 }
@@ -118,12 +123,13 @@ impl PageNetworkPolicy {
         Self {
             state: Arc::new(Mutex::new(state)),
             network_conditions: Arc::new(Mutex::new(PageNetworkConditionsState::default())),
+            subresource_interception: Arc::default(),
         }
     }
 
-    /// Returns a policy with the same current values and independent mutable
-    /// state. This is the target-creation boundary; ordinary `clone()` keeps
-    /// sharing the original target policy.
+    /// Copies request configuration and network conditions into a new target.
+    /// Target-local protocol interception starts disabled; ordinary
+    /// `clone()` keeps sharing the original target policy.
     pub fn isolated_copy(&self) -> Self {
         Self::from_snapshot(self.snapshot())
     }
@@ -131,12 +137,15 @@ impl PageNetworkPolicy {
     /// Returns a Document-owned mutable view within the same Page target.
     ///
     /// Renderer Documents need independent request-policy state, but resource
-    /// reuse across top-level navigation remains owned by the stable Page.
+    /// reuse across top-level navigation and protocol interception remain
+    /// owned by the stable Page.
     pub fn isolated_same_page_copy(&self) -> Self {
-        Self::from_snapshot_with_memory_cache_partition(
+        let mut copy = Self::from_snapshot_with_memory_cache_partition(
             self.snapshot(),
             self.memory_cache_partition_id(),
-        )
+        );
+        copy.subresource_interception = Arc::clone(&self.subresource_interception);
+        copy
     }
 
     pub fn shares_memory_cache_partition_with(&self, other: &Self) -> bool {
@@ -168,16 +177,18 @@ impl PageNetworkPolicy {
                 revision: snapshot.network_conditions_revision,
                 offline: snapshot.network_offline,
             })),
+            subresource_interception: Arc::default(),
         }
     }
 
     /// Freezes request configuration while retaining the target's live
-    /// network-emulation conditions.
+    /// network-emulation conditions and interception rules.
     ///
     /// A resource lease uses this view to keep its original backend, headers
     /// and blocked-URL policy across re-entry. It deliberately continues to
     /// observe `Network.emulateNetworkConditions`, including while a DevTools
-    /// request-stage interception is paused.
+    /// request-stage interception is paused. Interception rules also stay live
+    /// so existing Documents and workers observe subsequent enable/disable calls.
     pub(crate) fn frozen_request_view(&self) -> Self {
         let snapshot = self.snapshot();
         Self {
@@ -194,6 +205,7 @@ impl PageNetworkPolicy {
                 cache_disabled: snapshot.cache_disabled,
             })),
             network_conditions: Arc::clone(&self.network_conditions),
+            subresource_interception: Arc::clone(&self.subresource_interception),
         }
     }
 
@@ -204,11 +216,16 @@ impl PageNetworkPolicy {
     pub fn shares_state_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.state, &other.state)
             && Arc::ptr_eq(&self.network_conditions, &other.network_conditions)
+            && Arc::ptr_eq(
+                &self.subresource_interception,
+                &other.subresource_interception,
+            )
     }
 
     /// Captures the current request configuration and network conditions.
     ///
-    /// A normal request preparation retains this complete snapshot. A
+    /// Protocol interception stays with its target and is not copied into
+    /// snapshots. A normal request preparation retains this snapshot. A
     /// long-lived resource lease instead uses [`Self::frozen_request_view`] so
     /// that DevTools network conditions remain live while request
     /// configuration cannot drift across JavaScript/CDP re-entry.
@@ -296,6 +313,24 @@ impl PageNetworkPolicy {
         }
         state.blocked_url_patterns = patterns;
         state.advance_revision();
+    }
+
+    /// Live target eligibility only. Protocol rules and session ordering stay
+    /// with their canonical protocol owner, rather than being copied to XHR.
+    pub fn set_subresource_interception(&self, classes: SubresourceInterceptionClasses) {
+        *self.subresource_interception.lock() = classes;
+    }
+
+    pub(crate) fn subresource_interception_config(&self) -> SubresourceInterceptionClasses {
+        *self.subresource_interception.lock()
+    }
+
+    pub(crate) fn should_intercept_subresource(
+        &self,
+        resource_type: SubresourceResourceType,
+    ) -> bool {
+        self.subresource_interception_config()
+            .intercepts(resource_type)
     }
 
     pub fn set_optional_resource_fetch_mask(&self, mask: OptionalResourceFetchMask) {
@@ -487,6 +522,25 @@ impl PageNetworkPolicySnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interception_eligibility_follows_same_target_views_only() {
+        let page = PageNetworkPolicy::default();
+        let document = page.isolated_same_page_copy();
+        let worker = page.frozen_request_view();
+        page.set_subresource_interception(SubresourceInterceptionClasses::FETCH_LIKE);
+        let target = page.isolated_copy();
+        for view in [&page, &document, &worker] {
+            assert!(view.should_intercept_subresource(SubresourceResourceType::Xhr));
+            assert!(!view.should_intercept_subresource(SubresourceResourceType::Image));
+        }
+        assert!(!target.should_intercept_subresource(SubresourceResourceType::Xhr));
+        page.set_subresource_interception(SubresourceInterceptionClasses::NONE);
+        for view in [&page, &document, &worker] {
+            assert!(!view.should_intercept_subresource(SubresourceResourceType::Xhr));
+        }
+        assert!(!target.should_intercept_subresource(SubresourceResourceType::Xhr));
+    }
 
     #[test]
     fn isolated_policy_copy_preserves_values_without_sharing_mutations() {

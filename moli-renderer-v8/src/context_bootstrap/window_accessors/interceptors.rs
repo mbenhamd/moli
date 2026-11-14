@@ -3,7 +3,7 @@ use crate::document_runtime::DomHandle;
 use crate::native_bridge::named_access::{
     build_window_named_items_collection, window_named_item_handles,
 };
-use crate::native_bridge::{JsContextHost, OwnerDispatchScope};
+use crate::native_bridge::{OwnerDispatchScope, PageScriptHost};
 use crate::util::serialize_v8_iter_array;
 use moli_webapi_declare::DataPropertyDescriptorDeclaration;
 
@@ -15,7 +15,7 @@ fn window_indexed_child_handle<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     holder: v8::Local<'s, v8::Object>,
     index: u32,
-) -> Option<(*mut JsContextHost, DomHandle, OwnerDispatchScope)> {
+) -> Option<(*mut PageScriptHost, DomHandle, OwnerDispatchScope)> {
     let host_ptr = window_host_ptr(scope, holder)?;
     let host = unsafe { &mut *host_ptr };
     let owner = window_current_dispatch_scope(scope, holder, host)?;
@@ -66,6 +66,19 @@ pub(in crate::context_bootstrap) fn window_indexed_property_query<'s>(
         return v8::Intercepted::kNo;
     }
     rv.set_int32(v8::PropertyAttribute::READ_ONLY.as_u32() as i32);
+    v8::Intercepted::kYes
+}
+
+pub(in crate::context_bootstrap) fn window_indexed_property_deleter<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    index: u32,
+    args: v8::PropertyCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
+) -> v8::Intercepted {
+    if window_indexed_child_handle(scope, args.holder(), index).is_none() {
+        return v8::Intercepted::kNo;
+    }
+    rv.set_bool(false);
     v8::Intercepted::kYes
 }
 

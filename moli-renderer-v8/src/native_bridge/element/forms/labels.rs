@@ -13,7 +13,7 @@ fn is_labelable_element(element: &Element) -> bool {
     }
 }
 
-fn is_labelable_handle(runtime: &JsContextHost, handle: DomHandle, element: &Element) -> bool {
+fn is_labelable_handle(runtime: &PageScriptHost, handle: DomHandle, element: &Element) -> bool {
     if crate::custom_elements::is_form_associated_custom_element_handle(runtime, handle) {
         return true;
     }
@@ -35,7 +35,7 @@ fn is_label_interactive_content(element: &Element) -> bool {
     }
 }
 
-fn label_tree_scope_root(runtime: &JsContextHost, label_handle: DomHandle) -> DomHandle {
+fn label_tree_scope_root(runtime: &PageScriptHost, label_handle: DomHandle) -> DomHandle {
     runtime
         .dom_host()
         .root_node_handle(label_handle)
@@ -43,7 +43,7 @@ fn label_tree_scope_root(runtime: &JsContextHost, label_handle: DomHandle) -> Do
 }
 
 fn element_by_id_in_label_tree_scope(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     label_handle: DomHandle,
     id: &str,
 ) -> Option<DomHandle> {
@@ -52,7 +52,7 @@ fn element_by_id_in_label_tree_scope(
 }
 
 fn collect_shadow_including_labels_from(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     root: DomHandle,
     include_root: bool,
     out: &mut Vec<DomHandle>,
@@ -70,7 +70,7 @@ fn collect_shadow_including_labels_from(
 }
 
 fn collect_shadow_including_labels_at(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     out: &mut Vec<DomHandle>,
 ) {
@@ -91,14 +91,14 @@ fn collect_shadow_including_labels_at(
     }
 }
 
-fn shadow_including_label_handles(runtime: &JsContextHost, document: DomHandle) -> Vec<DomHandle> {
+fn shadow_including_label_handles(runtime: &PageScriptHost, document: DomHandle) -> Vec<DomHandle> {
     let mut labels = Vec::new();
     collect_shadow_including_labels_from(runtime, document, false, &mut labels);
     labels
 }
 
 fn shadow_including_contains(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     root: DomHandle,
     candidate: DomHandle,
 ) -> bool {
@@ -125,7 +125,10 @@ fn shadow_including_contains(
     false
 }
 
-fn label_handles_for_control(runtime: &JsContextHost, control_handle: DomHandle) -> Vec<DomHandle> {
+fn label_handles_for_control(
+    runtime: &PageScriptHost,
+    control_handle: DomHandle,
+) -> Vec<DomHandle> {
     if runtime.dom_host().is_connected(control_handle) {
         // A control in a child browsing context shares this host with the top
         // document, so its labels must come from its own node document.
@@ -180,7 +183,7 @@ fn label_handles_for_control(runtime: &JsContextHost, control_handle: DomHandle)
 }
 
 fn first_implicit_label_control_from_node(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
 ) -> Option<DomHandle> {
     let element = runtime.dom_host().node(handle).and_then(Node::as_element);
@@ -210,7 +213,7 @@ fn first_implicit_label_control_from_node(
 }
 
 fn first_implicit_label_control(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     label_handle: DomHandle,
 ) -> Option<DomHandle> {
     let mut child = runtime.dom_host().first_child(label_handle);
@@ -224,7 +227,7 @@ fn first_implicit_label_control(
 }
 
 pub(in crate::native_bridge) fn label_control_handle(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     label_handle: DomHandle,
 ) -> Option<DomHandle> {
     let label = runtime
@@ -252,7 +255,7 @@ pub(in crate::native_bridge) fn label_control_handle(
 }
 
 fn label_reflected_control_handle(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     label_handle: DomHandle,
 ) -> Option<DomHandle> {
     let label = runtime
@@ -284,7 +287,7 @@ fn label_reflected_control_handle(
 
 /// IDs that a label's `for` must carry to target this control: the control's
 /// own, or that of a shadow host whose reference target resolves to it.
-fn label_for_target_ids(runtime: &JsContextHost, control_handle: DomHandle) -> Vec<String> {
+fn label_for_target_ids(runtime: &PageScriptHost, control_handle: DomHandle) -> Vec<String> {
     let id_of = |handle| {
         runtime
             .dom_host()
@@ -310,7 +313,7 @@ fn label_for_target_ids(runtime: &JsContextHost, control_handle: DomHandle) -> V
 /// Skips the tree-order `for` lookup, a subtree walk outside the top document,
 /// for labels that name some other element. A match here is still resolved in
 /// full, because a duplicate ID may make another element the actual target.
-fn label_may_target_ids(runtime: &JsContextHost, label_handle: DomHandle, ids: &[String]) -> bool {
+fn label_may_target_ids(runtime: &PageScriptHost, label_handle: DomHandle, ids: &[String]) -> bool {
     runtime
         .dom_host()
         .node(label_handle)
@@ -321,7 +324,7 @@ fn label_may_target_ids(runtime: &JsContextHost, label_handle: DomHandle, ids: &
 }
 
 pub(crate) fn control_label_handles(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     control_handle: DomHandle,
 ) -> Vec<DomHandle> {
     let Some(element) = runtime
@@ -346,7 +349,7 @@ pub(crate) fn control_label_handles(
 }
 
 pub(in crate::native_bridge) fn label_activation_control_handle(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     target_handle: DomHandle,
 ) -> Option<DomHandle> {
     let mut current = Some(target_handle);
@@ -367,7 +370,7 @@ pub(in crate::native_bridge) fn label_activation_control_handle(
 }
 
 pub(in crate::native_bridge) fn label_receives_programmatic_focus(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     label_handle: DomHandle,
 ) -> bool {
     let Some(label) = runtime

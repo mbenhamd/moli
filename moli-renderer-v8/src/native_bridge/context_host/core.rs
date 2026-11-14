@@ -12,7 +12,7 @@ fn slotchange_microtask_callback(
     crate::observer_runtime::flush_slotchange_microtask(scope, host_ptr);
 }
 
-impl JsContextHost {
+impl PageScriptHost {
     pub(crate) fn initialize_native_bridge_bindings(
         &mut self,
         scope: &mut v8::PinScope<'_, '_, ()>,
@@ -114,8 +114,11 @@ impl JsContextHost {
         &mut self,
         environment: &crate::script_vm::RendererPageScriptEnvironment,
     ) {
-        environment
-            .bind_window_identity(self.browsing_context_name.clone(), self.auxiliary_window());
+        assert_eq!(
+            environment.window_identity(),
+            &self.window_identity,
+            "a Document must retain its Page window identity"
+        );
         self.page_script_environment = Some(environment.downgrade());
     }
 
@@ -128,20 +131,24 @@ impl JsContextHost {
         self.page_script_environment.as_ref()?.upgrade()
     }
 
-    pub(crate) fn bind_auxiliary_window(
+    #[cfg(test)]
+    pub(crate) fn bind_auxiliary_window_for_test(
         &mut self,
         window: Option<crate::runtime::RendererAuxiliaryWindow>,
     ) {
-        self.auxiliary_window = window;
+        self.window_identity = crate::runtime::RendererPageWindowIdentity::new(
+            self.window_identity.name().clone(),
+            window,
+        );
     }
 
     pub(crate) fn auxiliary_window(&self) -> Option<crate::runtime::RendererAuxiliaryWindow> {
-        self.auxiliary_window.clone()
+        self.window_identity.auxiliary_window().cloned()
     }
 
     pub(crate) fn browsing_context_is_closed(&self) -> bool {
-        self.auxiliary_window
-            .as_ref()
+        self.window_identity
+            .auxiliary_window()
             .is_some_and(|window| window.is_closed())
             || self
                 .page_script_environment
@@ -164,15 +171,12 @@ impl JsContextHost {
         }
     }
 
-    pub(crate) fn browsing_context_name(&self) -> &crate::runtime::RendererBrowsingContextName {
-        &self.browsing_context_name
+    pub(crate) fn window_identity(&self) -> &crate::runtime::RendererPageWindowIdentity {
+        &self.window_identity
     }
 
-    pub(crate) fn bind_browsing_context_name(
-        &mut self,
-        name: crate::runtime::RendererBrowsingContextName,
-    ) {
-        self.browsing_context_name = name;
+    pub(crate) fn browsing_context_name(&self) -> &crate::runtime::RendererBrowsingContextName {
+        self.window_identity.name()
     }
 
     pub(crate) fn capture_node_creation_stack_trace(
@@ -293,7 +297,7 @@ impl JsContextHost {
     }
 }
 
-impl JsContextHost {
+impl PageScriptHost {
     pub(crate) fn new(
         runtime: &mut DocumentRuntime,
         mut frame_owner_store: FrameOwnerStore,
@@ -304,10 +308,12 @@ impl JsContextHost {
         top_level_navigation_handoff_tx: crate::page_task_queue::RendererTopLevelNavigationHandoffSender,
         service_worker_task_tx: crate::page_task_queue::RendererPageServiceWorkerTaskSender,
         browser_context_runtime: RendererBrowserContextRuntime,
+        window_identity: crate::runtime::RendererPageWindowIdentity,
         javascript_dialog_runtime: crate::runtime::RendererJavaScriptDialogRuntime,
         page_context_cancel_rx: RendererPageContextCancelReceiver,
         top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
         reserved_service_worker_client_id: Option<ServiceWorkerClientId>,
+        page_network_policy: crate::network::PageNetworkPolicy,
     ) -> Self {
         let message_port_registry = browser_context_runtime.message_port_registry();
         let broadcast_channel_registry = browser_context_runtime.broadcast_channel_registry();
@@ -346,7 +352,7 @@ impl JsContextHost {
         let mut host = Self {
             session_histories: Default::default(),
             pending_history_traversal_admissions: Default::default(),
-            runtime: runtime as *mut DocumentRuntime,
+            document_runtime: runtime as *mut DocumentRuntime,
             layout_policy: moli_page_types::LayoutPolicy::default(),
             scrollbars_hidden: false,
             document_layout_state: RefCell::new(super::layout_state::DocumentLayoutState::default()),
@@ -365,6 +371,7 @@ impl JsContextHost {
             style_viewport_generation: Cell::new(0),
             root_document_lifecycle: None,
             output_journal: None,
+            native_interception_output: None,
             page_context_resources_closed: false,
             context_host_lifecycle: Rc::new(Cell::new(crate::util::ContextHostLifecycle::Active)),
             deferred_context_host_release_queue: Default::default(),
@@ -531,8 +538,7 @@ impl JsContextHost {
             next_child_window_event_registration_id: 0,
             event_callbacks: Default::default(),
             browser_context_runtime,
-            browsing_context_name: Default::default(),
-            auxiliary_window: None,
+            window_identity,
             page_script_environment: None,
             top_level_navigation_handoff_tx,
             service_worker_task_tx,
@@ -587,13 +593,10 @@ impl JsContextHost {
             next_javascript_dialog_id: 1,
             pending_network_output: Vec::new(),
             focus_change_epoch: 0,
-            next_subresource_network_request_handle: 1,
             subresource_activity_epoch: 0,
             subresource_last_activity_at: std::time::Instant::now(),
-            fetch_subresource_interception_enabled: false,
-            fetch_subresource_interception_resource_type: None,
+            page_network_policy,
             active_subresource_requests: 0,
-            next_pending_subresource_fetch_id: 0,
             pending_subresource_fetches: HashMap::new(),
             pending_subresource_auths: HashMap::new(),
             pending_subresource_responses: HashMap::new(),
@@ -778,7 +781,7 @@ impl JsContextHost {
 
     pub(crate) fn install_page_task_capabilities(
         &self,
-        capabilities: super::JsContextHostPageTaskCapabilities,
+        capabilities: super::PageScriptHostTaskCapabilities,
     ) {
         assert!(
             self.page_task_capabilities.set(capabilities).is_ok(),
@@ -1323,8 +1326,8 @@ impl JsContextHost {
     }
 
     pub(crate) fn queue_native_dynamic_module_evaluation_fulfilled(&mut self, reaction_id: u64) {
-        let import_owner =
-            unsafe { &*self.runtime }.native_dynamic_module_evaluation_reaction_owner(reaction_id);
+        let import_owner = unsafe { &*self.document_runtime }
+            .native_dynamic_module_evaluation_reaction_owner(reaction_id);
         let Some(import_owner) = import_owner else {
             tracing::debug!(
                 reaction_id,
@@ -1345,8 +1348,8 @@ impl JsContextHost {
         reaction_id: u64,
         reason: v8::Global<v8::Value>,
     ) {
-        let import_owner =
-            unsafe { &*self.runtime }.native_dynamic_module_evaluation_reaction_owner(reaction_id);
+        let import_owner = unsafe { &*self.document_runtime }
+            .native_dynamic_module_evaluation_reaction_owner(reaction_id);
         let Some(import_owner) = import_owner else {
             tracing::debug!(
                 reaction_id,
@@ -1410,7 +1413,7 @@ impl JsContextHost {
     pub(crate) fn set_character_data_utf16_units(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         handle: DomHandle,
         units: &[u16],
     ) -> bool {
@@ -1420,7 +1423,7 @@ impl JsContextHost {
     pub(crate) fn set_character_data_utf16_units_for_edit(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         handle: DomHandle,
         units: &[u16],
     ) -> bool {
@@ -1430,7 +1433,7 @@ impl JsContextHost {
     fn set_character_data_utf16_units_with_options(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         handle: DomHandle,
         units: &[u16],
         force_mutation_record: bool,
@@ -1460,7 +1463,7 @@ impl JsContextHost {
     pub(crate) fn set_text_content(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         handle: DomHandle,
         value: &str,
     ) -> bool {
@@ -2252,11 +2255,12 @@ impl JsContextHost {
     }
 
     pub(crate) fn enter_parser_pause(&mut self) -> crate::document_runtime::ParserPauseGuard {
-        unsafe { &mut *self.runtime }.enter_parser_pause()
+        unsafe { &mut *self.document_runtime }.enter_parser_pause()
     }
 
     pub(crate) fn should_checkpoint_before_parser_custom_element_constructor(&self) -> bool {
-        unsafe { &*self.runtime }.should_checkpoint_before_parser_custom_element_constructor()
+        unsafe { &*self.document_runtime }
+            .should_checkpoint_before_parser_custom_element_constructor()
     }
 
     pub(crate) fn custom_elements_for_node_handle(

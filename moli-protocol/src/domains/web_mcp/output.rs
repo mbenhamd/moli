@@ -1,16 +1,14 @@
 use crate::{
     conn::{BackgroundProtocolEvent, CdpConnection, CommandOwnerScope},
-    domains::{
-        activity::{
-            ProtocolOutputPayloads, ProtocolOutputProjectionContext, ProtocolOutputSink,
-            ProtocolOutputSlot,
-        },
-        command_output::protocol_message_background_event,
+    domains::activity::{
+        ProtocolOutputPayloads, ProtocolOutputProjectionContext, ProtocolOutputSink,
+        ProtocolOutputSlot,
     },
 };
 use moli_page_types::{
     RendererWebMcpEvent, RendererWebMcpObservation, RendererWebMcpResult, RendererWebMcpTool,
 };
+use moli_protocol_cdp_defs::LocalCdpEvent;
 use serde_json::{Value, json};
 
 #[derive(Debug, Default)]
@@ -62,11 +60,11 @@ pub(in crate::domains) fn append_observation(
     };
     let (method, params) = match &observation.event {
         RendererWebMcpEvent::ToolsAdded(tools) => (
-            "WebMCP.toolsAdded",
+            LocalCdpEvent::WebMcpToolsAdded,
             json!({"tools": tools.iter().map(|tool| tool_json(tool, &root)).collect::<Vec<_>>()}),
         ),
         RendererWebMcpEvent::ToolsRemoved(tools) => (
-            "WebMCP.toolsRemoved",
+            LocalCdpEvent::WebMcpToolsRemoved,
             json!({"tools": tools.iter().map(|tool| json!({"name":tool.name,"frameId":tool.frame_id.as_ref().unwrap_or(&root)})).collect::<Vec<_>>()}),
         ),
         RendererWebMcpEvent::ToolInvoked {
@@ -74,38 +72,18 @@ pub(in crate::domains) fn append_observation(
             invocation_id,
             input,
         } => (
-            "WebMCP.toolInvoked",
+            LocalCdpEvent::WebMcpToolInvoked,
             json!({"toolName":tool.name,"frameId":tool.frame_id.as_ref().unwrap_or(&root),"invocationId":invocation_id.to_string(),"input":input}),
         ),
         RendererWebMcpEvent::ToolResponded {
             invocation_id,
             result,
-        } => {
-            if let RendererWebMcpResult::Error {
-                exception: Some(exception),
-                ..
-            } = result
-            {
-                let event_owner = session_id
-                    .as_deref()
-                    .map(CommandOwnerScope::for_session)
-                    .unwrap_or_else(|| owner.clone());
-                conn.register_runtime_remote_object_ids_from_value_for_owner(
-                    &event_owner,
-                    exception,
-                );
-            }
-            (
-                "WebMCP.toolResponded",
-                response_json(*invocation_id, result),
-            )
-        }
+        } => (
+            LocalCdpEvent::WebMcpToolResponded,
+            response_json(*invocation_id, result),
+        ),
     };
-    let mut message = json!({"method":method,"params":params});
-    if let Some(session_id) = session_id {
-        message["sessionId"] = json!(session_id);
-    }
-    let event = protocol_message_background_event(message);
+    let event = BackgroundProtocolEvent::immediate_event(method, params, session_id.as_deref());
     sink.push_produced_slot(ProtocolOutputSlot::WebMcp);
     sink.push_prepared_payload(
         WebMcpPreparedOutputSlot {
@@ -181,11 +159,11 @@ pub(in crate::domains) fn navigation_failed(
             {
                 return None;
             }
-            let mut message = json!({"method":"WebMCP.toolResponded","params":params});
-            if let Some(session) = session_id {
-                message["sessionId"] = json!(session);
-            }
-            Some(protocol_message_background_event(message))
+            Some(BackgroundProtocolEvent::immediate_event(
+                LocalCdpEvent::WebMcpToolResponded,
+                params.clone(),
+                session_id.as_deref(),
+            ))
         })
         .collect()
 }

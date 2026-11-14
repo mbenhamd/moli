@@ -123,7 +123,15 @@ Promise.all(Array.from({ length: 129 }, (_, index) => new Promise((resolve, reje
     }))
     .await;
 
-    let response = wait_for_response_by_id_async(&mut ctx, None, 3_020).await;
+    // Resource completions and their Renderer publications are separate
+    // inputs. Their interleaving must not consume a fixed polling budget.
+    crate::testing::wait_until_scheduler_message(
+        &mut ctx,
+        "connected stylesheet Runtime response",
+        |message| message["id"] == json!(3_020),
+    )
+    .await;
+    let response = take_response_by_id(&mut ctx, 3_020);
     assert_eq!(
         response["result"]["result"]["value"],
         json!(129),
@@ -514,13 +522,6 @@ async fn object_runtime_commands_can_complete_through_pending_command_dispatch()
         .find(|message| message["id"] == json!(3_07))
         .expect("pending Runtime.releaseObject should produce a response");
     assert_eq!(release_response["result"], json!({}));
-    ctx.with_fixture(|conn| {
-        assert!(
-            conn.validate_runtime_remote_object_ids_for_session_owner(None, &[object_id])
-                .is_ok(),
-            "pending Runtime.releaseObject should unregister released handles"
-        )
-    });
 }
 
 #[tokio::test]
@@ -561,6 +562,10 @@ async fn heap_usage_and_release_group_can_complete_through_pending_command_dispa
         .as_str()
         .map(str::to_owned)
         .expect("Runtime.evaluate should return a grouped objectId");
+    assert!(
+        !object_id.is_empty(),
+        "native Inspector returned a real handle"
+    );
 
     let release_group_raw = json!({
         "id": 3_10,
@@ -579,13 +584,6 @@ async fn heap_usage_and_release_group_can_complete_through_pending_command_dispa
         .find(|message| message["id"] == json!(3_10))
         .expect("pending Runtime.releaseObjectGroup should produce a response");
     assert_eq!(release_group_response["result"], json!({}));
-    ctx.with_fixture(|conn| {
-        assert!(
-            conn.validate_runtime_remote_object_ids_for_session_owner(None, &[object_id])
-                .is_ok(),
-            "pending Runtime.releaseObjectGroup should unregister grouped handles"
-        )
-    });
 }
 
 #[tokio::test]

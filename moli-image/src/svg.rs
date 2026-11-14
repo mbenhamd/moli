@@ -5,7 +5,28 @@
 // 300x150 default concrete-object-size algorithm follow Blink's
 // LayoutSVGRoot::UnscaledNaturalSizingInfo and ConcreteObjectSize.
 
-use std::sync::{Arc, LazyLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock},
+};
+
+pub use usvg::ElementStyleProperty as SvgStyleProperty;
+/// Shared final style profile, applied after matching the original SVG XML.
+pub type SvgElementStyle = Arc<[SvgStyleProperty]>;
+
+/// Numeric object geometry associated with an original serialized element.
+#[derive(Clone, Debug)]
+pub struct SvgObjectGeometry {
+    pub element_index: usize,
+    pub bounds: [f32; 4],
+    pub transform: [f32; 6],
+}
+
+/// Paint and source geometry produced by one bounded inline SVG parse.
+pub struct SvgScene {
+    pub image: SvgImage,
+    pub objects: Vec<SvgObjectGeometry>,
+}
 
 /// Maximum encoded SVG body admitted to the static image decoder.
 ///
@@ -14,13 +35,6 @@ use std::sync::{Arc, LazyLock};
 /// before `usvg` receives attacker-controlled bytes.
 pub const MAX_ENCODED_SVG_BYTES: usize = 16 * 1024 * 1024;
 
-/// Maximum DOM-neutral vector work units retained by one decoded SVG image.
-///
-/// A node costs one unit and every path segment costs another. The paint
-/// executor charges the same count against its per-capture operation budget.
-pub const MAX_SVG_PAINT_WORK_UNITS: usize = 250_000;
-
-const MAX_SVG_TREE_DEPTH: usize = 1_024;
 const DEFAULT_OBJECT_WIDTH: f32 = 300.0;
 const DEFAULT_OBJECT_HEIGHT: f32 = 150.0;
 
@@ -187,7 +201,6 @@ impl SvgImageMetadata {
 pub struct SvgImage {
     tree: usvg::Tree,
     metadata: SvgImageMetadata,
-    paint_work_units: usize,
 }
 
 impl SvgImage {
@@ -198,10 +211,6 @@ impl SvgImage {
     pub const fn metadata(&self) -> SvgImageMetadata {
         self.metadata
     }
-
-    pub const fn paint_work_units(&self) -> usize {
-        self.paint_work_units
-    }
 }
 
 impl std::fmt::Debug for SvgImage {
@@ -210,7 +219,6 @@ impl std::fmt::Debug for SvgImage {
             .debug_struct("SvgImage")
             .field("metadata", &self.metadata)
             .field("tree_size", &self.tree.size())
-            .field("paint_work_units", &self.paint_work_units)
             .finish()
     }
 }
@@ -238,12 +246,10 @@ pub enum SvgDecodeError {
     MissingRoot,
     #[error("SVG concrete object size must be finite and positive")]
     InvalidConcreteSize,
+    #[error("SVG style profile count {actual} does not match {expected} serialized elements")]
+    StyleElementCount { actual: usize, expected: usize },
     #[error("SVG tree could not be parsed: {0}")]
     Parse(#[from] usvg::Error),
-    #[error("SVG tree depth {actual} exceeds the {max}-level limit")]
-    TreeDepthExceeded { actual: usize, max: usize },
-    #[error("SVG contains {actual} vector work units, exceeding the {max}-unit limit")]
-    PaintWorkBudgetExceeded { actual: usize, max: usize },
 }
 
 /// Reads SVG natural sizing without constructing a vector tree.
@@ -296,6 +302,87 @@ pub fn decode_svg_image(bytes: &[u8]) -> Result<SvgImage, SvgDecodeError> {
     decode_svg_image_with_metadata(bytes, metadata)
 }
 
+/// Decodes an original XML input with an embedding document's final styles.
+/// Generated properties do not count towards the encoded user-input budget,
+/// never become selector-visible XML attributes, and share their value storage.
+pub fn decode_inline_svg_scene(
+    bytes: &[u8],
+    styles: &[Option<SvgElementStyle>],
+    viewport: (f32, f32),
+) -> Result<SvgScene, SvgDecodeError> {
+    check_encoded_budget(bytes)?;
+    let source = std::str::from_utf8(bytes).map_err(|_| SvgDecodeError::InvalidUtf8)?;
+    let xml = usvg::roxmltree::Document::parse_with_options(
+        source,
+        usvg::roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|error| SvgDecodeError::MalformedXml(error.to_string()))?;
+    let elements = xml
+        .descendants()
+        .filter(|node| node.is_element())
+        .collect::<Vec<_>>();
+    if elements.len() != styles.len() {
+        return Err(SvgDecodeError::StyleElementCount {
+            actual: styles.len(),
+            expected: elements.len(),
+        });
+    }
+    let default_size =
+        usvg::Size::from_wh(viewport.0, viewport.1).ok_or(SvgDecodeError::InvalidConcreteSize)?;
+    let overrides = elements
+        .iter()
+        .zip(styles)
+        .filter_map(|(node, style)| style.clone().map(|style| (node.id(), style)))
+        .collect();
+    let sources = elements
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id(), index))
+        .collect::<HashMap<_, _>>();
+    let fonts = &SVG_FONTS;
+    let options = usvg::Options {
+        fontdb: fonts.database.clone(),
+        font_family: fonts.default_family.clone(),
+        font_resolver: fonts.resolver(),
+        default_size,
+        element_styles: Some(Arc::new(overrides)),
+        collect_object_geometry: true,
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_, _, _| None),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..Default::default()
+    };
+    let mut tree = usvg::Tree::from_xmltree(&xml, &options)?;
+    let objects = tree
+        .take_object_geometry()
+        .into_iter()
+        .filter_map(|geometry| {
+            let rect = geometry.bounding_box;
+            let t = geometry.transform;
+            Some(SvgObjectGeometry {
+                element_index: *sources.get(&geometry.source)?,
+                bounds: [rect.x(), rect.y(), rect.width(), rect.height()],
+                transform: [t.sx, t.ky, t.kx, t.sy, t.tx, t.ty],
+            })
+        })
+        .collect();
+    let metadata = SvgImageMetadata {
+        intrinsic_width: Some(viewport.0),
+        intrinsic_height: Some(viewport.1),
+        intrinsic_ratio: Some(viewport.0 / viewport.1),
+        concrete_width: viewport.0,
+        concrete_height: viewport.1,
+    };
+    Ok(SvgScene {
+        image: SvgImage { tree, metadata },
+        objects,
+    })
+}
+
 /// Parses SVG after the caller has already admitted the immutable byte buffer.
 pub fn decode_svg_image_with_metadata(
     bytes: &[u8],
@@ -330,89 +417,7 @@ fn decode_svg_image_with_fonts(
         ..Default::default()
     };
     let tree = usvg::Tree::from_data(bytes, &options)?;
-    let paint_work_units = tree_work_units(&tree)?;
-    Ok(SvgImage {
-        tree,
-        metadata,
-        paint_work_units,
-    })
-}
-
-fn tree_work_units(tree: &usvg::Tree) -> Result<usize, SvgDecodeError> {
-    let mut units = group_work_units(tree.root(), 1)?;
-    for gradient in tree.linear_gradients() {
-        add_work_units(&mut units, 1usize.saturating_add(gradient.stops().len()))?;
-    }
-    for gradient in tree.radial_gradients() {
-        add_work_units(&mut units, 1usize.saturating_add(gradient.stops().len()))?;
-    }
-    for pattern in tree.patterns() {
-        add_work_units(
-            &mut units,
-            1usize.saturating_add(group_work_units(pattern.root(), 1)?),
-        )?;
-    }
-    for clip_path in tree.clip_paths() {
-        add_work_units(
-            &mut units,
-            1usize.saturating_add(group_work_units(clip_path.root(), 1)?),
-        )?;
-    }
-    for mask in tree.masks() {
-        add_work_units(
-            &mut units,
-            1usize.saturating_add(group_work_units(mask.root(), 1)?),
-        )?;
-    }
-    for filter in tree.filters() {
-        add_work_units(&mut units, 1usize.saturating_add(filter.primitives().len()))?;
-        for primitive in filter.primitives() {
-            if let usvg::filter::Kind::Image(image) = primitive.kind() {
-                add_work_units(&mut units, group_work_units(image.root(), 1)?)?;
-            }
-        }
-    }
-    Ok(units)
-}
-
-fn group_work_units(group: &usvg::Group, depth: usize) -> Result<usize, SvgDecodeError> {
-    if depth > MAX_SVG_TREE_DEPTH {
-        return Err(SvgDecodeError::TreeDepthExceeded {
-            actual: depth,
-            max: MAX_SVG_TREE_DEPTH,
-        });
-    }
-    let mut units = 0usize;
-    for node in group.children() {
-        add_work_units(&mut units, 1)?;
-        add_work_units(
-            &mut units,
-            match node {
-                usvg::Node::Group(group) => group_work_units(group, depth + 1)?,
-                usvg::Node::Path(path) => path.data().segments().count(),
-                usvg::Node::Image(image) => match image.kind() {
-                    usvg::ImageKind::SVG(tree) => group_work_units(tree.root(), depth + 1)?,
-                    usvg::ImageKind::JPEG(_)
-                    | usvg::ImageKind::PNG(_)
-                    | usvg::ImageKind::GIF(_)
-                    | usvg::ImageKind::WEBP(_) => 0,
-                },
-                usvg::Node::Text(text) => group_work_units(text.flattened(), depth + 1)?,
-            },
-        )?;
-    }
-    Ok(units)
-}
-
-fn add_work_units(total: &mut usize, additional: usize) -> Result<(), SvgDecodeError> {
-    *total = total.saturating_add(additional);
-    if *total > MAX_SVG_PAINT_WORK_UNITS {
-        return Err(SvgDecodeError::PaintWorkBudgetExceeded {
-            actual: *total,
-            max: MAX_SVG_PAINT_WORK_UNITS,
-        });
-    }
-    Ok(())
+    Ok(SvgImage { tree, metadata })
 }
 
 fn concrete_object_size(width: Option<f32>, height: Option<f32>, ratio: Option<f32>) -> (f32, f32) {
@@ -533,6 +538,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inline_scene_keeps_xml_identity_without_retaining_geometry_in_the_paint_tree() {
+        let source = br##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><defs><clipPath id="empty"/></defs><rect x="10" y="20" width="30" height="40" clip-path="url(#empty)"/></svg>"##;
+        let profile: SvgElementStyle = Arc::from([SvgStyleProperty::new("fill", "red")]);
+        let styles = [None, None, None, Some(profile)];
+        let mut scene = decode_inline_svg_scene(source, &styles, (100.0, 100.0)).unwrap();
+        let shape = scene
+            .objects
+            .iter()
+            .find(|object| object.element_index == 3)
+            .unwrap();
+        assert_eq!(shape.bounds, [10.0, 20.0, 30.0, 40.0]);
+        assert!(
+            scene.image.tree.root().children().is_empty(),
+            "the clipped shape has no paint node"
+        );
+        assert!(
+            scene.image.tree.take_object_geometry().is_empty(),
+            "numeric geometry is moved out, never duplicated in the retained paint tree"
+        );
+        assert!(matches!(
+            decode_inline_svg_scene(source, &[], (100.0, 100.0)),
+            Err(SvgDecodeError::StyleElementCount { .. })
+        ));
+    }
+
+    #[test]
     fn metadata_preserves_natural_dimensions_and_applies_default_object_size() {
         let explicit = probe_svg_image(
             br#"<svg xmlns="http://www.w3.org/2000/svg" width="2in" height="25.4mm"/>"#,
@@ -568,13 +599,16 @@ mod tests {
     }
 
     #[test]
-    fn parsed_tree_retains_vector_work_without_a_raster_surface() {
+    fn parsed_tree_retains_vector_paths_without_a_raster_surface() {
         let svg = decode_svg_image(
             br#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><path d="M0 0h10v10z" fill="red"/></svg>"#,
         )
         .unwrap();
         assert_eq!(svg.metadata().concrete_dimensions(), Some((20, 10)));
-        assert!(svg.paint_work_units() >= 2);
+        assert!(matches!(
+            svg.tree().root().children(),
+            [usvg::Node::Path(_)]
+        ));
         assert_eq!(svg.tree().size().width(), 20.0);
         assert_eq!(svg.tree().size().height(), 10.0);
     }
@@ -619,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn vector_work_budget_includes_definition_subtrees() {
+    fn parsed_tree_preserves_definition_subtrees() {
         let svg = decode_svg_image(
             br##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10">
                 <defs>
@@ -631,7 +665,23 @@ mod tests {
         )
         .unwrap();
 
-        assert!(svg.paint_work_units() >= 10);
+        assert_eq!(svg.tree().clip_paths().len(), 1);
+        assert_eq!(svg.tree().linear_gradients().len(), 1);
+        assert_eq!(svg.tree().linear_gradients()[0].stops().len(), 2);
+    }
+
+    #[test]
+    fn complex_paths_remain_available_for_vector_rendering() {
+        let path = format!("M0 0{}z", "h1v1h-1v-1".repeat(62_501));
+        let source = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><path d="{path}"/></svg>"#,
+        );
+        let svg = decode_svg_image(source.as_bytes()).unwrap();
+        let usvg::Node::Path(path) = &svg.tree().root().children()[0] else {
+            panic!("the vector path must remain available to the renderer");
+        };
+
+        assert!(path.data().segments().count() > 250_000);
     }
 
     #[test]

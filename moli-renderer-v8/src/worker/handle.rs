@@ -3,8 +3,8 @@
 use crate::RendererSyntheticResponseBody;
 use crate::protocol_types::{
     PendingSubresourceContinueEvent, PendingSubresourceFetchInfo, SubresourceAuthCredentials,
-    SubresourceNetworkRecord, SubresourceNetworkRequestHandle, SubresourceResourceType,
-    WebSocketFrameDirection, WebSocketFrameOpcode,
+    SubresourceNetworkRecord, SubresourceNetworkRequestHandle, WebSocketFrameDirection,
+    WebSocketFrameOpcode,
 };
 use crate::runtime::WorkerInspectorError;
 use crate::runtime::{
@@ -183,11 +183,6 @@ pub(crate) enum WorkerMessage {
     SetCacheDisabled(bool),
     /// Update the Network.setBlockedURLs state visible to worker-owned fetch/XHR.
     SetBlockedUrlPatterns(Vec<String>),
-    /// Update Fetch domain subresource interception visible to worker-owned fetch/XHR.
-    SetFetchSubresourceInterception {
-        enabled: bool,
-        resource_type: Option<SubresourceResourceType>,
-    },
     /// Continue a worker-owned fetch() that was paused for Fetch domain interception.
     ContinuePendingFetch(WorkerPendingFetchContinue),
     /// Continue a worker-owned XHR that was paused for Fetch domain interception.
@@ -675,8 +670,6 @@ pub(crate) struct WorkerNetworkPolicy {
     pub(crate) network_offline: bool,
     pub(crate) blocked_url_patterns: Vec<String>,
     pub(crate) network_partition_key: Option<String>,
-    pub(crate) fetch_subresource_interception_enabled: bool,
-    pub(crate) fetch_subresource_interception_resource_type: Option<SubresourceResourceType>,
 }
 
 #[derive(Debug)]
@@ -708,6 +701,8 @@ impl WorkerRuntimeEvent {
 /// running worker.
 #[derive(Clone, Debug)]
 pub(crate) struct WorkerDevToolsHandle {
+    network_cancel: moli_fetch::FetchCancelHandle,
+    isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
     worker_tx: mpsc::UnboundedSender<WorkerMessage>,
     inspector_tasks: WorkerInspectorTaskRunner,
 }
@@ -718,9 +713,15 @@ impl WorkerDevToolsHandle {
         isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
     ) -> Self {
         Self {
+            network_cancel: moli_fetch::FetchCancelHandle::new(),
+            isolate_handle: Arc::clone(&isolate_handle),
             inspector_tasks: WorkerInspectorTaskRunner::new(wake_tx.clone(), isolate_handle),
             worker_tx: wake_tx,
         }
+    }
+
+    pub(crate) fn network_cancel_handle(&self) -> moli_fetch::FetchCancelHandle {
+        self.network_cancel.clone()
     }
 
     pub(crate) fn inspector_tasks(&self) -> &WorkerInspectorTaskRunner {
@@ -752,7 +753,7 @@ impl WorkerDevToolsHandle {
     pub(crate) fn detach_runtime_inspector_session(
         &self,
         inspector_session_id: Option<String>,
-    ) -> bool {
+    ) -> tokio::sync::oneshot::Receiver<anyhow::Result<()>> {
         self.inspector_tasks.append_detach(inspector_session_id)
     }
 
@@ -761,10 +762,14 @@ impl WorkerDevToolsHandle {
     }
 
     pub(crate) fn dispose(&self, error: WorkerInspectorError) {
+        self.network_cancel.cancel();
         self.inspector_tasks.dispose(error);
     }
 
     pub(crate) fn terminate_for_devtools(&self) -> bool {
+        if let Some(handle) = self.isolate_handle.lock().as_ref() {
+            handle.terminate_execution();
+        }
         self.dispose(WorkerInspectorError::Closed);
         self.worker_tx.send(WorkerMessage::Terminate).is_ok()
     }
@@ -846,9 +851,9 @@ impl WorkerHandle {
         // Publish the lifecycle transition before interrupting V8. The worker
         // event loop can then reject an already-selected task without relying
         // on ordering between cloned mpsc senders.
-        self.devtools.dispose(WorkerInspectorError::Terminated);
         self.termination_requested.store(true, Ordering::Release);
         self.terminate_execution_if_ready();
+        self.devtools.dispose(WorkerInspectorError::Terminated);
         let _ = self.tx.send(WorkerMessage::Terminate);
     }
 
@@ -898,7 +903,7 @@ impl WorkerHandle {
     pub(crate) fn detach_runtime_inspector_session(
         &self,
         inspector_session_id: Option<String>,
-    ) -> bool {
+    ) -> tokio::sync::oneshot::Receiver<anyhow::Result<()>> {
         self.devtools
             .detach_runtime_inspector_session(inspector_session_id)
     }
@@ -929,19 +934,6 @@ impl WorkerHandle {
         let _ = self
             .tx
             .send(WorkerMessage::SetBlockedUrlPatterns(patterns.to_vec()));
-    }
-
-    pub(crate) fn set_fetch_subresource_interception(
-        &self,
-        enabled: bool,
-        resource_type: Option<SubresourceResourceType>,
-    ) {
-        let _ = self
-            .tx
-            .send(WorkerMessage::SetFetchSubresourceInterception {
-                enabled,
-                resource_type,
-            });
     }
 
     pub(crate) fn dispatch_service_worker_lifecycle_event(

@@ -202,13 +202,10 @@ impl CdpConnection {
                     );
                 }
                 if Some(id) == current_cmd_id {
-                    self.register_runtime_remote_object_ids_from_value_for_owner(
-                        owner,
-                        message.value(),
-                    );
                     if matches!(message, InspectorJson::Raw(_)) {
                         message.set_session_id(current_session_id);
-                        response_events.push(BackgroundProtocolEvent::immediate(message));
+                        response_events
+                            .push(BackgroundProtocolEvent::inspector_message(message, None));
                     } else {
                         let response =
                             BackgroundCommandResponsePayload::from_owned_runtime_inspector_message(
@@ -272,24 +269,9 @@ impl CdpConnection {
                     );
                     return false;
                 }
-                // These notifications have no RemoteObject fields. Unknown
-                // methods still take the conservative ownership scan.
-                if !matches!(
-                    message.method(),
-                    Some(
-                        "Debugger.scriptParsed"
-                            | "Debugger.scriptFailedToParse"
-                            | "HeapProfiler.addHeapSnapshotChunk"
-                            | "Runtime.executionContextCreated"
-                            | "Runtime.executionContextDestroyed"
-                            | "Runtime.executionContextsCleared"
-                    )
-                ) {
-                    self.register_runtime_remote_object_ids_from_value_for_owner(
-                        owner,
-                        message.value(),
-                    );
-                }
+                // Context lifecycle notifications have typed side effects.
+                // Other notifications stay opaque through forwarding.
+
                 if matches!(
                     message.method(),
                     Some(
@@ -537,7 +519,6 @@ impl CdpConnection {
         owner: &CommandOwnerScope,
         dispatched_attachment_id: Option<RendererAgentAttachmentId>,
         messages: &mut Vec<RendererRuntimeInspectorMessage>,
-        project_runtime_object_ownership: bool,
     ) {
         let session_id = owner.session_id().map(str::to_owned);
         messages.retain_mut(|message| {
@@ -547,18 +528,6 @@ impl CdpConnection {
             let Some(renderer_call_id) = message.renderer_call_id() else {
                 return true;
             };
-            let descriptor = self
-                .renderer_command_descriptor_for_renderer_if_attachment_matches_for_owner(
-                    owner,
-                    renderer_call_id,
-                    dispatched_attachment_id,
-                );
-            let result_object_group = descriptor.as_ref().and_then(|descriptor| {
-                self.runtime_result_object_group_for_renderer_command_descriptor(
-                    session_id.as_deref(),
-                    descriptor,
-                )
-            });
             let Some(correlation) = self
                 .take_frontend_command_for_renderer_if_attachment_matches_for_owner(
                     owner,
@@ -576,69 +545,11 @@ impl CdpConnection {
             };
             let frontend_command_id = correlation.frontend_command_id().get();
             message.set_frontend_id(frontend_command_id);
-            if project_runtime_object_ownership && message.payload().has_field("result") {
-                if let Some(object_group) = result_object_group.as_deref() {
-                    self.register_runtime_remote_object_ids_from_value_for_owner_with_group(
-                        owner,
-                        message.value(),
-                        object_group,
-                    );
-                } else {
-                    self.register_runtime_remote_object_ids_from_value_for_owner(
-                        owner,
-                        message.value(),
-                    );
-                }
-            }
+
             self.complete_runtime_await_job(frontend_command_id, session_id.as_deref());
             let _ = self.remove_pending_inspector_await_for_owner(frontend_command_id, owner);
             true
         });
-    }
-
-    pub(super) fn runtime_result_object_group_for_renderer_command_descriptor(
-        &self,
-        session_id: Option<&str>,
-        descriptor: &RendererCommandDescriptor,
-    ) -> Option<String> {
-        let command = serde_json::from_str::<Value>(descriptor.frontend_payload()).ok()?;
-        let method = command.get("method")?.as_str()?;
-        let params = command.get("params")?.as_object()?;
-        match method {
-            "Runtime.evaluate" | "Runtime.runScript" => params
-                .get("objectGroup")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            "Runtime.callFunctionOn" => params
-                .get("objectGroup")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .or_else(|| {
-                    self.runtime_remote_object_group_for_session_owner(
-                        session_id,
-                        params.get("objectId")?.as_str()?,
-                    )
-                }),
-            "Runtime.getProperties" => self.runtime_remote_object_group_for_session_owner(
-                session_id,
-                params.get("objectId")?.as_str()?,
-            ),
-            "Runtime.awaitPromise" => self.runtime_remote_object_group_for_session_owner(
-                session_id,
-                params.get("promiseObjectId")?.as_str()?,
-            ),
-            "Runtime.queryObjects" => params
-                .get("objectGroup")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .or_else(|| {
-                    self.runtime_remote_object_group_for_session_owner(
-                        session_id,
-                        params.get("prototypeObjectId")?.as_str()?,
-                    )
-                }),
-            _ => None,
-        }
     }
 
     pub(super) fn start_or_enqueue_registered_runtime_inspector_response_ready(
@@ -715,18 +626,7 @@ impl CdpConnection {
             }
         }
         let routed_session_id = response.session_id().map(str::to_owned);
-        if let Some(object_group) = response.object_group() {
-            self.register_runtime_remote_object_ids_from_value_for_owner_with_group(
-                response.owner(),
-                response.message.value(),
-                object_group,
-            );
-        } else {
-            self.register_runtime_remote_object_ids_from_value_for_owner(
-                response.owner(),
-                response.message.value(),
-            );
-        }
+
         let mut message = response.into_protocol_message();
         message.set_session_id(routed_session_id.as_deref());
         response_events.push(protocol_message_background_event(message));
@@ -772,6 +672,7 @@ impl CdpConnection {
             );
             return BidiChannelListenerRoute::Consumed;
         }
+        let reply_group = residence.reply_group();
         let listener = residence.listener();
         let message = response.message.value();
         if let Some(error) = message.get("error") {
@@ -780,6 +681,9 @@ impl CdpConnection {
                 channel = %listener.properties().channel,
                 "BiDi channel listener stopped after inspector error"
             );
+            if let Some(group) = reply_group {
+                self.publish_bidi_channel_object_group_release(owner.clone(), group);
+            }
             self.publish_bidi_channel_object_group_release(
                 owner,
                 listener.channel_object_group().to_owned(),
@@ -793,6 +697,9 @@ impl CdpConnection {
                 channel = %listener.properties().channel,
                 "BiDi channel listener stopped after JavaScript exception"
             );
+            if let Some(group) = reply_group {
+                self.publish_bidi_channel_object_group_release(owner.clone(), group);
+            }
             self.publish_bidi_channel_object_group_release(
                 owner,
                 listener.channel_object_group().to_owned(),
@@ -802,30 +709,47 @@ impl CdpConnection {
         let remote = result.get("result").unwrap_or(&Value::Null);
         let properties = listener.properties().clone();
         let realm_id = listener.realm_id().clone();
-        let data = DevToolsRemoteValue::from_cdp_remote_object(
+        let mut data = DevToolsRemoteValue::from_cdp_remote_object(
             remote,
             matches!(properties.ownership, DevToolsResultOwnership::Root),
             Some(realm_id.clone()),
         );
-        if let Some(remote_object_id) = data.handle.as_ref().or(data.shared_id.as_ref()) {
-            self.register_runtime_remote_object_ids_for_owner_with_realm(
-                owner.command_owner(),
-                vec![remote_object_id.as_str().to_owned()],
-                realm_id.as_str(),
-            );
+        if let Some(native) = data.handle.take() {
+            data.handle = self
+                .export_bidi_handle(
+                    owner.command_owner(),
+                    native.as_str().to_owned(),
+                    realm_id.as_str(),
+                    reply_group,
+                )
+                .map(Into::into);
         }
-        let event = BackgroundProtocolEvent::immediate_automation_event(
-            json!({
-                "method": "Moli.scriptMessage",
-                "params": {}
-            }),
-            AutomationEvent::ScriptMessage(ScriptMessageEvent {
+        if data.remote_subtype.as_deref() == Some("node")
+            && let Some(shared) = &mut data.shared_id
+            && !crate::automation::is_webdriver_bidi_node_shared_id(shared.as_str())
+        {
+            *shared = self
+                .export_bidi_node_reference(
+                    owner.command_owner(),
+                    shared.as_str().to_owned(),
+                    realm_id.as_str(),
+                    reply_group,
+                )
+                .into();
+        }
+        if let Some(group) = reply_group
+            && !self.bidi_retains_object_group(owner.command_owner(), group)
+        {
+            self.publish_bidi_channel_object_group_release(owner.clone(), group);
+        }
+        let event = BackgroundProtocolEvent::automation_only(AutomationEvent::ScriptMessage(
+            ScriptMessageEvent {
                 target_id: Some(listener.target_id().clone()),
                 realm_id: Some(realm_id),
                 channel: properties.channel.clone(),
                 data,
-            }),
-        );
+            },
+        ));
         self.publish_bidi_channel_listener_start(residence);
         BidiChannelListenerRoute::Event(event)
     }

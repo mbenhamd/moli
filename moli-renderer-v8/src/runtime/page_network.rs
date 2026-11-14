@@ -129,11 +129,11 @@ impl PageVm {
 
     pub(crate) fn set_fetch_subresource_interception(
         &mut self,
-        enabled: bool,
-        resource_type: Option<crate::SubresourceResourceType>,
+        classes: crate::SubresourceInterceptionClasses,
     ) {
-        self.vm_mut()
-            .set_fetch_subresource_interception(enabled, resource_type);
+        self.request_client
+            .page_network_policy()
+            .set_subresource_interception(classes);
     }
 
     pub(crate) fn set_extra_http_headers(&mut self, headers: &moli_fetch::RequestHeaders) {
@@ -293,12 +293,14 @@ impl PageVm {
         response_code: u16,
         response_headers: Vec<(String, Vec<u8>)>,
         response_body: RendererSyntheticResponseBody,
+        request_overrides: Option<moli_fetch::RequestOverrides>,
     ) -> Result<()> {
         let execution = self.vm_mut().fulfill_pending_subresource_fetch_body(
             internal_id,
             response_code,
             response_headers,
             response_body,
+            request_overrides,
         )?;
         self.finish_async_subresource_command(execution)
     }

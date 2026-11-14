@@ -1410,6 +1410,7 @@ impl PageVm {
 
     fn followed_location_navigation_env(&self) -> PageVmEnvConfig {
         PageVmEnvConfig {
+            window_identity: self.vm().page_window_identity(),
             main_document_commit: None,
             web_storage: self.vm().web_storage_handles(),
             document_start_scripts: self.document_start_scripts.clone(),
@@ -1434,9 +1435,10 @@ impl PageVm {
             blocked_url_patterns: self.blocked_url_patterns.clone(),
             indexed_db_manager: self.indexed_db_manager.clone(),
             storage_bucket_store: self.storage_bucket_store.clone(),
-            fetch_subresource_interception_enabled: self.fetch_subresource_interception_enabled,
-            fetch_subresource_interception_resource_type: self
-                .fetch_subresource_interception_resource_type,
+            fetch_subresource_interception_classes: self
+                .request_client
+                .page_network_policy()
+                .subresource_interception_config(),
             layout_configuration: self.layout_configuration,
             wpt_extensions_enabled: self.wpt_extensions_enabled,
             root_frame_id: self.vm().root_frame_id().map(str::to_owned),

@@ -1142,6 +1142,166 @@ fn cli_fetch_implicit_html_dump_is_quiet_by_default() -> Result<()> {
 }
 
 #[test]
+fn cli_dump_html_with_frames_nests_and_strips_child_documents() -> Result<()> {
+    // INNER and the shadow tree exist only in the live child Documents, never
+    // in the original srcdoc attributes.
+    let html = r#"<!doctype html><p>Top</p><iframe srcdoc="<p>OUTER</p><div id=h></div><script>h.attachShadow({mode:'open'}).innerHTML='<b>SHADOW'+'TEXT</b>'</script><iframe srcdoc='<p id=x></p><script>x.textContent=&quot;IN&quot;+&quot;NER&quot;;var secret=1</script><style>p{color:red}</style>'></iframe>"></iframe>"#;
+    let url = format!("data:text/html;base64,{}", BASE64_STANDARD.encode(html));
+    let output = run_fetch_cli_with_args(&url, &["--with-frames"])?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The inner Document is serialized inside the outer frame's srcdoc, so it
+    // is escaped twice.
+    assert!(stdout.contains("&amp;gt;INNER&amp;lt;"), "{stdout}");
+    assert!(
+        stdout.contains("&lt;template shadowrootmode=&quot;open&quot;&gt;&lt;b&gt;SHADOWTEXT"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("var secret=1"), "{stdout}");
+
+    let output = run_fetch_cli_with_args(&url, &["--with-frames", "--strip-mode", "full"])?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("&amp;gt;INNER&amp;lt;"), "{stdout}");
+    assert!(!stdout.contains("secret"), "{stdout}");
+    assert!(!stdout.contains("color:red"), "{stdout}");
+    Ok(())
+}
+
+#[test]
+fn cli_dump_html_includes_and_strips_shadow_roots() -> Result<()> {
+    let shadow = "<div id=h></div><script>h.attachShadow({mode:'open'}).innerHTML='<style>b{color:red}</style><b>SHADOW</b>'</script>";
+    let url = format!("data:text/html;base64,{}", BASE64_STANDARD.encode(shadow));
+    let output = run_fetch_cli_with_args(&url, &[])?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(r#"<div id="h"><template shadowrootmode="open"><style>b{color:red}</style><b>SHADOW</b></template></div>"#),
+        "{stdout}"
+    );
+    let output = run_fetch_cli_with_args(&url, &["--strip-mode", "full"])?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(r#"<template shadowrootmode="open"><b>SHADOW</b></template>"#),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("color:red"), "{stdout}");
+
+    let framed = format!(
+        "<iframe srcdoc=\"{}\"></iframe>",
+        shadow.replace('"', "&quot;")
+    );
+    let url = format!("data:text/html;base64,{}", BASE64_STANDARD.encode(framed));
+    let output = run_fetch_cli_with_args(&url, &["--with-frames", "--strip-mode", "full"])?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("SHADOW"), "{stdout}");
+    assert!(!stdout.contains("color:red"), "{stdout}");
+    Ok(())
+}
+
+#[test]
+fn cli_dump_html_inlines_and_strips_frames_inside_shadow_roots() -> Result<()> {
+    // AFTER is produced by the child script, never present in authored srcdoc.
+    let fixture = r#"<div id=h></div><script>
+        const root = h.attachShadow({mode: 'MODE'});
+        globalThis.dumpFrame = document.createElement('iframe');
+        dumpFrame.srcdoc = '<p id=x>before</p><script>x.textContent="AF"+"TER";var secret=1<\/script><style>p{color:red}</style>';
+        root.appendChild(dumpFrame);
+    </script>"#;
+    for nested in [false, true] {
+        let html = fixture.replace("MODE", if nested { "closed" } else { "open" });
+        let (html, frame) = if nested {
+            (
+                format!(
+                    "<iframe id=outer srcdoc=\"{}\"></iframe>",
+                    html.replace('&', "&amp;").replace('"', "&quot;")
+                ),
+                "document.getElementById('outer')?.contentWindow?.dumpFrame",
+            )
+        } else {
+            (html, "globalThis.dumpFrame")
+        };
+        let url = format!("data:text/html;base64,{}", BASE64_STANDARD.encode(html));
+        let ready =
+            format!("{frame}?.contentDocument?.getElementById('x')?.textContent === 'AFTER'");
+        let output = run_fetch_cli_with_args(&url, &["--wait-script", &ready])?;
+        assert!(output.status.success(), "{}", clean_output(&output.stderr));
+        assert!(!clean_output(&output.stdout).contains("AFTER"));
+
+        for strip in [false, true] {
+            let mut args = vec!["--with-frames", "--wait-script", &ready];
+            if strip {
+                args.extend(["--strip-mode", "full"]);
+            }
+            let output = run_fetch_cli_with_args(&url, &args)?;
+            assert!(output.status.success(), "{}", clean_output(&output.stderr));
+            let stdout = clean_output(&output.stdout);
+            assert_eq!(
+                stdout.matches("AFTER").count(),
+                1,
+                "nested={nested}, strip={strip}: {stdout}"
+            );
+            assert!(stdout.contains("shadowrootmode="), "{stdout}");
+            if strip {
+                for omitted in ["secret", "color:red", "before"] {
+                    assert!(!stdout.contains(omitted), "retained {omitted}: {stdout}");
+                }
+            } else {
+                assert!(stdout.contains("var secret=1"), "{stdout}");
+                assert!(stdout.contains("color:red"), "{stdout}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn cli_dump_html_strips_shadow_adopted_stylesheets_in_top_and_child_documents() -> Result<()> {
+    let fixture = r#"<div id=h><template shadowrootmode="open" shadowrootadoptedstylesheets="data:text/css,b%7Bcolor:red%7D"><b>KEEP</b></template></div>"#;
+    for nested in [false, true] {
+        let (html, document) = if nested {
+            (
+                format!(
+                    "<iframe id=outer srcdoc=\"{}\"></iframe>",
+                    fixture.replace('"', "&quot;")
+                ),
+                "document.getElementById('outer')?.contentDocument",
+            )
+        } else {
+            (fixture.to_owned(), "document")
+        };
+        let url = format!("data:text/html;base64,{}", BASE64_STANDARD.encode(html));
+        let ready = format!(
+            "() => {{ const target = {document}?.getElementById('h')?.shadowRoot?.querySelector('b'); return target && target.ownerDocument.defaultView.getComputedStyle(target).color === 'rgb(255, 0, 0)'; }}"
+        );
+        for strip in [None, Some("js"), Some("css"), Some("full")] {
+            let mut args = vec!["--wait-script", &ready];
+            if nested {
+                args.push("--with-frames");
+            }
+            if let Some(strip) = strip {
+                args.extend(["--strip-mode", strip]);
+            }
+            let output = run_fetch_cli_with_args(&url, &args)?;
+            assert!(output.status.success(), "{}", clean_output(&output.stderr));
+            let stdout = clean_output(&output.stdout);
+            let includes_css = !matches!(strip, Some("css" | "full"));
+            assert_eq!(
+                stdout.contains("shadowrootadoptedstylesheets="),
+                includes_css,
+                "nested={nested}, strip={strip:?}: {stdout}"
+            );
+            assert_eq!(stdout.contains("data:text/css,"), includes_css, "{stdout}");
+            assert!(stdout.contains("KEEP"), "{stdout}");
+            assert!(stdout.contains("shadowrootmode="), "{stdout}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn cli_dump_full_screenshot_captures_tall_page_without_prior_layout() -> Result<()> {
     let html = "<!doctype html><style>html,body{margin:0}main{height:1600px;background:blue}</style><main></main>";
     let url = format!("data:text/html;base64,{}", BASE64_STANDARD.encode(html));
@@ -2660,49 +2820,55 @@ fn cli_wait_response_survives_xhr_callback_location_replace() -> Result<()> {
     let runtime = fixture_runtime()?;
     let server = runtime.block_on(FixtureServer::spawn())?;
     let url = server.url("/wait-until-xhr-location-replace");
-    let output = run_moli([
-        "moli",
-        "fetch",
-        "--log-level",
-        "error",
-        "--http-no-proxy",
-        "*",
-        "--wait-until",
-        "load",
-        "--wait-response-url",
-        "/wait-until-data",
-        "--dump",
-        "json",
-        "--trace-network",
-        &url,
-    ])?;
+    for strip in [false, true] {
+        let mut args = vec![
+            "moli",
+            "fetch",
+            "--log-level",
+            "error",
+            "--http-no-proxy",
+            "*",
+            "--wait-until",
+            "load",
+            "--wait-response-url",
+            "/wait-until-data",
+            "--dump",
+            "json",
+            "--trace-network",
+            &url,
+        ];
+        if strip {
+            args.extend(["--strip-mode", "full"]);
+        }
+        let output = run_moli(args)?;
+
+        assert!(
+            output.status.success(),
+            "moli fetch failed: stdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = clean_output(&output.stdout);
+        let payload: Value = serde_json::from_str(&stdout)?;
+        let subresources = payload["network"]["subresources"]
+            .as_array()
+            .expect("network.subresources should be an array");
+        let record = subresources
+            .iter()
+            .find(|record| {
+                record["url"]
+                    .as_str()
+                    .is_some_and(|url| url.ends_with("/wait-until-data"))
+            })
+            .unwrap_or_else(|| panic!("missing XHR record: {subresources:?}"));
+        assert_eq!(record["resource_type"], "XHR");
+        assert_eq!(
+            payload["network"]["matched_response"]["url"], record["url"],
+            "matched_response should remain available when the response callback queues navigation"
+        );
+    }
     runtime.block_on(server.shutdown());
-
-    assert!(
-        output.status.success(),
-        "moli fetch failed: stdout={}\nstderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = clean_output(&output.stdout);
-    let payload: Value = serde_json::from_str(&stdout)?;
-    let subresources = payload["network"]["subresources"]
-        .as_array()
-        .expect("network.subresources should be an array");
-    let record = subresources
-        .iter()
-        .find(|record| {
-            record["url"]
-                .as_str()
-                .is_some_and(|url| url.ends_with("/wait-until-data"))
-        })
-        .unwrap_or_else(|| panic!("missing XHR record: {subresources:?}"));
-    assert_eq!(record["resource_type"], "XHR");
-    assert_eq!(
-        payload["network"]["matched_response"]["url"], record["url"],
-        "matched_response should remain available when the response callback queues navigation"
-    );
     Ok(())
 }
 

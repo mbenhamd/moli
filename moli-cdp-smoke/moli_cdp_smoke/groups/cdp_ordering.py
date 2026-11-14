@@ -1,7 +1,8 @@
-"""Renderer publication contracts calibrated against Chromium 145.0.7632.116.
+"""Renderer publication contracts calibrated against Chromium 156.0.8078.73.
 
 Use the actual WebSocket order, retaining replies received while waiting for
 another id. Timeouts only bound liveness; no sleep or retry proves ordering.
+The pending-evaluation frame, navigation and download cases use real owner work.
 The six mutation cases explicitly distinguish Moli's current owner-only entry
 from Chromium's ordinary-pause capability. They are not CDP-wide requirements.
 """
@@ -10,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -18,7 +21,7 @@ from ..assertions import SmokeError, assert_equal, record_contract
 from ..raw_cdp import RawCdpClient, connect_raw_cdp, discover_browser_version
 
 
-CHROMIUM_SOURCE = "Chromium 145.0.7632.116 raw CDP calibration, 2026-10-01"
+CHROMIUM_SOURCE = "Chromium 156.0.8078.73 raw CDP calibration, 2026-11-12"
 
 
 @dataclass
@@ -279,6 +282,181 @@ async def _pause(wire: _Wire, page: _Page, *, instrumentation: bool = False) -> 
     return outer
 
 
+async def _frame_facts_during_pending_evaluation(
+    wire: _Wire, page: _Page, _is_moli: bool
+) -> dict[str, Any]:
+    # A second command proves the first evaluation reached its unresolved
+    # Promise. Event receipt and exact frame identity establish order; no timer
+    # or assumption about an otherwise empty protocol queue is involved.
+    checks = []
+    frame_id = None
+    for method, mutation in [
+        ("Page.frameAttached", "globalThis.__dependencyFrame = document.createElement('iframe');"
+         "document.body.append(globalThis.__dependencyFrame);"),
+        ("Page.frameDetached", "globalThis.__dependencyFrame.remove();"),
+    ]:
+        start = len(wire.messages)
+        pending = await wire.send("Runtime.evaluate", {
+            "expression": "(() => {" + mutation
+                + "return new Promise(resolve => { globalThis.__dependencyRelease = resolve; }); })()",
+            "awaitPromise": True, "returnByValue": True,
+        }, page.session)
+        assert_equal(await wire.evaluate(page.session,
+            "typeof globalThis.__dependencyRelease === 'function'"), True,
+            "mutation reached its unresolved Promise")
+        event = await wire.until(
+            lambda message: message.get("sessionId") == page.session
+                and message.get("method") == method
+                and (message.get("params", {}).get("parentFrameId") == page.frame
+                     if frame_id is None else message.get("params", {}).get("frameId") == frame_id),
+            method + " while the invoking evaluation is pending", after=start)
+        if frame_id is None:
+            frame_id = event["params"]["frameId"]
+        assert_equal(wire.has_response(pending), False,
+                     "frame fact must not depend on the original Runtime reply")
+        await wire.evaluate(page.session,
+            "globalThis.__dependencyRelease('released'); globalThis.__dependencyRelease = null; 1")
+        reply = await wire.response(pending)
+        assert_equal(reply["result"]["result"].get("value"), "released",
+                     "the original evaluation resumes with its real result")
+        matches = [message for message in wire.messages[start:]
+                   if message.get("sessionId") == page.session and message.get("method") == method
+                   and message.get("params", {}).get("frameId") == frame_id]
+        assert_equal(len(matches), 1, "each frame lifecycle fact is delivered once")
+        event_index = wire.messages.index(event)
+        if event_index >= wire.index(pending):
+            raise SmokeError(method + " overtook its recorded reply position")
+        checks.append({"method": method, "frame": frame_id,
+                       "eventIndex": event_index, "replyIndex": wire.index(pending)})
+    return {"checks": checks}
+
+
+async def _navigation_during_pending_evaluation(
+    wire: _Wire, page: _Page, _is_moli: bool
+) -> dict[str, Any]:
+    await wire.call("Runtime.enable", session=page.session)
+    await wire.call("Target.setDiscoverTargets", {"discover": True})
+    opening = len(wire.messages)
+    result = await wire.call("Runtime.evaluate", {
+        "expression": "globalThis.__navigationChild = window.open('about:blank');"
+                      "!!globalThis.__navigationChild",
+        "userGesture": True, "returnByValue": True,
+    }, page.session)
+    assert_equal(result["result"].get("value"), True, "navigation fixture popup opened")
+    created = await wire.until(
+        lambda message: message.get("method") == "Target.targetCreated"
+            and message.get("params", {}).get("targetInfo", {}).get("type") == "page"
+            and message["params"]["targetInfo"].get("openerFrameId") == page.frame,
+        "exact popup target", after=opening)
+    child_target = created["params"]["targetInfo"]["targetId"]
+    child_session = (await wire.call("Target.attachToTarget", {
+        "targetId": child_target, "flatten": True,
+    }))["sessionId"]
+    await wire.call("Page.enable", session=child_session)
+    await wire.call("Page.setLifecycleEventsEnabled", {"enabled": True}, child_session)
+    await wire.call("Network.enable", session=child_session)
+    destination = page.url + "?navigation-owner-progress"
+    start = len(wire.messages)
+    pending = await wire.send("Runtime.evaluate", {
+        "expression": "(() => { console.log('owner-before-navigation');"
+                      "__navigationChild.location.href = " + json.dumps(destination) + ";"
+                      "console.log('owner-after-navigation');"
+                      "return new Promise(resolve => { globalThis.__navigationRelease = resolve; }); })()",
+        "awaitPromise": True, "returnByValue": True,
+    }, page.session)
+    assert_equal(await wire.evaluate(page.session,
+        "typeof globalThis.__navigationRelease === 'function'"), True,
+        "navigation source reached its unresolved Promise")
+    source_events = []
+    for marker in ["owner-before-navigation", "owner-after-navigation"]:
+        source_events.append(await wire.until(
+            lambda message: message.get("sessionId") == page.session
+                and message.get("method") == "Runtime.consoleAPICalled"
+                and message.get("params", {}).get("args", [{}])[0].get("value") == marker,
+            marker, after=start))
+    committed = await wire.until(
+        lambda message: message.get("sessionId") == child_session
+            and message.get("method") == "Page.frameNavigated"
+            and message.get("params", {}).get("frame", {}).get("url") == destination,
+        "child navigation while its source evaluation waits", after=start)
+    frame = committed["params"]["frame"]
+    metadata = await wire.until(
+        lambda message: message.get("sessionId") == child_session
+            and message.get("method") == "Network.responseReceived"
+            and message.get("params", {}).get("type") == "Document"
+            and message["params"].get("loaderId") == frame["loaderId"]
+            and message["params"].get("response", {}).get("url") == destination,
+        "exact navigation response metadata", after=start)
+    loaded = await wire.until(
+        lambda message: message.get("sessionId") == child_session
+            and message.get("method") == "Page.lifecycleEvent"
+            and message.get("params", {}).get("name") == "load"
+            and message["params"].get("loaderId") == frame["loaderId"]
+            and message["params"].get("frameId") == frame["id"],
+        "exact child navigation load", after=start)
+    assert_equal(wire.has_response(pending), False,
+                 "navigation must not wait for its source evaluation response")
+    before_index, after_index = [wire.messages.index(event) for event in source_events]
+    metadata_index, commit_index, load_index = [
+        wire.messages.index(event) for event in [metadata, committed, loaded]
+    ]
+    if before_index >= after_index or not metadata_index < commit_index < load_index:
+        raise SmokeError("source facts and navigation metadata/commit/load lost their causal order")
+    await wire.evaluate(page.session,
+        "__navigationRelease('navigation-complete'); __navigationRelease = null; 1")
+    reply = await wire.response(pending)
+    assert_equal(reply["result"]["result"].get("value"), "navigation-complete",
+                 "source evaluation preserves its real result")
+    for event in [*source_events, metadata, committed, loaded]:
+        assert_equal(sum(message == event for message in wire.messages[start:]), 1,
+                     "each source and navigation fact is delivered once")
+    await wire.call("Target.closeTarget", {"targetId": child_target})
+    return {"beforeIndex": before_index, "afterIndex": after_index,
+            "metadataIndex": metadata_index, "commitIndex": commit_index,
+            "loadIndex": load_index, "sourceReplyIndex": wire.index(pending)}
+
+
+async def _download_during_pending_evaluation(
+    wire: _Wire, page: _Page, _is_moli: bool
+) -> dict[str, Any]:
+    info = await wire.call("Target.getTargetInfo", session=page.session)
+    context = info["targetInfo"]["browserContextId"]
+    with tempfile.TemporaryDirectory(prefix="moli-ordering-download-") as download_path:
+        await wire.call("Browser.setDownloadBehavior", {
+            "behavior": "allow", "downloadPath": download_path,
+            "browserContextId": context, "eventsEnabled": True,
+        })
+        start = len(wire.messages)
+        pending = await wire.send("Runtime.evaluate", {
+            "expression": "(() => { const a = document.createElement('a');"
+                "a.href='data:text/plain,download-probe'; a.download='probe.txt';"
+                "document.body.append(a); a.click();"
+                "return new Promise(resolve => { globalThis.__downloadRelease = resolve; }); })()",
+            "awaitPromise": True, "returnByValue": True, "userGesture": True,
+        }, page.session)
+        assert_equal(await wire.evaluate(page.session,
+            "typeof globalThis.__downloadRelease === 'function'"), True,
+            "download activation reached its unresolved Promise")
+        event = await wire.until(lambda message: message.get("method") == "Browser.downloadWillBegin",
+                                 "download start while Runtime reply remains pending", after=start)
+        assert_equal(wire.has_response(pending), False,
+                     "download activation must not depend on its invoking Runtime reply")
+        guid = event["params"]["guid"]
+        await wire.until(lambda message: message.get("method") == "Browser.downloadProgress"
+                         and message["params"].get("guid") == guid
+                         and message["params"].get("state") == "completed",
+                         "exact download completion while evaluation remains pending", after=start)
+        assert_equal(wire.has_response(pending), False,
+                     "download completion must remain independent of the unresolved Promise")
+        await wire.evaluate(page.session,
+            "globalThis.__downloadRelease('released'); globalThis.__downloadRelease = null; 1")
+        reply = await wire.response(pending)
+        assert_equal(reply["result"]["result"].get("value"), "released",
+                     "download does not alter the eventual JavaScript result")
+        return {"guid": guid, "eventIndex": wire.messages.index(event),
+                "replyIndex": wire.index(pending)}
+
+
 async def _normal_pause(wire: _Wire, page: _Page, _is_moli: bool) -> dict[str, Any]:
     await wire.evaluate(page.session,
         "document.getElementById('probe').setAttribute('style', 'outline-width: 3px'); void 0")
@@ -463,12 +641,90 @@ async def _paused_mutation(wire: _Wire, page: _Page, is_moli: bool) -> dict[str,
             "outerReplyIndex": wire.index(outer), "value": expected}
 
 
+async def _intercepted_navigation_control(wire: _Wire, page: _Page, _is_moli: bool) -> dict[str, Any]:
+    operation = wire.scenario.removeprefix("intercepted_navigation_")
+    info = await wire.call("Target.getTargetInfo", session=page.session)
+    target = (await wire.call("Target.createTarget", {
+        "url": "about:blank", "browserContextId": info["targetInfo"]["browserContextId"]
+    }))["targetId"]
+    session = (await wire.call("Target.attachToTarget", {
+        "targetId": target, "flatten": True
+    }))["sessionId"]
+    await wire.call("Target.setDiscoverTargets", {"discover": True})
+    await wire.call("Page.enable", session=session)
+    await wire.call("Page.setLifecycleEventsEnabled", {"enabled": True}, session)
+    start = len(wire.messages)
+    loaded = await wire.call("Page.navigate", {"url": page.url}, session)
+    await wire.until(lambda m: m.get("sessionId") == session
+                     and m.get("method") == "Page.lifecycleEvent"
+                     and m["params"].get("loaderId") == loaded["loaderId"]
+                     and m["params"].get("name") == "load", "control fixture loaded", after=start)
+    await wire.evaluate(session, "globalThis.__oldDocument = 73")
+    await wire.call("Fetch.enable", {"patterns": [{
+        "urlPattern": "*scheduler-held*", "requestStage": "Request"
+    }]}, session)
+    start = len(wire.messages)
+    navigation = await wire.send("Page.navigate", {
+        "url": f"{page.url}?scheduler-held={operation}"
+    }, session)
+    paused = await wire.until(lambda m: m.get("sessionId") == session
+                              and m.get("method") == "Fetch.requestPaused"
+                              and "scheduler-held" in m["params"]["request"]["url"],
+                              "navigation intercepted before the request", after=start)
+    if wire.has_response(navigation):
+        raise SmokeError("intercepted navigation settled before the control operation")
+    if operation in ("page_close", "target_close"):
+        if operation == "page_close":
+            await wire.call("Page.close", session=session)
+        else:
+            assert_equal((await wire.call("Target.closeTarget", {"targetId": target}))["success"],
+                         True, "target close accepted")
+        await wire.until(lambda m: m.get("method") == "Target.targetDestroyed"
+                         and m["params"]["targetId"] == target,
+                         "target destroyed without releasing interception", after=start)
+    elif operation == "replace":
+        replacement = await wire.call("Page.navigate", {
+            "url": f"{page.url}?replacement={operation}"
+        }, session)
+        if replacement.get("errorText"):
+            raise SmokeError(f"replacement navigation failed: {replacement!r}")
+        await wire.until(lambda m: m.get("sessionId") == session
+                         and m.get("method") == "Page.lifecycleEvent"
+                         and m["params"].get("loaderId") == replacement["loaderId"]
+                         and m["params"].get("name") == "load",
+                         "replacement loaded without releasing interception", after=start)
+        assert_equal(await wire.evaluate(session, "location.search"), "?replacement=replace",
+                     "late completion cannot restore the intercepted navigation")
+    elif operation == "stop":
+        await wire.call("Page.stopLoading", session=session)
+        await wire.response(navigation, allow_error=True)
+        assert_equal(await wire.evaluate(session, "__oldDocument"), 73,
+                     "stopping the request retains the old Document")
+    else:
+        assert_equal(operation, "independent", "known navigation control")
+        assert_equal(await wire.evaluate(page.session, "6 * 7"), 42,
+                     "independent Page executes while its sibling navigates")
+        if wire.has_response(navigation):
+            raise SmokeError("independent execution unexpectedly settled the intercepted navigation")
+        await wire.call("Fetch.continueRequest", {"requestId": paused["params"]["requestId"]}, session)
+    terminal = await wire.response(navigation, allow_error=True)
+    if operation not in ("page_close", "target_close"):
+        await wire.call("Fetch.disable", session=session)
+        await wire.call("Target.closeTarget", {"targetId": target})
+    return {"operation": operation, "navigationTerminal": terminal}
+
+
 async def run_cdp_ordering_group(endpoint: str, fixture_url: str, results: list[dict[str, Any]]) -> None:
     is_moli = isinstance((await discover_browser_version(endpoint)).get("Moli-Version"), str)
     scenarios = [
         ("native_terminal_notification_prefix", _native_prefix),
         ("isolated_world_notification_prefix", _world_prefix),
         ("deferred_reply_later_resolver", _deferred_reply),
+        ("frame_facts_during_pending_evaluation", _frame_facts_during_pending_evaluation),
+        ("navigation_during_pending_evaluation", _navigation_during_pending_evaluation),
+        ("download_during_pending_evaluation", _download_during_pending_evaluation),
+        *((f"intercepted_navigation_{operation}", _intercepted_navigation_control)
+          for operation in ("independent", "replace", "stop", "page_close", "target_close")),
         ("normal_pause_native_queries", _normal_pause),
         ("normal_pause_dom_agent_commands", _paused_dom_agent),
         ("instrumentation_pause_io_only", _instrumentation_pause),

@@ -1,4 +1,4 @@
-use crate::{document_runtime::DomHandle, native_bridge::JsContextHost, scroll_options};
+use crate::{document_runtime::DomHandle, native_bridge::PageScriptHost, scroll_options};
 
 use super::super::super::{
     document,
@@ -80,7 +80,7 @@ fn node_scroll_position_value<'s>(
 
 fn set_observable_node_scroll_position(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
     left: f64,
     top: f64,
@@ -122,7 +122,7 @@ fn set_observable_node_scroll_position(
 fn geometry_receiver(
     scope: &mut v8::PinScope<'_, '_>,
     object: v8::Local<'_, v8::Object>,
-) -> Option<(*mut JsContextHost, DomHandle)> {
+) -> Option<(*mut PageScriptHost, DomHandle)> {
     let object = v8::Local::new(scope, object);
     if let Ok(node) = node_runtime_and_handle_from_object(scope, object) {
         return Some(node);
@@ -132,7 +132,7 @@ fn geometry_receiver(
     node_is_in_rendered_document(unsafe { &*runtime_ptr }, handle).then_some((runtime_ptr, handle))
 }
 
-fn node_is_in_rendered_document(runtime: &JsContextHost, handle: DomHandle) -> bool {
+fn node_is_in_rendered_document(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     runtime.dom_host().is_connected(handle)
         && runtime
             .dom_host()
@@ -145,7 +145,7 @@ fn node_is_in_rendered_document(runtime: &JsContextHost, handle: DomHandle) -> b
 /// node outside a connected, rendered Document ignores scroll requests.
 fn scroll_receiver_is_detached<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     object: v8::Local<'s, v8::Object>,
     handle: DomHandle,
 ) -> bool {
@@ -324,7 +324,7 @@ fn set_box_metric_return_value<'s>(
 
 fn detached_child_document_box_metric(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime: &mut JsContextHost,
+    runtime: &mut PageScriptHost,
     handle: DomHandle,
     metric: &str,
 ) -> Option<i32> {
@@ -345,7 +345,7 @@ fn detached_child_document_box_metric(
     })
 }
 
-fn detached_metric_element_has_zero_mock_box(runtime: &JsContextHost, handle: DomHandle) -> bool {
+fn detached_metric_element_has_zero_mock_box(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     matches!(
         raw_inline_style_property_value(runtime, handle, "display")
             .unwrap_or_default()
@@ -354,7 +354,7 @@ fn detached_metric_element_has_zero_mock_box(runtime: &JsContextHost, handle: Do
     ) || light_child_suppressed_by_shadow_host(runtime, handle)
 }
 
-fn light_child_suppressed_by_shadow_host(runtime: &JsContextHost, handle: DomHandle) -> bool {
+fn light_child_suppressed_by_shadow_host(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     runtime
         .dom_host()
         .parent_node(handle)

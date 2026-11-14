@@ -266,6 +266,7 @@ pub struct NavigationRedirect {
     pub headers: Vec<(String, Vec<u8>)>,
     pub network_extra_info_available: bool,
     pub request_extra_info: Option<NetworkRequestExtraInfo>,
+    pub dispatched_request: Option<std::sync::Arc<moli_fetch::DispatchedRequest>>,
     pub response_extra_info: Option<NetworkResponseExtraInfo>,
     pub redirect_has_extra_info: bool,
     pub request_cookie_report: Option<StoredCookieQueryReport>,
@@ -284,6 +285,7 @@ impl From<RedirectInfo> for NavigationRedirect {
             headers: value.headers,
             network_extra_info_available: value.network_extra_info_available,
             request_extra_info: value.request_extra_info,
+            dispatched_request: value.dispatched_request,
             response_extra_info: value.response_extra_info,
             redirect_has_extra_info: value.redirect_has_extra_info,
             request_cookie_report: value.request_cookie_report,
@@ -304,6 +306,7 @@ impl From<NavigationRedirect> for RedirectInfo {
             headers: value.headers,
             network_extra_info_available: value.network_extra_info_available,
             request_extra_info: value.request_extra_info,
+            dispatched_request: value.dispatched_request,
             response_extra_info: value.response_extra_info,
             redirect_has_extra_info: value.redirect_has_extra_info,
             request_cookie_report: value.request_cookie_report,
@@ -1510,6 +1513,7 @@ impl SubresourceBodyFinished {
 #[derive(Debug, Clone)]
 pub struct SubresourceResponseBody {
     inner: Arc<SubresourceResponseBodyInner>,
+    prefix_len: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -1539,8 +1543,17 @@ impl PooledSubresourceResponseBody {
         Ok(bytes)
     }
 
-    fn read_exact_at(&self, mut offset: usize, mut buffer: &mut [u8]) -> io::Result<()> {
-        for chunk in &self.chunks {
+    fn read_exact_at(&self, offset: usize, buffer: &mut [u8]) -> io::Result<()> {
+        Self::read_chunks_at(&self.chunks, &self.trailing_bytes, offset, buffer)
+    }
+
+    fn read_chunks_at(
+        chunks: &[DiskData],
+        trailing_bytes: &[u8],
+        mut offset: usize,
+        mut buffer: &mut [u8],
+    ) -> io::Result<()> {
+        for chunk in chunks {
             if buffer.is_empty() {
                 break;
             }
@@ -1555,7 +1568,7 @@ impl PooledSubresourceResponseBody {
         }
 
         if !buffer.is_empty() {
-            let trailing = self.trailing_bytes.get(offset..).ok_or_else(|| {
+            let trailing = trailing_bytes.get(offset..).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "pooled resource body ended before its recorded length",
@@ -1586,6 +1599,9 @@ impl PooledSubresourceResponseBody {
 
 impl PartialEq for SubresourceResponseBody {
     fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
         if Arc::ptr_eq(&self.inner, &other.inner) {
             return true;
         }
@@ -1593,7 +1609,7 @@ impl PartialEq for SubresourceResponseBody {
             (
                 SubresourceResponseBodyInner::Memory(left),
                 SubresourceResponseBodyInner::Memory(right),
-            ) => left == right,
+            ) => left[..self.len()] == right[..other.len()],
             (
                 SubresourceResponseBodyInner::ParkableImage(left),
                 SubresourceResponseBodyInner::ParkableImage(right),
@@ -1622,6 +1638,28 @@ impl Default for SubresourceResponseBodyWriter {
 }
 
 impl SubresourceResponseBodyWriter {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Read bytes already captured without finishing or duplicating the body.
+    /// Pending Fetch response streams use the same disk backing as final bodies.
+    pub fn read_chunk(&self, offset: usize, max_len: usize) -> io::Result<Vec<u8>> {
+        let len = max_len.min(self.len.saturating_sub(offset));
+        let mut bytes = vec![0; len];
+        PooledSubresourceResponseBody::read_chunks_at(
+            &self.disk_chunks,
+            &self.memory,
+            offset,
+            &mut bytes,
+        )?;
+        Ok(bytes)
+    }
+
     pub fn new(memory_limit: usize) -> Self {
         Self::with_memory_limit_and_disk_pool(memory_limit, None)
     }
@@ -1695,6 +1733,7 @@ impl SubresourceResponseBodyWriter {
                 .saturating_add(self.memory.len());
             debug_assert_eq!(stored_len, self.len);
             return SubresourceResponseBody {
+                prefix_len: None,
                 inner: Arc::new(SubresourceResponseBodyInner::Disk {
                     storage: PooledSubresourceResponseBody {
                         chunks: std::mem::take(&mut self.disk_chunks),
@@ -1727,6 +1766,7 @@ impl SubresourceResponseBody {
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
         Self {
             inner: Arc::new(SubresourceResponseBodyInner::Memory(bytes)),
+            prefix_len: None,
         }
     }
 
@@ -1735,6 +1775,17 @@ impl SubresourceResponseBody {
     pub fn from_parkable_image(image: ParkableImage) -> Self {
         Self {
             inner: Arc::new(SubresourceResponseBodyInner::ParkableImage(image)),
+            prefix_len: None,
+        }
+    }
+
+    /// A bounded readable view of the same capture, without copying or
+    /// re-spooling. The entire backing remains alive; bounded caches must
+    /// charge `retained_size_bytes()`, not this view's `len()`.
+    pub fn prefix(&self, len: usize) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            prefix_len: Some(len.min(self.len())),
         }
     }
 
@@ -1762,11 +1813,11 @@ impl SubresourceResponseBody {
 
     pub fn try_bytes(&self) -> io::Result<Cow<'_, [u8]>> {
         match self.inner.as_ref() {
-            SubresourceResponseBodyInner::Memory(bytes) => Ok(Cow::Borrowed(bytes)),
+            SubresourceResponseBodyInner::Memory(bytes) => Ok(Cow::Borrowed(&bytes[..self.len()])),
             SubresourceResponseBodyInner::Disk { .. } => self.materialize_bytes().map(Cow::Owned),
             SubresourceResponseBodyInner::ParkableImage(image) => image
                 .snapshot()
-                .map(|snapshot| Cow::Owned(snapshot.to_vec())),
+                .map(|snapshot| Cow::Owned(snapshot[..self.len()].to_vec())),
         }
     }
 
@@ -1811,20 +1862,11 @@ impl SubresourceResponseBody {
     }
 
     pub fn materialize_bytes_from(&self, offset: usize) -> io::Result<Vec<u8>> {
-        match self.inner.as_ref() {
-            SubresourceResponseBodyInner::Memory(bytes) => {
-                Ok(bytes.get(offset..).map(<[u8]>::to_vec).unwrap_or_default())
-            }
-            SubresourceResponseBodyInner::Disk { storage, .. } => {
-                storage.read_range(offset, storage.len.saturating_sub(offset))
-            }
-            SubresourceResponseBodyInner::ParkableImage(image) => {
-                image.read_range(offset, image.len().saturating_sub(offset))
-            }
-        }
+        self.read_chunk(offset, self.len().saturating_sub(offset))
     }
 
     pub fn read_chunk(&self, offset: usize, max_len: usize) -> io::Result<Vec<u8>> {
+        let max_len = max_len.min(self.len().saturating_sub(offset));
         if max_len == 0 {
             return Ok(Vec::new());
         }
@@ -1844,6 +1886,15 @@ impl SubresourceResponseBody {
     }
 
     pub fn write_bytes_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        if self.prefix_len.is_some() {
+            let mut offset = 0;
+            while offset < self.len() {
+                let bytes = self.read_chunk(offset, 64 * 1024)?;
+                writer.write_all(&bytes)?;
+                offset += bytes.len();
+            }
+            return Ok(());
+        }
         match self.inner.as_ref() {
             SubresourceResponseBodyInner::Memory(bytes) => writer.write_all(bytes),
             SubresourceResponseBodyInner::Disk { storage, .. } => storage.write_to(writer),
@@ -1854,9 +1905,21 @@ impl SubresourceResponseBody {
     }
 
     pub fn len(&self) -> usize {
-        match self.inner.as_ref() {
+        let len = match self.inner.as_ref() {
             SubresourceResponseBodyInner::Memory(bytes) => bytes.len(),
             SubresourceResponseBodyInner::Disk { storage, .. } => storage.len,
+            SubresourceResponseBodyInner::ParkableImage(image) => image.len(),
+        };
+        self.prefix_len.map_or(len, |prefix| prefix.min(len))
+    }
+
+    /// Storage byte charge for the whole backing retained by this view.
+    /// Shared backings are conservatively charged in full for each entry.
+    /// This does not read or materialize the body, and excludes object metadata.
+    pub fn retained_size_bytes(&self) -> usize {
+        match self.inner.as_ref() {
+            SubresourceResponseBodyInner::Memory(bytes) => bytes.capacity(),
+            SubresourceResponseBodyInner::Disk { storage } => storage.len,
             SubresourceResponseBodyInner::ParkableImage(image) => image.len(),
         }
     }
@@ -2280,6 +2343,27 @@ impl SubresourceNetworkRecord {
         self
     }
 
+    /// Projects a terminal after redirects were already reported separately.
+    /// The diagnostic record can keep its original complete redirect chain.
+    pub fn with_redirect_chain(mut self, redirects: Vec<NavigationRedirect>) -> Self {
+        if let SubresourceNetworkOutcome::Success { redirect_chain, .. } =
+            &mut Arc::make_mut(&mut self.inner).outcome
+        {
+            *redirect_chain = redirects;
+        }
+        self
+    }
+
+    /// Keeps a consumer's detailed diagnostic without rebuilding the terminal.
+    pub fn with_error_text(mut self, error: impl Into<String>) -> Self {
+        if let SubresourceNetworkOutcome::Failure { error_text } =
+            &mut Arc::make_mut(&mut self.inner).outcome
+        {
+            *error_text = error.into();
+        }
+        self
+    }
+
     pub fn with_response_status_text(mut self, status_text: impl Into<String>) -> Self {
         if let SubresourceNetworkOutcome::Success {
             status_text: current,
@@ -2443,8 +2527,8 @@ pub struct PendingSubresourceResponseInfo {
     pub network_request_headers: Option<Vec<(String, String)>>,
     pub response_status: u16,
     pub response_headers: Vec<(String, Vec<u8>)>,
-    /// Exact response bytes plus the lossy compatibility text view needed while
-    /// a response-stage Fetch pause is held.
+    /// Captured body for renderer-owned continuations. Native network pauses
+    /// carry their pending body capability separately; this is empty there.
     pub response_body: SubresourceResponseBody,
     pub from_cache: bool,
     pub cache_state: moli_fetch::ResponseCacheState,
@@ -2465,6 +2549,8 @@ pub struct PendingSubresourceAuthInfo {
     pub response_final_url: Url,
     pub response_status: u16,
     pub response_headers: Vec<(String, Vec<u8>)>,
+    /// Captured compatibility body; native network pauses retain the pending
+    /// transfer in their native decision port instead of waiting for EOF.
     pub response_body: SubresourceResponseBody,
     pub response_from_cache: bool,
     pub response_cache_state: moli_fetch::ResponseCacheState,
@@ -2760,6 +2846,80 @@ impl SubresourceResourceType {
 
     pub fn has_same_cdp_fetch_interception_type(self, other: Self) -> bool {
         self.as_cdp_fetch_interception_type() == other.as_cdp_fetch_interception_type()
+    }
+}
+
+bitflags::bitflags! {
+    /// The set of CDP Fetch interception classes that the renderer routes
+    /// through the protocol.
+    ///
+    /// Interception classes mirror the distinct tokens of
+    /// [`SubresourceResourceType::as_cdp_fetch_interception_type`]: Chromium's
+    /// loader collapses Blink's Fetch, EventSource, and XHR into the shared
+    /// "XHR" class and text tracks into "Media", so several resource types
+    /// share one class bit. Fetch.enable patterns with heterogeneous resource
+    /// types used to collapse the renderer channel to "intercept every
+    /// class"; a class set keeps them scoped to exactly the classes the
+    /// patterns name. An empty set routes nothing through the protocol, while
+    /// [`Self::ALL`] routes every class and preserves type-less pattern,
+    /// auth, and response-stage admission.
+    #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+    pub struct SubresourceInterceptionClasses: u16 {
+        const NONE = 0;
+        const DOCUMENT = 1 << 0;
+        const SCRIPT = 1 << 1;
+        const STYLESHEET = 1 << 2;
+        const IMAGE = 1 << 3;
+        const FONT = 1 << 4;
+        const MEDIA = 1 << 5;
+        const FETCH_LIKE = 1 << 6;
+        const PING = 1 << 7;
+        const CSP_VIOLATION_REPORT = 1 << 8;
+        const MANIFEST = 1 << 9;
+        const WEBSOCKET = 1 << 10;
+        const OTHER = 1 << 11;
+        const ALL = Self::DOCUMENT.bits()
+            | Self::SCRIPT.bits()
+            | Self::STYLESHEET.bits()
+            | Self::IMAGE.bits()
+            | Self::FONT.bits()
+            | Self::MEDIA.bits()
+            | Self::FETCH_LIKE.bits()
+            | Self::PING.bits()
+            | Self::CSP_VIOLATION_REPORT.bits()
+            | Self::MANIFEST.bits()
+            | Self::WEBSOCKET.bits()
+            | Self::OTHER.bits();
+    }
+}
+
+impl SubresourceInterceptionClasses {
+    /// The set holding only `resource_type`'s CDP Fetch interception class.
+    pub const fn for_resource_type(resource_type: SubresourceResourceType) -> Self {
+        match resource_type {
+            SubresourceResourceType::Document => Self::DOCUMENT,
+            SubresourceResourceType::Script => Self::SCRIPT,
+            SubresourceResourceType::Stylesheet => Self::STYLESHEET,
+            SubresourceResourceType::Image => Self::IMAGE,
+            SubresourceResourceType::Font => Self::FONT,
+            SubresourceResourceType::Audio
+            | SubresourceResourceType::Video
+            | SubresourceResourceType::Media
+            | SubresourceResourceType::TextTrack => Self::MEDIA,
+            SubresourceResourceType::Fetch
+            | SubresourceResourceType::EventSource
+            | SubresourceResourceType::Xhr => Self::FETCH_LIKE,
+            SubresourceResourceType::Ping => Self::PING,
+            SubresourceResourceType::CspReport => Self::CSP_VIOLATION_REPORT,
+            SubresourceResourceType::Dictionary => Self::OTHER,
+            SubresourceResourceType::Manifest => Self::MANIFEST,
+            SubresourceResourceType::WebSocket => Self::WEBSOCKET,
+        }
+    }
+
+    /// Whether the set admits `resource_type`'s interception class.
+    pub const fn intercepts(self, resource_type: SubresourceResourceType) -> bool {
+        self.intersects(Self::for_resource_type(resource_type))
     }
 }
 
@@ -3309,8 +3469,6 @@ pub struct ChildFrameNavigationSnapshot {
     pub security_origin_inherited: bool,
     #[serde(default)]
     pub security_origin_opaque: bool,
-    #[serde(default)]
-    pub document_network: Option<ChildFrameDocumentNetworkSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -3552,6 +3710,22 @@ mod tests {
             memory_limit,
             Some(pool.clone()),
         )
+    }
+
+    #[test]
+    fn response_body_prefix_reads_survive_spilling_and_later_appends() {
+        let pool = DiskPool::new(None).unwrap();
+        let mut body = pooled_body_writer(4, &pool);
+        body.append(b"abc");
+        assert_eq!(body.read_chunk(1, 100).unwrap(), b"bc");
+        body.append(b"defghi");
+        assert_eq!(body.len(), 9);
+        assert_eq!(body.read_chunk(2, 6).unwrap(), b"cdefgh");
+        body.append(b"jkl");
+        assert_eq!(body.read_chunk(7, 20).unwrap(), b"hijkl");
+        assert!(body.read_chunk(20, 1).unwrap().is_empty());
+        let finished = body.finish();
+        assert_eq!(finished.materialize_bytes().unwrap(), b"abcdefghijkl");
     }
 
     #[test]
@@ -3802,6 +3976,96 @@ mod tests {
         assert_eq!(
             SubresourceResourceType::TextTrack.as_cdp_type(),
             "TextTrack"
+        );
+    }
+
+    #[test]
+    fn interception_classes_share_bits_with_cdp_fetch_interception_groups() {
+        let grouped: &[(&[SubresourceResourceType], SubresourceInterceptionClasses)] = &[
+            (
+                &[SubresourceResourceType::Document],
+                SubresourceInterceptionClasses::DOCUMENT,
+            ),
+            (
+                &[SubresourceResourceType::Script],
+                SubresourceInterceptionClasses::SCRIPT,
+            ),
+            (
+                &[SubresourceResourceType::Stylesheet],
+                SubresourceInterceptionClasses::STYLESHEET,
+            ),
+            (
+                &[SubresourceResourceType::Image],
+                SubresourceInterceptionClasses::IMAGE,
+            ),
+            (
+                &[SubresourceResourceType::Font],
+                SubresourceInterceptionClasses::FONT,
+            ),
+            (
+                &[
+                    SubresourceResourceType::Audio,
+                    SubresourceResourceType::Video,
+                    SubresourceResourceType::Media,
+                    SubresourceResourceType::TextTrack,
+                ],
+                SubresourceInterceptionClasses::MEDIA,
+            ),
+            (
+                &[
+                    SubresourceResourceType::Fetch,
+                    SubresourceResourceType::EventSource,
+                    SubresourceResourceType::Xhr,
+                ],
+                SubresourceInterceptionClasses::FETCH_LIKE,
+            ),
+            (
+                &[SubresourceResourceType::Ping],
+                SubresourceInterceptionClasses::PING,
+            ),
+            (
+                &[SubresourceResourceType::CspReport],
+                SubresourceInterceptionClasses::CSP_VIOLATION_REPORT,
+            ),
+            (
+                &[SubresourceResourceType::Dictionary],
+                SubresourceInterceptionClasses::OTHER,
+            ),
+            (
+                &[SubresourceResourceType::Manifest],
+                SubresourceInterceptionClasses::MANIFEST,
+            ),
+            (
+                &[SubresourceResourceType::WebSocket],
+                SubresourceInterceptionClasses::WEBSOCKET,
+            ),
+        ];
+
+        let all: Vec<SubresourceResourceType> = grouped
+            .iter()
+            .flat_map(|(types, _)| types.iter().copied())
+            .collect();
+        assert_eq!(all.len(), 17);
+        for (types, class) in grouped {
+            for resource_type in *types {
+                assert_eq!(
+                    SubresourceInterceptionClasses::for_resource_type(*resource_type),
+                    *class
+                );
+                assert!(class.intercepts(*resource_type));
+                assert!(SubresourceInterceptionClasses::ALL.intercepts(*resource_type));
+                let others = SubresourceInterceptionClasses::ALL.difference(*class);
+                assert!(!others.intercepts(*resource_type));
+            }
+        }
+        let union = grouped
+            .iter()
+            .fold(SubresourceInterceptionClasses::NONE, |set, (_, class)| {
+                set.union(*class)
+            });
+        assert_eq!(union, SubresourceInterceptionClasses::ALL);
+        assert!(
+            !SubresourceInterceptionClasses::NONE.intersects(SubresourceInterceptionClasses::ALL)
         );
     }
 
@@ -4182,6 +4446,85 @@ mod tests {
         body.write_bytes_to(&mut copied)
             .expect("pooled body should stream-copy into writer");
         assert_eq!(copied, b"hello world");
+    }
+
+    #[test]
+    fn response_body_prefix_shares_storage_and_bounds_all_read_paths() {
+        let pool = DiskPool::new(None).unwrap();
+        let mut writer = pooled_body_writer(4, &pool);
+        writer.append(b"hello world");
+        let pooled = writer.finish();
+        for body in [
+            SubresourceResponseBody::from_bytes(b"hello world".to_vec()),
+            pooled,
+        ] {
+            let prefix = body.prefix(5);
+            assert!(Arc::ptr_eq(&body.inner, &prefix.inner));
+            assert_eq!(prefix.len(), 5);
+            assert_ne!(body, prefix);
+            assert_eq!(prefix.try_bytes().unwrap().as_ref(), b"hello");
+            assert_eq!(prefix.materialize_bytes_from(3).unwrap(), b"lo");
+            assert_eq!(prefix.read_chunk(3, usize::MAX).unwrap(), b"lo");
+            assert!(prefix.read_chunk(5, usize::MAX).unwrap().is_empty());
+            let mut copied = Vec::new();
+            prefix.write_bytes_to(&mut copied).unwrap();
+            assert_eq!(copied, b"hello");
+            assert_eq!(prefix.prefix(usize::MAX), prefix);
+            assert!(prefix.prefix(0).is_empty());
+            assert_eq!(body.materialize_bytes().unwrap(), b"hello world");
+        }
+        assert_eq!(pool.diagnostics().disk_footprint_bytes, 11);
+    }
+
+    #[test]
+    fn response_body_prefix_retains_full_memory_allocation_after_other_owners_drop() {
+        for visible in [0, 2] {
+            let mut bytes = Vec::with_capacity(64);
+            bytes.extend_from_slice(b"abcdef");
+            let capacity = bytes.capacity();
+            let full = SubresourceResponseBody::from_bytes(bytes);
+            let backing = Arc::downgrade(&full.inner);
+            let reader = full.clone();
+            let prefix = full.prefix(visible);
+            drop(full);
+            drop(reader);
+
+            assert_eq!(backing.strong_count(), 1);
+            assert_eq!(prefix.len(), visible);
+            assert_eq!(prefix.retained_size_bytes(), capacity);
+            assert_eq!(prefix.materialize_bytes().unwrap(), &b"abcdef"[..visible]);
+            drop(prefix);
+            assert!(backing.upgrade().is_none());
+        }
+    }
+
+    #[test]
+    fn response_body_prefix_retains_full_disk_capture_until_last_owner_drops() {
+        let pool = DiskPool::new(None).unwrap();
+        for visible in [0, 2] {
+            let mut writer = pooled_body_writer(4, &pool);
+            writer.append(b"abcdefghijkl");
+            let full = writer.finish();
+            let reader = full.clone();
+            let prefix = full.prefix(visible);
+            drop(full);
+            drop(reader);
+
+            let retained = pool.diagnostics();
+            assert_eq!(
+                retained.disk_footprint_bytes - retained.free_bytes as u64,
+                12
+            );
+            assert_eq!(prefix.len(), visible);
+            assert_eq!(prefix.retained_size_bytes(), 12);
+            assert_eq!(
+                prefix.materialize_bytes().unwrap(),
+                &b"abcdefghijkl"[..visible]
+            );
+            drop(prefix);
+            let released = pool.diagnostics();
+            assert_eq!(released.disk_footprint_bytes, released.free_bytes as u64);
+        }
     }
 
     #[test]

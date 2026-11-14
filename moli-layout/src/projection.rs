@@ -1,3 +1,24 @@
+//! Builds output from completed numeric layout and clamped scroll geometry.
+//!
+//! Numeric locations remain in parent layout CSS pixels. Positioning adds only
+//! the node's local delta; ancestor translations arrive through the parent space.
+//! Layout metrics separately accumulate those positioning deltas without authored
+//! CSS transforms. Visual document mappings include element scrolling but exclude
+//! viewport scrolling; viewport mappings include both. Paint derives from the same
+//! placement, with its own snapping and property-space boundaries.
+//!
+//! Overflow feedback stays independent of this output pass. Only the existing
+//! FrozenLayoutTree survives projection; reads neither rebuild layout nor create
+//! paint snapshots. Clip inheritance and paint order remain separate relations.
+
+mod coordinates;
+mod paint_space;
+mod sticky;
+
+use coordinates::{ProjectionAnchor, ResolvedPlacement, compose_layout_space};
+pub(crate) use paint_space::PaintSpace;
+use paint_space::derive_paint_space;
+
 use std::{collections::HashMap, fmt::Debug, hash::Hash, time::Instant};
 
 use taffy::ResolveOrZero;
@@ -43,6 +64,7 @@ pub(crate) fn finish_layout_pass<N, S: crate::LayoutSource<NodeId = N>>(
     reason: LayoutFlushReason,
     started: Instant,
     paint_capture: Option<PaintCaptureRequest>,
+    mut object_geometry: Vec<crate::LayoutObjectGeometry<N>>,
     mut embedded_frames: HashMap<LayoutBoxId, (N, crate::EmbeddedFrameSnapshot<N>)>,
     phase_metrics: LayoutPassPhaseMetrics,
 ) -> Result<LayoutPassResult<N>, LayoutError>
@@ -55,6 +77,15 @@ where
     projection.build_local_box_geometry(&overflow);
     projection.build_scroll_extents(&overflow);
     projection.build_coordinate_spaces()?;
+    for object in &mut object_geometry {
+        let owner = object.owner.index();
+        let content = projection.boxes[owner].content_box;
+        let zoom = world.boxes[owner].style.effective_zoom();
+        object.quad.points = object
+            .quad
+            .points
+            .map(|point| LayoutPoint::new(content.x + point.x * zoom, content.y + point.y * zoom));
+    }
     projection.build_fragments();
     projection.assign_clip_and_paint_order();
 
@@ -148,7 +179,12 @@ where
             tree: Box::new(snapshot.tree),
         })
         .collect();
-    let tree = projection.into_frozen_tree(source.root(), content_size, embedded_frames);
+    let tree = projection.into_frozen_tree(
+        source.root(),
+        content_size,
+        object_geometry,
+        embedded_frames,
+    );
     Ok(LayoutPassResult::new(
         tree,
         diagnostics,
@@ -156,52 +192,6 @@ where
         paint_snapshot,
         css_image_references,
     ))
-}
-
-/// Blink-like linear paint space for one projected coordinate space.
-///
-/// Chromium describes this space as the combination of a transform and a
-/// paint offset. Keeping those two values together lets paint snap geometry
-/// before applying CSS and scroll property transforms.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct PaintSpace {
-    pub(crate) paint_offset: LayoutPoint,
-    property_transform: LayoutTransform2D,
-}
-
-impl PaintSpace {
-    pub(crate) const ROOT: Self = Self {
-        paint_offset: LayoutPoint::ZERO,
-        property_transform: LayoutTransform2D::IDENTITY,
-    };
-
-    pub(crate) fn with_outer_transform(self, outer: LayoutTransform2D) -> Self {
-        Self {
-            paint_offset: self.paint_offset,
-            property_transform: outer.concatenate(self.property_transform),
-        }
-    }
-
-    pub(crate) fn local_transform(self) -> LayoutTransform2D {
-        self.property_transform
-            .concatenate(LayoutTransform2D::translation(
-                self.paint_offset.x,
-                self.paint_offset.y,
-            ))
-    }
-
-    pub(crate) fn pre_transform_rect(self, rect: LayoutRect) -> LayoutRect {
-        LayoutRect::new(
-            rect.x + self.paint_offset.x,
-            rect.y + self.paint_offset.y,
-            rect.width,
-            rect.height,
-        )
-    }
-
-    pub(crate) const fn property_transform(self) -> LayoutTransform2D {
-        self.property_transform
-    }
 }
 
 /// One coordinate space while output and paint projection are both live.
@@ -609,17 +599,23 @@ where
             paint: PaintSpace::ROOT,
         });
         let mut state = vec![0_u8; self.world.boxes.len()];
+        let mut accumulated_position_adjustments = vec![LayoutPoint::ZERO; self.world.boxes.len()];
+        let mut resolver = CoordinateSpaceResolver {
+            world: self.world,
+            viewport_scroll: self.viewport_scroll,
+            scroll_extents: &self.scroll_extents,
+            resolved_transforms: &self.resolved_transforms,
+            viewport_anchored: &mut self.viewport_anchored,
+            accumulated_position_adjustments: &mut accumulated_position_adjustments,
+            spaces: &mut spaces,
+            state: &mut state,
+        };
         for index in 0..self.world.boxes.len() {
-            resolve_coordinate_space(
-                index,
-                self.world,
-                self.viewport_scroll,
-                &self.scroll_extents,
-                &self.resolved_transforms,
-                &mut self.viewport_anchored,
-                &mut spaces,
-                &mut state,
-            )?;
+            resolver.resolve(index)?;
+        }
+        for (geometry, offset) in self.boxes.iter_mut().zip(accumulated_position_adjustments) {
+            geometry.layout_origin_in_document.x += offset.x;
+            geometry.layout_origin_in_document.y += offset.y;
         }
         self.coordinate_spaces = spaces
             .into_iter()
@@ -976,6 +972,7 @@ where
         self,
         source_root: N,
         content_size: LayoutSize,
+        object_geometry: Vec<crate::LayoutObjectGeometry<N>>,
         embedded_frames: Vec<crate::FrozenEmbeddedFrame<N>>,
     ) -> FrozenLayoutTree<N> {
         let root_box = LayoutOutputBoxId::from_index(self.world.root.index());
@@ -1103,6 +1100,7 @@ where
             boxes,
             self.fragments,
             self.scroll_proxy_links,
+            object_geometry,
             viewport_coordinate_space,
             self.clip_chain,
             embedded_frames,
@@ -1111,238 +1109,127 @@ where
     }
 }
 
-#[derive(Clone, Copy)]
-struct SubpixelPropagation {
-    x: bool,
-    y: bool,
-}
-
-impl SubpixelPropagation {
-    const BOTH: Self = Self { x: true, y: true };
-    const NONE: Self = Self { x: false, y: false };
-
-    fn through_transform(transform: LayoutTransform2D) -> Self {
-        let [scale_x, skew_y, skew_x, scale_y, _, _] = transform.coefficients;
-        if skew_x != 0.0 || skew_y != 0.0 {
-            return Self::NONE;
-        }
-        Self {
-            x: scale_x == 1.0,
-            y: scale_y == 1.0,
-        }
-    }
-}
-
-fn establish_property_space(
-    state: PaintSpace,
-    property_transform: LayoutTransform2D,
-    propagation: SubpixelPropagation,
-) -> PaintSpace {
-    let rounded_offset = LayoutPoint::new(
-        crate::snapshot::round_layout_pixel(f64::from(state.paint_offset.x)) as f32,
-        crate::snapshot::round_layout_pixel(f64::from(state.paint_offset.y)) as f32,
-    );
-    let residual = LayoutPoint::new(
-        state.paint_offset.x - rounded_offset.x,
-        state.paint_offset.y - rounded_offset.y,
-    );
-    PaintSpace {
-        property_transform: state
-            .property_transform
-            .concatenate(LayoutTransform2D::translation(
-                rounded_offset.x,
-                rounded_offset.y,
-            ))
-            .concatenate(property_transform),
-        paint_offset: LayoutPoint::new(
-            if propagation.x { residual.x } else { 0.0 },
-            if propagation.y { residual.y } else { 0.0 },
-        ),
-    }
-}
-
-fn resolve_paint_space(
-    parent: Option<PaintSpace>,
-    viewport_scroll: LayoutPoint,
-    is_viewport_anchored: bool,
-    parent_scroll: Option<LayoutPoint>,
-    location: LayoutPoint,
-    resolved_transform: ResolvedLayoutTransform,
-) -> PaintSpace {
-    let mut state = parent.unwrap_or(PaintSpace {
-        property_transform: if is_viewport_anchored {
-            LayoutTransform2D::IDENTITY
-        } else {
-            LayoutTransform2D::translation(-viewport_scroll.x, -viewport_scroll.y)
-        },
-        paint_offset: LayoutPoint::ZERO,
-    });
-
-    // A scroll container establishes a property space even at scroll offset
-    // zero. Commit the rounded translation while retaining its fractional
-    // residue for descendant snapping, then apply scrolling outside it.
-    if let Some(parent_scroll) = parent_scroll {
-        state = establish_property_space(
-            state,
-            LayoutTransform2D::translation(-parent_scroll.x, -parent_scroll.y),
-            SubpixelPropagation::BOTH,
-        );
-    }
-    state.paint_offset = LayoutPoint::new(
-        state.paint_offset.x + location.x,
-        state.paint_offset.y + location.y,
-    );
-
-    if resolved_transform.establishes_property_space {
-        let propagation = if resolved_transform.has_unsupported_3d {
-            SubpixelPropagation::NONE
-        } else {
-            SubpixelPropagation::through_transform(resolved_transform.transform)
-        };
-        state = establish_property_space(state, resolved_transform.transform, propagation);
-    }
-    state
-}
-
-#[allow(clippy::too_many_arguments)]
-fn resolve_coordinate_space<N>(
-    index: usize,
-    world: &LayoutWorld<N>,
-    viewport_scroll: LayoutPoint,
-    scroll_extents: &[LayoutScrollExtent],
-    resolved_transforms: &[ResolvedLayoutTransform],
-    viewport_anchored: &mut [bool],
-    spaces: &mut [Option<ProjectedCoordinateSpace>],
-    state: &mut [u8],
-) -> Result<(), LayoutError>
+/// Pass-local dependency coordination. CSS decisions are resolved here; the
+/// coordinate and paint composers consume only a ResolvedPlacement.
+struct CoordinateSpaceResolver<'a, N>
 where
     N: Copy + Debug + Eq + Hash,
 {
-    let Some(slot_state) = state.get(index).copied() else {
-        return Err(LayoutError::InvalidBoxReference { index });
-    };
-    match slot_state {
-        2 => return Ok(()),
-        1 => return Err(LayoutError::NumericTreeCycle { index }),
-        _ => state[index] = 1,
-    }
+    world: &'a LayoutWorld<N>,
+    viewport_scroll: LayoutPoint,
+    scroll_extents: &'a [LayoutScrollExtent],
+    resolved_transforms: &'a [ResolvedLayoutTransform],
+    viewport_anchored: &'a mut [bool],
+    accumulated_position_adjustments: &'a mut [LayoutPoint],
+    spaces: &'a mut [Option<ProjectedCoordinateSpace>],
+    state: &'a mut [u8],
+}
 
-    let layout_box = world
-        .boxes
-        .get(index)
-        .ok_or(LayoutError::InvalidBoxReference { index })?;
-    let parent_box = layout_box.layout_parent;
-    if let Some(parent) = parent_box {
-        if parent.index() >= world.boxes.len() {
-            return Err(LayoutError::InvalidBoxReference {
-                index: parent.index(),
-            });
+impl<N: Copy + Debug + Eq + Hash> CoordinateSpaceResolver<'_, N> {
+    fn resolve(&mut self, index: usize) -> Result<(), LayoutError> {
+        let Some(slot_state) = self.state.get(index).copied() else {
+            return Err(LayoutError::InvalidBoxReference { index });
+        };
+        match slot_state {
+            2 => return Ok(()),
+            1 => return Err(LayoutError::NumericTreeCycle { index }),
+            _ => self.state[index] = 1,
         }
-        resolve_coordinate_space(
-            parent.index(),
-            world,
-            viewport_scroll,
-            scroll_extents,
-            resolved_transforms,
-            viewport_anchored,
-            spaces,
-            state,
-        )?;
+        let parent_box = self.world.boxes[index].layout_parent;
+        if let Some(parent) = parent_box {
+            self.resolve(parent.index())?;
+        }
+        let sticky = sticky::prepare_constraints(index, self.world, self.scroll_extents)?;
+        if let Some(constraints) = &sticky
+            && constraints.scroll_container != self.world.root
+        {
+            // Scroll ancestry need not equal numeric layout ancestry. Resolve
+            // the actual referenced space, retaining the same cycle checks.
+            self.resolve(constraints.scroll_container.index())?;
+        }
+        let (placement, is_viewport_anchored) = self.resolve_placement(index, sticky.as_ref())?;
+        let local_delta = placement.local_sticky_delta_in_parent;
+        let space = ProjectedCoordinateSpace {
+            layout: compose_layout_space(index, placement, self.viewport_scroll),
+            paint: derive_paint_space(placement, self.viewport_scroll),
+        };
+        // This separate, existing O(N) pass-local array serves layout metrics.
+        // It never becomes a local transform or a second retained geometry tree.
+        let inherited = parent_box
+            .map(|parent| self.accumulated_position_adjustments[parent.index()])
+            .unwrap_or(LayoutPoint::ZERO);
+        self.accumulated_position_adjustments[index] =
+            LayoutPoint::new(inherited.x + local_delta.x, inherited.y + local_delta.y);
+        self.viewport_anchored[index] = is_viewport_anchored;
+        self.spaces[index + 1] = Some(space);
+        self.state[index] = 2;
+        Ok(())
     }
 
-    let parent_space = parent_box.map_or(LayoutCoordinateSpaceId::from_index(0), |parent| {
-        LayoutCoordinateSpaceId::from_index(parent.index() + 1)
-    });
-    let (parent_transform, parent_transform_ignoring_css_transforms) = match parent_box {
-        Some(parent) => spaces
-            .get(parent.index() + 1)
-            .and_then(Option::as_ref)
-            .map(|space| {
-                (
-                    space.layout.local_to_document,
-                    space.layout.local_to_document_ignoring_css_transforms,
+    fn resolve_placement(
+        &self,
+        index: usize,
+        sticky: Option<&sticky::StickyConstraints>,
+    ) -> Result<(ResolvedPlacement<'_>, bool), LayoutError> {
+        let layout_box = &self.world.boxes[index];
+        let is_viewport_anchored = layout_box.layout_parent.map_or_else(
+            || layout_box.style.is_fixed_positioned(),
+            |parent| self.viewport_anchored[parent.index()],
+        );
+        let parent = layout_box
+            .layout_parent
+            .map(|id| self.space(id))
+            .transpose()?;
+        let anchor = match parent {
+            Some(parent) => ProjectionAnchor::Parent(parent),
+            None if is_viewport_anchored => ProjectionAnchor::Viewport,
+            None => ProjectionAnchor::Document,
+        };
+        let parent_scroll = layout_box.layout_parent.and_then(|id| {
+            (id != self.world.root && self.scroll_extents[id.index()].is_scroll_container)
+                .then_some(self.scroll_extents[id.index()].applied_offset)
+        });
+        let location = layout_box.final_layout.location;
+        let layout_location_in_parent = LayoutPoint::new(location.x, location.y);
+        let local_sticky_delta_in_parent = match sticky {
+            Some(constraints) => {
+                let origin = if constraints.scroll_container == self.world.root {
+                    self.viewport_scroll
+                } else {
+                    self.space(constraints.scroll_container)?
+                        .layout
+                        .local_to_document_ignoring_css_transforms
+                        .map_point(LayoutPoint::ZERO)
+                };
+                constraints.resolve_offset(
+                    origin,
+                    parent.map_or(LayoutTransform2D::IDENTITY, |space| {
+                        space.layout.local_to_document_ignoring_css_transforms
+                    }),
+                    parent_scroll.unwrap_or(LayoutPoint::ZERO),
+                    layout_location_in_parent,
                 )
-            })
-            .ok_or(LayoutError::InvalidBoxReference {
-                index: parent.index(),
-            })?,
-        None => (LayoutTransform2D::IDENTITY, LayoutTransform2D::IDENTITY),
-    };
-    let is_viewport_anchored = parent_box.map_or_else(
-        || layout_box.style.is_fixed_positioned(),
-        |parent| viewport_anchored[parent.index()],
-    );
-    viewport_anchored[index] = is_viewport_anchored;
-    let parent_scroll = parent_box.and_then(|parent| {
-        (parent != world.root && scroll_extents[parent.index()].is_scroll_container)
-            .then_some(scroll_extents[parent.index()].applied_offset)
-    });
-    let applied_parent_scroll = parent_scroll.unwrap_or(LayoutPoint::ZERO);
-    let location = layout_box.final_layout.location;
-    let local_to_parent = LayoutTransform2D::translation(
-        location.x - applied_parent_scroll.x,
-        location.y - applied_parent_scroll.y,
-    )
-    .concatenate(resolved_transforms[index].transform);
-    let local_to_parent_ignoring_css_transforms = LayoutTransform2D::translation(
-        location.x - applied_parent_scroll.x,
-        location.y - applied_parent_scroll.y,
-    );
-    let local_to_document = if parent_box.is_none() && is_viewport_anchored {
-        LayoutTransform2D::translation(viewport_scroll.x, viewport_scroll.y)
-            .concatenate(local_to_parent)
-    } else {
-        parent_transform.concatenate(local_to_parent)
-    };
-    let local_to_document_ignoring_css_transforms = if parent_box.is_none() && is_viewport_anchored
-    {
-        LayoutTransform2D::translation(viewport_scroll.x, viewport_scroll.y)
-            .concatenate(local_to_parent_ignoring_css_transforms)
-    } else {
-        parent_transform_ignoring_css_transforms
-            .concatenate(local_to_parent_ignoring_css_transforms)
-    };
-    let parent_paint_state = match parent_box {
-        Some(parent) => Some(
-            spaces
-                .get(parent.index() + 1)
-                .and_then(Option::as_ref)
-                .map(|space| space.paint)
-                .ok_or(LayoutError::InvalidBoxReference {
-                    index: parent.index(),
-                })?,
-        ),
-        None => None,
-    };
-    let paint = resolve_paint_space(
-        parent_paint_state,
-        viewport_scroll,
-        is_viewport_anchored,
-        parent_scroll,
-        LayoutPoint::new(location.x, location.y),
-        resolved_transforms[index],
-    );
-    let exact_local_to_viewport =
-        LayoutTransform2D::translation(-viewport_scroll.x, -viewport_scroll.y)
-            .concatenate(local_to_document);
-    let local_to_viewport_ignoring_css_transforms =
-        LayoutTransform2D::translation(-viewport_scroll.x, -viewport_scroll.y)
-            .concatenate(local_to_document_ignoring_css_transforms);
-    spaces[index + 1] = Some(ProjectedCoordinateSpace {
-        layout: LayoutCoordinateSpace {
-            id: LayoutCoordinateSpaceId::from_index(index + 1),
-            owner: Some(LayoutOutputBoxId::from_index(index)),
-            parent: Some(parent_space),
-            local_to_parent,
-            local_to_document,
-            local_to_viewport: exact_local_to_viewport,
-            local_to_document_ignoring_css_transforms,
-            local_to_viewport_ignoring_css_transforms,
-        },
-        paint,
-    });
-    state[index] = 2;
-    Ok(())
+            }
+            None => LayoutPoint::ZERO,
+        };
+        Ok((
+            ResolvedPlacement {
+                anchor,
+                layout_location_in_parent,
+                local_sticky_delta_in_parent,
+                parent_scroll,
+                transform: self.resolved_transforms[index],
+            },
+            is_viewport_anchored,
+        ))
+    }
+
+    fn space(&self, id: LayoutBoxId) -> Result<&ProjectedCoordinateSpace, LayoutError> {
+        self.spaces
+            .get(id.index() + 1)
+            .and_then(Option::as_ref)
+            .ok_or(LayoutError::InvalidBoxReference { index: id.index() })
+    }
 }
 
 pub(crate) fn finite_point(point: LayoutPoint) -> LayoutPoint {
@@ -1471,109 +1358,86 @@ where
 }
 
 #[cfg(test)]
-mod paint_space_tests {
+mod dependency_tests {
     use super::*;
 
-    fn property_transform(transform: LayoutTransform2D) -> ResolvedLayoutTransform {
-        ResolvedLayoutTransform {
-            transform,
-            has_unsupported_3d: false,
-            establishes_property_space: true,
+    #[test]
+    fn sticky_resolves_a_scroll_space_outside_its_layout_parent_chain() {
+        fn box_for(id: usize) -> crate::world::LayoutBox<usize> {
+            LayoutWorld::new_box(
+                Some(id),
+                None,
+                None,
+                id.to_string(),
+                None,
+                None,
+                None,
+                crate::LayoutBoxKind::PrincipalBlock,
+                crate::ResolvedLayoutStyle::synthetic(
+                    crate::LayoutDisplay::Block,
+                    taffy::Style::default(),
+                    crate::PaintColor::TRANSPARENT,
+                ),
+                None,
+            )
         }
-    }
-
-    #[test]
-    fn ordinary_offsets_accumulate_without_an_extra_property_transform() {
-        let root = resolve_paint_space(
-            None,
-            LayoutPoint::ZERO,
-            false,
-            None,
-            LayoutPoint::ZERO,
-            ResolvedLayoutTransform::IDENTITY,
-        );
-        let ordinary = resolve_paint_space(
-            Some(root),
-            LayoutPoint::ZERO,
-            false,
-            None,
-            LayoutPoint::new(0.0, 12.5),
-            ResolvedLayoutTransform::IDENTITY,
-        );
-        assert_eq!(ordinary.paint_offset, LayoutPoint::new(0.0, 12.5));
-        assert_eq!(ordinary.property_transform, LayoutTransform2D::IDENTITY);
+        let mut world = LayoutWorld::new(box_for(0), false);
+        world.boxes.extend([box_for(1), box_for(2)]);
+        for layout_box in &mut world.boxes {
+            layout_box.final_layout.size = taffy::Size {
+                width: 1000.0,
+                height: 1000.0,
+            };
+        }
+        let root = LayoutBoxId::from_index(0);
+        let scroller = LayoutBoxId::from_index(2);
+        world.boxes[1].parent = Some(scroller);
+        world.boxes[1].layout_parent = Some(root);
+        world.boxes[1].style = crate::ResolvedLayoutStyle::synthetic(
+            crate::LayoutDisplay::Block,
+            taffy::Style {
+                inset: taffy::Rect {
+                    top: taffy::style_helpers::length(10.0),
+                    ..taffy::Rect::auto()
+                },
+                ..taffy::Style::default()
+            },
+            crate::PaintColor::TRANSPARENT,
+        )
+        .with_position(crate::LayoutPosition::Sticky);
+        world.boxes[1].final_layout.size = taffy::Size {
+            width: 20.0,
+            height: 20.0,
+        };
+        world.boxes[2].layout_parent = Some(root);
+        world.boxes[2].parent = Some(root);
+        world.boxes[2].final_layout.location.y = 40.0;
+        let mut projection = OutputProjection::new(&world, LayoutViewport::new(100, 100, 1.0));
+        projection.scroll_extents = (0..3)
+            .map(|index| LayoutScrollExtent {
+                scrollport: LayoutRect::new(0.0, 0.0, 100.0, 100.0),
+                scrollable_overflow: LayoutRect::ZERO,
+                scroll_size: LayoutSize::new(100.0, 100.0),
+                applied_offset: LayoutPoint::ZERO,
+                minimum_offset: LayoutPoint::ZERO,
+                maximum_offset: LayoutPoint::ZERO,
+                is_scroll_container: index == 2,
+                allows_user_scroll_x: false,
+                allows_user_scroll_y: false,
+                clips_overflow: false,
+                horizontal_scrollbar: None,
+                vertical_scrollbar: None,
+                scrollbar_corner: None,
+                scrollbar_colors: None,
+            })
+            .collect();
+        projection.build_coordinate_spaces().unwrap();
+        let sticky = &projection.coordinate_spaces[2].layout;
         assert_eq!(
-            ordinary.local_transform(),
-            LayoutTransform2D::translation(0.0, 12.5)
+            sticky.local_to_viewport.map_point(LayoutPoint::ZERO).y,
+            50.0
         );
-    }
-
-    #[test]
-    fn translation_property_space_keeps_the_fractional_residual() {
-        let transformed = resolve_paint_space(
-            Some(PaintSpace {
-                paint_offset: LayoutPoint::new(0.75, 0.25),
-                property_transform: LayoutTransform2D::IDENTITY,
-            }),
-            LayoutPoint::ZERO,
-            false,
-            None,
-            LayoutPoint::ZERO,
-            property_transform(LayoutTransform2D::translation(5.0, 7.0)),
-        );
-        assert_eq!(transformed.paint_offset, LayoutPoint::new(-0.25, 0.25));
-        assert_eq!(
-            transformed.property_transform,
-            LayoutTransform2D::translation(6.0, 7.0)
-        );
-        assert_eq!(
-            transformed.local_transform(),
-            LayoutTransform2D::translation(5.75, 7.25)
-        );
-    }
-
-    #[test]
-    fn scale_discards_only_the_residual_on_scaled_axes() {
-        let transformed = resolve_paint_space(
-            Some(PaintSpace {
-                paint_offset: LayoutPoint::new(0.75, 0.75),
-                property_transform: LayoutTransform2D::IDENTITY,
-            }),
-            LayoutPoint::ZERO,
-            false,
-            None,
-            LayoutPoint::ZERO,
-            property_transform(LayoutTransform2D::scale(2.0, 1.0)),
-        );
-        assert_eq!(transformed.paint_offset, LayoutPoint::new(0.0, -0.25));
-        assert_eq!(
-            transformed.property_transform,
-            LayoutTransform2D::translation(1.0, 1.0)
-                .concatenate(LayoutTransform2D::scale(2.0, 1.0))
-        );
-    }
-
-    #[test]
-    fn scroll_property_space_exists_at_zero_offset_and_preserves_residual() {
-        let scrolled_child = resolve_paint_space(
-            Some(PaintSpace {
-                paint_offset: LayoutPoint::new(0.75, 0.0),
-                property_transform: LayoutTransform2D::IDENTITY,
-            }),
-            LayoutPoint::ZERO,
-            false,
-            Some(LayoutPoint::ZERO),
-            LayoutPoint::new(0.125, 0.0),
-            ResolvedLayoutTransform::IDENTITY,
-        );
-        assert_eq!(
-            scrolled_child.property_transform,
-            LayoutTransform2D::translation(1.0, 0.0)
-        );
-        assert_eq!(scrolled_child.paint_offset, LayoutPoint::new(-0.125, 0.0));
-        assert_eq!(
-            scrolled_child.local_transform(),
-            LayoutTransform2D::translation(0.875, 0.0)
-        );
+        // The output pass borrows the numeric world and never patches locations.
+        assert_eq!(world.boxes[1].final_layout.location.y, 0.0);
     }
 }

@@ -1,6 +1,6 @@
 use super::shared::*;
 use crate::{
-    native_bridge::JsContextHost,
+    native_bridge::PageScriptHost,
     util::{
         context_host_ptr_from_context_slot, context_host_ptr_from_global_bridge,
         context_host_ptr_from_window_object,
@@ -29,9 +29,9 @@ pub(crate) use document::{
 pub(crate) use helpers::{current_window_style_viewport, window_host_ptr};
 pub(super) use helpers::{window_child_context_handle, window_current_dispatch_scope};
 pub(super) use interceptors::{
-    window_indexed_property_descriptor, window_indexed_property_enumerator,
-    window_indexed_property_getter, window_indexed_property_query, window_named_property_getter,
-    window_named_property_query,
+    window_indexed_property_deleter, window_indexed_property_descriptor,
+    window_indexed_property_enumerator, window_indexed_property_getter,
+    window_indexed_property_query, window_named_property_getter, window_named_property_query,
 };
 pub(crate) use surface::{
     window_closed_getter, window_opener_getter, window_parent_getter, window_top_getter,

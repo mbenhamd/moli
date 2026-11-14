@@ -39,7 +39,7 @@ pub(in crate::native_bridge) fn node_document_active_element_getter_function<'s>
 /// `document` with nothing focused inside, which makes `document`'s viewport
 /// the focused area. With nothing focused only the runtime's top Document
 /// (the viewport) is focused.
-pub(crate) fn document_is_in_focus_chain(runtime: &JsContextHost, document: DomHandle) -> bool {
+pub(crate) fn document_is_in_focus_chain(runtime: &PageScriptHost, document: DomHandle) -> bool {
     match runtime.active_element_handle() {
         Some(active) => {
             runtime.child_browsing_context_document_handle(active) == Some(document)
@@ -50,7 +50,7 @@ pub(crate) fn document_is_in_focus_chain(runtime: &JsContextHost, document: DomH
 }
 
 fn retarget_active_element_to_document(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     active: DomHandle,
     target_document: DomHandle,
 ) -> Option<DomHandle> {

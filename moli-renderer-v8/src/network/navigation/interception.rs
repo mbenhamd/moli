@@ -63,12 +63,13 @@ impl NavigationInterception {
         method: String,
         headers: moli_fetch::RequestHeaders,
         body: Option<bytes::Bytes>,
+        body_text: Option<std::sync::Arc<str>>,
         redirect_headers: Option<moli_fetch::RequestHeaders>,
     ) {
         self.request.url = url;
         self.request.method = method;
         self.request.request_headers = headers;
-        self.request.body = body;
+        self.request.set_body(body, body_text);
         self.request.set_redirect_headers(redirect_headers);
     }
 
@@ -141,6 +142,7 @@ impl NavigationInterception {
     /// Returns the next hop to its owner before any transport is started.
     /// Synthetic and network responses use exactly the same redirect rules.
     pub fn follow_redirect(&mut self, head: &ResponseHead) -> Result<Option<RedirectInfo>> {
+        self.request.observe_redirect_requests(&head.redirect_chain);
         if !self.manual_redirects {
             return Ok(None);
         }
@@ -157,21 +159,11 @@ impl NavigationInterception {
         if !matches!(next_url.scheme(), "http" | "https") {
             bail!("document redirect to unsupported URL {next_url}");
         }
-        let redirect = RedirectInfo {
-            source: moli_fetch::RedirectSource::Network,
-            from_url: head.final_url.clone(),
-            to_url: next_url.clone(),
-            status: head.status,
-            headers: head.headers.clone(),
-            network_extra_info_available: false,
-            request_extra_info: None,
-            response_extra_info: None,
-            redirect_has_extra_info: false,
-            request_cookie_report: head.request_cookie_report.clone(),
-            cookie_set_reports: head.cookie_set_reports.clone(),
-            from_cache: head.from_cache,
-            negotiated_http_version: head.negotiated_http_version,
-        };
+        let redirect = head.clone().into_redirect(
+            next_url.clone(),
+            moli_fetch::RedirectSource::Network,
+            false,
+        );
         self.request.follow_redirect(redirect.clone())?;
         self.loader.restart_after_response()?;
         self.navigation_url = next_url;

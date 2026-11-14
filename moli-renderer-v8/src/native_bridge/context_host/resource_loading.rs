@@ -1,4 +1,4 @@
-use super::{JsContextHost, OwnerDispatchScope};
+use super::{OwnerDispatchScope, PageScriptHost};
 use crate::network::loads::{ResourceLoadDisposition, ResourceLoadKind, ResourceLoadLease};
 use crate::types::DedicatedWorkerId;
 use crate::{
@@ -31,7 +31,7 @@ fn navigation_response_from_subresource_body(
     )
 }
 
-impl JsContextHost {
+impl PageScriptHost {
     #[cfg(test)]
     pub(crate) fn has_pending_load_event_delaying_subresource_requests(&self) -> bool {
         self.pending_subresource_fetches
@@ -40,20 +40,23 @@ impl JsContextHost {
     }
 
     fn push_pending_subresource_fetch_info(&mut self, info: PendingSubresourceFetchInfo) {
-        self.push_subresource_fetch_pause(info, None);
+        self.push_subresource_fetch_pause(info, None, None);
     }
 
     fn push_subresource_fetch_pause(
         &mut self,
         info: PendingSubresourceFetchInfo,
         child_document: Option<crate::protocol_types::ChildDocumentFetchRequest>,
+        redirect: Option<crate::protocol_types::NavigationRedirect>,
     ) {
         if let Some(source_document) = self.root_document_lifecycle_identity()
             && self.append_live_turn_owner_action(
                 crate::runtime::RendererOwnerAction::SubresourceFetchPause {
+                    network_pause: None,
                     source_document,
                     info: Box::new(info.clone()),
                     child_document: child_document.map(Box::new),
+                    redirect: redirect.map(Box::new),
                 },
             )
         {
@@ -69,13 +72,13 @@ impl JsContextHost {
     }
 
     pub(crate) fn document_url(&self) -> &url::Url {
-        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-        unsafe { &*self.runtime }.document_url()
+        // SAFETY: PageScriptHost is owned by the ScriptVm that owns this DocumentRuntime.
+        unsafe { &*self.document_runtime }.document_url()
     }
 
     pub(crate) fn document_character_set(&self) -> &str {
-        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-        unsafe { &*self.runtime }.document_character_set()
+        // SAFETY: PageScriptHost is owned by the ScriptVm that owns this DocumentRuntime.
+        unsafe { &*self.document_runtime }.document_character_set()
     }
 
     pub(crate) fn resolve_module_specifier_with_base(
@@ -83,16 +86,16 @@ impl JsContextHost {
         specifier: &str,
         base_url: &url::Url,
     ) -> std::result::Result<url::Url, String> {
-        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-        unsafe { &mut *self.runtime }.resolve_module_specifier(specifier, base_url)
+        // SAFETY: PageScriptHost is owned by the ScriptVm that owns this DocumentRuntime.
+        unsafe { &mut *self.document_runtime }.resolve_module_specifier(specifier, base_url)
     }
 
     pub(crate) fn native_module_wasm_record_for(
         &self,
         module: v8::Local<'_, v8::Module>,
     ) -> Option<WasmModuleRecord> {
-        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-        unsafe { &*self.runtime }.native_module_wasm_record_for(module)
+        // SAFETY: PageScriptHost is owned by the ScriptVm that owns this DocumentRuntime.
+        unsafe { &*self.document_runtime }.native_module_wasm_record_for(module)
     }
 
     pub(crate) fn native_wasm_instance_for_namespace<'s>(
@@ -100,8 +103,8 @@ impl JsContextHost {
         scope: &mut v8::PinScope<'s, '_>,
         namespace: v8::Local<'s, v8::Object>,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-        unsafe { &*self.runtime }.native_wasm_instance_for_namespace(scope, namespace)
+        // SAFETY: PageScriptHost is owned by the ScriptVm that owns this DocumentRuntime.
+        unsafe { &*self.document_runtime }.native_wasm_instance_for_namespace(scope, namespace)
     }
 
     pub(crate) fn native_resolved_dependency_module_for(
@@ -110,24 +113,24 @@ impl JsContextHost {
         specifier: &str,
         attributes: &ModuleAttributesKey,
     ) -> Option<v8::Global<v8::Module>> {
-        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-        unsafe { &*self.runtime }
+        // SAFETY: PageScriptHost is owned by the ScriptVm that owns this DocumentRuntime.
+        unsafe { &*self.document_runtime }
             .native_resolved_dependency_module_for(referrer, specifier, attributes)
     }
 
     pub(crate) fn native_document_modulator_ptr(
         &self,
     ) -> *const crate::module_runtime::NativeDocumentModulator {
-        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-        unsafe { &*self.runtime }.native_document_modulator_ptr()
+        // SAFETY: PageScriptHost is owned by the ScriptVm that owns this DocumentRuntime.
+        unsafe { &*self.document_runtime }.native_document_modulator_ptr()
     }
 
     pub(crate) fn queue_native_dynamic_module_import(
         &mut self,
         request: PendingDynamicModuleImport,
     ) {
-        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-        unsafe { &mut *self.runtime }.queue_native_dynamic_module_import(request);
+        // SAFETY: PageScriptHost is owned by the ScriptVm that owns this DocumentRuntime.
+        unsafe { &mut *self.document_runtime }.queue_native_dynamic_module_import(request);
     }
 
     pub(crate) fn current_dynamic_module_import_owner(
@@ -181,13 +184,7 @@ impl JsContextHost {
     pub(crate) fn next_subresource_network_request_handle(
         &mut self,
     ) -> SubresourceNetworkRequestHandle {
-        let handle =
-            SubresourceNetworkRequestHandle::new(self.next_subresource_network_request_handle);
-        self.next_subresource_network_request_handle = self
-            .next_subresource_network_request_handle
-            .wrapping_add(1)
-            .max(1);
-        handle
+        crate::network::interception_control::next_subresource_network_handle()
     }
 
     pub(crate) fn record_subresource_request_started(
@@ -278,7 +275,7 @@ impl JsContextHost {
         request_initiator_type: SubresourceRequestInitiatorType,
         result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
     ) {
-        let record = Self::get_subresource_network_record_with_initiator(
+        self.record_get_subresource_network_result_with_handle(
             frame_id,
             document_url,
             request_url,
@@ -287,6 +284,74 @@ impl JsContextHost {
             result,
             None,
         );
+    }
+
+    pub(crate) fn record_get_subresource_network_result_with_handle(
+        &mut self,
+        frame_id: Option<String>,
+        document_url: url::Url,
+        request_url: url::Url,
+        resource_type: SubresourceResourceType,
+        request_initiator_type: SubresourceRequestInitiatorType,
+        result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
+        request_handle: Option<SubresourceNetworkRequestHandle>,
+    ) {
+        if resource_type == SubresourceResourceType::Script
+            && let Ok(response) = result
+            && response.status >= 400
+        {
+            // Script loading rejects HTTP error responses after receiving the
+            // headers. Preserve those headers and the original request identity,
+            // then report the resource failure independently of script execution.
+            let handle =
+                request_handle.unwrap_or_else(|| self.next_subresource_network_request_handle());
+            self.record_subresource_request_started(SubresourceRequestStarted::new(
+                handle,
+                frame_id,
+                document_url,
+                request_url,
+                "GET".to_owned(),
+                Default::default(),
+                None,
+                resource_type,
+                request_initiator_type,
+                response.request_cookie_report.clone(),
+            ));
+            self.record_subresource_response_started(
+                SubresourceResponseStarted::new(
+                    handle,
+                    response.redirect_chain.clone().into_iter().collect(),
+                    response.final_url.clone(),
+                    response.status,
+                    response.headers.clone(),
+                    response.cookie_set_reports.clone(),
+                )
+                .with_from_cache(response.from_cache)
+                .with_negotiated_http_version(response.negotiated_http_version)
+                .with_network_request_headers(
+                    response
+                        .network_request_headers()
+                        .map(|headers| headers.to_vec()),
+                ),
+            );
+            self.record_subresource_body_finished(SubresourceBodyFinished::failed(
+                handle,
+                moli_fetch::NET_ERR_ABORTED_ERROR_TEXT.to_owned(),
+            ));
+            return;
+        }
+        let mut record = Self::get_subresource_network_record_with_initiator(
+            frame_id,
+            document_url,
+            request_url,
+            resource_type,
+            request_initiator_type,
+            result,
+            None,
+        );
+        if let Some(handle) = request_handle {
+            record = record.with_request_handle(handle);
+        }
         self.record_subresource_network(record);
     }
 
@@ -453,6 +518,38 @@ impl JsContextHost {
         }
     }
 
+    pub(crate) fn update_pending_subresource_native_info(
+        &mut self,
+        info: &PendingSubresourceFetchInfo,
+    ) {
+        if let Some(pending) = self.pending_subresource_fetches.get_mut(&info.internal_id) {
+            pending.info = info.clone();
+        }
+    }
+
+    pub(crate) fn start_pending_subresource_native_stream(
+        &mut self,
+        info: &PendingSubresourceFetchInfo,
+    ) {
+        let Some(pending) = self.pending_subresource_fetches.get_mut(&info.internal_id) else {
+            return;
+        };
+        pending.info = info.clone();
+        let disposition = pending.load.disposition();
+        // Native pauses have already announced the request to protocol clients.
+        // The staged body delivery still needs its own request metadata; the
+        // protocol projection suppresses that duplicate public announcement.
+        self.record_pending_subresource_request_started(info, disposition);
+    }
+
+    pub(crate) fn pending_subresource_native_inputs(
+        &self,
+        internal_id: u64,
+    ) -> Option<(ResourceLoadLease, PendingSubresourceFetchInfo)> {
+        let pending = self.pending_subresource_fetches.get(&internal_id)?;
+        Some((pending.load.clone(), pending.info.clone()))
+    }
+
     pub(crate) fn css_module_text_for_url(&self, url: &url::Url) -> Option<String> {
         self.css_module_texts_by_url.get(url.as_str()).cloned()
     }
@@ -469,12 +566,11 @@ impl JsContextHost {
         self.subresource_activity_epoch
     }
 
-    fn assign_pending_subresource_fetch_identity(
+    pub(crate) fn assign_pending_subresource_fetch_identity(
         &mut self,
         info: &mut PendingSubresourceFetchInfo,
     ) {
-        self.next_pending_subresource_fetch_id += 1;
-        info.internal_id = self.next_pending_subresource_fetch_id;
+        info.internal_id = crate::network::interception_control::next_subresource_request_id();
         if info.network_request_handle.is_none() {
             info.network_request_handle = Some(self.next_subresource_network_request_handle());
         }
@@ -608,6 +704,7 @@ impl JsContextHost {
         credentials_mode: moli_fetch::RequestCredentialsMode,
         request_mode: moli_fetch::RequestMode,
         cache_mode: moli_fetch::RequestCacheMode,
+        request: moli_fetch::Request,
         request_origin: moli_url::WebOrigin,
         network_partition_key: Option<String>,
         policy_context: crate::types::SubresourcePolicyContext,
@@ -648,7 +745,8 @@ impl JsContextHost {
                         cache_mode,
                         connect_policy,
                         csp_report_context,
-                    ),
+                    )
+                    .with_intercepted_request(request),
                 ),
                 deferred_request_started: false,
             },
@@ -1609,7 +1707,7 @@ impl JsContextHost {
         self.assign_pending_subresource_fetch_identity(&mut info);
         fetch.set_network_info(info.clone());
         let internal_id = info.internal_id;
-        self.push_subresource_fetch_pause(info.clone(), Some(child_document));
+        self.push_subresource_fetch_pause(info.clone(), Some(child_document), None);
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
@@ -1644,6 +1742,7 @@ impl JsContextHost {
         network_partition_key: Option<String>,
         policy_context: crate::types::SubresourcePolicyContext,
         mut info: PendingSubresourceFetchInfo,
+        publish_request_started: bool,
     ) -> u64 {
         self.assign_pending_subresource_fetch_identity(&mut info);
         let internal_id = info.internal_id;
@@ -1653,7 +1752,9 @@ impl JsContextHost {
             ResourceLoadDisposition::Ordinary,
             cancel_handle.clone(),
         );
-        self.record_pending_subresource_request_started(&info, load.disposition());
+        if publish_request_started {
+            self.record_pending_subresource_request_started(&info, load.disposition());
+        }
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
@@ -1753,6 +1854,22 @@ impl JsContextHost {
         self.pending_subresource_fetches
             .insert(state.info.internal_id, state);
         self.note_subresource_activity();
+    }
+
+    pub(crate) fn repause_window_fetch_after_redirect(
+        &mut self,
+        pending: PendingSubresourceFetchState,
+        redirect: moli_fetch::RedirectInfo,
+    ) {
+        // Retire the previous hop before a pattern-mismatched next hop can
+        // install its automatic continuation/auth correlation under this id.
+        self.record_pending_subresource_continue_event(
+            PendingSubresourceContinueEvent::Completed {
+                internal_id: pending.info.internal_id,
+            },
+        );
+        self.push_subresource_fetch_pause(pending.info.clone(), None, Some(redirect.into()));
+        self.restore_pending_subresource_fetch(pending);
     }
 
     pub(crate) fn cancel_pending_worker_subresource_fetch(
@@ -1890,7 +2007,7 @@ impl JsContextHost {
             .values_mut()
             .find(|state| state.body_source_id == body_source_id)
         {
-            state.body_writer.append(bytes);
+            state.body_capture.append(bytes);
             true
         } else {
             false
@@ -1934,7 +2051,7 @@ impl JsContextHost {
         let context = v8::Local::new(scope, state.pending.execution_context.context_global()?);
         let event_source = v8::Local::new(scope, event_source);
         let parser = state.event_source_parser.as_mut()?;
-        state.body_writer.append(bytes);
+        state.body_capture.append(bytes);
         let messages = parser.push(bytes);
         let delivery = crate::types::EventSourceStreamingChunkDelivery {
             context,
@@ -1963,7 +2080,7 @@ impl JsContextHost {
             };
             let context = v8::Local::new(scope, state.pending.execution_context.context_global()?);
             let xhr = v8::Local::new(scope, xhr);
-            state.body_writer.append(bytes);
+            state.body_capture.append(bytes);
             let (decoded_text, loaded, total) = state.xhr_response.as_mut()?.append(bytes);
             crate::types::XhrStreamingChunkDelivery {
                 context,
@@ -2043,7 +2160,7 @@ impl JsContextHost {
         error_text: String,
     ) {
         if let Some(handle) = streaming.pending.info.network_request_handle {
-            let partial_body = streaming.body_writer.finish();
+            let partial_body = streaming.body_capture.finish();
             self.record_subresource_response_started(
                 SubresourceResponseStarted::new(
                     handle,
@@ -2225,7 +2342,7 @@ impl JsContextHost {
                 SubresourceBodyFinished::failed_with_partial_body(
                     handle,
                     error_text,
-                    streaming.body_writer.finish(),
+                    streaming.body_capture.finish(),
                 ),
             );
         } else {
@@ -2996,6 +3113,7 @@ impl JsContextHost {
         if let Some(source_document) = self.root_document_lifecycle_identity()
             && self.append_live_turn_owner_action(
                 crate::runtime::RendererOwnerAction::SubresourceContinue {
+                    network_pause: None,
                     source_document,
                     event: Box::new(event.clone()),
                 },
@@ -3224,7 +3342,9 @@ fn cancelled_fetch_resource_timing(
     fetch.resolver()?;
     Some((
         pending.execution_context.context_global()?.clone(),
-        fetch.resource_timing().failed(&pending.info.url),
+        fetch
+            .resource_timing()
+            .failed(fetch.initial_request_url(&pending.info.url)),
     ))
 }
 

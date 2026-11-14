@@ -1,4 +1,5 @@
 use super::*;
+use crate::context_bootstrap::indexed_db::indexed_db_transaction_status;
 
 pub(in crate::context_bootstrap::indexed_db) fn cursor_request_and_transaction<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -59,9 +60,7 @@ pub(in crate::context_bootstrap::indexed_db) fn cursor_active_transaction<'s>(
     cursor: v8::Local<'s, v8::Object>,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let (_, transaction) = cursor_request_and_transaction(scope, cursor)?;
-    if !object_bool_property(scope, transaction, INDEXED_DB_TRANSACTION_ACTIVE_SLOT)
-        .unwrap_or(false)
-    {
+    if !indexed_db_transaction_status(scope, transaction).is_some_and(|state| state.active) {
         let error = dom_exception_value(
             scope,
             "The transaction is not active.",
@@ -125,15 +124,14 @@ pub(in crate::context_bootstrap::indexed_db) fn cursor_source_is_index<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     cursor: v8::Local<'s, v8::Object>,
 ) -> bool {
-    cursor_source(scope, cursor)
-        .and_then(|source| object_bool_property(scope, source, INDEXED_DB_INDEX_MARKER_SLOT))
-        .unwrap_or(false)
+    cursor_source(scope, cursor).is_some_and(|source| {
+        indexed_db_typed_wrapper_is(scope, source, IndexedDbWrapperKind::Index)
+    })
 }
 
 pub(in crate::context_bootstrap::indexed_db) struct CursorMutation<'s> {
     pub(super) transaction: v8::Local<'s, v8::Object>,
     pub(super) store: v8::Local<'s, v8::Object>,
-    pub(super) store_name: moli_indexeddb::IndexedDbName,
     pub(super) primary_key: Key,
 }
 
@@ -144,8 +142,7 @@ impl<'s> CursorMutation<'s> {
         cursor: v8::Local<'s, v8::Object>,
     ) -> Option<v8::Local<'s, v8::Object>> {
         // A serialization getter may have aborted the transaction.
-        if !object_bool_property(scope, self.transaction, INDEXED_DB_TRANSACTION_ACTIVE_SLOT)
-            .unwrap_or(false)
+        if !indexed_db_transaction_status(scope, self.transaction).is_some_and(|state| state.active)
         {
             throw_cursor_mutation_error(
                 scope,
@@ -166,11 +163,9 @@ pub(in crate::context_bootstrap::indexed_db) fn prepare_cursor_mutation<'s>(
 ) -> Option<CursorMutation<'s>> {
     let (store, transaction, primary_key) = cursor_mutation_state(scope, cursor)?;
     transaction_handle_from_value(scope, transaction.into())?;
-    let store_name = indexed_db_object_store_name(scope, store)?;
     Some(CursorMutation {
         transaction,
         store,
-        store_name,
         primary_key,
     })
 }

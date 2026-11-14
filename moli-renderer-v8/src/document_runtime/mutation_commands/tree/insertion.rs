@@ -9,14 +9,14 @@ use crate::{
     document_runtime::{DocumentRuntime, DomHandle},
     dom::native::Node,
     mutation_coordinator::{ConnectedScriptMutationPolicy, RuntimeMutationOptions},
-    native_bridge::JsContextHost,
+    native_bridge::PageScriptHost,
 };
 
 impl DocumentRuntime {
     pub(crate) fn append_child(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         parent: DomHandle,
         child: DomHandle,
     ) -> bool {
@@ -32,7 +32,7 @@ impl DocumentRuntime {
     pub(crate) fn append_child_appending_to_current_reaction_queue(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         parent: DomHandle,
         child: DomHandle,
     ) -> bool {
@@ -48,7 +48,7 @@ impl DocumentRuntime {
     pub(crate) fn append_html_fragment_child_appending_to_current_reaction_queue(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         parent: DomHandle,
         child: DomHandle,
     ) -> bool {
@@ -65,7 +65,7 @@ impl DocumentRuntime {
     fn append_child_with_source_profile(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         parent: DomHandle,
         child: DomHandle,
         source_profile: TreeMutationSourceProfile,
@@ -121,6 +121,7 @@ impl DocumentRuntime {
             child,
             insertion_plan.insertion_roots,
             None,
+            false,
         ) {
             Some(result) => (result.effects, result.prepublished_removals),
             None => (
@@ -212,7 +213,7 @@ impl DocumentRuntime {
     pub(crate) fn insert_before(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         parent: DomHandle,
         child: DomHandle,
         reference_child: Option<DomHandle>,
@@ -233,7 +234,7 @@ impl DocumentRuntime {
     pub(crate) fn insert_before_appending_to_current_reaction_queue(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         parent: DomHandle,
         child: DomHandle,
         reference_child: Option<DomHandle>,
@@ -254,7 +255,7 @@ impl DocumentRuntime {
     pub(crate) fn insert_html_fragment_child_appending_to_current_reaction_queue(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         parent: DomHandle,
         child: DomHandle,
         reference_child: Option<DomHandle>,
@@ -270,10 +271,11 @@ impl DocumentRuntime {
         )
     }
 
+    /// Applies moveBefore() after the node binding validates its move constraints.
     pub(crate) fn move_before_preserving_state_appending_to_current_reaction_queue(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         parent: DomHandle,
         child: DomHandle,
         reference_child: Option<DomHandle>,
@@ -294,7 +296,7 @@ impl DocumentRuntime {
     fn insert_before_with_source_profile(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         parent: DomHandle,
         child: DomHandle,
         reference_child: Option<DomHandle>,
@@ -318,19 +320,19 @@ impl DocumentRuntime {
     pub(super) fn insert_before_with_nonce_handling(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         parent: DomHandle,
         child: DomHandle,
         reference_child: Option<DomHandle>,
         hide_nonce_content_attributes: bool,
-        dispatch_atomic_move_callbacks: bool,
+        is_atomic_move: bool,
         connected_script_policy: ConnectedScriptMutationPolicy,
         source_profile: TreeMutationSourceProfile,
     ) -> bool {
         let mutation_options = RuntimeMutationOptions::js_dom_api()
             .with_connected_script_policy(connected_script_policy)
             .with_nonce_hiding(hide_nonce_content_attributes)
-            .with_atomic_move_callbacks(dispatch_atomic_move_callbacks);
+            .with_atomic_move_callbacks(is_atomic_move);
         let started = dom_binding_timing_started();
         trace_resource_dom_mutation(&self.dom_host, "insertBefore", child, None, None);
         // DOM pre-insert adopts (and therefore removes) a self-referenced node
@@ -358,7 +360,7 @@ impl DocumentRuntime {
             ),
         );
         let was_connected = insertion_plan.was_lifecycle_connected_before_insert();
-        if !dispatch_atomic_move_callbacks {
+        if !is_atomic_move {
             self.reset_focus_for_non_preserving_connected_move_before_insert(
                 scope,
                 host_ptr,
@@ -367,7 +369,7 @@ impl DocumentRuntime {
             );
         }
         // Removal resets scroll offsets; a state-preserving move keeps them.
-        let preserved_scroll_offsets = if dispatch_atomic_move_callbacks {
+        let preserved_scroll_offsets = if is_atomic_move {
             self.scroll_offsets_in_subtrees(insertion_plan.insertion_roots)
         } else {
             Vec::new()
@@ -378,10 +380,16 @@ impl DocumentRuntime {
             child,
             insertion_plan.insertion_roots,
             reference_child,
+            is_atomic_move,
         ) {
             Some(result) => (result.effects, result.prepublished_removals),
             None => (
-                self.insert_before_effects_in_structural_scope(parent, child, reference_child),
+                self.insert_before_effects_in_structural_scope_with_state_preservation(
+                    parent,
+                    child,
+                    reference_child,
+                    is_atomic_move,
+                ),
                 Vec::new(),
             ),
         };
@@ -410,7 +418,7 @@ impl DocumentRuntime {
                 source_profile,
             );
         }
-        if dispatch_atomic_move_callbacks
+        if is_atomic_move
             && was_connected
             && insertion_plan
                 .insertion_roots
@@ -424,7 +432,7 @@ impl DocumentRuntime {
             );
         }
         self.restore_scroll_offsets_after_atomic_move(preserved_scroll_offsets);
-        if dispatch_atomic_move_callbacks && let Some(active) = self.active_element_handle() {
+        if is_atomic_move && let Some(active) = self.active_element_handle() {
             crate::native_bridge::element::schedule_focus_blur_if_needed(scope, host_ptr, active);
         }
         self.preserve_selectedness_for_insertion_plan(scope, host_ptr, &insertion_plan);

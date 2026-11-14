@@ -43,6 +43,7 @@ pub use command_dispatch::{
     CompletedRuntimeInspectorCommandDispatch, PageDocumentCommandTarget,
     PendingDevToolsIoCommandDispatch, PendingPageCommand, PendingRuntimeInspectorCommandDispatch,
 };
+pub use moli_renderer_v8::RendererPageRequestPolicyUpdate;
 
 #[cfg(all(test, debug_assertions))]
 use crate::network::ResourceRequestClient;
@@ -92,8 +93,9 @@ pub use moli_renderer_v8::{
     RendererBrowsingContextGroup, RendererBrowsingContextName, RendererCaptureScreencastFrameReply,
     RendererCaptureScreencastFrameRequest, RendererCaptureScreenshotReply,
     RendererCaptureScreenshotRequest, RendererCapturedDocumentEnvironment,
-    RendererCommandTurnCompletion, RendererCommandTurnOutput, RendererDedicatedWorkerTargetEvent,
-    RendererDedicatedWorkerTargetInfo, RendererDevToolsAgentToken, RendererDocumentHitTestResult,
+    RendererCommandTurnCompletion, RendererCommandTurnOutput, RendererContentStripOptions,
+    RendererDedicatedWorkerTargetEvent, RendererDedicatedWorkerTargetInfo,
+    RendererDevToolsAgentToken, RendererDocumentHitTestResult,
     RendererDocumentIsolateAccountingDiagnostics, RendererDocumentLifecycleEvent,
     RendererDocumentLifecycleEventKind, RendererDocumentLifecycleIdentity,
     RendererDocumentLifecycleMilestone, RendererDocumentLifecycleSnapshot,
@@ -106,37 +108,38 @@ pub use moli_renderer_v8::{
     RendererDomFocusOutcome, RendererDomMutationEvent, RendererDomMutationEventBatch,
     RendererDomSnapshotCaptureOptions, RendererDomSnapshotCapturePayload, RendererDragData,
     RendererDragDataItem, RendererDraggedDirectory, RendererDraggedFile, RendererFrameToken,
-    RendererInputDispatchOutcome, RendererInspectorCommandRoute, RendererInterceptedDrag,
-    RendererJavaScriptDialogCompletion, RendererJavaScriptDialogId, RendererJavaScriptDialogResult,
-    RendererJavaScriptDialogSource, RendererLayoutMetrics, RendererLifecycleEpoch,
-    RendererLifecycleEventStamp, RendererLifecycleStartReason, RendererLifecycleTerminationStamp,
-    RendererMainDocumentCommit, RendererMainDocumentResource, RendererNavigationInitiator,
+    RendererHtmlSerializeOptions, RendererInputDispatchOutcome, RendererInspectorCommandRoute,
+    RendererInterceptedDrag, RendererJavaScriptDialogCompletion, RendererJavaScriptDialogId,
+    RendererJavaScriptDialogResult, RendererJavaScriptDialogSource, RendererLayoutMetrics,
+    RendererLifecycleEpoch, RendererLifecycleEventStamp, RendererLifecycleStartReason,
+    RendererLifecycleTerminationStamp, RendererMainDocumentCommit, RendererMainDocumentResource,
+    RendererMarkdownOptions, RendererNavigationInitiator,
     RendererPageCommandPostResponseContinuation, RendererPageCreationArtifacts,
-    RendererPageCreationDiagnostics, RendererPageDiagnosticsSnapshot, RendererPageDumpFormat,
-    RendererPageDumpOptions, RendererPageDumpStripOptions, RendererPageReplacementError,
-    RendererPageReplacementFailureDisposition, RendererPdfOptions, RendererPendingAuxiliaryPage,
-    RendererPendingDownloadActivation, RendererPendingDownloadResponse,
-    RendererPendingFileChooserActivation, RendererPendingJavaScriptDialog,
-    RendererPendingPopupActivation, RendererPendingSameDocumentNavigation,
-    RendererPendingTopLevelHistoryTraversal, RendererPendingWindowOpenEvent,
-    RendererPerformanceMetricSnapshot, RendererPointerEventProperties,
-    RendererPopupActivationSource, RendererPopupDisposition, RendererPrintToPdfReply,
-    RendererPrintToPdfRequest, RendererResourceContentBody, RendererResourceSearchRequest,
-    RendererResourceTextSearchOutcome, RendererRuntimeCommandOutput, RendererRuntimeHeapUsage,
-    RendererRuntimeInspectorIoCommandClaim, RendererRuntimeInspectorIoCommandRoute,
-    RendererRuntimeInspectorMainCommandCompletion, RendererRuntimeInspectorMainCommandRoute,
-    RendererRuntimeInspectorMessage, RendererRuntimeInspectorMessageBatch,
-    RendererRuntimeInspectorProtocolMessage, RendererRuntimeObservableSourceItem,
-    RendererRuntimeObservableSourceSummary, RendererRuntimeRealmInfo, RendererScreenshotClip,
-    RendererScreenshotFormat, RendererScreenshotRegion, RendererScrollIntoViewResult,
-    RendererServiceWorkerConsoleMessage, RendererServiceWorkerExceptionMessage,
-    RendererServiceWorkerFetchDiagnostic, RendererServiceWorkerFetchDiagnosticResult,
-    RendererServiceWorkerRunIdentity, RendererServiceWorkerTargetEvent,
-    RendererServiceWorkerTargetInfo, RendererServiceWorkerVersionStatus,
-    RendererSetDocumentContentResult, RendererSharedWorkerConsoleMessage,
-    RendererSharedWorkerTargetEvent, RendererSharedWorkerTargetInfo, RendererSyntheticResponseBody,
-    RendererTextSearchMatch, RendererTouchPoint, RendererVisualStateToken,
-    RendererWindowDocumentSource, RuntimeConsoleMessageSnapshot, WorkerInspectorError,
+    RendererPageCreationDiagnostics, RendererPageDiagnosticsSnapshot, RendererPageReplacementError,
+    RendererPageReplacementFailureDisposition, RendererPageWindowIdentity, RendererPdfOptions,
+    RendererPendingAuxiliaryPage, RendererPendingDownloadActivation,
+    RendererPendingDownloadResponse, RendererPendingFileChooserActivation,
+    RendererPendingJavaScriptDialog, RendererPendingPopupActivation,
+    RendererPendingSameDocumentNavigation, RendererPendingTopLevelHistoryTraversal,
+    RendererPendingWindowOpenEvent, RendererPerformanceMetricSnapshot,
+    RendererPointerEventProperties, RendererPopupActivationSource, RendererPopupDisposition,
+    RendererPrintToPdfReply, RendererPrintToPdfRequest, RendererResourceContentBody,
+    RendererResourceSearchRequest, RendererResourceTextSearchOutcome, RendererRuntimeCommandOutput,
+    RendererRuntimeHeapUsage, RendererRuntimeInspectorIoCommandClaim,
+    RendererRuntimeInspectorIoCommandRoute, RendererRuntimeInspectorMainCommandCompletion,
+    RendererRuntimeInspectorMainCommandRoute, RendererRuntimeInspectorMessage,
+    RendererRuntimeInspectorMessageBatch, RendererRuntimeInspectorProtocolMessage,
+    RendererRuntimeObservableSourceItem, RendererRuntimeObservableSourceSummary,
+    RendererRuntimeRealmInfo, RendererScreenshotClip, RendererScreenshotFormat,
+    RendererScreenshotRegion, RendererScrollIntoViewResult, RendererServiceWorkerConsoleMessage,
+    RendererServiceWorkerExceptionMessage, RendererServiceWorkerFetchDiagnostic,
+    RendererServiceWorkerFetchDiagnosticResult, RendererServiceWorkerRunIdentity,
+    RendererServiceWorkerTargetEvent, RendererServiceWorkerTargetInfo,
+    RendererServiceWorkerVersionStatus, RendererSetDocumentContentResult,
+    RendererSharedWorkerConsoleMessage, RendererSharedWorkerTargetEvent,
+    RendererSharedWorkerTargetInfo, RendererSyntheticResponseBody, RendererTextSearchMatch,
+    RendererTouchPoint, RendererVisualStateToken, RendererWindowDocumentSource,
+    RuntimeConsoleMessageSnapshot, WorkerInspectorError,
 };
 pub use moli_renderer_v8::{
     RendererAppManifest, RendererAppManifestDisplayMode, RendererAppManifestError,
@@ -170,17 +173,18 @@ pub use protocol_support::{
     ScriptObservableOutputItem, SubresourceAuthChallenge, SubresourceAuthCredentials,
     SubresourceAuthScheme, SubresourceAuthTarget, SubresourceBodyFinished,
     SubresourceBodyFinishedResult, SubresourceDataReceived, SubresourceEventSourceMessageReceived,
-    SubresourceJsonPathEquals, SubresourceJsonPathRegex, SubresourceNetworkOutcome,
-    SubresourceNetworkRecord, SubresourceNetworkRequestHandle, SubresourceRequestInitiatorType,
-    SubresourceRequestStarted, SubresourceResourceType, SubresourceResponseBody,
-    SubresourceResponseStarted, SubresourceResponseWaitCriteria, ViewportSurface,
-    WebSocketFrameDirection, WebSocketFrameOpcode, WebSocketLifecycleEvent, WebSocketLifecycleKind,
-    WebSocketNetworkEvent, extract_subresource_auth_challenge,
+    SubresourceInterceptionClasses, SubresourceJsonPathEquals, SubresourceJsonPathRegex,
+    SubresourceNetworkOutcome, SubresourceNetworkRecord, SubresourceNetworkRequestHandle,
+    SubresourceRequestInitiatorType, SubresourceRequestStarted, SubresourceResourceType,
+    SubresourceResponseBody, SubresourceResponseStarted, SubresourceResponseWaitCriteria,
+    ViewportSurface, WebSocketFrameDirection, WebSocketFrameOpcode, WebSocketLifecycleEvent,
+    WebSocketLifecycleKind, WebSocketNetworkEvent, extract_subresource_auth_challenge,
     subresource_auth_credentials_for_challenge,
 };
 pub use renderer_command_support::DocumentNodeClientRectResolution;
 pub use renderer_command_support::{
-    DocumentNodeRuntimeObjectResolution, PageObservableOutputUpdate, TestingOutcome,
+    DocumentNodeRuntimeObjectResolution, PageObservableOutputUpdate, SerializedHtmlDocument,
+    TestingOutcome,
 };
 
 #[cfg(test)]
@@ -599,3 +603,6 @@ mod tests {
         );
     }
 }
+
+mod resource_command;
+pub use resource_command::{CompletedResourceCommand, PendingResourceCommand};

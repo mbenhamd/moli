@@ -1,3 +1,4 @@
+use crate::conn::DrainedFetchRequests;
 use anyhow::Result;
 
 use super::*;
@@ -15,16 +16,14 @@ use crate::conn::{
     DocumentStartScript, EmulatedDeviceMetrics, FetchInterceptionPattern, FetchRequestStage,
     InitialDocumentPageInstallResult, InitialDocumentPageOwner, InstalledNavigationPage,
     LoadedNavigationPageCommit, LoadedNavigationRendererAttachmentCommit, NETWORK_ERROR_PAGE_URL,
-    NetworkErrorPageNavigation, PausedDocumentTransfer, PendingFetchAuthNavigation,
-    PendingFetchNavigation, PendingSubresourceFetchAuthRequest, PendingSubresourceFetchRequest,
-    PendingSubresourceFetchResponseRequest, RuntimeBindingDefinition,
+    NetworkErrorPageNavigation, PendingFetchNavigation, RuntimeBindingDefinition,
 };
 use moli_cookie_jar::{StoredCookieQueryReport, StoredCookieSetReport};
 #[cfg(test)]
 use moli_core::page::RendererServiceWorkerVersionStatus;
 use moli_core::page::{
     BidiPreloadChannelHandoff, Page, RendererInspectorSessionRestoreSnapshot,
-    RendererMainDocumentCommit, RendererPageCreationArtifacts, SubresourceResourceType,
+    RendererMainDocumentCommit, RendererPageCreationArtifacts, SubresourceInterceptionClasses,
 };
 use moli_core::runtime::RendererBrowserContextRuntimeOwnerAccess;
 use moli_fetch::BrowserNavigationRequestKind;
@@ -47,22 +46,8 @@ pub(super) struct TargetSessionOwnerRef<'a> {
     pub(super) session_key: DevToolsSessionKey,
 }
 
-type FetchDisableStateWithSubresourceConfig = (
-    super::fetch_owner::SessionOwnerPendingFetchState,
-    (bool, Option<SubresourceResourceType>),
-    bool,
-);
-
-fn empty_pending_fetch_state() -> super::fetch_owner::SessionOwnerPendingFetchState {
-    (
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-    )
-}
+type FetchDisableStateWithSubresourceConfig =
+    (DrainedFetchRequests, SubresourceInterceptionClasses, bool);
 
 pub(crate) struct PendingPageTargetClose {
     target: PageTargetHost,
@@ -168,6 +153,7 @@ impl TargetNavigationStorageHandles {
 
 #[derive(Clone)]
 pub(crate) struct TargetNavigationLoadInputs {
+    pub(crate) window_identity: moli_core::page::RendererPageWindowIdentity,
     pub(crate) auxiliary_document_response:
         Option<moli_core::page::RendererAuxiliaryDocumentResponse>,
     pub(crate) redirect_chain: Vec<moli_fetch::RedirectInfo>,
@@ -204,8 +190,7 @@ pub(crate) struct TargetNavigationLoadInputs {
     pub(crate) bypass_service_worker: bool,
     pub(crate) cache_disabled: bool,
     pub(crate) blocked_url_patterns: Vec<String>,
-    pub(crate) fetch_subresource_interception:
-        (bool, Option<moli_core::page::SubresourceResourceType>),
+    pub(crate) fetch_subresource_interception: moli_core::page::SubresourceInterceptionClasses,
     pub(crate) permission_overrides: Vec<moli_core::page::PermissionOverrideRegistration>,
     main_document_commit_seed: Option<RendererMainDocumentCommitSeed>,
     session_history_position: Option<moli_session_history::SessionHistoryPosition>,
@@ -350,6 +335,7 @@ impl TargetNavigationLoadInputs {
             redirect_chain: Vec::new(),
             redirect_headers: None,
             browser_context_id: Some(browser_context.id.clone()),
+            window_identity: target.window_identity().clone(),
             storage_handles: TargetNavigationStorageHandles::from_page_handles(
                 browser_context
                     .page_storage_handles_for_target(target_id)
@@ -459,6 +445,7 @@ impl TargetNavigationLoadInputs {
             redirect_chain: Vec::new(),
             redirect_headers: None,
             browser_context_id: None,
+            window_identity: Default::default(),
             storage_handles: TargetNavigationStorageHandles::from_page_handles(page_handles),
             root_frame_id: None,
             renderer_runtime,
@@ -487,7 +474,7 @@ impl TargetNavigationLoadInputs {
             bypass_service_worker: false,
             cache_disabled: false,
             blocked_url_patterns: Vec::new(),
-            fetch_subresource_interception: (false, None),
+            fetch_subresource_interception: SubresourceInterceptionClasses::NONE,
             permission_overrides: Vec::new(),
             main_document_commit_seed: None,
             session_history_position: None,
@@ -538,14 +525,14 @@ fn target_navigation_initiator_url(target_url: &str, loaded_page: Option<&Page>)
     url.host_str().is_some().then_some(url)
 }
 
-fn clear_page_runtime_remote_object_tracking(state: &mut crate::conn::state::PageTargetHost) {
+fn clear_page_runtime_context_metadata(state: &mut crate::conn::state::PageTargetHost) {
     for session in state.devtools_sessions.states_mut() {
-        session.clear_runtime_remote_object_tracking();
+        session.clear_runtime_context_metadata();
     }
 }
 
 fn clear_page_loaded_document_session_state(state: &mut crate::conn::state::PageTargetHost) {
-    clear_page_runtime_remote_object_tracking(state);
+    clear_page_runtime_context_metadata(state);
     state.clear_loaded_document_context_state();
 }
 
@@ -558,11 +545,7 @@ impl<'a> TargetSessionOwnerRef<'a> {
         &self,
         browser_initiated: bool,
     ) -> crate::conn::state::NavigationBrowsingContextGroup {
-        let group = self
-            .browser_context
-            .renderer_runtime()
-            .browsing_context_name(&self.target_id)
-            .group();
+        let group = self.target().window_identity().name().group();
         let target = self.target();
         target
             .owner_state
@@ -823,12 +806,18 @@ impl<'a> TargetSessionOwnerMut<'a> {
         f(&mut self.target_mut().owner_state)
     }
 
+    pub(super) fn subresource_response_is_paused(&self, request_id: &str) -> bool {
+        self.target()
+            .fetch_owner
+            .subresource_response_is_paused(request_id)
+    }
+
     pub(super) fn configure_fetch(
         &mut self,
         command_session_id: Option<String>,
         handle_auth_requests: bool,
         patterns: Vec<FetchInterceptionPattern>,
-    ) -> (bool, Option<moli_core::page::SubresourceResourceType>) {
+    ) -> moli_core::page::SubresourceInterceptionClasses {
         let target = self.target_mut();
         target
             .fetch_owner
@@ -843,7 +832,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
         handle_auth_requests: bool,
         auth_url_patterns: Vec<String>,
         patterns: Vec<FetchInterceptionPattern>,
-    ) -> (bool, Option<moli_core::page::SubresourceResourceType>) {
+    ) -> moli_core::page::SubresourceInterceptionClasses {
         let target = self.target_mut();
         target.fetch_owner.add_network_intercept(
             intercept_id,
@@ -858,7 +847,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
     pub(super) fn remove_network_intercept(
         &mut self,
         intercept_id: &str,
-    ) -> Option<(bool, Option<moli_core::page::SubresourceResourceType>)> {
+    ) -> Option<moli_core::page::SubresourceInterceptionClasses> {
         let target = self.target_mut();
         target
             .fetch_owner
@@ -879,7 +868,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
                 .fetch_owner
                 .drain_pending_requests_for_disable_session(session_id)
         } else {
-            empty_pending_fetch_state()
+            DrainedFetchRequests::default()
         };
         let page_update_required = removed && previous_subresource_config != subresource_config;
         (pending, subresource_config, page_update_required)
@@ -896,16 +885,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
         (pending, config, previous != config)
     }
 
-    pub(super) fn drain_fetch_pending_state(
-        &mut self,
-    ) -> (
-        Vec<PendingFetchNavigation>,
-        Vec<PendingFetchAuthNavigation>,
-        Vec<PausedDocumentTransfer>,
-        Vec<(String, PendingSubresourceFetchRequest)>,
-        Vec<(String, PendingSubresourceFetchAuthRequest)>,
-        Vec<(String, PendingSubresourceFetchResponseRequest)>,
-    ) {
+    pub(super) fn drain_fetch_pending_state(&mut self) -> DrainedFetchRequests {
         self.target_mut().fetch_owner.drain_pending_requests()
     }
 
@@ -1198,11 +1178,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
         document: moli_core::RendererDocumentLifecycleIdentity,
         url: &Url,
     ) {
-        let group = self
-            .browser_context
-            .renderer_runtime()
-            .browsing_context_name(&self.target_id)
-            .group();
+        let group = self.target().window_identity().name().group();
         let target = self.target_mut();
         if target.owner_state.navigation_history_document
             == Some((renderer_page, document.document))
@@ -1238,11 +1214,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
         document: moli_core::RendererDocumentLifecycleIdentity,
     ) -> Option<Result<InstalledNavigationPage>> {
         let browser_context_id = self.browser_context.id.clone();
-        let group = self
-            .browser_context
-            .renderer_runtime()
-            .browsing_context_name(&self.target_id)
-            .group();
+        let group = self.target().window_identity().name().group();
         Some(
             self.browser_context
                 .page_target_mut(&self.target_id)
@@ -1473,11 +1445,7 @@ impl CdpConnection {
             return None;
         }
         let mut resolved = self.target_session_owner_mut_for_owner(owner)?;
-        let group = resolved
-            .browser_context
-            .renderer_runtime()
-            .browsing_context_name(&resolved.target_id)
-            .group();
+        let group = resolved.target().window_identity().name().group();
         Some(resolved.target_mut().commit_existing_page_navigation(
             expected,
             transaction,
@@ -1652,6 +1620,10 @@ impl CdpConnection {
                     .runtime_slot
                     .fail_initial_document_page_build(reason.to_owned());
             }
+            // Native teardown can be queued behind this request. Cancel it
+            // while retiring the host, rather than waiting for the owned host
+            // (and its request) to be dropped after teardown has completed.
+            target.runtime_slot.clear_document_navigation_state();
             let collected_network_data_artifacts =
                 target.runtime_slot.collected_network_data_artifacts();
             let attached_session_ids = target
@@ -1704,14 +1676,18 @@ impl CdpConnection {
             .page_session_state()
     }
 
+    pub(crate) fn owner_has_pending_javascript_dialog(&self, owner: &CommandOwnerScope) -> bool {
+        self.target_session_owner_ref_for_owner(owner)
+            .is_some_and(|owner| owner.target().has_pending_javascript_dialog())
+    }
+
     /// Includes dialogs from the addressed Page's child frames and DevTools sessions.
     pub fn has_pending_javascript_dialog_for_devtools_context(
         &self,
         context: &AutomationContext,
     ) -> bool {
         self.command_owner_scope_for_devtools_context(context)
-            .and_then(|owner| self.target_session_owner_ref_for_owner(&owner))
-            .is_some_and(|owner| owner.target().has_pending_javascript_dialog())
+            .is_some_and(|owner| self.owner_has_pending_javascript_dialog(&owner))
     }
 
     pub(crate) fn target_devtools_session_state_for_session(
@@ -2423,14 +2399,6 @@ impl CdpConnection {
             return Some((browser_context_id, Some(target_id)));
         }
         self.target_owner_identity_for_session(session_id)
-    }
-
-    pub(crate) fn target_devtools_attached_session_id_for_session(
-        &self,
-        session_id: Option<&str>,
-    ) -> Option<Option<String>> {
-        let owner = self.target_session_owner(session_id)?;
-        Some(owner.session_key.wire_session_id().map(str::to_owned))
     }
 
     pub(crate) fn runtime_session_owner_slot_mut(
@@ -3237,7 +3205,8 @@ mod tests {
             };
             assert_eq!(
                 owner.configure_fetch(Some("SID-active".to_owned()), true, patterns.clone()),
-                (true, None)
+                SubresourceInterceptionClasses::ALL
+                    .difference(SubresourceInterceptionClasses::WEBSOCKET)
             );
             assert!(owner.register_pending_subresource_fetch_request(
                 "FETCH-active".to_owned(),
@@ -3245,9 +3214,9 @@ mod tests {
             ));
             let (pending, subresource_config, page_update_required) =
                 owner.reset_fetch_config_for_session_and_drain_pending_state(Some("SID-active"));
-            assert_eq!(subresource_config, (false, None));
+            assert_eq!(subresource_config, SubresourceInterceptionClasses::NONE);
             assert!(page_update_required);
-            assert_eq!(pending.3.len(), 1);
+            assert_eq!(pending.subresource_requests.len(), 1);
         }
         assert!(
             !active
@@ -3273,7 +3242,8 @@ mod tests {
             };
             assert_eq!(
                 owner.configure_fetch(Some("SID-background".to_owned()), true, patterns),
-                (true, None)
+                SubresourceInterceptionClasses::ALL
+                    .difference(SubresourceInterceptionClasses::WEBSOCKET)
             );
             assert!(owner.register_pending_subresource_fetch_request(
                 "FETCH-background".to_owned(),
@@ -3281,9 +3251,9 @@ mod tests {
             ));
             let (pending, subresource_config, page_update_required) = owner
                 .reset_fetch_config_for_session_and_drain_pending_state(Some("SID-background"));
-            assert_eq!(subresource_config, (false, None));
+            assert_eq!(subresource_config, SubresourceInterceptionClasses::NONE);
             assert!(page_update_required);
-            assert_eq!(pending.3.len(), 1);
+            assert_eq!(pending.subresource_requests.len(), 1);
         }
         assert!(
             background
@@ -3741,7 +3711,11 @@ mod tests {
         assert_eq!(inputs.emulated_media.media.as_deref(), Some("print"));
         assert!(inputs.network_offline);
         assert_eq!(inputs.blocked_url_patterns, vec!["*.blocked.test"]);
-        assert_eq!(inputs.fetch_subresource_interception, (true, None));
+        assert_eq!(
+            inputs.fetch_subresource_interception,
+            SubresourceInterceptionClasses::ALL
+                .difference(SubresourceInterceptionClasses::WEBSOCKET)
+        );
     }
 
     #[test]
@@ -3839,7 +3813,11 @@ mod tests {
                 .secure_context_type(),
             "Secure"
         );
-        assert_eq!(inputs.fetch_subresource_interception, (true, None));
+        assert_eq!(
+            inputs.fetch_subresource_interception,
+            SubresourceInterceptionClasses::ALL
+                .difference(SubresourceInterceptionClasses::WEBSOCKET)
+        );
     }
 
     #[test]
@@ -4173,7 +4151,7 @@ mod tests {
         })
         .expect("active target owner state should be mutable");
         conn.with_target_devtools_session_state_for_session_mut(Some("SID-background"), |state| {
-            state.register_runtime_remote_object_ids(["background-object".to_owned()]);
+            state.runtime_session_state.runtime_frontend_enabled = true;
         })
         .expect("background DevTools session state should be mutable");
 
@@ -4185,17 +4163,14 @@ mod tests {
             .target_runtime_session_state_for_session(Some("SID-background"))
             .expect("background runtime state should be readable");
         assert!(background_runtime_state.inspector_enabled);
+        assert!(background_runtime_state.runtime_frontend_enabled);
         assert!(
             conn.target_owner_state_for_session(Some("SID-active"))
                 .expect("active owner state should be readable")
                 .target_crash_state
                 .is_crashed()
         );
-        assert!(
-            conn.target_devtools_session_state_for_session(Some("SID-background"))
-                .expect("background DevTools session state should be readable")
-                .has_runtime_remote_object_id("background-object")
-        );
+
         assert!(
             conn.with_target_owner_state_for_session_mut(Some("SID-missing"), |_| ())
                 .is_none()

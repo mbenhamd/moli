@@ -1,6 +1,7 @@
 mod baseline_drag_views;
 mod beforeinput_target_validation;
 mod fetch_cache_modes;
+mod selection_worlds;
 mod size_containment_layout;
 
 mod child_document_web_fonts;
@@ -21,6 +22,7 @@ mod native_drag_pointer_suppression;
 mod native_drag_source_events;
 mod picture_in_picture_interfaces;
 mod touch_native_receivers;
+mod touch_snapshot;
 mod visual_viewport_receiver;
 mod writable_stream_native_receivers;
 use super::post_parse::dynamic_script_execute_is_runnable_before_dom_content_loaded;
@@ -249,7 +251,7 @@ async fn drain_pending_page_child_frame_work_for_test(
 
 fn register_pending_window_xhr_for_test(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut crate::native_bridge::JsContextHost,
+    host: &mut crate::native_bridge::PageScriptHost,
     cancel_handle: moli_fetch::FetchCancelHandle,
 ) -> (
     u64,
@@ -285,6 +287,7 @@ fn register_pending_window_xhr_for_test(
             resource_type: crate::types::SubresourceResourceType::Xhr,
             request_cookie_report: None,
         },
+        true,
     );
     (internal_id, owner, realm_token)
 }
@@ -301,7 +304,7 @@ enum PendingWindowFetchTestStage {
 
 fn register_pending_window_fetch_for_test(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut crate::native_bridge::JsContextHost,
+    host: &mut crate::native_bridge::PageScriptHost,
     keepalive: bool,
     stage: PendingWindowFetchTestStage,
 ) -> (
@@ -400,7 +403,7 @@ fn register_pending_window_fetch_for_test(
                             negotiated_http_version: None,
                         },
                         network_request_headers: None,
-                        body_writer: Default::default(),
+                        body_capture: crate::types::StreamingSubresourceBody::new(None, None),
                         event_source_parser: None,
                         xhr_response: None,
                     },
@@ -467,7 +470,7 @@ fn register_pending_window_fetch_for_test(
 
 fn register_pending_window_fetch_with_connect_policy_for_test(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut crate::native_bridge::JsContextHost,
+    host: &mut crate::native_bridge::PageScriptHost,
     keepalive: bool,
     policy: crate::document_runtime::DocumentPolicyContainer,
     request_url: Url,
@@ -555,6 +558,7 @@ fn redirected_fetch_response(source_url: &Url, final_url: Url) -> crate::types::
         headers: Vec::new(),
         network_extra_info_available: true,
         request_extra_info: None,
+        dispatched_request: None,
         response_extra_info: None,
         redirect_has_extra_info: true,
         request_cookie_report: None,
@@ -2054,7 +2058,7 @@ fn test_trusted_key_dispatch_callback(
         rv.set(v8::Boolean::new(scope, false).into());
         return;
     };
-    let runtime_ptr = external.value() as *mut crate::native_bridge::JsContextHost;
+    let runtime_ptr = external.value() as *mut crate::native_bridge::PageScriptHost;
     if runtime_ptr.is_null() {
         rv.set(v8::Boolean::new(scope, false).into());
         return;
@@ -2435,6 +2439,7 @@ mod detached_node_producer_host;
 mod shadow_frame_unload_discovery;
 
 mod file_reader_handlers;
+mod frame_element_security;
 
 mod streams_sync_protocol;
 

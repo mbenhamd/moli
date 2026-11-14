@@ -69,8 +69,9 @@ pub(crate) use indexed_db::{
     create_sql_upgrade_for_test, deserialize_indexed_db_value_for_test,
     indexed_db_has_in_flight_sql_tasks_for_test, indexed_db_has_queued_task_kind_for_test,
     indexed_db_metadata_sharing_probe_for_test, indexed_db_native_cursor_count_for_test,
-    indexed_db_transaction_resources_for_test, serialize_indexed_db_value_for_test,
-    sql_transaction_handle_for_test, sql_transaction_started_for_test,
+    indexed_db_transaction_commit_submitted_for_test, indexed_db_transaction_resources_for_test,
+    serialize_indexed_db_value_for_test, sql_transaction_handle_for_test,
+    sql_transaction_started_for_test,
 };
 mod location_history_storage;
 mod location_navigation;
@@ -175,6 +176,7 @@ pub(crate) use self::css_runtime::css_lazy_state_diagnostics;
 pub(crate) use self::css_runtime::{
     css_supports_condition_text, install_css_runtime_state_for_document,
 };
+pub(crate) use self::events::construct_original_text_input_event;
 pub(crate) use self::events::{
     clear_input_event_target_ranges, construct_original_event,
     construct_original_page_transition_event, construct_original_storage_event_utf16,
@@ -218,7 +220,8 @@ pub(crate) use navigation_traversal_execution::apply_authorized_history_traversa
 pub(crate) use performance_runtime::PERFORMANCE_TIME_ORIGIN_SLOT;
 pub(crate) use performance_runtime::performance_slot_number;
 pub(crate) use selection_surface::{
-    selection_value_for_window, sync_selection_owner_document_for_window,
+    bind_isolated_window_selection_owner, focus_editing_host_selection, selection_value_for_window,
+    sync_selection_owner_document_for_window, window_selection_is_collapsed,
 };
 pub(crate) use shared::{dom_time_since_origin_millis, unix_epoch_millis};
 mod specs;
@@ -247,7 +250,7 @@ pub(crate) use window_accessors::{
 mod window_events;
 mod window_lazy_surface;
 mod window_receiver;
-pub(crate) use window_receiver::{is_window_receiver, require_same_origin_window_receiver};
+pub(crate) use window_receiver::is_window_receiver;
 mod window_runtime;
 
 pub(crate) use form_data_runtime::{
@@ -320,11 +323,11 @@ pub(crate) use self::events::{
     construct_original_message_event, error_event_handler_arguments, event_attribute,
     event_backing, event_bool_attribute, event_callback_values, event_initialized,
     event_internal_bool_flag, event_is_dispatching, event_is_error_event, event_is_mouse_event,
-    event_private_value, initialize_event_object, initialize_event_wrapper,
-    initialize_native_security_policy_violation_event, mark_agent_submit_event, mark_event_trusted,
-    new_event_state, new_event_wrapper, node_event_callback_values, set_event_composed_path,
-    set_event_internal_flag, set_event_private_value, set_event_trusted,
-    submit_event_submitter_value,
+    event_private_value, initialize_event_object, initialize_event_object_with_type,
+    initialize_event_wrapper, initialize_native_security_policy_violation_event,
+    mark_agent_submit_event, mark_event_trusted, new_event_state, new_event_wrapper,
+    node_event_callback_values, set_event_composed_path, set_event_internal_flag,
+    set_event_private_value, set_event_trusted, submit_event_submitter_value,
 };
 #[cfg(test)]
 pub(crate) use self::file_api::drag_data_read_count_for_test;
@@ -478,9 +481,8 @@ pub(crate) use self::shared::structured_deserialize_value;
 pub(crate) use self::shared::structured_serialize_value;
 pub(in crate::context_bootstrap) use self::shared::*;
 pub(crate) use self::shared::{
-    CHILD_BROWSING_CONTEXT_HANDLE_SLOT, DOCUMENT_SELECTION_CHANGE_LISTENER_SLOT,
-    READABLE_STREAM_CHILD_REALM_HANDLED_REJECTION_SLOT, WINDOW_CUSTOM_ELEMENTS_SLOT,
-    WINDOW_NAME_SLOT,
+    CHILD_BROWSING_CONTEXT_HANDLE_SLOT, READABLE_STREAM_CHILD_REALM_HANDLED_REJECTION_SLOT,
+    WINDOW_CUSTOM_ELEMENTS_SLOT, WINDOW_NAME_SLOT,
 };
 pub(crate) use self::shared::{
     RuntimeMessageSourceSecurity, prepare_value_for_window_post_message,
@@ -545,12 +547,11 @@ pub(crate) use self::webassembly_runtime::{
 };
 pub(crate) use self::websocket::{WebSocketDispatchResult, dispatch_websocket_event};
 pub(crate) use self::window_events::{
-    WINDOW_EVENT_HANDLER_PROPERTIES, clear_simple_window_event_handler_values,
-    dispatch_window_error_event_with_details, dispatch_window_promise_rejection_event,
-    dispatch_window_report_error_message, event_handler_property_is_exposed,
-    install_simple_window_event_handlers, is_window_event_handler_property,
-    set_window_body_onerror_handler_compiled, set_window_onerror_handler_value,
-    window_body_onerror_handler_is_compiled,
+    clear_simple_window_event_handler_values, dispatch_window_error_event_with_details,
+    dispatch_window_promise_rejection_event, dispatch_window_report_error_message,
+    event_handler_property_is_exposed, install_simple_window_event_handlers,
+    is_window_event_handler_property, set_window_body_onerror_handler_compiled,
+    set_window_onerror_handler_value, window_body_onerror_handler_is_compiled,
 };
 #[cfg(test)]
 pub(crate) use self::window_lazy_surface::window_lazy_surface_diagnostics;
@@ -567,7 +568,7 @@ pub(crate) use self::worker_host::{
 pub(crate) use self::worker_location_runtime::install_worker_location_runtime_state;
 pub(super) use super::{
     blob,
-    native_bridge::{self, JsContextHost},
+    native_bridge::{self, PageScriptHost},
     util::{
         callback_data_item, context_host_ptr_from_global_bridge, get_private_value,
         object_number_property, set_private_value, throw_range_error, throw_type_error, v8_string,
@@ -586,7 +587,7 @@ const WORKER_CURRENT_SCRIPT_URL_SLOT: &str = "__moliWorkerCurrentScriptUrl";
 
 pub(crate) fn current_child_frame_id_for_runtime_scope(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &JsContextHost,
+    host: &PageScriptHost,
 ) -> Option<String> {
     let global = scope.get_current_context().global(scope);
     let owner = self::navigation_window::runtime_window_owner(scope, global);
@@ -1136,7 +1137,7 @@ pub(crate) fn live_ranges_child_insertion(
 
 pub(crate) fn live_ranges_child_removal(
     scope: &mut v8::PinScope<'_, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     dom_host: &crate::dom::native::DomHost,
     parent: super::document_runtime::DomHandle,
     removed_child: super::document_runtime::DomHandle,
@@ -1164,7 +1165,7 @@ pub(crate) fn live_ranges_detached_child_insertion<'s>(
 
 pub(crate) fn live_ranges_text_split(
     scope: &mut v8::PinScope<'_, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     original: super::document_runtime::DomHandle,
     new_text: super::document_runtime::DomHandle,
     offset: u32,
@@ -1203,3 +1204,5 @@ pub(crate) fn set_event_private_bool<'s>(
         v8::Boolean::new(scope, value).into(),
     );
 }
+
+pub(crate) use self::events::event_trusted;

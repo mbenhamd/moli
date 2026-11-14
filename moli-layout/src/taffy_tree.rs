@@ -23,7 +23,6 @@ use crate::{
         build_inline_line_placements, measure_inline_lines, position_inline_edges,
         relative_atomic_inset_offset, reset_inline_layout_for_probe,
     },
-    overflow::OverflowProjection,
     positioned::{
         FlexCrossAxisStaticContext, HorizontalStaticEdge, PhysicalStaticPosition,
         VerticalStaticEdge, flex_main_axis_static_edge, physical_static_position_from_logical,
@@ -255,19 +254,6 @@ where
     finish_inline_positioned_layout(world, viewport);
     finish_form_control_contents(world);
     finish_outside_list_markers(world);
-    round_world_layout(world, root);
-    // Sticky scroll ranges read the rounded, sticky-free overflow, so sticky
-    // offsets apply after the first rounding and are rounded again.
-    if finish_sticky_positioning(world, viewport) {
-        round_world_layout(world, root);
-    }
-    world.finish_numeric_layout_tracking()
-}
-
-fn round_world_layout<N>(world: &mut LayoutWorld<N>, root: NodeId)
-where
-    N: Copy + Debug + Eq + Hash,
-{
     round_layout_to_css_subpixels(world, root);
     // Outside markers deliberately are not numeric children of the list item,
     // otherwise Taffy would allocate them a normal-flow row. Round each
@@ -821,171 +807,6 @@ where
             Some(content_width),
         );
     }
-}
-
-/// Applies sticky offsets against each sticky box's current scroll position.
-///
-/// Returns whether any sticky box exists, so the caller can re-round the
-/// geometry it moved. Scroll ranges come from an overflow projection of the
-/// already rounded, sticky-free geometry, the same clamp output projection
-/// applies, so sticky offsets and scrolled coordinates agree in one pass.
-fn finish_sticky_positioning<N>(world: &mut LayoutWorld<N>, viewport: PaintViewport) -> bool
-where
-    N: Copy + Debug + Eq + Hash,
-{
-    let sticky_boxes = (0..world.boxes.len())
-        .map(LayoutBoxId::from_index)
-        .filter(|id| world.boxes[id.index()].style.position() == crate::LayoutPosition::Sticky)
-        .collect::<Vec<_>>();
-    if sticky_boxes.is_empty() {
-        return false;
-    }
-    let overflow = OverflowProjection::new(world, viewport);
-    for id in sticky_boxes {
-        let layout = world.boxes[id.index()].unrounded_layout;
-        let global = unrounded_global_origin(world, id);
-        let (scroll_container, view) = sticky_view_rect(world, &overflow, id);
-        let inset = world.boxes[id.index()].style.sticky_inset();
-        let left = inset
-            .left
-            .maybe_resolve(view.width, resolve_stylo_calc_value);
-        let right = inset
-            .right
-            .maybe_resolve(view.width, resolve_stylo_calc_value);
-        let top = inset
-            .top
-            .maybe_resolve(view.height, resolve_stylo_calc_value);
-        let bottom = inset
-            .bottom
-            .maybe_resolve(view.height, resolve_stylo_calc_value);
-        let mut target_x = global.x;
-        let mut target_y = global.y;
-        if let Some(left) = left {
-            target_x = target_x.max(view.x + left);
-        }
-        if let Some(right) = right {
-            target_x = target_x.min(view.x + view.width - right - layout.size.width);
-        }
-        if let Some(top) = top {
-            target_y = target_y.max(view.y + top);
-        }
-        if let Some(bottom) = bottom {
-            target_y = target_y.min(view.y + view.height - bottom - layout.size.height);
-        }
-
-        if let Some(containing_block) = world.boxes[id.index()].layout_parent {
-            let containing_layout = world.boxes[containing_block.index()].unrounded_layout;
-            let containing_origin = unrounded_global_origin(world, containing_block);
-            let padding = containing_layout.padding;
-            // A scroll container that is itself the containing block bounds
-            // the sticky box by its scrollable overflow, in both directions
-            // (RTL and bottom-up content overflow toward negative
-            // coordinates), as Blink's sticky constraints do. Otherwise the
-            // containing block's content box bounds it.
-            let area = if scroll_container == Some(containing_block) {
-                let overflow_rect = overflow.scrollable_overflow(containing_block);
-                PaintRect::new(
-                    containing_origin.x + overflow_rect.x + padding.left,
-                    containing_origin.y + overflow_rect.y + padding.top,
-                    overflow_rect.width - padding.left - padding.right,
-                    overflow_rect.height - padding.top - padding.bottom,
-                )
-            } else {
-                let border = containing_layout.border;
-                PaintRect::new(
-                    containing_origin.x + border.left + padding.left,
-                    containing_origin.y + border.top + padding.top,
-                    containing_layout.size.width
-                        - border.left
-                        - border.right
-                        - padding.left
-                        - padding.right,
-                    containing_layout.size.height
-                        - border.top
-                        - border.bottom
-                        - padding.top
-                        - padding.bottom,
-                )
-            };
-            let min_x = area.x;
-            let max_x = area.x + area.width - layout.size.width;
-            let min_y = area.y;
-            let max_y = area.y + area.height - layout.size.height;
-            if min_x <= max_x {
-                target_x = target_x.clamp(min_x, max_x);
-            }
-            if min_y <= max_y {
-                target_y = target_y.clamp(min_y, max_y);
-            }
-        }
-        world.boxes[id.index()].unrounded_layout.location.x += target_x - global.x;
-        world.boxes[id.index()].unrounded_layout.location.y += target_y - global.y;
-    }
-    true
-}
-
-/// Resolves the sticky view rectangle in unscrolled global coordinates: the
-/// nearest scroll container's scrollport, deflated by its padding and shifted
-/// by its applied scroll offset, or the viewport scrollport.
-///
-/// The search follows the containing-block (`layout_parent`) chain, the same
-/// chain output projection uses to apply scroll translations. A chain that
-/// ends at a viewport-fixed box never scrolls with the document, so its view
-/// rectangle is the unshifted viewport.
-fn sticky_view_rect<N>(
-    world: &LayoutWorld<N>,
-    overflow: &OverflowProjection,
-    id: LayoutBoxId,
-) -> (Option<LayoutBoxId>, PaintRect)
-where
-    N: Copy + Debug + Eq + Hash,
-{
-    let root = world.root;
-    let root_geometry = overflow.geometry(root);
-    let viewport_rect = PaintRect::new(
-        root_geometry.vertical_leading_gutter,
-        root_geometry.horizontal_leading_gutter,
-        root_geometry.local_scrollport.width,
-        root_geometry.local_scrollport.height,
-    );
-    let mut candidate = world.boxes[id.index()].layout_parent;
-    while let Some(container) = candidate {
-        if container == root {
-            break;
-        }
-        let layout_box = &world.boxes[container.index()];
-        if !world.is_viewport_defining_body(container)
-            && layout_box.style.establishes_scroll_container()
-        {
-            let scrollport = overflow.geometry(container).local_scrollport;
-            let padding = layout_box.unrounded_layout.padding;
-            let origin = unrounded_global_origin(world, container);
-            let offset = overflow.applied_scroll_offset(world, container);
-            return (
-                Some(container),
-                PaintRect::new(
-                    origin.x + scrollport.x + padding.left + offset.x,
-                    origin.y + scrollport.y + padding.top + offset.y,
-                    (scrollport.width - padding.left - padding.right).max(0.0),
-                    (scrollport.height - padding.top - padding.bottom).max(0.0),
-                ),
-            );
-        }
-        match layout_box.layout_parent {
-            Some(parent) => candidate = Some(parent),
-            None => return (None, viewport_rect),
-        }
-    }
-    let offset = overflow.applied_scroll_offset(world, root);
-    (
-        None,
-        PaintRect::new(
-            viewport_rect.x + offset.x,
-            viewport_rect.y + offset.y,
-            viewport_rect.width,
-            viewport_rect.height,
-        ),
-    )
 }
 
 fn push_layout_diagnostic<N>(

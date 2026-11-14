@@ -1,41 +1,20 @@
 use super::stores::collection::CollectionRequest;
-use super::{CursorDirection, IdbKeyRangeQuery, IndexInfo, PreparedObjectStoreWrite};
+use super::{CursorDirection, IdbKeyRangeQuery, PreparedObjectStoreWrite};
 use crate::native_bridge::OwnerDispatchScope;
 
-pub(super) enum IndexedDbCursorSource {
-    ObjectStore,
-    Index(IndexInfo),
-}
-
 pub(super) struct IndexedDbCursorOpenOperation {
-    pub(super) source: IndexedDbCursorSource,
     pub(super) query: Option<IdbKeyRangeQuery>,
     pub(super) direction: CursorDirection,
     pub(super) key_only: bool,
 }
 
 impl IndexedDbCursorOpenOperation {
-    pub(super) fn object_store(
+    pub(super) fn new(
         query: Option<IdbKeyRangeQuery>,
         direction: CursorDirection,
         key_only: bool,
     ) -> Self {
         Self {
-            source: IndexedDbCursorSource::ObjectStore,
-            query,
-            direction,
-            key_only,
-        }
-    }
-
-    pub(super) fn index(
-        index_info: IndexInfo,
-        query: Option<IdbKeyRangeQuery>,
-        direction: CursorDirection,
-        key_only: bool,
-    ) -> Self {
-        Self {
-            source: IndexedDbCursorSource::Index(index_info),
             query,
             direction,
             key_only,

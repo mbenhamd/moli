@@ -31,6 +31,7 @@ class GroupSelectionTests(unittest.TestCase):
         self.assertIn("file-chooser", DEFAULT_GROUP_NAMES)
         self.assertIn("inspector-routing", DEFAULT_GROUP_NAMES)
         self.assertIn("cdp-ordering", DEFAULT_GROUP_NAMES)
+        self.assertIn("protocol-progress", DEFAULT_GROUP_NAMES)
         self.assertIn("dom-publication", DEFAULT_GROUP_NAMES)
         self.assertIn("navigation-outcomes", DEFAULT_GROUP_NAMES)
         self.assertIn("font-face", DEFAULT_GROUP_NAMES)
@@ -48,7 +49,7 @@ class GroupSelectionTests(unittest.TestCase):
         self.assertIn("puppeteer", DEFAULT_GROUP_NAMES)
         self.assertEqual(
             tuple(group.name for group in MANAGED_EXTERNAL_GROUPS),
-            ("puppeteer",),
+            ("protocol-schema", "puppeteer"),
         )
 
     def test_only_external_environment_groups_remain_opt_in(self) -> None:

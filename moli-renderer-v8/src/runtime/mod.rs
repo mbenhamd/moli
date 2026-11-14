@@ -69,6 +69,9 @@ pub use document_replacement::{
     RendererPageReplacementFailureDisposition, RendererPageReplacementReservationRequest,
     RendererPageReplacementTarget,
 };
+mod content_filter;
+mod html_serialization;
+mod markdown_dump;
 mod page;
 mod page_commands;
 mod page_context_cancel;
@@ -76,7 +79,6 @@ mod page_creation_progress;
 mod page_css;
 pub(crate) mod page_dom;
 mod page_dom_snapshot;
-mod page_dump;
 mod page_entry_residence;
 mod page_generated_dom;
 mod page_geometry;
@@ -281,7 +283,7 @@ pub use self::browser_context_runtime::{
     DetachedParserScriptFetchContinuation, RendererAuxiliaryNavigationKind,
     RendererAuxiliaryWindow, RendererBrowserContextRuntime, RendererBrowserContextRuntimeOwner,
     RendererBrowserContextRuntimeOwnerAccess, RendererBrowsingContextGroup,
-    RendererBrowsingContextName, RendererReservedServiceWorkerClient,
+    RendererBrowsingContextName, RendererPageWindowIdentity, RendererReservedServiceWorkerClient,
     RendererServiceWorkerMainResourceFetch,
 };
 pub(crate) use self::document_lifecycle::{
@@ -314,7 +316,8 @@ pub use self::owner_local::RendererPageReplacementCommit;
 pub use self::owner_local::RendererPageTestingHandle;
 pub use self::owner_local::{
     RendererDocumentCommandTarget, RendererPageAccessError, RendererPageCommandPending,
-    RendererPageHandle, RendererRuntimeInspectorSessionDetachGuard,
+    RendererPageHandle, RendererPageRequestPolicyUpdate,
+    RendererRuntimeInspectorSessionDetachGuard,
 };
 pub(crate) use self::owner_local_store::RendererPageToken;
 pub use self::page::{
@@ -346,15 +349,15 @@ pub use self::page_surface::{
     RendererActivityDiagnostics, RendererAgentAttachmentId, RendererAutofillAddressField,
     RendererAutofillCreditCard, RendererAutofillTriggerOutcome, RendererAutofillTriggerRequest,
     RendererAuxiliaryDocumentResponse, RendererCommandTurnCompletion, RendererCommandTurnOutput,
-    RendererCountEntry, RendererDedicatedWorkerTargetEvent, RendererDedicatedWorkerTargetInfo,
-    RendererDevToolsAgentToken, RendererDocumentBoxModel, RendererDocumentChildNodeSnapshotEvent,
-    RendererDocumentChildNodeSnapshotEvents, RendererDocumentChildNodeSnapshots,
-    RendererDocumentFrontendNodeIdsResolution, RendererDocumentHitTestResult,
-    RendererDocumentIsolateAccountingDiagnostics, RendererDocumentNodeAttributesResolution,
-    RendererDocumentNodeClientRect, RendererDocumentNodeGeometry,
-    RendererDocumentNodePropertyResolution, RendererDocumentNodeReference,
-    RendererDocumentNodeTextResolution, RendererDocumentQuerySelectorNode,
-    RendererDocumentQuerySelectorResolution,
+    RendererContentStripOptions, RendererCountEntry, RendererDedicatedWorkerTargetEvent,
+    RendererDedicatedWorkerTargetInfo, RendererDevToolsAgentToken, RendererDocumentBoxModel,
+    RendererDocumentChildNodeSnapshotEvent, RendererDocumentChildNodeSnapshotEvents,
+    RendererDocumentChildNodeSnapshots, RendererDocumentFrontendNodeIdsResolution,
+    RendererDocumentHitTestResult, RendererDocumentIsolateAccountingDiagnostics,
+    RendererDocumentNodeAttributesResolution, RendererDocumentNodeClientRect,
+    RendererDocumentNodeGeometry, RendererDocumentNodePropertyResolution,
+    RendererDocumentNodeReference, RendererDocumentNodeTextResolution,
+    RendererDocumentQuerySelectorNode, RendererDocumentQuerySelectorResolution,
     RendererDocumentQuerySelectorWithChildNodeSnapshotEvents,
     RendererDocumentSourcedSameDocumentNavigation,
     RendererDocumentSourcedTopLevelLocationNavigation, RendererDomAttributeMutation,
@@ -369,15 +372,15 @@ pub use self::page_surface::{
     RendererDomSearchResultNode, RendererDomSearchResultsResolution,
     RendererDomSnapshotCaptureOptions, RendererDomSnapshotCapturePayload, RendererDragData,
     RendererDragDataItem, RendererDraggedDirectory, RendererDraggedFile, RendererGeometryQuad,
-    RendererInputDispatchOutcome, RendererInspectorProtocolConfiguration,
-    RendererInspectorProtocolConfigurationCommand, RendererInspectorSessionRestoreSnapshot,
-    RendererInterceptedDrag, RendererJavaScriptDialogId, RendererJavaScriptDialogSource,
-    RendererLayoutMetrics, RendererMainDocumentCommit, RendererMoliDomMemoryDiagnostics,
-    RendererMoliMemoryDiagnostics, RendererMoliMemoryScopeDiagnostics,
-    RendererMoliRuntimeMemoryDiagnostics, RendererNavigationInitiator, RendererPageCommand,
-    RendererPageCommandPostResponseContinuation, RendererPageCookieFacadeSnapshotReply,
-    RendererPageCreationDiagnostics, RendererPageDiagnosticsSnapshot, RendererPageDumpFormat,
-    RendererPageDumpOptions, RendererPageDumpStripOptions, RendererPageReply, RendererPageView,
+    RendererHtmlSerializeOptions, RendererInputDispatchOutcome,
+    RendererInspectorProtocolConfiguration, RendererInspectorProtocolConfigurationCommand,
+    RendererInspectorSessionRestoreSnapshot, RendererInterceptedDrag, RendererJavaScriptDialogId,
+    RendererJavaScriptDialogSource, RendererLayoutMetrics, RendererMainDocumentCommit,
+    RendererMarkdownOptions, RendererMoliDomMemoryDiagnostics, RendererMoliMemoryDiagnostics,
+    RendererMoliMemoryScopeDiagnostics, RendererMoliRuntimeMemoryDiagnostics,
+    RendererNavigationInitiator, RendererPageCommand, RendererPageCommandPostResponseContinuation,
+    RendererPageCookieFacadeSnapshotReply, RendererPageCreationDiagnostics,
+    RendererPageDiagnosticsSnapshot, RendererPageReply, RendererPageView,
     RendererPendingDownloadActivation, RendererPendingDownloadResponse,
     RendererPendingFileChooserActivation, RendererPendingJavaScriptDialog,
     RendererPendingPopupActivation, RendererPendingSameDocumentNavigation,

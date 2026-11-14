@@ -9,7 +9,11 @@ use std::rc::Rc;
 #[cfg(feature = "ace-protocol")]
 mod ace_page_tasks;
 mod drag_source;
+mod mouse_boundary;
+mod touch_tap;
 use drag_source::dispatch_drag_source_event;
+use mouse_boundary::dispatch_mouse_boundary_events;
+use touch_tap::dispatch_touch_tap_activation;
 
 use super::input_dispatch_outcome;
 use super::input_helpers::{mouse_button_mask, single_changed_mouse_button};
@@ -18,7 +22,8 @@ use super::inspector::{
     option_is_disabled, radio_group_members,
 };
 use super::{
-    ActiveDragSession, ActiveScrollbarDrag, ActiveTouchPoint, PendingDragGesture, ScriptVm,
+    ActiveDragSession, ActiveScrollbarDrag, ActiveTouchPoint, PendingDragGesture, PendingTouchTap,
+    ScriptVm,
 };
 use crate::context_bootstrap::DragDataStoreMode;
 use crate::document_runtime::DomHandle;
@@ -27,21 +32,22 @@ use crate::dom::{
     native::{Node, SelectedFile},
 };
 use crate::native_bridge::element::{
-    InputEventCoordinates, TextEditInputType, TouchEventPoint,
-    activate_handle_after_pointer_release, activate_handle_via_click, activate_handle_via_keyboard,
-    cache_input_files_from_selected_files, construct_drag_event_with_related_target,
-    construct_keyboard_event, construct_mouse_event_for_target,
-    construct_mouse_event_with_detail_for_target,
+    InputEventCoordinates, TextEditInputType, TextInputSource, TouchEventPoint,
+    activate_handle_after_pointer_release, activate_handle_after_touch_release,
+    activate_handle_via_keyboard, cache_input_files_from_selected_files,
+    construct_drag_event_with_related_target, construct_keyboard_event,
+    construct_mouse_event_for_target, construct_mouse_event_with_detail_for_target,
     construct_mouse_event_with_related_target_for_target, construct_pointer_event,
     construct_pointer_event_with_modifiers, construct_pointer_event_with_related_target,
     construct_pointer_event_with_related_target_and_modifiers, construct_simple_event,
-    construct_touch_event, construct_touch_event_with_points, construct_wheel_event_for_target,
-    contenteditable_editing_host, dispatch_public_event, input_surface_hit_test, is_text_control,
-    observable_input_hit_test, perform_auxiliary_link_default_action, perform_drop_default_action,
-    perform_implicit_submission_from_control, perform_mouse_focus_default_action,
-    perform_scrollbar_scroll_default_action, perform_wheel_scroll_default_action,
-    replace_contenteditable_selection, replace_text_control_selection,
-    select_contenteditable_contents, text_control_set_selection_range_internal,
+    construct_touch_event_with_points, construct_wheel_event_for_target,
+    contenteditable_editing_host, dispatch_public_event, input_surface_hit_test,
+    is_disabled_form_control, observable_input_hit_test, perform_auxiliary_link_default_action,
+    perform_drop_default_action, perform_implicit_submission_from_control,
+    perform_mouse_focus_default_action, perform_scrollbar_scroll_default_action,
+    perform_text_input, perform_wheel_scroll_default_action, replace_contenteditable_selection,
+    replace_text_control_selection, select_contenteditable_contents,
+    text_control_set_selection_range_internal,
     text_control_set_selection_range_with_direction_internal, text_control_value, update_focus,
 };
 use crate::native_bridge::{
@@ -88,7 +94,7 @@ fn frozen_frame_transform(
 }
 
 fn root_to_document_frame(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     document: DomHandle,
 ) -> Option<moli_layout::LayoutTransform2D> {
     let dom = runtime.dom_host();
@@ -105,7 +111,7 @@ fn root_to_document_frame(
 }
 
 fn drag_related_target_in_document(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
     document: DomHandle,
     mut related: DomHandle,
 ) -> Option<DomHandle> {
@@ -120,7 +126,7 @@ fn drag_related_target_in_document(
 
 fn create_drag_data_transfer_view_for_target<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut crate::native_bridge::JsContextHost,
+    runtime_ptr: *mut crate::native_bridge::PageScriptHost,
     target: DomHandle,
     store: &crate::context_bootstrap::NativeDragDataStore,
     mode: DragDataStoreMode,
@@ -135,7 +141,7 @@ fn create_drag_data_transfer_view_for_target<'s>(
 #[allow(clippy::too_many_arguments)]
 fn dispatch_native_drag_event<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut crate::native_bridge::JsContextHost,
+    runtime_ptr: *mut crate::native_bridge::PageScriptHost,
     event_type: &str,
     target: DomHandle,
     related: Option<DomHandle>,
@@ -185,7 +191,7 @@ enum DragFinishReason {
 /// Take the session before calling script so every exit path ends it once.
 fn finish_drag_session<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut crate::native_bridge::JsContextHost,
+    runtime_ptr: *mut crate::native_bridge::PageScriptHost,
     active: &mut Option<ActiveDragSession>,
     reason: DragFinishReason,
     coordinates: InputEventCoordinates,
@@ -262,7 +268,7 @@ fn author_drag_operation<'s>(
 
 fn accepted_drag_operation<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut crate::native_bridge::JsContextHost,
+    runtime_ptr: *mut crate::native_bridge::PageScriptHost,
     target: DomHandle,
     transfer: v8::Local<'s, v8::Object>,
     canceled: bool,
@@ -284,7 +290,7 @@ fn accepted_drag_operation<'s>(
 /// leave using that view; a later update delivers over using a new view.
 fn update_drag_target<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut crate::native_bridge::JsContextHost,
+    runtime_ptr: *mut crate::native_bridge::PageScriptHost,
     session: &mut ActiveDragSession,
     target: Option<DomHandle>,
     coordinates: InputEventCoordinates,
@@ -392,7 +398,7 @@ fn update_drag_target<'s>(
 
 fn drop_drag_target<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut crate::native_bridge::JsContextHost,
+    runtime_ptr: *mut crate::native_bridge::PageScriptHost,
     session: &mut ActiveDragSession,
     coordinates: InputEventCoordinates,
     modifiers: u8,
@@ -472,7 +478,7 @@ fn drop_drag_target<'s>(
 
 fn native_drag_source(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut crate::native_bridge::JsContextHost,
+    runtime_ptr: *mut crate::native_bridge::PageScriptHost,
     gesture: PendingDragGesture,
 ) -> Option<(DomHandle, RendererDragData)> {
     let runtime = unsafe { &*runtime_ptr };
@@ -555,6 +561,9 @@ fn can_suppress_compat_mouse_event(event_name: &str) -> bool {
 
 const MOUSE_POINTER_ID: i32 = 1;
 const TOUCH_POINTER_ID: i32 = 2;
+// Match the default Chromium touch slop in CSS pixels. A contact that leaves
+// this radius cannot become a tap, even if it returns to its starting point.
+const TOUCH_TAP_SLOP: f64 = 16.0;
 
 struct PreparedMouseInputDispatch {
     button: i32,
@@ -583,10 +592,23 @@ fn buttons_for_touch_pointer_event(event_name: &str) -> i32 {
     }
 }
 
-fn touch_pointer_properties(event_name: &str, pointer_id: i32) -> RendererPointerEventProperties {
+fn touch_tap_is_live(runtime: &crate::native_bridge::PageScriptHost, tap: PendingTouchTap) -> bool {
+    runtime.dom_host().is_connected(tap.target)
+        && runtime.dom_host().owner_document_handle(tap.target) == Some(tap.document)
+        && runtime
+            .document_execution_context_for_node(tap.target)
+            .is_some()
+}
+
+fn touch_pointer_properties(
+    event_name: &str,
+    pointer_id: i32,
+    is_primary: bool,
+) -> RendererPointerEventProperties {
     RendererPointerEventProperties {
         pointer_id,
         pointer_type: "touch".to_owned(),
+        is_primary,
         pressure: match event_name {
             "touchend" | "touchcancel" => 0.0,
             _ => 0.5,
@@ -597,7 +619,7 @@ fn touch_pointer_properties(event_name: &str, pointer_id: i32) -> RendererPointe
 
 fn dispatch_pointer_capture_events(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut crate::native_bridge::JsContextHost,
+    runtime_ptr: *mut crate::native_bridge::PageScriptHost,
     pointer_id: i32,
     events: &[PointerCaptureDispatchEvent],
     coordinates: InputEventCoordinates,
@@ -647,7 +669,7 @@ fn dispatch_pointer_capture_events(
 
 fn release_pointer_capture_after_pointer_end(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut crate::native_bridge::JsContextHost,
+    runtime_ptr: *mut crate::native_bridge::PageScriptHost,
     pointer_id: i32,
     coordinates: InputEventCoordinates,
     button: i32,
@@ -677,7 +699,7 @@ fn release_pointer_capture_after_pointer_end(
 
 fn dispatch_drag_pointer_suppression_boundaries(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut crate::native_bridge::JsContextHost,
+    runtime_ptr: *mut crate::native_bridge::PageScriptHost,
     target: DomHandle,
     coordinates: InputEventCoordinates,
     pointer: &RendererPointerEventProperties,
@@ -727,7 +749,7 @@ fn dispatch_drag_pointer_suppression_boundaries(
 
 fn dispatch_touch_pointer_boundary_events(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut crate::native_bridge::JsContextHost,
+    runtime_ptr: *mut crate::native_bridge::PageScriptHost,
     previous: Option<DomHandle>,
     current: Option<DomHandle>,
     x: f64,
@@ -1509,77 +1531,21 @@ impl ScriptVm {
                     unsafe { &mut *runtime_ptr }.set_mouse_event_target(pointer_dispatch_handle);
                 }
             }
-            if let Some((Some(previous_handle), previous_root_to_frame)) = hover_transition {
-                let previous_client_point = previous_root_to_frame.map_point(root_point);
-                let previous_coordinates = InputEventCoordinates::from_root(x, y).with_client(
-                    f64::from(previous_client_point.x),
-                    f64::from(previous_client_point.y),
-                );
-                let related_target = related_target_value(scope, Some(handle));
-                if let Some(event) = construct_mouse_event_with_related_target_for_target(
+            if let Some((previous_handle, previous_root_to_frame)) = hover_transition {
+                let point = previous_root_to_frame.map_point(root_point);
+                let previous_coordinates = InputEventCoordinates::from_root(x, y)
+                    .with_client(f64::from(point.x), f64::from(point.y));
+                dispatch_mouse_boundary_events(
                     scope,
                     runtime_ptr,
                     previous_handle,
-                    "mouseout",
+                    Some(handle),
                     previous_coordinates,
-                    button,
-                    buttons,
-                    related_target,
-                    modifiers,
-                ) {
-                    let _ = dispatch_public_event(scope, runtime_ptr, previous_handle, event);
-                }
-                let remains_inside_previous = {
-                    let dom = unsafe { &*runtime_ptr }.dom_host();
-                    std::iter::successors(Some(handle), |node| dom.flat_tree_parent(*node))
-                        .any(|ancestor| ancestor == previous_handle)
-                };
-                if !remains_inside_previous {
-                    let related_target = related_target_value(scope, Some(handle));
-                    if let Some(event) = construct_mouse_event_with_related_target_for_target(
-                        scope,
-                        runtime_ptr,
-                        previous_handle,
-                        "mouseleave",
-                        previous_coordinates,
-                        button,
-                        buttons,
-                        related_target,
-                        modifiers,
-                    ) {
-                        let _ = dispatch_public_event(scope, runtime_ptr, previous_handle, event);
-                    }
-                }
-            }
-            if let Some((previous_handle, _)) = hover_transition {
-                let related_target = related_target_value(scope, previous_handle);
-                if let Some(event) = construct_mouse_event_with_related_target_for_target(
-                    scope,
-                    runtime_ptr,
-                    handle,
-                    "mouseover",
                     coordinates,
                     button,
                     buttons,
-                    related_target,
                     modifiers,
-                ) {
-                    let _ = dispatch_public_event(scope, runtime_ptr, handle, event);
-                }
-                let related_target = related_target_value(scope, previous_handle);
-                if let Some(event) = construct_mouse_event_with_related_target_for_target(
-                    scope,
-                    runtime_ptr,
-                    handle,
-                    "mouseenter",
-                    coordinates,
-                    button,
-                    buttons,
-                    related_target,
-                    modifiers,
-                ) {
-                    let _ = dispatch_public_event(scope, runtime_ptr, handle, event);
-                }
+                );
             }
             if let Some(pointer_event_name) = pointer_event_name_for_mouse_event(event_name)
                 && let Some(event) = construct_pointer_event_with_modifiers(
@@ -2082,6 +2048,7 @@ impl ScriptVm {
         Ok(input_dispatch_outcome(true))
     }
 
+    #[cfg(test)]
     pub(crate) fn dispatch_touch_event_at_point(
         &mut self,
         x: f64,
@@ -2089,176 +2056,11 @@ impl ScriptVm {
         event_name: &str,
         activate: bool,
     ) -> Result<RendererInputDispatchOutcome> {
-        let hit_handle = observable_input_hit_test(
-            &self._context_host.borrow(),
-            self.document_runtime.document_handle(),
-            moli_layout::LayoutPoint::new(x as f32, y as f32),
-        )?
-        .map(|hit| hit.handle);
-        if event_name == "touchstart" && hit_handle.is_none() {
-            return Ok(input_dispatch_outcome(false));
-        }
-        if event_name == "touchstart" {
-            self.active_touch_event_handle = hit_handle;
-        }
-        if matches!(event_name, "touchstart" | "touchmove") {
-            self.active_touch_point = Some(RendererTouchPoint { id: 0, x, y });
-        }
-        let touch_handle = match event_name {
-            "touchmove" | "touchend" | "touchcancel" => {
-                self.active_touch_event_handle.or(hit_handle)
-            }
-            _ => hit_handle,
-        };
-        let pointer_event_name = pointer_event_name_for_touch_event(event_name);
-        let pointer = touch_pointer_properties(event_name, TOUCH_POINTER_ID);
-        let button = button_for_touch_pointer_event(event_name);
-        let buttons = buttons_for_touch_pointer_event(event_name);
-        let mut pending_pointer_capture_events = Vec::new();
-        if pointer_event_name.is_some() {
-            let mut context_host = self._context_host.borrow_mut();
-            context_host.set_pointer_capture_active(TOUCH_POINTER_ID, true);
-            if event_name == "touchstart" {
-                if let Some(handle) = hit_handle {
-                    // Blink sets implicit pending capture for touch before
-                    // dispatching pointerdown; it is settled before the next
-                    // pointer event in the stream.
-                    context_host.set_pending_pointer_capture_target(TOUCH_POINTER_ID, handle);
-                }
-            } else {
-                pending_pointer_capture_events =
-                    context_host.process_pending_pointer_capture(TOUCH_POINTER_ID);
-            }
-        }
-        if !pending_pointer_capture_events.is_empty() {
-            self.with_default_context_scope(|scope, runtime_ptr| {
-                dispatch_pointer_capture_events(
-                    scope,
-                    runtime_ptr,
-                    TOUCH_POINTER_ID,
-                    &pending_pointer_capture_events,
-                    InputEventCoordinates::from_root(x, y),
-                    button,
-                    buttons,
-                    &pointer,
-                    0,
-                );
-                Ok(())
-            })?;
-        }
-        let pointer_handle = pointer_event_name
-            .is_some()
-            .then(|| {
-                self._context_host
-                    .borrow()
-                    .active_pointer_capture_target(TOUCH_POINTER_ID)
-            })
-            .flatten()
-            .or(hit_handle);
-        let pointer_transition = if pointer_event_name.is_some() {
-            if let Some(pointer_handle) = pointer_handle {
-                let previous = self.active_touch_pointer_handle;
-                if previous != Some(pointer_handle) {
-                    self.active_touch_pointer_handle = Some(pointer_handle);
-                    Some((previous, Some(pointer_handle)))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let should_finish_touch = matches!(event_name, "touchend" | "touchcancel");
-        let finish_pointer_handle = should_finish_touch
-            .then_some(self.active_touch_pointer_handle)
-            .flatten();
-
-        let Some(handle) = touch_handle.or(pointer_handle) else {
-            return Ok(input_dispatch_outcome(false));
-        };
-
-        let result = self.with_default_context_scope(|scope, runtime_ptr| {
-            if let Some((previous, current)) = pointer_transition {
-                dispatch_touch_pointer_boundary_events(
-                    scope,
-                    runtime_ptr,
-                    previous,
-                    current,
-                    x,
-                    y,
-                    button,
-                    buttons,
-                    &pointer,
-                );
-            }
-            if let Some(pointer_event_name) = pointer_event_name
-                && let Some(pointer_handle) = pointer_handle
-                && let Some(event) = construct_pointer_event(
-                    scope,
-                    pointer_event_name,
-                    InputEventCoordinates::from_root(x, y),
-                    button,
-                    buttons,
-                    &pointer,
-                )
-            {
-                let _ = dispatch_public_event(scope, runtime_ptr, pointer_handle, event);
-            }
-            if should_finish_touch {
-                release_pointer_capture_after_pointer_end(
-                    scope,
-                    runtime_ptr,
-                    TOUCH_POINTER_ID,
-                    InputEventCoordinates::from_root(x, y),
-                    button,
-                    buttons,
-                    &pointer,
-                    0,
-                );
-            }
-            let runtime = unsafe { &mut *runtime_ptr };
-            if let Some(target) =
-                runtime
-                    .native_bridge_mut()
-                    .wrap_handle(scope, runtime_ptr, handle)
-                && let Some(event) = construct_touch_event(scope, event_name, x, y, target)
-            {
-                let _ = dispatch_public_event(scope, runtime_ptr, handle, event);
-            }
-            if should_finish_touch {
-                dispatch_touch_pointer_boundary_events(
-                    scope,
-                    runtime_ptr,
-                    finish_pointer_handle,
-                    None,
-                    x,
-                    y,
-                    button,
-                    buttons,
-                    &pointer,
-                );
-            }
-            if activate {
-                return Ok(activate_handle_via_click(
-                    scope,
-                    runtime_ptr,
-                    handle,
-                    x,
-                    y,
-                    0,
-                    0,
-                ));
-            }
-            Ok(input_dispatch_outcome(true))
-        });
-        if should_finish_touch {
-            self.active_touch_pointer_handle = None;
-            self.active_touch_event_handle = None;
-            self.active_touch_point = None;
-        }
-        self.finish_input_event_dispatch_turn(result)
+        self.dispatch_touch_event_at_points(
+            &[RendererTouchPoint { id: 0, x, y }],
+            event_name,
+            activate,
+        )
     }
 
     pub(crate) fn dispatch_touch_event_at_points(
@@ -2267,13 +2069,14 @@ impl ScriptVm {
         event_name: &str,
         activate: bool,
     ) -> Result<RendererInputDispatchOutcome> {
+        // synthesizeTapGesture supplies a complete gesture rather than a raw
+        // end packet. Both APIs finish through the same tap recognition path.
         if activate
             && event_name == "touchend"
-            && self.active_touch_event_handle.is_none()
+            && self.active_touch_points.is_empty()
             && let [point] = points
         {
-            let started =
-                self.dispatch_touch_event_at_point(point.x, point.y, "touchstart", false)?;
+            let started = self.dispatch_multi_touch_event_at_points(&[*point], "touchstart")?;
             if !started.handled
                 || started.triggered_top_level_navigation
                 || started.pending_download.is_some()
@@ -2282,17 +2085,17 @@ impl ScriptVm {
                 return Ok(started);
             }
         }
-        if points.is_empty()
-            && matches!(event_name, "touchend" | "touchcancel")
-            && let Some(point) = self.active_touch_point
-        {
-            return self.dispatch_touch_event_at_point(point.x, point.y, event_name, activate);
-        }
-        if let [point] = points
-            && point.id == 0
-            && self.active_touch_points.is_empty()
-        {
-            return self.dispatch_touch_event_at_point(point.x, point.y, event_name, activate);
+        if points.is_empty() && matches!(event_name, "touchend" | "touchcancel") {
+            let ended = self
+                .active_touch_points
+                .iter()
+                .map(|(id, point)| RendererTouchPoint {
+                    id: *id,
+                    x: point.x,
+                    y: point.y,
+                })
+                .collect::<Vec<_>>();
+            return self.dispatch_multi_touch_event_at_points(&ended, event_name);
         }
         self.dispatch_multi_touch_event_at_points(points, event_name)
     }
@@ -2302,60 +2105,87 @@ impl ScriptVm {
         points: &[RendererTouchPoint],
         event_name: &str,
     ) -> Result<RendererInputDispatchOutcome> {
-        struct ChangedTouchPoint {
-            point: RendererTouchPoint,
-            pointer_id: i32,
-            pointer_handle: DomHandle,
-            pending_capture_events: Vec<PointerCaptureDispatchEvent>,
-            pointer_transition: Option<(Option<DomHandle>, DomHandle)>,
-            finish_pointer_handle: Option<DomHandle>,
-        }
-
         if points.is_empty() {
             return Ok(input_dispatch_outcome(false));
         }
 
         let is_end = matches!(event_name, "touchend" | "touchcancel");
+        let was_empty = self.active_touch_points.is_empty();
         let mut changed_points = Vec::new();
         for point in points {
-            let hit_handle = observable_input_hit_test(
-                &self._context_host.borrow(),
-                self.document_runtime.document_handle(),
-                moli_layout::LayoutPoint::new(point.x as f32, point.y as f32),
-            )?
-            .map(|hit| hit.handle);
+            let previous = self.active_touch_points.get(&point.id).copied();
             let target = match event_name {
-                "touchstart" => hit_handle,
-                "touchmove" | "touchend" | "touchcancel" => self
-                    .active_touch_points
-                    .get(&point.id)
-                    .map(|active| active.target)
-                    .or(hit_handle),
-                _ => hit_handle,
+                "touchstart" if previous.is_none() => observable_input_hit_test(
+                    &self._context_host.borrow(),
+                    self.document_runtime.document_handle(),
+                    moli_layout::LayoutPoint::new(point.x as f32, point.y as f32),
+                )?
+                .map(|hit| hit.handle),
+                "touchmove" if previous.is_some_and(|p| p.x != point.x || p.y != point.y) => {
+                    previous.map(|p| p.target)
+                }
+                "touchend" | "touchcancel" => previous.map(|p| p.target),
+                _ => None,
             };
             if let Some(target) = target {
-                changed_points.push((*point, target));
+                changed_points.push((*point, target, previous));
             }
         }
         if changed_points.is_empty() {
             return Ok(input_dispatch_outcome(false));
         }
-
+        let mut tap = self.pending_touch_tap.take();
+        if event_name == "touchstart"
+            && was_empty
+            && let [(point, target, _)] = changed_points.as_slice()
+            && let Some(document) = self
+                ._context_host
+                .borrow()
+                .dom_host()
+                .owner_document_handle(*target)
+        {
+            tap = Some(PendingTouchTap {
+                id: point.id,
+                target: *target,
+                document,
+                start_x: point.x,
+                start_y: point.y,
+                suppress_mouse: false,
+            });
+        }
+        if event_name == "touchcancel" {
+            tap = None;
+        }
+        if let Some(candidate) = tap
+            && changed_points.iter().any(|(p, _, _)| {
+                p.id == candidate.id
+                    && (p.x - candidate.start_x).powi(2) + (p.y - candidate.start_y).powi(2)
+                        >= TOUCH_TAP_SLOP * TOUCH_TAP_SLOP
+            })
+        {
+            tap = None;
+        }
         match event_name {
             "touchstart" | "touchmove" => {
-                for (point, target) in &changed_points {
+                for (point, target, previous) in &changed_points {
+                    let is_primary =
+                        previous.map_or(self.active_touch_points.is_empty(), |p| p.is_primary);
                     self.active_touch_points.insert(
                         point.id,
                         ActiveTouchPoint {
                             x: point.x,
                             y: point.y,
                             target: *target,
+                            is_primary,
                         },
                     );
                 }
+                if self.active_touch_points.len() > 1 {
+                    tap = None;
+                }
             }
             "touchend" | "touchcancel" => {
-                for (point, _) in &changed_points {
+                for (point, _, _) in &changed_points {
                     self.active_touch_points.remove(&point.id);
                 }
             }
@@ -2365,74 +2195,67 @@ impl ScriptVm {
         let pointer_event_name = pointer_event_name_for_touch_event(event_name);
         let button = button_for_touch_pointer_event(event_name);
         let buttons = buttons_for_touch_pointer_event(event_name);
-        let mut changed_pointer_points = Vec::new();
-        if pointer_event_name.is_some() {
-            for (point, target) in &changed_points {
-                let pointer_id = touch_pointer_id(point.id);
-                let (pointer_handle, pending_capture_events) = {
-                    let mut context_host = self._context_host.borrow_mut();
-                    context_host.set_pointer_capture_active(pointer_id, true);
-                    let pending_capture_events = if event_name == "touchstart" {
-                        // Touch contacts get implicit pending capture before
-                        // pointerdown. It is processed before the next pointer
-                        // event for the same contact.
-                        context_host.set_pending_pointer_capture_target(pointer_id, *target);
-                        Vec::new()
-                    } else {
-                        context_host.process_pending_pointer_capture(pointer_id)
-                    };
-                    let pointer_handle = context_host
-                        .active_pointer_capture_target(pointer_id)
-                        .unwrap_or(*target);
-                    (pointer_handle, pending_capture_events)
-                };
-                let previous_pointer_handle = self
-                    .active_touch_pointer_handles
-                    .insert(point.id, pointer_handle);
-                let pointer_transition = (previous_pointer_handle != Some(pointer_handle))
-                    .then_some((previous_pointer_handle, pointer_handle));
-                let finish_pointer_handle = is_end.then_some(pointer_handle);
-                changed_pointer_points.push(ChangedTouchPoint {
-                    point: *point,
-                    pointer_id,
-                    pointer_handle,
-                    pending_capture_events,
-                    pointer_transition,
-                    finish_pointer_handle,
-                });
-            }
-        }
-
         let event_target = changed_points[0].1;
         let active_snapshot = self
             .active_touch_points
             .iter()
             .map(|(id, point)| (*id, *point))
             .collect::<Vec<_>>();
+        let previous_mouse_hover = self.hovered_mouse_handle;
+        let mut compatibility_hover = None;
+        let document = self.document_runtime.document_handle();
+        let mut pointer_handles = std::mem::take(&mut self.active_touch_pointer_handles);
         let result = self.with_default_context_scope(|scope, runtime_ptr| {
-            for changed in &changed_pointer_points {
-                let pointer = touch_pointer_properties(event_name, changed.pointer_id);
-                if !changed.pending_capture_events.is_empty() {
-                    dispatch_pointer_capture_events(
-                        scope,
-                        runtime_ptr,
-                        changed.pointer_id,
-                        &changed.pending_capture_events,
-                        InputEventCoordinates::from_root(changed.point.x, changed.point.y),
-                        button,
-                        buttons,
-                        &pointer,
-                        0,
-                    );
-                }
-                if let Some((previous, current)) = changed.pointer_transition {
+            for (index, (point, target, previous)) in changed_points.iter().enumerate() {
+                let pointer_id = touch_pointer_id(point.id);
+                let is_primary = previous.map_or(was_empty && index == 0, |p| p.is_primary);
+                let pointer = touch_pointer_properties(event_name, pointer_id, is_primary);
+                let pending_capture_events = {
+                    let runtime = unsafe { &mut *runtime_ptr };
+                    runtime.set_pointer_capture_active(pointer_id, true);
+                    if event_name == "touchstart" {
+                        runtime.set_pending_pointer_capture_target(pointer_id, *target);
+                        Vec::new()
+                    } else {
+                        runtime.process_pending_pointer_capture(pointer_id)
+                    }
+                };
+                dispatch_pointer_capture_events(
+                    scope,
+                    runtime_ptr,
+                    pointer_id,
+                    &pending_capture_events,
+                    InputEventCoordinates::from_root(point.x, point.y),
+                    button,
+                    buttons,
+                    &pointer,
+                    0,
+                );
+                // Capture callbacks can remove or release their target. Resolve
+                // the pointer destination afterwards; Touch.target stays fixed.
+                let runtime = unsafe { &*runtime_ptr };
+                let pointer_handle =
+                    if let Some(captured) = runtime.active_pointer_capture_target(pointer_id) {
+                        captured
+                    } else if event_name == "touchstart" {
+                        *target
+                    } else {
+                        observable_input_hit_test(
+                            runtime,
+                            document,
+                            moli_layout::LayoutPoint::new(point.x as f32, point.y as f32),
+                        )?
+                        .map_or(*target, |hit| hit.handle)
+                    };
+                let previous_pointer = pointer_handles.insert(point.id, pointer_handle);
+                if previous_pointer != Some(pointer_handle) {
                     dispatch_touch_pointer_boundary_events(
                         scope,
                         runtime_ptr,
-                        previous,
-                        Some(current),
-                        changed.point.x,
-                        changed.point.y,
+                        previous_pointer,
+                        Some(pointer_handle),
+                        point.x,
+                        point.y,
                         button,
                         buttons,
                         &pointer,
@@ -2442,21 +2265,28 @@ impl ScriptVm {
                     && let Some(event) = construct_pointer_event(
                         scope,
                         pointer_event_name,
-                        InputEventCoordinates::from_root(changed.point.x, changed.point.y),
+                        InputEventCoordinates::from_root(point.x, point.y),
                         button,
                         buttons,
                         &pointer,
                     )
                 {
-                    let _ =
-                        dispatch_public_event(scope, runtime_ptr, changed.pointer_handle, event);
+                    let dispatched =
+                        dispatch_public_event(scope, runtime_ptr, pointer_handle, event);
+                    if event_name == "touchstart"
+                        && !dispatched.allows_default()
+                        && let Some(candidate) = &mut tap
+                        && candidate.id == point.id
+                    {
+                        candidate.suppress_mouse = true;
+                    }
                 }
-                if let Some(finish_pointer_handle) = changed.finish_pointer_handle {
+                if is_end {
                     release_pointer_capture_after_pointer_end(
                         scope,
                         runtime_ptr,
-                        changed.pointer_id,
-                        InputEventCoordinates::from_root(changed.point.x, changed.point.y),
+                        pointer_id,
+                        InputEventCoordinates::from_root(point.x, point.y),
                         button,
                         buttons,
                         &pointer,
@@ -2465,10 +2295,10 @@ impl ScriptVm {
                     dispatch_touch_pointer_boundary_events(
                         scope,
                         runtime_ptr,
-                        Some(finish_pointer_handle),
+                        Some(pointer_handle),
                         None,
-                        changed.point.x,
-                        changed.point.y,
+                        point.x,
+                        point.y,
                         button,
                         buttons,
                         &pointer,
@@ -2495,7 +2325,7 @@ impl ScriptVm {
             }
 
             let mut changed_event_points = Vec::with_capacity(changed_points.len());
-            for (point, target_handle) in &changed_points {
+            for (point, target_handle, _) in &changed_points {
                 let Some(target) =
                     runtime
                         .native_bridge_mut()
@@ -2517,19 +2347,43 @@ impl ScriptVm {
                 event_name,
                 &active_event_points,
                 &changed_event_points,
-            ) {
-                let _ = dispatch_public_event(scope, runtime_ptr, event_target, event);
+            ) && !dispatch_public_event(scope, runtime_ptr, event_target, event).allows_default()
+            {
+                tap = None;
+            }
+            if event_name == "touchend"
+                && let Some(candidate) = tap.take()
+                && let Some((point, _, _)) =
+                    changed_points.iter().find(|(p, _, _)| p.id == candidate.id)
+            {
+                let (outcome, hover) = dispatch_touch_tap_activation(
+                    scope,
+                    runtime_ptr,
+                    candidate,
+                    point.x,
+                    point.y,
+                    previous_mouse_hover,
+                )?;
+                compatibility_hover = Some(hover);
+                return Ok(outcome);
             }
             Ok(input_dispatch_outcome(true))
         });
-        if is_end && self.active_touch_points.is_empty() {
-            self.active_touch_pointer_handle = None;
-            self.active_touch_pointer_handles.clear();
-            self.active_touch_event_handle = None;
-        } else if is_end {
-            for (point, _) in &changed_points {
-                self.active_touch_pointer_handles.remove(&point.id);
-            }
+        pointer_handles.retain(|id, _| self.active_touch_points.contains_key(id));
+        self.active_touch_pointer_handles = pointer_handles;
+        self.pending_touch_tap = tap.filter(|candidate| {
+            self.active_touch_points.contains_key(&candidate.id)
+                && touch_tap_is_live(&self._context_host.borrow(), *candidate)
+        });
+        if let Some(hover) = compatibility_hover {
+            let target =
+                hover.filter(|node| self._context_host.borrow().dom_host().is_connected(*node));
+            self.hovered_mouse_handle = target;
+            let host = self._context_host.borrow();
+            self.hovered_mouse_root_to_frame = target
+                .and_then(|node| host.dom_host().owner_document_handle(node))
+                .and_then(|document| root_to_document_frame(&host, document))
+                .unwrap_or(moli_layout::LayoutTransform2D::IDENTITY);
         }
         self.finish_input_event_dispatch_turn(result)
     }
@@ -2701,26 +2555,13 @@ impl ScriptVm {
         };
 
         let result = self.with_default_context_scope(|scope, runtime_ptr| {
-            if is_text_control(unsafe { &*runtime_ptr }, handle) {
-                let _ = replace_text_control_selection(
-                    scope,
-                    runtime_ptr,
-                    handle,
-                    text,
-                    TextEditInputType::InsertText,
-                );
-                return Ok(true);
-            }
-            let runtime = unsafe { &*runtime_ptr };
-            let Some(editing_host) = contenteditable_editing_host(runtime, handle) else {
-                return Ok(false);
-            };
-            Ok(replace_contenteditable_selection(
+            Ok(perform_text_input(
                 scope,
                 runtime_ptr,
-                editing_host,
+                handle,
                 text,
                 TextEditInputType::InsertText,
+                TextInputSource::InputMethod,
             ))
         });
         self.finish_input_command_checkpoint(result)
@@ -2823,12 +2664,13 @@ impl ScriptVm {
                 let is_character_phase =
                     should_insert_text && matches!(event_name, "keydown" | "keypress");
                 if target.is_textarea && is_character_phase {
-                    return Ok(input_dispatch_outcome(replace_text_control_selection(
+                    return Ok(input_dispatch_outcome(perform_text_input(
                         scope,
                         runtime_ptr,
                         handle,
                         "\n",
                         TextEditInputType::InsertLineBreak,
+                        TextInputSource::Keyboard,
                     )));
                 }
                 if is_character_phase
@@ -2840,6 +2682,22 @@ impl ScriptVm {
                     )
                 {
                     return Ok(outcome);
+                }
+                if is_character_phase
+                    && contenteditable_editing_host(runtime, editing_handle).is_some()
+                {
+                    return Ok(input_dispatch_outcome(perform_text_input(
+                        scope,
+                        runtime_ptr,
+                        editing_handle,
+                        "\n",
+                        if shift {
+                            TextEditInputType::InsertLineBreak
+                        } else {
+                            TextEditInputType::InsertParagraph
+                        },
+                        TextInputSource::Keyboard,
+                    )));
                 }
                 if event_name == "keydown" && (target.is_button_like || target.is_anchor_like) {
                     return Ok(activate_handle_via_keyboard(
@@ -2856,21 +2714,25 @@ impl ScriptVm {
                     return Ok(input_dispatch_outcome(true));
                 }
                 if target.is_text_control {
-                    return Ok(input_dispatch_outcome(replace_text_control_selection(
+                    return Ok(input_dispatch_outcome(perform_text_input(
                         scope,
                         runtime_ptr,
                         handle,
                         text,
                         TextEditInputType::InsertText,
+                        TextInputSource::Keyboard,
                     )));
                 }
-                if let Some(editing_host) = contenteditable_editing_host(runtime, editing_handle) {
-                    return Ok(input_dispatch_outcome(replace_contenteditable_selection(
+                // Contenteditable defaults edit from the same focus snapshot's
+                // editing element, not a focused frame's body key target.
+                if contenteditable_editing_host(runtime, editing_handle).is_some() {
+                    return Ok(input_dispatch_outcome(perform_text_input(
                         scope,
                         runtime_ptr,
-                        editing_host,
+                        editing_handle,
                         text,
                         TextEditInputType::InsertText,
+                        TextInputSource::Keyboard,
                     )));
                 }
                 return Ok(input_dispatch_outcome(true));
@@ -3029,6 +2891,7 @@ impl ScriptVm {
             {
                 return Ok(input_dispatch_outcome(select_contenteditable_contents(
                     scope,
+                    runtime_ptr,
                     editing_host,
                 )));
             }
@@ -3154,7 +3017,7 @@ impl ScriptVm {
 /// contenteditable paths edit through the top context's selection, which
 /// never holds a range in a focused frame's document.
 fn key_and_editing_targets(
-    runtime: &crate::native_bridge::JsContextHost,
+    runtime: &crate::native_bridge::PageScriptHost,
 ) -> Option<(DomHandle, DomHandle)> {
     let handle = keyboard_event_target(runtime)?;
     let editing_handle = runtime

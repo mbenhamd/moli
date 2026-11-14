@@ -744,7 +744,7 @@ impl PreparedMainDocumentDownload {
     pub(crate) async fn run(self, context: &mut crate::conn::CommandWorkflowContext) {
         if let Some(pending) = self.pending {
             let mut events = Vec::new();
-            pending.run(&mut events, context.context_mut()).await;
+            pending.run(&mut events).await;
             context.context_mut().protocol_events_mut().extend(events);
         }
     }
@@ -933,8 +933,6 @@ mod tests {
         CompletedDownloadProgressTransfer::new(
             Vec::new(),
             CompletedMainDocumentNetworkEvents::new(
-                "GET".to_owned(),
-                vec![("Accept".to_owned(), "text/html".to_owned())],
                 None,
                 200,
                 vec![(

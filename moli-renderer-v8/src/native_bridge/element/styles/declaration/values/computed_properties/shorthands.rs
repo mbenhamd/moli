@@ -108,7 +108,7 @@ fn computed_shorthand(property: &str) -> Option<ComputedShorthand> {
 /// Returns `None` when `property` is not a table shorthand or a longhand has
 /// no resolved value, so the caller keeps its existing fallback.
 pub(super) fn computed_shorthand_value(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
     resolution: StyleResolutionContext<'_>,

@@ -14,11 +14,13 @@ mod font_face;
 mod headers;
 mod image;
 mod js_values;
+mod loaded_response;
 mod media;
 mod preflight_events;
 mod request;
 mod request_scope;
 mod response;
+mod response_hop;
 mod stylesheet_subresource;
 mod subresource;
 pub(crate) use subresource::SubresourceRequestDispatch;
@@ -40,7 +42,7 @@ pub(crate) use self::async_fetch::{
     fetch_browser_subresource_with_preflight_and_network_metadata,
     fetch_browser_subresource_with_preflight_headers,
     fetch_browser_subresource_with_preflight_headers_and_network_metadata,
-    spawn_async_subresource_fetch,
+    fetch_intercepted_window_hop, spawn_async_subresource_fetch,
 };
 pub(crate) use self::beacon::{navigator_send_beacon_callback, send_link_audit_ping};
 pub(super) use self::bindings::install_window_network_bindings;
@@ -135,7 +137,9 @@ pub(crate) use self::request::{
     FetchArgs, parse_fetch_init, parse_request_redirect_mode_label, request_object_credentials_mode,
 };
 pub(crate) use self::request::{FetchArgumentError, convert_fetch_arguments};
-pub(crate) use self::request::{RequestInputUrl, build_service_worker_request_object};
+pub(crate) use self::request::{
+    RequestInputUrl, build_cached_request_object, build_service_worker_request_object,
+};
 pub(crate) use self::request::{
     mark_request_input_body_used_for_fetch, request_body_already_used_error,
     try_resolve_request_constructor_url, try_resolve_request_constructor_url_for_base,
@@ -213,7 +217,7 @@ use super::{
     blob,
     context_bootstrap::{new_readable_stream_from_array_buffer, new_readable_stream_from_source},
     dom_parser,
-    native_bridge::JsContextHost,
+    native_bridge::PageScriptHost,
     page_task_queue::RendererResourceCompletionSender,
     types::{
         AsyncSubresourceFetchCompletion, AsyncSubresourceFetchEvent,
@@ -258,3 +262,5 @@ pub(crate) use response::{fetch_response_metadata, set_response_metadata};
 
 #[cfg(test)]
 pub(crate) use response::build_fetch_response_object_from_stream_for_request_mode;
+
+pub(crate) mod controlled_xhr;

@@ -10,6 +10,8 @@ mod node;
 mod parser_construction;
 mod queries;
 mod scripts;
+#[cfg(any(test, feature = "test-support"))]
+pub mod serialization_probe;
 
 use std::sync::Arc;
 
@@ -34,9 +36,13 @@ pub use host::{
 };
 pub use host::{
     HostElementSnapshot, ShadowRootBindingSnapshot, ShadowRootInclusion, ShadowRootInit,
-    ShadowRootRegistryAttributePolicy,
+    ShadowRootMarkupProfile, ShadowRootRegistryAttributePolicy,
 };
-pub use html_serialization::HtmlSerializationLimitExceeded;
+pub use html_serialization::{
+    HtmlEmbeddedDocument, HtmlEmbeddedDocumentProvider, HtmlInsertionPoint, HtmlSerializationError,
+    HtmlSerializationInsertion, HtmlSerializationLimitExceeded, HtmlSerializationPolicy,
+    escape_html_attribute_into_string,
+};
 pub use node::{
     CDataSection, Comment, LiveDomNodeMetadata, NativeNodeId, Node, NodeData, NodeFlags, NodeType,
     ProcessingInstruction, Text,
@@ -82,6 +88,8 @@ impl NativeNodeStorage {
     }
 
     fn push(&mut self, node: Node) {
+        #[cfg(any(test, feature = "test-support"))]
+        serialization_probe::record(serialization_probe::Access::Mutation);
         let chunks = Arc::make_mut(&mut self.chunks);
         match chunks.last_mut() {
             Some(chunk) if chunk.len() < NATIVE_DOM_NODE_CHUNK_CAPACITY => {
@@ -145,7 +153,7 @@ impl<'a> DoubleEndedIterator for NativeDomNodes<'a> {
 impl ExactSizeIterator for NativeDomNodes<'_> {}
 impl std::iter::FusedIterator for NativeDomNodes<'_> {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct NativeDom {
     nodes: NativeNodeStorage,
     // HTML `iframe`/`frame` elements in `nodes`. The arena never frees a node
@@ -155,6 +163,19 @@ pub struct NativeDom {
     document_node_id: NativeNodeId,
     stylesheet_candidate_registries: StylesheetCandidateRegistries,
     parse_errors: Vec<String>,
+}
+
+impl Clone for NativeDom {
+    fn clone(&self) -> Self {
+        #[cfg(any(test, feature = "test-support"))]
+        serialization_probe::record(serialization_probe::Access::Clone);
+        Self {
+            nodes: self.nodes.clone(),
+            document_node_id: self.document_node_id,
+            stylesheet_candidate_registries: self.stylesheet_candidate_registries.clone(),
+            parse_errors: self.parse_errors.clone(),
+        }
+    }
 }
 
 impl AsRef<NativeDom> for NativeDom {
@@ -255,6 +276,8 @@ impl NativeDom {
     }
 
     pub fn node_mut(&mut self, node_id: NativeNodeId) -> Option<&mut Node> {
+        #[cfg(any(test, feature = "test-support"))]
+        serialization_probe::record(serialization_probe::Access::MutableNode);
         self.nodes.get_mut(node_id.index())
     }
 
@@ -677,10 +700,14 @@ impl NativeDom {
     }
 
     pub fn append_child(&mut self, parent: NativeNodeId, child: NativeNodeId) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        serialization_probe::record(serialization_probe::Access::Mutation);
         self.insert_before(parent, child, None)
     }
 
     pub fn remove_child(&mut self, parent: NativeNodeId, child: NativeNodeId) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        serialization_probe::record(serialization_probe::Access::Mutation);
         self.remove_child_with_stylesheet_candidate_changes(parent, child)
             .is_some()
     }
@@ -691,6 +718,8 @@ impl NativeDom {
         child: NativeNodeId,
         reference_child: Option<NativeNodeId>,
     ) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        serialization_probe::record(serialization_probe::Access::Mutation);
         self.insert_before_with_stylesheet_candidate_changes(parent, child, reference_child)
             .is_some()
     }
@@ -1350,6 +1379,75 @@ mod tests {
                 document
             ),
             vec![embed, first_created, object, second_created]
+        );
+    }
+
+    #[test]
+    fn child_browsing_context_candidates_follow_shadow_including_subtree_order() {
+        let mut host = DomHost::from_dom(NativeDom::new_html(test_url()));
+        host.reset_html_document_shell();
+        let body = host.document_body_handle().unwrap();
+        // Creation/index order deliberately differs from shadow-including order.
+        let light_frame = host.create_element("iframe");
+        let first_host = host.create_element("div");
+        let last_host = host.create_element("section");
+        assert!(host.append_child(body, first_host));
+        assert!(host.append_child(body, last_host));
+        assert!(host.append_child(first_host, light_frame));
+        let root = host.attach_shadow_root(first_host, "closed").unwrap();
+        let nested_host = host.create_element("div");
+        let nested_root = host.attach_shadow_root(nested_host, "open").unwrap();
+        let nested_frame = host.create_element("iframe");
+        assert!(host.append_child(nested_root, nested_frame));
+        let shadow_frame = host.create_element("iframe");
+        assert!(host.append_child(root, shadow_frame));
+        assert!(host.append_child(root, nested_host));
+        let last_root = host.attach_shadow_root(last_host, "open").unwrap();
+        let last_frame = host.create_element("iframe");
+        assert!(host.append_child(last_root, last_frame));
+        let detached_host = host.create_element("div");
+        let detached_root = host.attach_shadow_root(detached_host, "closed").unwrap();
+        let detached_frame = host.create_element("iframe");
+        assert!(host.append_child(detached_root, detached_frame));
+        let template = host.create_element("template");
+        let contents = host.parser_template_contents_handle(template).unwrap();
+        let inert_frame = host.create_element("iframe");
+        assert!(host.append_child(contents, inert_frame));
+        assert!(host.append_child(body, template));
+        assert!(host.is_connected(template));
+        assert!(!host.is_connected(inert_frame));
+        let document = host.document_handle();
+        assert!(host.is_connected(nested_frame));
+        assert!(!host.dom().contains(document, nested_frame));
+        assert_eq!(
+            host.child_browsing_context_host_candidate_handles_in_subtree_in_document_order(
+                document
+            ),
+            vec![shadow_frame, nested_frame, light_frame, last_frame]
+        );
+        assert_eq!(
+            host.child_browsing_context_host_candidate_handles_in_subtree_in_document_order(root),
+            vec![shadow_frame, nested_frame]
+        );
+        assert!(host.insert_before(body, last_host, Some(first_host)));
+        assert_eq!(
+            host.child_browsing_context_host_candidate_handles_in_subtree_in_document_order(
+                document
+            ),
+            vec![last_frame, shadow_frame, nested_frame, light_frame]
+        );
+        assert!(host.remove_child(body, first_host));
+        assert_eq!(
+            host.child_browsing_context_host_candidate_handles_in_subtree_in_document_order(
+                document
+            ),
+            vec![last_frame]
+        );
+        assert_eq!(
+            host.child_browsing_context_host_candidate_handles_in_subtree_in_document_order(
+                first_host
+            ),
+            vec![shadow_frame, nested_frame, light_frame]
         );
     }
 

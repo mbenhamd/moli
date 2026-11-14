@@ -73,7 +73,9 @@ pub use page_slot::{DocumentStartScript, IsolatedWorldDefinition, RuntimeBinding
 pub(crate) use runtime_slot::{FinishedRendererDocumentNavigation, TargetRuntimeSlot};
 
 pub use fetch::TargetFetchConfig;
-pub(crate) use fetch::{TargetFetchOwner, TargetFetchSubresourceInterceptionSnapshot};
+pub(crate) use fetch::{
+    DrainedFetchRequests, TargetFetchOwner, TargetFetchSubresourceInterceptionSnapshot,
+};
 
 pub(crate) use inspector::InspectorCommandDispatch;
 pub(crate) use javascript_dialog::{
@@ -81,12 +83,13 @@ pub(crate) use javascript_dialog::{
     TargetJavaScriptDialogState, TargetPreparedJavaScriptDialog,
     TargetPreparedJavaScriptDialogRoute,
 };
+pub(crate) use moli_protocol_cdp_defs::actions::ProfilerAction;
 pub(crate) use pending_renderer_command::{
     DuplicatePendingRendererCommand, PendingRendererCommandKey, PreparedRendererCallDispatch,
     PreparedRendererCallTermination, RegisterRendererCallError, RendererCommandCorrelation,
     RendererCommandDescriptor, RendererCommandReplay,
 };
-pub(crate) use profiler::{ProfilerAction, ProfilerInspectorCommand};
+pub(crate) use profiler::ProfilerInspectorCommand;
 pub(crate) use service_worker_lifetime::{
     TargetServiceWorkerProtocolAttachmentIdentity, TargetServiceWorkerProtocolAttachmentRetirement,
     TargetServiceWorkerRunIdentity, TargetServiceWorkerRunRetirement,

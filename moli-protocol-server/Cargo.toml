@@ -21,6 +21,7 @@ moli-fetch = { path = "../moli-fetch" }
 moli-html-input-type = { path = "../moli-html-input-type" }
 moli-protocol = { path = "../moli-protocol" }
 moli-protocol-cdp = { path = "../moli-protocol-cdp" }
+moli-protocol-cdp-defs = { path = "../moli-protocol-cdp-defs" }
 moli-protocol-webdriver-bidi = { path = "../moli-protocol-webdriver-bidi" }
 moli-protocol-webdriver-classic = { path = "../moli-protocol-webdriver-classic" }
 moli-trace = { path = "../moli-trace" }
@@ -42,6 +43,7 @@ moli-protocol = { path = "../moli-protocol", features = ["test-support"] }
 moli-test-support = { path = "../moli-test-support" }
 png = "0.18"
 time = "0.3"
+tokio = { version = "1.51.0", features = ["test-util"] }
 tokio-tungstenite = "0.28.0"
 
 [lints]

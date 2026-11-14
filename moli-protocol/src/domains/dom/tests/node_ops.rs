@@ -4374,7 +4374,7 @@ async fn object_snapshot_producers_register_renderer_frontend_bindings() {
         .and_then(|id| u32::try_from(id).ok())
         .expect("requestNode should return frontend node id");
 
-    ctx.with_fixture(|conn| conn.clear_runtime_remote_object_tracking_for_session_owner(None));
+    ctx.with_fixture(|conn| conn.clear_runtime_context_metadata_for_session_owner(None));
     let request_backend_node_id =
         match renderer_frontend_binding_for_test(&mut ctx, request_frontend_node_id).await {
             moli_core::page::RendererDomFrontendNodeBindingResolution::BackendNodeId(
@@ -4420,7 +4420,7 @@ async fn object_snapshot_producers_register_renderer_frontend_bindings() {
         "describeNode producer should return renderer-owned backend id"
     );
 
-    ctx.with_fixture(|conn| conn.clear_runtime_remote_object_tracking_for_session_owner(None));
+    ctx.with_fixture(|conn| conn.clear_runtime_context_metadata_for_session_owner(None));
     let bound_describe_backend_node_id =
         match renderer_frontend_binding_for_test(&mut ctx, describe_frontend_node_id).await {
             moli_core::page::RendererDomFrontendNodeBindingResolution::BackendNodeId(
@@ -5338,14 +5338,6 @@ async fn resolve_node_caches_node_payload_from_renderer_snapshot_command() {
         .as_str()
         .expect("DOM.resolveNode should return objectId")
         .to_owned();
-
-    ctx.with_fixture(|conn| {
-        assert_eq!(
-            conn.runtime_remote_object_group_for_session_owner(None, &object_id),
-            Some("native-resolve".to_owned()),
-            "the Browser registry must be updated before the terminal becomes visible",
-        )
-    });
 
     navigate_to_data_html_async(&mut ctx, 5, "<!doctype html><html><body>next</body></html>").await;
 

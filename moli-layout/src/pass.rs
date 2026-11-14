@@ -257,7 +257,7 @@ where
     let mut reused_inline_count = 0usize;
     let mut reused_numeric_count = 0usize;
     let mut used_retained_world = false;
-    let (world, numeric_metrics, numeric_unrounded, structural_len, built_policy) = loop {
+    let (mut world, numeric_metrics, numeric_unrounded, structural_len, built_policy) = loop {
         container_query_iteration_count += 1;
         let phase_started = Instant::now();
         let mut world = build_layout_world(source, styles)?;
@@ -330,6 +330,12 @@ where
             });
         }
     };
+    // SVG content depends only on the final used size, so it resolves once
+    // against the converged world rather than on every container-query
+    // iteration.
+    let phase_started = Instant::now();
+    let object_geometry = prepare_svg_content(&mut world, source);
+    numeric_layout_elapsed += phase_started.elapsed();
     let phase_started = Instant::now();
     let mut embedded_frames = HashMap::new();
     for (index, layout_box) in world.boxes.iter().enumerate() {
@@ -375,6 +381,7 @@ where
         request.reason,
         started,
         request.paint_capture,
+        object_geometry,
         embedded_frames,
         crate::projection::LayoutPassPhaseMetrics {
             box_tree_elapsed,
@@ -479,6 +486,55 @@ where
             "incremental layout geometry differs from a full rebuild"
         );
     }
+}
+
+fn prepare_svg_content<S: LayoutSource>(
+    world: &mut crate::LayoutWorld<S::NodeId>,
+    source: &S,
+) -> Vec<crate::LayoutObjectGeometry<S::NodeId>> {
+    let mut objects = Vec::new();
+    for (index, layout_box) in world.boxes.iter_mut().enumerate() {
+        if !layout_box
+            .element_semantics()
+            .is_some_and(|semantics| semantics.replaced == Some(crate::LayoutReplacedKind::Svg))
+        {
+            continue;
+        }
+        let Some(node) = layout_box.source() else {
+            continue;
+        };
+        let layout = layout_box.final_layout;
+        let zoom = layout_box.style.effective_zoom();
+        let viewport = crate::LayoutSize::new(
+            ((layout.size.width
+                - layout.border.left
+                - layout.border.right
+                - layout.padding.left
+                - layout.padding.right
+                - layout.scrollbar_size.width)
+                / zoom)
+                .max(0.0),
+            ((layout.size.height
+                - layout.border.top
+                - layout.border.bottom
+                - layout.padding.top
+                - layout.padding.bottom
+                - layout.scrollbar_size.height)
+                / zoom)
+                .max(0.0),
+        );
+        if let Some(content) = source.svg_content(node, &layout_box.style, viewport) {
+            layout_box.replaced_image = content.image;
+            objects.extend(content.objects.into_iter().map(|(source, quad)| {
+                crate::LayoutObjectGeometry {
+                    source,
+                    owner: crate::LayoutOutputBoxId::from_index(index),
+                    quad,
+                }
+            }));
+        }
+    }
+    objects
 }
 
 /// Resolves `overflow:auto` with a monotonic browser-style feedback loop.

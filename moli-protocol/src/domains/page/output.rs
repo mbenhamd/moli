@@ -312,6 +312,48 @@ impl PagePreparedOutputs {
         }
     }
 
+    pub(crate) fn from_renderer_child_frame_commit(
+        conn: &CdpConnection,
+        owner: &CommandOwnerScope,
+        source_document: RendererDocumentLifecycleIdentity,
+        mut event: ChildFrameNavigationSnapshot,
+        document_network: Option<ChildFrameDocumentNetworkActivitySnapshot>,
+    ) -> Self {
+        let Some(binding) =
+            conn.target_root_document_output_identity_for_owner(owner, source_document)
+        else {
+            return Self::default();
+        };
+        let Some((root_frame_id, _, security_origin, secure_context_type)) =
+            conn.target_session_owner_frame_tree_identity_for_owner(owner)
+        else {
+            return Self::default();
+        };
+        if event.parent_frame_id.is_none() {
+            event.parent_frame_id = Some(root_frame_id);
+        }
+        let mut document = PagePreparedChildFrameDocumentActivity::from_parts(
+            monotonic_timestamp_seconds(),
+            Vec::new(),
+            Vec::new(),
+            document_network.into_iter().collect(),
+            Vec::new(),
+            security_origin,
+            secure_context_type,
+        );
+        document.commits.push(
+            super::child_frame_activity::PagePreparedChildFrameNavigationCommit::from_snapshot(
+                event,
+            ),
+        );
+        Self {
+            child_frame_activities: vec![PagePreparedChildFrameActivity::from_document(
+                binding, document,
+            )],
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn from_renderer_child_frame_load(
         conn: &CdpConnection,
         owner: &CommandOwnerScope,
@@ -556,7 +598,7 @@ impl PagePreparedOutputs {
     #[cfg(test)]
     pub(super) fn child_frame_document_activity_for_test() -> PagePreparedChildFrameDocumentActivity
     {
-        PagePreparedChildFrameDocumentActivity::from_parts(
+        let mut document = PagePreparedChildFrameDocumentActivity::from_parts(
             12.5,
             vec![PagePreparedChildFrameTreeEvent::Attached {
                 frame_id: "CHILD-FRAME-1".to_owned(),
@@ -573,11 +615,46 @@ impl PagePreparedOutputs {
                 document_open_replacement: false,
                 security_origin_inherited: false,
                 security_origin_opaque: false,
-                document_network: None,
             }],
             "https://example.test".to_owned(),
             "Secure".to_owned(),
-        )
+        );
+        document.commits = document
+            .loads
+            .iter()
+            .map(|load| load.navigation_commit.clone())
+            .collect();
+        document
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_child_frame_tree_event_for_test(
+        binding: crate::conn::TargetRootDocumentProtocolAttachmentIdentity,
+        frame_id: String,
+        parent_frame_id: Option<String>,
+    ) -> Self {
+        let event = match parent_frame_id {
+            Some(parent_frame_id) => PagePreparedChildFrameTreeEvent::Attached {
+                frame_id,
+                parent_frame_id,
+            },
+            None => PagePreparedChildFrameTreeEvent::Detached { frame_id },
+        };
+        let document = PagePreparedChildFrameDocumentActivity::from_parts(
+            12.5,
+            vec![event],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+        );
+        Self {
+            child_frame_activities: vec![PagePreparedChildFrameActivity::from_document(
+                binding, document,
+            )],
+            ..Self::default()
+        }
     }
 
     #[cfg(test)]
@@ -715,31 +792,6 @@ impl PagePreparedOutputSlot {
         &mut self,
     ) -> Option<PagePreparedTopLevelLocationNavigation> {
         self.outputs.top_level_location_navigation.take()
-    }
-
-    pub(in crate::domains) fn top_level_location_navigation_runtime_command_cause(
-        &self,
-    ) -> Option<&RendererRuntimeCommandCausalIdentity> {
-        self.outputs
-            .top_level_location_navigation
-            .as_ref()
-            .and_then(PagePreparedTopLevelLocationNavigation::runtime_command_cause)
-    }
-
-    pub(in crate::domains) fn take_top_level_location_navigation_for_runtime_command(
-        &mut self,
-        cause: &RendererRuntimeCommandCausalIdentity,
-    ) -> Option<Self> {
-        let navigation = (self.top_level_location_navigation_runtime_command_cause()
-            == Some(cause))
-        .then(|| self.outputs.top_level_location_navigation.take())
-        .flatten()?;
-        Some(Self {
-            outputs: PagePreparedOutputs {
-                top_level_location_navigation: Some(navigation),
-                ..Default::default()
-            },
-        })
     }
 
     pub(crate) fn take_top_level_history_traversal(

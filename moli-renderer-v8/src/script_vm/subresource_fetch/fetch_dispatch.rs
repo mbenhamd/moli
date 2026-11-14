@@ -394,7 +394,7 @@ impl ScriptVm {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn resolve_pending_subresource_fetch_completion(
         &mut self,
-        mut pending: PendingSubresourceFetchState,
+        pending: PendingSubresourceFetchState,
         request_url: Url,
         request_method: String,
         request_headers: moli_fetch::RequestHeaders,
@@ -405,12 +405,87 @@ impl ScriptVm {
         network_error_text: Option<String>,
         completion_result: AsyncSubresourceFetchResult,
     ) -> Result<AsyncSubresourceFetchBodyActivity> {
+        self.resolve_pending_subresource_fetch_completion_with_record(
+            pending,
+            request_url,
+            request_method,
+            request_headers,
+            request_body,
+            response_status_text,
+            skip_fetch_security_validation,
+            response_filter,
+            network_error_text,
+            completion_result,
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn resolve_pending_subresource_fetch_completion_with_record(
+        &mut self,
+        mut pending: PendingSubresourceFetchState,
+        request_url: Url,
+        request_method: String,
+        request_headers: moli_fetch::RequestHeaders,
+        request_body: Option<String>,
+        response_status_text: Option<String>,
+        skip_fetch_security_validation: bool,
+        response_filter: Option<AsyncSubresourceFetchResponseFilter>,
+        network_error_text: Option<String>,
+        completion_result: AsyncSubresourceFetchResult,
+        mut supplied_network_record: Option<crate::types::SubresourceNetworkRecord>,
+    ) -> Result<AsyncSubresourceFetchBodyActivity> {
         let (supplied_parkable_image, result) = match completion_result {
             AsyncSubresourceFetchResult::Response(response) => (None, Ok(response)),
             AsyncSubresourceFetchResult::Image { response, encoded } => {
                 (Some(encoded), Ok(response))
             }
             AsyncSubresourceFetchResult::Failure(error) => (None, Err(error)),
+        };
+        let response_filter = response_filter.or_else(|| {
+            (!skip_fetch_security_validation
+                && pending
+                    .continuation
+                    .window_fetch()
+                    .and_then(|fetch| fetch.intercepted_request.as_ref())
+                    .is_some_and(|request| {
+                        request.redirect_mode() == moli_fetch::RequestRedirectMode::Manual
+                    })
+                && result
+                    .as_ref()
+                    .is_ok_and(|response| matches!(response.status, 301 | 302 | 303 | 307 | 308)))
+            .then_some(crate::types::FetchResponseType::OpaqueRedirect.into())
+        });
+        // Only intercepted Window requests stop after each network hop. The
+        // transport and fulfilled responses share redirect validation, policy,
+        // and the next Fetch pause; ordinary fetch streaming stays unchanged.
+        let result = if !skip_fetch_security_validation
+            && pending
+                .continuation
+                .window_fetch()
+                .is_some_and(|fetch| fetch.intercepted_request.is_some())
+            && let Ok(response) = &result
+        {
+            let request = super::pending_fetch::request_for_pending_subresource(
+                &pending,
+                &pending.info.url,
+                &pending.info.method,
+                pending.info.request_headers.clone(),
+                pending.info.request_body_bytes.clone(),
+            );
+            match super::intercepted_redirects::follow_intercepted_redirect(
+                request,
+                &response.head(),
+                &pending.info.document_url,
+                response.network_request_headers(),
+            ) {
+                Ok(Some((request, redirect))) => {
+                    return self.continue_intercepted_window_redirect(pending, request, redirect);
+                }
+                Ok(None) => result,
+                Err(error) => Err(error),
+            }
+        } else {
+            result
         };
         let trace_started = moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
         let trace_fields = async_subresource_trace_fields_for_pending(
@@ -516,6 +591,7 @@ impl ScriptVm {
                     return Err("Font redirect blocked by Content Security Policy".to_owned());
                 }
                 if !response.redirect_chain.is_empty()
+                    && !window_fetch_redirect_policy_was_checked(&pending, &response.head())
                     && let Some(message) = document_connect_csp_redirect_failure_message(
                         scope,
                         &context_host,
@@ -597,7 +673,7 @@ impl ScriptVm {
                         .or_else(|| pending.info.request_cookie_report.clone());
                     let record_started =
                         moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
-                    let mut network_record = if opaque_response_blocked {
+                    let mut network_record = supplied_network_record.take().unwrap_or_else(|| if opaque_response_blocked {
                         crate::types::SubresourceNetworkRecord::failure(
                             pending.info.frame_id.clone(),
                             pending.info.document_url.clone(),
@@ -639,7 +715,7 @@ impl ScriptVm {
                         )
                         .with_request_initiator_type(request_initiator_type)
                         .with_request_body_bytes(pending.info.request_body_bytes.clone())
-                    };
+                    });
                     if !opaque_response_blocked
                         && let Some(status_text) = response_status_text.as_deref()
                     {
@@ -661,10 +737,10 @@ impl ScriptVm {
                         let entry = if opaque_response_blocked {
                             // ORB removes the original headers and body measurements;
                             // its TAO header cannot re-enable those measurements.
-                            fetch.resource_timing().failed(&pending.info.url)
+                            fetch.resource_timing().failed(fetch.initial_request_url(&pending.info.url))
                         } else {
                             fetch.resource_timing().completed(
-                                &pending.info.url, &pending.request_origin, pending.request_mode,
+                                fetch.initial_request_url(&pending.info.url), &pending.request_origin, pending.request_mode,
                                 &response.head(), response.body_bytes().len(), response_filter.as_ref(),
                             )
                         };
@@ -868,7 +944,9 @@ impl ScriptVm {
                         .unwrap_or(&error_text);
                     let record_started =
                         moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
-                    let mut network_record = crate::types::SubresourceNetworkRecord::failure(
+                    let mut network_record = supplied_network_record.take()
+                        .filter(|record| matches!(record.outcome(), crate::types::SubresourceNetworkOutcome::Failure { .. }))
+                        .unwrap_or_else(|| crate::types::SubresourceNetworkRecord::failure(
                         pending.info.frame_id.clone(),
                         pending.info.document_url.clone(),
                         request_url,
@@ -878,7 +956,7 @@ impl ScriptVm {
                         pending.info.resource_type,
                         network_error_text.to_owned(),
                     )
-                    .with_request_initiator_type(request_initiator_type);
+                    .with_request_initiator_type(request_initiator_type));
                     if let Some(handle) = pending.info.network_request_handle {
                         network_record = network_record.with_request_handle(handle);
                     }
@@ -896,7 +974,7 @@ impl ScriptVm {
                         PendingSubresourceContinuation::Fetch(fetch) => {
                             crate::context_bootstrap::record_resource_performance_entry(
                                 scope,
-                                fetch.resource_timing().failed(&pending.info.url),
+                                fetch.resource_timing().failed(fetch.initial_request_url(&pending.info.url)),
                             );
                             let resolver = fetch
                                 .into_resolver()

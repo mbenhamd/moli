@@ -1,3 +1,6 @@
+use super::response_hop::{
+    SubresourceResponseTransition, advance_subresource_response, redirect_mode_error_message,
+};
 use super::*;
 use moli_fetch::{
     BrowserRequestMetadata, FetchCancelHandle, NetworkFetchResult, RedirectInfo,
@@ -16,6 +19,47 @@ pub(crate) async fn fetch_browser_subresource_with_preflight(
     fetch_browser_subresource_with_preflight_and_network_metadata(loader, request, cancel_handle)
         .await
         .map(NetworkFetchResult::into_response)
+}
+
+/// Fetch interception owns redirect decisions, so every HTTP hop must return
+/// before the next request can run. Preflight still belongs to this hop.
+pub(crate) async fn fetch_intercepted_window_hop(
+    loader: ResourceRequestClient,
+    request: Request,
+    cancel_handle: Option<FetchCancelHandle>,
+) -> Result<NetworkFetchResult<Response>, String> {
+    let mode = request.redirect_mode();
+    let preflight_headers = request.request_headers.to_byte_strings();
+    let cancel = cancel_handle.unwrap_or_default();
+    let response_cancel = cancel.child_for_subrequest();
+    let observed = fetch_subresource_hop(
+        &loader,
+        request,
+        response_cancel.clone(),
+        preflight_headers,
+        None,
+    )
+    .await?;
+    let (response, journal) = observed.into_parts_with_observation_journal();
+    let redirect = matches!(response.head.status, 301 | 302 | 303 | 307 | 308)
+        && (mode == RequestRedirectMode::Manual
+            || response
+                .head
+                .headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("location")));
+    let materialized = if redirect {
+        // Redirect bodies are never delivered to fetch(). Dropping the hop
+        // retires its transport before the renderer announces the next pause.
+        Response::from_head_and_text_body(response.head.clone(), String::new())
+    } else {
+        cancel.adopt_response_progress(&response_cancel);
+        response.materialize().await?.0
+    };
+    Ok(NetworkFetchResult::with_observation_journal(
+        materialized,
+        journal,
+    ))
 }
 
 pub(crate) async fn fetch_browser_subresource_with_preflight_and_network_metadata(
@@ -99,6 +143,44 @@ async fn fetch_browser_subresource_with_preflight_headers_and_observer(
     Ok(observed)
 }
 
+pub(super) async fn fetch_subresource_hop(
+    loader: &ResourceRequestClient,
+    request: Request,
+    cancel: FetchCancelHandle,
+    preflight_headers: Vec<(String, String)>,
+    observer: Option<&CorsPreflightNetworkObserver>,
+) -> Result<NetworkFetchResult<super::loaded_response::LoadedResponse>, String> {
+    run_cors_preflight_if_needed(
+        loader,
+        &request,
+        Some(cancel.clone()),
+        &preflight_headers,
+        observer,
+    )
+    .await?;
+    if request.auth_requires_buffered_transport() {
+        // Preserve libcurl's existing multi-round credential negotiation for
+        // Digest/NTLM/Negotiate. Ordinary hops, response interception and the
+        // initial authentication challenge must use the head-first path below.
+        return fetch_once_with_network_metadata_unvalidated(
+            loader,
+            request.with_single_hop(),
+            Some(cancel),
+        )
+        .await
+        .map(|observed| {
+            observed.map_response(super::loaded_response::LoadedResponse::from_response)
+        });
+    }
+    let observed = loader
+        .fetch_raw_stream_with_cancel_and_network_metadata(request.with_single_hop(), cancel)
+        .await
+        .map_err(format_network_error)?;
+    Ok(observed.map_response(|response| {
+        super::loaded_response::LoadedResponse::from_stream(response, loader.disk_pool())
+    }))
+}
+
 pub(crate) fn browser_request_needs_manual_preflight_redirects(
     request: &Request,
     preflight_request_headers: &[(String, String)],
@@ -119,13 +201,6 @@ pub(crate) fn browser_request_needs_manual_preflight_redirects(
         && (request.use_cors_preflight()
             || !is_cors_safelisted_method(&request.method)
             || !moli_fetch::cors_unsafe_request_header_names(preflight_request_headers).is_empty())
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum ManualCorsRedirectTransition {
-    FinalResponse,
-    ManualResponse { response_url: url::Url },
-    FollowedRedirect,
 }
 
 struct ManualCorsRedirectState {
@@ -175,60 +250,13 @@ impl ManualCorsRedirectState {
         &mut self,
         head: ResponseHead,
         network_extra_info_available: bool,
-    ) -> Result<ManualCorsRedirectTransition, String> {
-        // Keep redirect-mode error precedence aligned with Fetch: an error-mode
-        // redirect is rejected before the redirect response is CORS-checked.
-        if self.request.redirect_mode() == RequestRedirectMode::Error {
-            if next_redirect_url(&head.final_url, head.status, &head.headers, 0)?.is_some() {
-                return Err(redirect_mode_error_message(&head.final_url));
-            }
-            validate_actual_cors_response_head(&self.request, &head)?;
-            return Ok(ManualCorsRedirectTransition::FinalResponse);
+    ) -> Result<SubresourceResponseTransition, String> {
+        let transition =
+            advance_subresource_response(&mut self.request, head, network_extra_info_available)?;
+        if transition == SubresourceResponseTransition::FollowedRedirect {
+            self.preflight_request_headers = self.request.request_headers.to_byte_strings();
         }
-
-        validate_actual_cors_response_head(&self.request, &head)?;
-        let Some(next_url) = next_redirect_url(
-            &head.final_url,
-            head.status,
-            &head.headers,
-            self.request.redirect_count(),
-        )?
-        else {
-            return Ok(ManualCorsRedirectTransition::FinalResponse);
-        };
-
-        if self.request.redirect_mode() == RequestRedirectMode::Manual {
-            return Ok(ManualCorsRedirectTransition::ManualResponse {
-                response_url: head.final_url,
-            });
-        }
-
-        match self.request.redirect_mode() {
-            RequestRedirectMode::Follow => {}
-            RequestRedirectMode::Error | RequestRedirectMode::Manual => {
-                unreachable!("redirect modes were handled before the follow transition")
-            }
-        }
-        let redirect_status = head.status;
-        self.request
-            .follow_redirect(RedirectInfo {
-                source: moli_fetch::RedirectSource::Network,
-                from_url: head.final_url,
-                to_url: next_url.clone(),
-                status: redirect_status,
-                headers: head.headers,
-                network_extra_info_available,
-                request_extra_info: None,
-                response_extra_info: None,
-                redirect_has_extra_info: network_extra_info_available,
-                request_cookie_report: head.request_cookie_report,
-                cookie_set_reports: head.cookie_set_reports,
-                from_cache: head.from_cache,
-                negotiated_http_version: head.negotiated_http_version,
-            })
-            .map_err(|error| error.to_string())?;
-        self.preflight_request_headers = self.request.request_headers.to_byte_strings();
-        Ok(ManualCorsRedirectTransition::FollowedRedirect)
+        Ok(transition)
     }
 
     fn into_redirect_chain(self) -> Vec<RedirectInfo> {
@@ -293,18 +321,18 @@ async fn fetch_browser_subresource_with_manual_preflight_redirects(
         .await?;
         let network_extra_info_available = observed.request_observation().is_some();
         match redirects.advance(observed.response().head(), network_extra_info_available)? {
-            ManualCorsRedirectTransition::FinalResponse => {
+            SubresourceResponseTransition::FinalResponse => {
                 cancel_handle.adopt_response_progress(&response_cancel);
                 let redirect_chain = redirects.into_redirect_chain();
                 observed.response_mut().redirected = !redirect_chain.is_empty();
                 observed.response_mut().redirect_chain = redirect_chain;
                 return Ok(observed);
             }
-            ManualCorsRedirectTransition::ManualResponse { .. } => {
+            SubresourceResponseTransition::ManualResponse { .. } => {
                 cancel_handle.adopt_response_progress(&response_cancel);
                 return Ok(observed);
             }
-            ManualCorsRedirectTransition::FollowedRedirect => {}
+            SubresourceResponseTransition::FollowedRedirect => {}
         }
     }
 }
@@ -337,33 +365,26 @@ async fn fetch_browser_subresource_raw_stream_with_manual_preflight_redirects(
         let network_extra_info_available = observed.request_observation().is_some();
         let head = observed.response().head();
         match redirects.advance(head, network_extra_info_available)? {
-            ManualCorsRedirectTransition::FinalResponse => {
+            SubresourceResponseTransition::FinalResponse => {
                 cancel_handle.adopt_response_progress(&observed.response().cancellation_handle());
                 let redirect_chain = redirects.into_redirect_chain();
                 observed.response_mut().redirected = !redirect_chain.is_empty();
                 observed.response_mut().redirect_chain = redirect_chain;
                 return Ok(observed);
             }
-            ManualCorsRedirectTransition::ManualResponse { response_url } => {
+            SubresourceResponseTransition::ManualResponse { response_url } => {
                 return Err(format!(
                     "manual redirect unexpectedly entered follow-mode streaming from {}",
                     response_url
                 ));
             }
-            ManualCorsRedirectTransition::FollowedRedirect => {}
+            SubresourceResponseTransition::FollowedRedirect => {}
         }
 
         // Dropping this hop retires only its transport. Its body and late
         // completion cannot cancel or commit the logical request's next hop.
         drop(observed);
     }
-}
-
-fn validate_actual_cors_response_head(
-    request: &Request,
-    response: &ResponseHead,
-) -> Result<(), String> {
-    request.validate_cors_response_for_url(&response.final_url, &response.headers)
 }
 
 pub(crate) fn next_redirect_url(
@@ -549,6 +570,7 @@ pub(crate) fn spawn_async_subresource_fetch(
     request_headers: moli_fetch::RequestHeaders,
     request_body: Option<String>,
 ) {
+    let request = request.with_body_text(request_body.as_deref().map(std::sync::Arc::from));
     let parkable_image_manager = matches!(
         request.browser_request_metadata(),
         Some(BrowserRequestMetadata::Image)
@@ -910,17 +932,14 @@ fn validate_redirect_mode_parts(
     headers: &[(String, Vec<u8>)],
     redirect_mode: RequestRedirectMode,
 ) -> Result<(), String> {
-    if redirect_mode != RequestRedirectMode::Error {
+    if redirect_mode == RequestRedirectMode::Manual {
         return Ok(());
     }
-    if next_redirect_url(final_url, status, headers, 0)?.is_some() {
+    let target = next_redirect_url(final_url, status, headers, 0)?;
+    if redirect_mode == RequestRedirectMode::Error && target.is_some() {
         return Err(redirect_mode_error_message(final_url));
     }
     Ok(())
-}
-
-fn redirect_mode_error_message(final_url: &url::Url) -> String {
-    format!("redirect mode error blocked redirect from {final_url}")
 }
 
 #[cfg(test)]
@@ -1015,7 +1034,7 @@ mod tests {
             )
             .map_err(anyhow::Error::msg)?;
 
-        assert_eq!(transition, ManualCorsRedirectTransition::FollowedRedirect);
+        assert_eq!(transition, SubresourceResponseTransition::FollowedRedirect);
         assert_eq!(
             redirects.request().url.as_str(),
             "https://target.test/final"
@@ -1066,6 +1085,21 @@ mod tests {
     }
 
     #[test]
+    fn follow_rejects_an_invalid_final_redirect_location_without_parsing_manual_redirects() {
+        let url = Url::parse("https://origin.test/source").unwrap();
+        let headers = vec![("Location".to_owned(), b"http://[".to_vec())];
+        for mode in [RequestRedirectMode::Follow, RequestRedirectMode::Error] {
+            assert!(validate_redirect_mode_parts(&url, 302, &headers, mode).is_err());
+        }
+        assert!(
+            validate_redirect_mode_parts(&url, 302, &headers, RequestRedirectMode::Manual).is_ok()
+        );
+        assert!(
+            validate_redirect_mode_parts(&url, 200, &headers, RequestRedirectMode::Follow).is_ok()
+        );
+    }
+
+    #[test]
     fn single_hop_cors_redirects_preserve_follow_manual_and_error_policy() -> Result<()> {
         let current_url = Url::parse("https://origin.test/start")?;
         let next_url = current_url.join("/final")?;
@@ -1102,14 +1136,14 @@ mod tests {
                 RequestRedirectMode::Follow => {
                     assert_eq!(
                         transition.map_err(anyhow::Error::msg)?,
-                        ManualCorsRedirectTransition::FollowedRedirect
+                        SubresourceResponseTransition::FollowedRedirect
                     );
                     assert_eq!(redirects.request().url, next_url);
                 }
                 RequestRedirectMode::Manual => {
                     assert_eq!(
                         transition.map_err(anyhow::Error::msg)?,
-                        ManualCorsRedirectTransition::ManualResponse {
+                        SubresourceResponseTransition::ManualResponse {
                             response_url: current_url.clone(),
                         }
                     );
@@ -1992,6 +2026,7 @@ mod tests {
             )],
             network_extra_info_available: false,
             request_extra_info: None,
+            dispatched_request: None,
             response_extra_info: None,
             redirect_has_extra_info: false,
             request_cookie_report: None,

@@ -20,16 +20,16 @@ use super::{
     SVG_PRESERVE_ASPECT_RATIO_X_MIN_Y_MID,
 };
 use crate::document_runtime::DomHandle;
-use crate::native_bridge::JsContextHost;
+use crate::native_bridge::PageScriptHost;
 
-fn is_svg_element(runtime: &JsContextHost, handle: DomHandle) -> bool {
+fn is_svg_element(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     runtime
         .dom_host()
         .node(handle)
         .is_some_and(|node| node.namespace() == Some(crate::native_bridge::document::SVG_NS))
 }
 
-pub(crate) fn is_outermost_svg(runtime: &JsContextHost, handle: DomHandle) -> bool {
+pub(crate) fn is_outermost_svg(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     let Some(node) = runtime.dom_host().node(handle) else {
         return false;
     };
@@ -47,7 +47,7 @@ pub(crate) fn is_outermost_svg(runtime: &JsContextHost, handle: DomHandle) -> bo
 /// The outermost `<svg>` whose CSS box hosts `handle`, when `handle` is SVG
 /// content without a CSS box of its own.
 pub(crate) fn svg_layout_viewport_root(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
 ) -> Option<DomHandle> {
     if !is_svg_element(runtime, handle) || is_outermost_svg(runtime, handle) {
@@ -76,7 +76,7 @@ pub(crate) fn svg_layout_viewport_root(
 /// HTML placed directly in other SVG content is not rendered. `handle` may
 /// itself be an outermost `<svg>` embedded in the `<foreignObject>`.
 pub(crate) fn svg_foreign_object_host(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
 ) -> Option<(DomHandle, DomHandle)> {
     let mut current = runtime.dom_host().node(handle)?.parent_node_id();
@@ -99,7 +99,7 @@ pub(crate) fn svg_foreign_object_host(
 /// with the origin at its `x`/`y`) to client coordinates, given the client
 /// border box of its outermost `<svg>` (`root`).
 pub(crate) fn svg_foreign_object_content_transform(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     foreign_object: DomHandle,
     root: DomHandle,
     root_border_box: [f64; 4],
@@ -117,7 +117,7 @@ pub(crate) fn svg_foreign_object_content_transform(
 /// border box of its outermost `<svg>` (`root`). `None` when `handle` is not
 /// rendered (inside `<defs>`-like containers or `display: none`).
 pub(crate) fn svg_client_bounds(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     root: DomHandle,
     root_border_box: [f64; 4],
@@ -138,7 +138,7 @@ pub(crate) fn svg_client_bounds(
 /// Transform from `handle`'s local user space (including its own transform)
 /// to the user space established by `root`.
 fn svg_ctm_below_root(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     root: DomHandle,
 ) -> SvgMatrixComponents {
@@ -167,7 +167,7 @@ fn svg_ctm_below_root(
 }
 
 fn svg_root_content_transform(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     root: DomHandle,
     [x, y, width, height]: [f64; 4],
 ) -> SvgMatrixComponents {
@@ -188,7 +188,7 @@ fn svg_root_content_transform(
 
 /// The `x`/`y` offset and viewBox mapping a nested `<svg>` establishes.
 pub(super) fn svg_nested_viewport_transform(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     svg: DomHandle,
 ) -> SvgMatrixComponents {
     let length = |attribute: &str| {
@@ -215,7 +215,7 @@ pub(super) fn svg_nested_viewport_transform(
 /// The viewBox-to-viewport transform of `svg` for a viewport of the given
 /// size (SVG 2 "equivalent transform of an SVG viewport").
 pub(super) fn svg_view_box_transform(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     svg: DomHandle,
     width: f64,
     height: f64,

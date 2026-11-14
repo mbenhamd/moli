@@ -1,7 +1,10 @@
 use super::*;
 use crate::native::html_serialization::{
-    HtmlSerializationTarget, HtmlSerializedShadowRoot, escape_html_attribute_into_string,
-    serialize_html_with_shadow_root_provider,
+    HtmlSerializationOptions, HtmlSerializationTarget, HtmlSerializedShadowRoot,
+    HtmlShadowRootProvider, serialize_html_with_options,
+};
+use crate::native::{
+    HtmlEmbeddedDocumentProvider, HtmlSerializationError, HtmlSerializationPolicy,
 };
 
 pub type ShadowRootRegistryAttributePolicy<'a> =
@@ -14,20 +17,11 @@ pub enum ShadowRootInclusion<'a> {
         serializable: bool,
         explicit: &'a [DomHandle],
     },
-    AllAuthorForInspector,
-}
-
-impl ShadowRootInclusion<'_> {
-    fn markup_profile(self) -> ShadowRootMarkupProfile {
-        match self {
-            Self::AllAuthorForInspector => ShadowRootMarkupProfile::Inspector,
-            Self::None | Self::SerializableOrExplicit { .. } => ShadowRootMarkupProfile::WebApi,
-        }
-    }
+    AllAuthor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShadowRootMarkupProfile {
+pub enum ShadowRootMarkupProfile {
     WebApi,
     Inspector,
 }
@@ -36,156 +30,134 @@ impl DomHost {
     pub fn get_html(
         &self,
         handle: DomHandle,
-        scripting_enabled_for_node: &dyn Fn(DomHandle) -> bool,
-        serializable_shadow_roots: bool,
-        explicit_shadow_roots: &[DomHandle],
+        scripting: &dyn Fn(DomHandle) -> bool,
+        serializable: bool,
+        explicit: &[DomHandle],
     ) -> Option<String> {
         self.get_html_with_shadow_root_registry_attribute_policy(
             handle,
-            scripting_enabled_for_node,
-            serializable_shadow_roots,
-            explicit_shadow_roots,
+            scripting,
+            serializable,
+            explicit,
             None,
         )
+    }
+
+    /// One read-only traversal, with directly streamed live embedded Documents.
+    /// No DOM copy, generated node, JavaScript execution or frame HTML cache.
+    pub fn get_html_for_export(
+        &self,
+        handle: DomHandle,
+        scripting: &dyn Fn(DomHandle) -> bool,
+        policy: Option<&dyn HtmlSerializationPolicy>,
+        embedded: Option<&dyn HtmlEmbeddedDocumentProvider>,
+        max_bytes: Option<usize>,
+    ) -> Result<String, HtmlSerializationError> {
+        let mut options =
+            HtmlSerializationOptions::new(HtmlSerializationTarget::ChildrenOnly, scripting);
+        options.policy = policy;
+        options.embedded_documents = embedded;
+        options.max_bytes = max_bytes;
+        self.serialize_html_with_shadow_roots(
+            handle,
+            options,
+            ShadowRootInclusion::AllAuthor,
+            ShadowRootMarkupProfile::WebApi,
+            None,
+        )?
+        .ok_or(HtmlSerializationError::InvalidNode { node: handle })
     }
 
     pub fn get_html_with_shadow_root_registry_attribute_policy(
         &self,
         handle: DomHandle,
-        scripting_enabled_for_node: &dyn Fn(DomHandle) -> bool,
-        serializable_shadow_roots: bool,
-        explicit_shadow_roots: &[DomHandle],
-        registry_attribute_policy: Option<&ShadowRootRegistryAttributePolicy<'_>>,
+        scripting: &dyn Fn(DomHandle) -> bool,
+        serializable: bool,
+        explicit: &[DomHandle],
+        registry: Option<&ShadowRootRegistryAttributePolicy<'_>>,
     ) -> Option<String> {
         self.serialize_html_with_shadow_roots(
             handle,
-            HtmlSerializationTarget::ChildrenOnly,
-            scripting_enabled_for_node,
+            HtmlSerializationOptions::new(HtmlSerializationTarget::ChildrenOnly, scripting),
             ShadowRootInclusion::SerializableOrExplicit {
-                serializable: serializable_shadow_roots,
-                explicit: explicit_shadow_roots,
+                serializable,
+                explicit,
             },
-            registry_attribute_policy,
+            ShadowRootMarkupProfile::WebApi,
+            registry,
         )
+        .ok()
+        .flatten()
     }
 
     pub fn outer_html_with_shadow_roots(
         &self,
         handle: DomHandle,
-        scripting_enabled_for_node: &dyn Fn(DomHandle) -> bool,
-        shadow_root_inclusion: ShadowRootInclusion<'_>,
-        registry_attribute_policy: Option<&ShadowRootRegistryAttributePolicy<'_>>,
+        scripting: &dyn Fn(DomHandle) -> bool,
+        inclusion: ShadowRootInclusion<'_>,
+        profile: ShadowRootMarkupProfile,
+        registry: Option<&ShadowRootRegistryAttributePolicy<'_>>,
     ) -> Option<String> {
         self.serialize_html_with_shadow_roots(
             handle,
-            HtmlSerializationTarget::IncludeNode,
-            scripting_enabled_for_node,
-            shadow_root_inclusion,
-            registry_attribute_policy,
+            HtmlSerializationOptions::new(HtmlSerializationTarget::IncludeNode, scripting),
+            inclusion,
+            profile,
+            registry,
         )
+        .ok()
+        .flatten()
     }
 
     fn serialize_html_with_shadow_roots(
         &self,
         handle: DomHandle,
-        target: HtmlSerializationTarget,
-        scripting_enabled_for_node: &dyn Fn(DomHandle) -> bool,
-        shadow_root_inclusion: ShadowRootInclusion<'_>,
-        registry_attribute_policy: Option<&ShadowRootRegistryAttributePolicy<'_>>,
-    ) -> Option<String> {
-        let shadow_root_provider = |host| {
-            let (shadow_root, init) =
-                self.serialized_shadow_root_for_host(host, shadow_root_inclusion)?;
-            let mut template_start = String::new();
-            self.write_shadow_root_template_start(
-                host,
-                shadow_root,
-                &init,
-                shadow_root_inclusion.markup_profile(),
-                &mut template_start,
-                registry_attribute_policy,
-            );
-            Some(HtmlSerializedShadowRoot::new(shadow_root, template_start))
+        options: HtmlSerializationOptions<'_>,
+        inclusion: ShadowRootInclusion<'_>,
+        profile: ShadowRootMarkupProfile,
+        registry: Option<&ShadowRootRegistryAttributePolicy<'_>>,
+    ) -> Result<Option<String>, HtmlSerializationError> {
+        let include_style_sheets = options
+            .policy
+            .is_none_or(|p| p.include_shadow_adopted_style_sheets());
+        // Serialization is synchronous and does not run author code. Borrow
+        // the existing host index once, including detached author roots.
+        let roots = self.shadow_roots_by_host.borrow();
+        let provider = |host| {
+            let state = roots.get(&host)?;
+            let included = match inclusion {
+                ShadowRootInclusion::None => false,
+                ShadowRootInclusion::SerializableOrExplicit {
+                    serializable,
+                    explicit,
+                } => serializable && state.init.serializable() || explicit.contains(&state.handle),
+                // Only author roots enter this native registry; UA trees are renderer projections.
+                ShadowRootInclusion::AllAuthor => true,
+            };
+            if !included {
+                return None;
+            }
+            Some(HtmlSerializedShadowRoot {
+                root: state.handle,
+                init: &state.init,
+                web_api: profile == ShadowRootMarkupProfile::WebApi,
+                registry_attribute: registry.map_or_else(
+                    || state.init.null_custom_element_registry(),
+                    |policy| policy(host, state.handle, &state.init),
+                ),
+                include_style_sheets,
+            })
         };
-        serialize_html_with_shadow_root_provider(
+        let provider = (!roots.is_empty() && inclusion != ShadowRootInclusion::None)
+            .then_some(&provider as &dyn HtmlShadowRootProvider<'_>);
+        serialize_html_with_options(
             &self.dom,
             handle,
-            target,
-            scripting_enabled_for_node,
-            &shadow_root_provider,
+            HtmlSerializationOptions {
+                shadow_root_provider: provider,
+                ..options
+            },
         )
-    }
-
-    fn serialized_shadow_root_for_host(
-        &self,
-        host: DomHandle,
-        shadow_root_inclusion: ShadowRootInclusion<'_>,
-    ) -> Option<(DomHandle, ShadowRootInit)> {
-        let state = self.shadow_roots_by_host.borrow().get(&host)?.clone();
-        let included = match shadow_root_inclusion {
-            ShadowRootInclusion::None => false,
-            ShadowRootInclusion::SerializableOrExplicit {
-                serializable,
-                explicit,
-            } => serializable && state.init.serializable() || explicit.contains(&state.handle),
-            // DomHost stores author shadow roots. Generated user-agent trees are
-            // Inspector projections owned by the renderer and never enter this map.
-            ShadowRootInclusion::AllAuthorForInspector => true,
-        };
-        if included {
-            Some((state.handle, state.init))
-        } else {
-            None
-        }
-    }
-
-    fn write_shadow_root_template_start(
-        &self,
-        host: DomHandle,
-        shadow_root: DomHandle,
-        init: &ShadowRootInit,
-        markup_profile: ShadowRootMarkupProfile,
-        out: &mut String,
-        registry_attribute_policy: Option<&ShadowRootRegistryAttributePolicy<'_>>,
-    ) {
-        out.push_str("<template shadowrootmode=\"");
-        escape_html_attribute_into_string(init.mode(), out);
-        out.push('"');
-        if init.delegates_focus() {
-            out.push_str(" shadowrootdelegatesfocus=\"\"");
-        }
-        if init.serializable() {
-            out.push_str(" shadowrootserializable=\"\"");
-        }
-        if markup_profile == ShadowRootMarkupProfile::WebApi && init.slot_assignment() != "named" {
-            out.push_str(" shadowrootslotassignment=\"");
-            escape_html_attribute_into_string(init.slot_assignment(), out);
-            out.push('"');
-        }
-        if init.clonable() {
-            out.push_str(" shadowrootclonable=\"\"");
-        }
-        let serialize_registry_attribute = registry_attribute_policy
-            .map(|policy| policy(host, shadow_root, init))
-            .unwrap_or_else(|| init.null_custom_element_registry());
-        if serialize_registry_attribute {
-            out.push_str(" shadowrootcustomelementregistry=\"\"");
-        }
-        if markup_profile == ShadowRootMarkupProfile::WebApi
-            && let Some(reference_target) = init.reference_target()
-        {
-            out.push_str(" shadowrootreferencetarget=\"");
-            escape_html_attribute_into_string(reference_target, out);
-            out.push('"');
-        }
-        if markup_profile == ShadowRootMarkupProfile::WebApi
-            && let Some(adopted_style_sheets) = init.adopted_style_sheets()
-        {
-            out.push_str(" shadowrootadoptedstylesheets=\"");
-            escape_html_attribute_into_string(adopted_style_sheets, out);
-            out.push('"');
-        }
-        out.push('>');
     }
 }
 

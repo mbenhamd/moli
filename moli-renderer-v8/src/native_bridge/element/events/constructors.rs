@@ -1,6 +1,6 @@
 use crate::runtime::RendererPointerEventProperties;
 use crate::util::{serialize_v8_iter_array, v8_string, v8str};
-use crate::{document_runtime::DomHandle, native_bridge::JsContextHost};
+use crate::{document_runtime::DomHandle, native_bridge::PageScriptHost};
 
 use super::{construct_event, event_constructor};
 use moli_webapi_declare::WebApiObject;
@@ -8,6 +8,7 @@ use moli_webapi_declare::WebApiObject;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::native_bridge::element) enum ClickEventSource {
     Pointer,
+    Touch { pointer_id: i32 },
     UserAgent,
     Script,
 }
@@ -166,6 +167,7 @@ pub(crate) enum TextEditInputType {
     None,
     InsertText,
     InsertLineBreak,
+    InsertParagraph,
     InsertFromDrop,
     DeleteContentBackward,
     DeleteContentForward,
@@ -177,6 +179,7 @@ impl TextEditInputType {
             Self::None => "",
             Self::InsertText => "insertText",
             Self::InsertLineBreak => "insertLineBreak",
+            Self::InsertParagraph => "insertParagraph",
             Self::InsertFromDrop => "insertFromDrop",
             Self::DeleteContentBackward => "deleteContentBackward",
             Self::DeleteContentForward => "deleteContentForward",
@@ -188,6 +191,7 @@ impl TextEditInputType {
             Self::InsertText | Self::InsertFromDrop => Some(text),
             Self::None
             | Self::InsertLineBreak
+            | Self::InsertParagraph
             | Self::DeleteContentBackward
             | Self::DeleteContentForward => None,
         }
@@ -703,7 +707,7 @@ pub(crate) fn construct_pointer_event_with_related_target_and_modifiers<'s>(
         f64::from(pointer.pointer_id),
         1.0,
         1.0,
-        true,
+        pointer.is_primary,
         related_target,
     )
     .bind(scope)
@@ -776,27 +780,6 @@ pub(crate) fn construct_wheel_event<'s>(
     init.set_prototype(scope, v8::null(scope).into())?
         .then_some(())?;
     construct_event(scope, "WheelEvent", event_type, init)
-}
-
-pub(crate) fn construct_touch_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    x: f64,
-    y: f64,
-    target: v8::Local<'s, v8::Object>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let point = TouchEventPoint {
-        identifier: 0,
-        x,
-        y,
-        target,
-        is_target_touch: true,
-    };
-    let active_points = match event_type {
-        "touchend" | "touchcancel" => Vec::new(),
-        _ => vec![point],
-    };
-    construct_touch_event_with_points(scope, event_type, &active_points, &[point])
 }
 
 #[derive(Clone, Copy)]
@@ -926,6 +909,18 @@ pub(crate) fn construct_input_event<'s>(
     data: Option<&str>,
 ) -> Option<v8::Local<'s, v8::Object>> {
     construct_input_event_with_transfer(scope, event_type, input_type, data, None)
+}
+
+pub(crate) fn construct_text_input_event_for_target<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    target: DomHandle,
+    text: &str,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let context =
+        crate::native_bridge::node_owner_document_relevant_context(scope, runtime_ptr, target)?;
+    let scope = &mut v8::ContextScope::new(scope, context);
+    crate::context_bootstrap::construct_original_text_input_event(scope, text)
 }
 
 pub(crate) fn construct_drop_input_event<'s>(
@@ -1062,6 +1057,16 @@ pub(in crate::native_bridge::element) fn construct_click_event<'s>(
     )?;
     let interface = if source == ClickEventSource::Pointer {
         "MouseEvent"
+    } else if let ClickEventSource::Touch { pointer_id } = source {
+        let key = v8str(scope, "pointerId");
+        let id = v8::Integer::new(scope, pointer_id);
+        init.create_data_property(scope, key.into(), id.into())?
+            .then_some(())?;
+        let key = v8str(scope, "pointerType");
+        let kind = v8str(scope, "touch");
+        init.create_data_property(scope, key.into(), kind.into())?
+            .then_some(())?;
+        "PointerEvent"
     } else {
         // Blink reserves -1 for clicks with no pointing device. PointerEvent's
         // other defaults describe a synthetic click, unlike physical input.
@@ -1076,7 +1081,7 @@ pub(in crate::native_bridge::element) fn construct_click_event<'s>(
 
 pub(crate) fn construct_mouse_event_for_target<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     target: DomHandle,
     event_type: &str,
     coordinates: InputEventCoordinates,
@@ -1092,7 +1097,7 @@ pub(crate) fn construct_mouse_event_for_target<'s>(
 
 pub(crate) fn construct_mouse_event_with_related_target_for_target<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     target: DomHandle,
     event_type: &str,
     coordinates: InputEventCoordinates,
@@ -1117,7 +1122,7 @@ pub(crate) fn construct_mouse_event_with_related_target_for_target<'s>(
 
 pub(crate) fn construct_mouse_event_with_detail_for_target<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     target: DomHandle,
     event_type: &str,
     coordinates: InputEventCoordinates,
@@ -1142,7 +1147,7 @@ pub(crate) fn construct_mouse_event_with_detail_for_target<'s>(
 
 pub(crate) fn construct_wheel_event_for_target<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     target: DomHandle,
     event_type: &str,
     coordinates: InputEventCoordinates,

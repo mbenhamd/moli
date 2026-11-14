@@ -11,7 +11,7 @@
 use moli_svg::{self as svg_geometry, SvgGeometryBox, SvgGeometryElement, SvgMatrixComponents};
 
 use crate::document_runtime::DomHandle;
-use crate::native_bridge::JsContextHost;
+use crate::native_bridge::PageScriptHost;
 use crate::native_bridge::element::computed_style_property_for_handle;
 
 struct SvgTextFragment {
@@ -31,7 +31,7 @@ struct SvgTextChunk {
 }
 
 struct SvgTextLayoutBuilder<'a> {
-    runtime: &'a JsContextHost,
+    runtime: &'a PageScriptHost,
     pen_x: f64,
     pen_y: f64,
     last_was_space: bool,
@@ -40,7 +40,7 @@ struct SvgTextLayoutBuilder<'a> {
     pending_chunk: Option<String>,
 }
 
-pub(super) fn svg_text_root(runtime: &JsContextHost, handle: DomHandle) -> Option<DomHandle> {
+pub(super) fn svg_text_root(runtime: &PageScriptHost, handle: DomHandle) -> Option<DomHandle> {
     let mut current = Some(handle);
     while let Some(candidate) = current {
         let node = runtime.dom_host().node(candidate)?;
@@ -55,7 +55,7 @@ pub(super) fn svg_text_root(runtime: &JsContextHost, handle: DomHandle) -> Optio
 /// Bounding box of the glyph cells that `handle` (a `<text>` or one of its
 /// content elements) renders, in the coordinate system of `transform`.
 pub(super) fn svg_text_bounding_box(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     transform: SvgMatrixComponents,
 ) -> Option<SvgGeometryBox> {
@@ -78,7 +78,7 @@ pub(super) fn svg_text_bounding_box(
 }
 
 /// Sum of the advances of the characters `handle` renders.
-pub(super) fn svg_computed_text_length(runtime: &JsContextHost, handle: DomHandle) -> f64 {
+pub(super) fn svg_computed_text_length(runtime: &PageScriptHost, handle: DomHandle) -> f64 {
     let Some(root) = svg_text_root(runtime, handle) else {
         return 0.0;
     };
@@ -89,7 +89,7 @@ pub(super) fn svg_computed_text_length(runtime: &JsContextHost, handle: DomHandl
         .sum()
 }
 
-fn layout_svg_text(runtime: &JsContextHost, root: DomHandle) -> Vec<SvgTextFragment> {
+fn layout_svg_text(runtime: &PageScriptHost, root: DomHandle) -> Vec<SvgTextFragment> {
     if !runtime
         .dom_host()
         .node(root)
@@ -232,7 +232,7 @@ fn chromium_descent(descent: f64) -> f64 {
     }
 }
 
-fn measure(runtime: &JsContextHost, owner: DomHandle, text: &str) -> moli_layout::TextMeasurement {
+fn measure(runtime: &PageScriptHost, owner: DomHandle, text: &str) -> moli_layout::TextMeasurement {
     let computed =
         crate::native_bridge::element::ComputedStyleRead::new(runtime, owner).computed_values();
     let Some(computed) = computed else {
@@ -254,7 +254,7 @@ fn measure(runtime: &JsContextHost, owner: DomHandle, text: &str) -> moli_layout
 }
 
 fn baseline_shift(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     owner: DomHandle,
     metrics: &moli_layout::TextMeasurement,
 ) -> f64 {
@@ -273,7 +273,7 @@ fn baseline_shift(
 
 /// Computed value of an inherited SVG text property, falling back to the
 /// nearest presentation attribute when the style engine has no value.
-fn svg_text_property(runtime: &JsContextHost, element: DomHandle, property: &str) -> String {
+fn svg_text_property(runtime: &PageScriptHost, element: DomHandle, property: &str) -> String {
     let computed = computed_style_property_for_handle(runtime, element, property);
     let computed = computed.trim();
     if !computed.is_empty() {
@@ -295,7 +295,7 @@ fn svg_text_property(runtime: &JsContextHost, element: DomHandle, property: &str
     String::new()
 }
 
-fn first_length(runtime: &JsContextHost, element: DomHandle, attribute: &str) -> Option<f64> {
+fn first_length(runtime: &PageScriptHost, element: DomHandle, attribute: &str) -> Option<f64> {
     let raw = runtime.dom_host().get_attribute(element, attribute)?;
     let first = raw
         .split(|character: char| character == ',' || character.is_ascii_whitespace())

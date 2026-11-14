@@ -1,10 +1,10 @@
 use super::*;
-use crate::network_host::{
-    ResolveContextUrlError, fetch_browser_subresource_with_preflight_headers,
+use crate::network_host::ResolveContextUrlError;
+use crate::network_host::controlled_xhr::{
+    ControlledXhrContext, XhrInterceptionRoute, start_buffered_xhr,
 };
-use crossbeam_channel::{after, bounded, never, select};
+use crossbeam_channel::{after, never, select};
 use moli_webapi_declare::WebApiObject;
-use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(in crate::worker) struct PreparedWorkerXhrSendRequest {
@@ -319,10 +319,6 @@ pub(crate) fn try_worker_xhr_send_callback<'s>(
     let extra_http_headers = state.borrow().extra_http_headers.clone();
     let blocked_url_patterns = state.borrow().blocked_url_patterns.clone();
     let network_offline = state.borrow().network_offline;
-    let fetch_subresource_interception_enabled =
-        state.borrow().fetch_subresource_interception_enabled;
-    let fetch_subresource_interception_resource_type =
-        state.borrow().fetch_subresource_interception_resource_type;
     let mut prepared = prepared;
     prepared.request_headers =
         merge_worker_request_headers(&extra_http_headers, &prepared.request_headers);
@@ -412,29 +408,15 @@ pub(crate) fn try_worker_xhr_send_callback<'s>(
 
     let loader = state.borrow().loader.clone();
 
-    let cancel_handle = FetchCancelHandle::new();
-    let intercept_request_stage = local_response.is_none()
-        && fetch_subresource_interception_enabled
-        && fetch_subresource_interception_resource_type.is_none_or(|expected| {
-            expected.has_same_cdp_fetch_interception_type(SubresourceResourceType::Xhr)
-        });
-    if intercept_request_stage && !async_request {
-        record_worker_subresource_failure(
-            &state.borrow(),
-            prepared.document_url,
-            prepared.resolved_url,
-            prepared.method,
-            prepared.request_headers,
-            request_body_text(&prepared.send_body),
-            SubresourceResourceType::Xhr,
-            "Synchronous XMLHttpRequest interception is not supported".to_owned(),
-        );
-        throw_synchronous_xhr_failure(scope, xhr, &request_url, "NetworkError");
-        return true;
-    }
+    let cancel_handle = state.borrow().network_cancel.child_for_subrequest();
+    let route = if local_response.is_some() {
+        XhrInterceptionRoute::Ordinary
+    } else {
+        prepare_worker_xhr_interception_route(&state.borrow())
+    };
 
     if !async_request {
-        send_synchronous_worker_xhr(scope, &state, xhr, prepared, loader);
+        send_synchronous_worker_xhr(scope, &state, xhr, prepared, loader, route);
         return true;
     }
 
@@ -459,7 +441,7 @@ pub(crate) fn try_worker_xhr_send_callback<'s>(
                 credentials_mode: prepared.credentials_mode,
                 use_cors_preflight: prepared.use_cors_preflight,
                 load: load.clone(),
-                request_paused: intercept_request_stage,
+                request_paused: matches!(route, XhrInterceptionRoute::Compatibility),
                 request_url: prepared.resolved_url.clone(),
                 request_method: prepared.method.clone(),
                 request_headers: prepared.request_headers.clone(),
@@ -478,6 +460,7 @@ pub(crate) fn try_worker_xhr_send_callback<'s>(
         // Local responses and network errors still complete asynchronously, so
         // abort(), open() and timeout processing use the ordinary pending XHR.
         let _ = state.borrow().xhr_completion_tx.send(WorkerXhrCompletion {
+            native_record: None,
             xhr_id,
             network_request_headers: None,
             result: result.map(|response| WorkerXhrResponse::Materialized(Box::new(response))),
@@ -485,35 +468,59 @@ pub(crate) fn try_worker_xhr_send_callback<'s>(
         return true;
     }
 
-    if intercept_request_stage {
-        let info = PendingSubresourceFetchInfo {
-            internal_id: 0,
-            network_request_handle: None,
-            frame_id: None,
-            document_url: prepared.document_url,
-            url: prepared.resolved_url,
-            websocket_socket_id: None,
-            method: prepared.method,
-            request_headers: prepared.request_headers,
-            request_body: request_body_text(&prepared.send_body),
-            request_body_bytes: prepared.send_body.clone(),
-            resource_type: SubresourceResourceType::Xhr,
-            request_cookie_report: None,
-        };
-        let _ = state
-            .borrow()
-            .parent_tx
-            .send(WorkerToParentMessage::PendingSubresourceFetch(
-                WorkerPendingSubresourceFetch {
-                    fetch_id: xhr_id,
-                    load: load.clone(),
-                    credentials_mode: prepared.credentials_mode,
-                    request_mode: RequestMode::Cors,
-                    network_partition_key: state.borrow().network_partition_key.clone(),
-                    info,
-                },
-            ));
-        return true;
+    match route {
+        XhrInterceptionRoute::Native(control) => {
+            let completion_tx = state.borrow().xhr_completion_tx.clone();
+            let info = native_worker_xhr_info(&prepared);
+            let request = worker_xhr_request(&state.borrow(), &prepared);
+            state
+                .borrow_mut()
+                .pending_xhrs
+                .get_mut(&xhr_id)
+                .unwrap()
+                .network_request_handle = info.network_request_handle;
+            load.task_runner().spawn(async move {
+                let completed = control
+                    .load(
+                        request,
+                        info,
+                        load,
+                        cancel_handle,
+                        prepared.request_headers.to_byte_strings(),
+                    )
+                    .run()
+                    .await;
+                let _ = completion_tx.send(WorkerXhrCompletion {
+                    xhr_id,
+                    network_request_headers: None,
+                    native_record: Some(completed.network_record),
+                    result: completed
+                        .result
+                        .map(|response| WorkerXhrResponse::Materialized(Box::new(response))),
+                });
+            });
+            return true;
+        }
+        XhrInterceptionRoute::Compatibility => {
+            // SharedWorker and standalone Worker embeddings use the public
+            // parent-owned continuation API, never an implicit native fallback.
+            let info = worker_xhr_info(&prepared);
+            let _ = state
+                .borrow()
+                .parent_tx
+                .send(WorkerToParentMessage::PendingSubresourceFetch(
+                    WorkerPendingSubresourceFetch {
+                        fetch_id: xhr_id,
+                        load: load.clone(),
+                        credentials_mode: prepared.credentials_mode,
+                        request_mode: RequestMode::Cors,
+                        network_partition_key: state.borrow().network_partition_key.clone(),
+                        info,
+                    },
+                ));
+            return true;
+        }
+        XhrInterceptionRoute::Ordinary => {}
     }
 
     let completion_tx = state.borrow().xhr_completion_tx.clone();
@@ -539,38 +546,91 @@ pub(crate) fn try_worker_xhr_send_callback<'s>(
     true
 }
 
+fn worker_xhr_request(
+    state: &WorkerGlobalState,
+    prepared: &PreparedWorkerXhrSendRequest,
+) -> Request {
+    let mut request = Request::new_bytes(
+        &prepared.method,
+        prepared.resolved_url.as_str(),
+        prepared.send_body.clone(),
+        prepared.request_headers.clone(),
+    )
+    .expect("worker XHR URL was already resolved")
+    .with_page_network_policy()
+    .with_initiator_url(&prepared.document_url)
+    .with_request_origin(moli_url::WebOrigin::from_url(&prepared.document_url))
+    .with_credentials_mode(prepared.credentials_mode)
+    .with_network_partition_key(state.network_partition_key.clone())
+    .with_request_mode(RequestMode::Cors)
+    .with_browser_request_metadata(BrowserRequestMetadata::Xhr)
+    .with_use_cors_preflight(prepared.use_cors_preflight);
+    if let Some(referrer_policy) = state.referrer_policy.clone() {
+        request = request.with_script_fetch_metadata(moli_fetch::ScriptFetchRequestMetadata {
+            document_referrer_policy: Some(referrer_policy),
+            ..Default::default()
+        });
+    }
+    request
+}
+
+fn prepare_worker_xhr_interception_route(state: &WorkerGlobalState) -> XhrInterceptionRoute {
+    if !state
+        .subresource_interception_config()
+        .intercepts(SubresourceResourceType::Xhr)
+    {
+        return XhrInterceptionRoute::Ordinary;
+    }
+    let Some(interception) = state.interception_context.clone() else {
+        return XhrInterceptionRoute::Compatibility;
+    };
+    XhrInterceptionRoute::Native(ControlledXhrContext {
+        interception,
+        connect_policy:
+            crate::document_runtime::DocumentConnectPolicySnapshot::from_worker_policies(
+                state.content_security_policies.clone(),
+                state.content_security_report_only_policies.clone(),
+                state.content_security_reporting_endpoints.clone(),
+            ),
+    })
+}
+
+fn worker_xhr_info(prepared: &PreparedWorkerXhrSendRequest) -> PendingSubresourceFetchInfo {
+    PendingSubresourceFetchInfo {
+        internal_id: 0,
+        network_request_handle: None,
+        frame_id: None,
+        document_url: prepared.document_url.clone(),
+        url: prepared.resolved_url.clone(),
+        websocket_socket_id: None,
+        method: prepared.method.clone(),
+        request_headers: prepared.request_headers.clone(),
+        request_body: request_body_text(&prepared.send_body),
+        request_body_bytes: prepared.send_body.clone(),
+        resource_type: SubresourceResourceType::Xhr,
+        request_cookie_report: None,
+    }
+}
+
+fn native_worker_xhr_info(prepared: &PreparedWorkerXhrSendRequest) -> PendingSubresourceFetchInfo {
+    let mut info = worker_xhr_info(prepared);
+    info.internal_id = crate::network::interception_control::next_subresource_request_id();
+    info.network_request_handle =
+        Some(crate::network::interception_control::next_subresource_network_handle());
+    info
+}
+
 fn send_synchronous_worker_xhr(
     scope: &mut v8::PinScope<'_, '_>,
     state: &Rc<RefCell<WorkerGlobalState>>,
     xhr: v8::Local<'_, v8::Object>,
     prepared: PreparedWorkerXhrSendRequest,
     loader: crate::network::context::WorkerResourceLoader,
+    route: XhrInterceptionRoute,
 ) {
     let request_url_text = prepared.resolved_url.to_string();
-    let request = match Request::new_bytes(
-        &prepared.method,
-        prepared.resolved_url.as_str(),
-        prepared.send_body.clone(),
-        prepared.request_headers.clone(),
-    ) {
-        Ok(request) => {
-            let mut request = request
-                .with_page_network_policy()
-                .with_initiator_url(&prepared.document_url)
-                .with_request_origin(moli_url::WebOrigin::from_url(&prepared.document_url))
-                .with_credentials_mode(prepared.credentials_mode)
-                .with_network_partition_key(state.borrow().network_partition_key.clone())
-                .with_browser_request_metadata(BrowserRequestMetadata::Xhr)
-                .with_use_cors_preflight(prepared.use_cors_preflight);
-            if let Some(referrer_policy) = state.borrow().referrer_policy.clone() {
-                request =
-                    request.with_script_fetch_metadata(moli_fetch::ScriptFetchRequestMetadata {
-                        document_referrer_policy: Some(referrer_policy),
-                        ..moli_fetch::ScriptFetchRequestMetadata::default()
-                    });
-            }
-            request
-        }
+    let control = match route.synchronous() {
+        Ok(control) => control,
         Err(error) => {
             record_worker_subresource_failure(
                 &state.borrow(),
@@ -580,24 +640,23 @@ fn send_synchronous_worker_xhr(
                 prepared.request_headers,
                 request_body_text(&prepared.send_body),
                 SubresourceResourceType::Xhr,
-                error.to_string(),
+                error.into(),
             );
             throw_synchronous_xhr_failure(scope, xhr, &request_url_text, "NetworkError");
             return;
         }
     };
+    let request = worker_xhr_request(&state.borrow(), &prepared);
     let request_url = prepared.resolved_url.clone();
     let request_method = prepared.method.clone();
     let request_headers = prepared.request_headers.clone();
-    let request_body = request_body_text(&prepared.send_body);
     let preflight_headers = request_headers.to_byte_strings();
     let timeout_document_url = prepared.document_url.clone();
     let timeout_request_url = request_url.clone();
     let timeout_request_method = request_method.clone();
     let timeout_request_headers = request_headers.clone();
-    let timeout_request_body = request_body.clone();
 
-    let cancel_handle = FetchCancelHandle::new();
+    let cancel_handle = state.borrow().network_cancel.child_for_subrequest();
     let Some(load) = loader.register_load(
         ResourceLoadKind::Xhr,
         ResourceLoadDisposition::Ordinary,
@@ -606,46 +665,42 @@ fn send_synchronous_worker_xhr(
         throw_synchronous_xhr_failure(scope, xhr, &request_url_text, "NetworkError");
         return;
     };
-    let worker_cancel_handle = cancel_handle.clone();
-    let (response_tx, response_rx) = bounded(1);
+    let info = if control.is_some() {
+        native_worker_xhr_info(&prepared)
+    } else {
+        worker_xhr_info(&prepared)
+    };
+    let native_handle = control.as_ref().and(info.network_request_handle);
     let xhr_timeout = synchronous_worker_xhr_timeout(scope, xhr);
     let timeout_rx = xhr_timeout
         .as_ref()
         .map(|timeout| after(timeout.wait_delay))
         .unwrap_or_else(never);
-    let spawn_result = thread::Builder::new()
-        .name("lm-worker-sync-xhr-fetch".to_owned())
-        .spawn(move || {
-            let result = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| format!("failed to build worker sync XHR fetch runtime: {error}"))
-                .and_then(|runtime| {
-                    runtime.block_on(fetch_browser_subresource_with_preflight_headers(
-                        loader.request_client().clone(),
-                        request,
-                        Some(worker_cancel_handle),
-                        preflight_headers,
-                    ))
-                });
-            let _ = response_tx.send(result);
-        });
+    let native = control.is_some();
+    let response_rx = start_buffered_xhr(
+        request,
+        info,
+        load.clone(),
+        cancel_handle,
+        preflight_headers,
+        control,
+    );
 
-    let result = match spawn_result {
-        Ok(_) => select! {
+    let result = select! {
             recv(response_rx) -> result => result.unwrap_or_else(|_| {
-                Err("worker sync XHR fetch thread dropped response channel".to_owned())
+                Err("worker sync XHR resource task dropped response channel".to_owned())
             }),
             recv(timeout_rx) -> _ => {
                 let timeout = xhr_timeout.as_ref().expect("never channel should not fire without xhr timeout");
                 load.cancel();
-                record_worker_subresource_failure(
+                record_worker_subresource_failure_with_handle(
                     &state.borrow(),
+                    native_handle,
                     timeout_document_url,
                     timeout_request_url,
                     timeout_request_method,
                     timeout_request_headers,
-                    timeout_request_body,
+                    prepared.send_body.clone(),
                     SubresourceResourceType::Xhr,
                     format!(
                         "Synchronous XMLHttpRequest timed out after {} ms",
@@ -660,13 +715,35 @@ fn send_synchronous_worker_xhr(
                 );
                 return;
             }
-        },
-        Err(error) => Err(format!(
-            "failed to spawn worker sync XHR fetch thread: {error}"
-        )),
     };
 
-    match result {
+    if state.borrow().network_cancel.is_cancelled() {
+        return;
+    }
+    let completed = match result {
+        Ok(completed) => completed,
+        Err(error) => {
+            record_worker_subresource_failure_with_handle(
+                &state.borrow(),
+                native_handle,
+                prepared.document_url,
+                request_url,
+                request_method,
+                request_headers,
+                prepared.send_body,
+                SubresourceResourceType::Xhr,
+                error,
+            );
+            throw_synchronous_xhr_failure(scope, xhr, &request_url_text, "NetworkError");
+            return;
+        }
+    };
+    let request_url = completed.info.url;
+    let request_method = completed.info.method;
+    let request_headers = completed.info.request_headers;
+    let request_body_bytes = completed.info.request_body_bytes;
+    let network_record = completed.network_record;
+    match completed.result {
         Ok(response) => {
             let response_head = response.head();
             let redirect_status = if response_head.redirect_chain.is_empty() {
@@ -702,66 +779,36 @@ fn send_synchronous_worker_xhr(
                     },
                 )
             };
-            if let Some(violation) = csp_violation {
+            if !native && let Some(violation) = csp_violation {
                 dispatch_worker_content_security_policy_violation_event_for_state(
                     scope, state, &violation,
                 );
                 let message = worker_content_security_policy_error_message(&violation, "xhr");
-                record_worker_subresource_failure(
+                record_worker_subresource_failure_with_handle(
                     &state.borrow(),
+                    native_handle,
                     prepared.document_url,
                     request_url,
                     request_method,
                     request_headers,
-                    request_body,
+                    request_body_bytes.clone(),
                     SubresourceResourceType::Xhr,
                     message,
                 );
                 throw_synchronous_xhr_failure(scope, xhr, &request_url_text, "NetworkError");
                 return;
             }
-            if let Err(message) = crate::network_host::validate_cors_response_chain(
-                &prepared.document_url,
-                &response_head,
-                prepared.credentials_mode,
-            ) {
-                record_worker_subresource_failure(
-                    &state.borrow(),
-                    prepared.document_url,
-                    request_url,
-                    request_method,
-                    request_headers,
-                    request_body,
-                    SubresourceResourceType::Xhr,
-                    message,
-                );
-                throw_synchronous_xhr_failure(scope, xhr, &request_url_text, "NetworkError");
-                return;
-            }
-            record_worker_subresource_success(
-                &state.borrow(),
-                prepared.document_url,
-                request_url,
-                request_method,
-                request_headers,
-                request_body,
-                SubresourceResourceType::Xhr,
-                response_head,
-                SubresourceResponseBody::from_fetch_response(&response),
-            );
+            let _ = state
+                .borrow()
+                .parent_tx
+                .send(WorkerToParentMessage::SubresourceNetwork(network_record));
             apply_xhr_response(scope, xhr, response);
         }
-        Err(error) => {
-            record_worker_subresource_failure(
-                &state.borrow(),
-                prepared.document_url,
-                request_url,
-                request_method,
-                request_headers,
-                request_body,
-                SubresourceResourceType::Xhr,
-                error.to_string(),
-            );
+        Err(_) => {
+            let _ = state
+                .borrow()
+                .parent_tx
+                .send(WorkerToParentMessage::SubresourceNetwork(network_record));
             throw_synchronous_xhr_failure(scope, xhr, &request_url_text, "NetworkError");
         }
     }
@@ -911,6 +958,49 @@ pub(in crate::worker) fn drain_worker_xhr_completion(
     {
         if let Some(pending) = state.borrow_mut().pending_xhrs.remove(&completion.xhr_id) {
             pending.load.cancel();
+        }
+        return;
+    }
+    if let Some(record) = completion.native_record {
+        if let Ok(response) = &completion.result {
+            let head = response.head();
+            if !head.redirect_chain.is_empty() {
+                let document_url = state
+                    .borrow()
+                    .pending_xhrs
+                    .get(&completion.xhr_id)
+                    .map(|pending| pending.document_url.clone());
+                if let Some(document_url) = document_url {
+                    dispatch_worker_content_security_policy_report_only_violation_for_checked_url_with_redirect_status_for_state(
+                        scope, state, &document_url, &head.final_url, record.url(),
+                        crate::content_security_policy::ContentSecurityPolicyResourceKind::WorkerConnect,
+                        crate::content_security_policy::ContentSecurityPolicyRedirectStatus::FollowedRedirect,
+                    );
+                }
+            }
+        }
+        let Some(pending) = state.borrow_mut().pending_xhrs.remove(&completion.xhr_id) else {
+            return;
+        };
+        pending.load.finish();
+        cancel_worker_xhr_timeout(scope, xhr);
+        let _ = state
+            .borrow()
+            .parent_tx
+            .send(WorkerToParentMessage::SubresourceNetwork(record));
+        match completion.result {
+            Ok(response) => match response.into_body_source() {
+                Ok((mut head, body)) => {
+                    head.headers = filter_cors_exposed_response_headers(
+                        &pending.document_url,
+                        &head,
+                        pending.credentials_mode,
+                    );
+                    apply_xhr_response_body_source(scope, xhr, head, body);
+                }
+                Err(_) => apply_xhr_failure(scope, xhr),
+            },
+            Err(_) => apply_xhr_failure(scope, xhr),
         }
         return;
     }

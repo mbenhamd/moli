@@ -1,12 +1,12 @@
 use super::*;
-use crate::context_bootstrap::indexed_db::schedule_indexed_db_transaction_deactivation_after_microtask_checkpoint;
 use crate::context_bootstrap::indexed_db::{
-    INDEXED_DB_DATABASE_UPGRADE_TRANSACTION_SLOT, INDEXED_DB_TRANSACTION_FINISHED_SLOT,
-    object_store_info_from_database_metadata,
+    indexed_db_database_is_closed, indexed_db_database_sql_client,
+    indexed_db_database_upgrade_transaction, indexed_db_transaction_status,
+    mark_indexed_db_database_closed, object_store_info_from_database_metadata,
+    schedule_indexed_db_transaction_deactivation_after_microtask_checkpoint,
+    set_indexed_db_transaction_start_request,
 };
-use crate::context_bootstrap::indexed_db::{
-    indexed_db_database_sql_client, set_indexed_db_transaction_start_request,
-};
+
 use crate::webidl;
 use moli_indexeddb::{DatabaseHandle, IndexedDbError};
 
@@ -43,12 +43,8 @@ pub(in crate::context_bootstrap::indexed_db) fn idb_database_transaction_callbac
     // A live upgrade includes its inactive and committing states. Checking the
     // connection's own transaction also works when this method is borrowed
     // from another realm.
-    if let Some(upgrade) = object_property_as_object(
-        scope,
-        database,
-        INDEXED_DB_DATABASE_UPGRADE_TRANSACTION_SLOT,
-    ) && !object_bool_property(scope, upgrade, INDEXED_DB_TRANSACTION_FINISHED_SLOT)
-        .unwrap_or(false)
+    if let Some(upgrade) = indexed_db_database_upgrade_transaction(scope, database)
+        && !indexed_db_transaction_status(scope, upgrade).is_some_and(|state| state.finished)
     {
         let error = dom_exception_value(
             scope,
@@ -58,7 +54,7 @@ pub(in crate::context_bootstrap::indexed_db) fn idb_database_transaction_callbac
         scope.throw_exception(error);
         return;
     }
-    if object_bool_property(scope, database, INDEXED_DB_DATABASE_CLOSED_SLOT).unwrap_or(false) {
+    if indexed_db_database_is_closed(scope, database) {
         let error = dom_exception_value(
             scope,
             "The database connection is closing.",
@@ -138,13 +134,23 @@ fn create_regular_transaction<'s>(
     let client = indexed_db_database_sql_client(scope, database).ok_or_else(|| {
         IndexedDbError::InvalidState("IndexedDB connection is unavailable".into())
     })?;
+    let stores = store_names
+        .iter()
+        .map(|name| {
+            crate::context_bootstrap::indexed_db::indexed_db_database_store_metadata(
+                scope, database, name,
+            )
+            .map(|metadata| metadata.id())
+            .ok_or_else(|| IndexedDbError::NotFound("The object store was not found".into()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let transaction_handle = client.allocate_transaction_handle()?;
     let request = if let Some(connection) =
         crate::context_bootstrap::indexed_db::indexed_db_database_sql_connection(scope, database)
     {
-        connection.queue_transaction_start(store_names, mode, wake)?
+        connection.queue_transaction_start(&stores, mode, wake)?
     } else {
-        client.queue_transaction_start(handle, store_names, mode, wake)?
+        client.queue_transaction_start(handle, &stores, mode, wake)?
     };
     let Some(transaction) = create_transaction_object(scope, database, None, mode, store_names)
     else {
@@ -186,12 +192,7 @@ pub(in crate::context_bootstrap::indexed_db) fn close_indexed_db_database_connec
     {
         connection.mark_close_pending();
     }
-    set_indexed_db_slot_value(
-        scope,
-        database,
-        INDEXED_DB_DATABASE_CLOSED_SLOT,
-        v8::Boolean::new(scope, true).into(),
-    );
+    mark_indexed_db_database_closed(scope, database);
     finish_indexed_db_database_close(scope, database);
 }
 
@@ -203,7 +204,7 @@ pub(in crate::context_bootstrap::indexed_db) fn finish_indexed_db_database_close
         crate::context_bootstrap::indexed_db::enqueue_database_forced_close_task(scope, database);
         return;
     }
-    if !object_bool_property(scope, database, INDEXED_DB_DATABASE_CLOSED_SLOT).unwrap_or(false)
+    if !indexed_db_database_is_closed(scope, database)
         || crate::context_bootstrap::indexed_db::indexed_db_database_has_unfinished_transactions(
             scope, database,
         )

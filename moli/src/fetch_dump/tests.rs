@@ -529,3 +529,180 @@ async fn render_page_dump_async_includes_network_trace_config_summary() -> Resul
     http_server.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn html_serialization_refreshes_page_state_and_preserves_reply_url_pairing() -> Result<()> {
+    use moli_core::page::RendererHtmlSerializeOptions;
+    let (_browser, mut page, http_server) =
+        load_page("<!doctype html><p id=target>before</p>").await?;
+    let mut pending_updates = Vec::new();
+    for case in 0..4 {
+        let expected = page
+            .final_url()
+            .join(&format!("/serialized-{case}?paired=1"))?;
+        let old_url = page.final_url().clone();
+        let command = json!({ "id": 720 + case, "method": "Runtime.evaluate", "params": {
+            "expression": format!("history.replaceState(null, '', {}); document.getElementById('target').textContent = 'case-{case}'; 'done'", serde_json::to_string(expected.as_str())?),
+            "returnByValue": true
+        }});
+        let pending = page.start_runtime_protocol_message(serde_json::to_string(&command)?)?;
+        // The renderer has changed, but the caller has not applied its PageState.
+        pending_updates.push(pending.wait().await?);
+        assert_eq!(page.final_url(), &old_url);
+        let html = match case {
+            0 => page.serialize_html_async().await?,
+            1 => {
+                let document = page
+                    .serialize_document_async(RendererHtmlSerializeOptions {
+                        with_base: true,
+                        ..Default::default()
+                    })
+                    .await?;
+                assert_eq!(document.url, expected.as_str());
+                document.html
+            }
+            2 => {
+                let pending = page.start_serialize_html()?;
+                let document = page.finish_serialized_document(pending.wait().await?)?;
+                assert_eq!(document.url, expected.as_str());
+                document.html
+            }
+            _ => {
+                let output = render_page_dump_with_options_async(
+                    &mut page,
+                    DumpFormat::Json,
+                    StripOptions {
+                        css: true,
+                        ..Default::default()
+                    },
+                    true,
+                    false,
+                    true,
+                    None,
+                )
+                .await?;
+                let payload: Value = serde_json::from_str(&output)?;
+                assert_eq!(payload["final_url"], expected.as_str());
+                assert_eq!(
+                    payload["network"]["main_document"]["url"],
+                    expected.as_str()
+                );
+                payload["html"].as_str().unwrap().to_owned()
+            }
+        };
+        assert!(html.contains(&format!("case-{case}")), "{html}");
+        assert_eq!(page.final_url(), &expected);
+    }
+    drop(pending_updates);
+    http_server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn html_dump_profiles_preserve_golden_markup_and_the_live_source() -> Result<()> {
+    let (_browser, mut page, http_server) = load_page("<!doctype html><html><head><style>p{color:red}</style></head><body><nav>MENU</nav><p style=\"color:red\" onclick=\"void 0\">KEEP &amp; text</p><script>window.secret=1</script><x-card></x-card></body></html>").await?;
+    let setup = page.evaluate_runtime_expression_by_value_async(r#"
+        globalThis.exportShadow=document.querySelector('x-card').attachShadow({mode:'closed',slotAssignment:'manual'});
+        exportShadow.innerHTML='<b>SHADOW &amp; text</b>';
+        globalThis.exportChanges=0;
+        globalThis.exportObserver=new MutationObserver(records=>exportChanges+=records.length);
+        exportObserver.observe(document,{subtree:true,childList:true,attributes:true,characterData:true});
+        JSON.stringify([document.documentElement.outerHTML,exportShadow.innerHTML,document.baseURI])
+    "#).await?;
+    assert!(setup.get("exception").is_none(), "{setup}");
+    assert!(setup["value"].is_string(), "{setup}");
+    for bits in 0..8 {
+        let strip = StripOptions {
+            js: bits & 1 != 0,
+            css: bits & 2 != 0,
+            ui: bits & 4 != 0,
+        };
+        let mut expected = String::from("<!DOCTYPE html><html><head>");
+        if !strip.css {
+            expected.push_str("<style>p{color:red}</style>");
+        }
+        expected.push_str("</head><body>");
+        if !strip.ui {
+            expected.push_str("<nav>MENU</nav>");
+        }
+        expected.push_str("<p");
+        if !strip.css {
+            expected.push_str(" style=\"color:red\"");
+        }
+        if !strip.js {
+            expected.push_str(" onclick=\"void 0\"");
+        }
+        expected.push_str(">KEEP &amp; text</p>");
+        if !strip.js {
+            expected.push_str("<script>window.secret=1</script>");
+        }
+        expected.push_str("<x-card><template shadowrootmode=\"closed\" shadowrootslotassignment=\"manual\"><b>SHADOW &amp; text</b></template></x-card></body></html>");
+        for _ in 0..2 {
+            let output = render_page_dump_with_options_async(
+                &mut page,
+                DumpFormat::Html,
+                strip,
+                false,
+                false,
+                false,
+                None,
+            )
+            .await?;
+            assert_eq!(output, expected, "strip={bits}");
+            let snapshot=page.evaluate_runtime_expression_by_value_async("JSON.stringify([document.documentElement.outerHTML,exportShadow.innerHTML,document.baseURI])").await?;
+            assert_eq!(snapshot["value"], setup["value"]);
+            let changes = page
+                .evaluate_runtime_expression_by_value_async(
+                    "exportChanges+exportObserver.takeRecords().length",
+                )
+                .await?;
+            assert_eq!(changes["value"], 0);
+        }
+    }
+    http_server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn html_dump_filters_template_contents_and_includes_inert_author_shadow_roots() -> Result<()>
+{
+    let (_browser, mut page, http_server) = load_page("<!doctype html><template id=content><nav>MENU</nav><script>secret=1</script><style>b{color:red}</style><div style=\"color:red\" onclick=\"void 0\">KEEP</div><x-card></x-card><iframe srcdoc=\"<script>inert=1</script><p>unparsed</p>\"></iframe></template>").await?;
+    let setup=page.evaluate_runtime_expression_by_value_async("document.getElementById('content').content.querySelector('x-card').attachShadow({mode:'closed'}).innerHTML='<style>b{color:red}</style><b>SHADOW</b>'; 'ready'").await?;
+    assert!(setup.get("exception").is_none(), "{setup}");
+    let before = page.serialize_html_async().await?;
+    assert!(
+        before.contains("shadowrootmode=\"closed\"") && before.contains("SHADOW"),
+        "{before}"
+    );
+    let output = render_page_dump_with_options_async(
+        &mut page,
+        DumpFormat::Html,
+        StripOptions {
+            js: true,
+            css: true,
+            ui: true,
+        },
+        false,
+        true,
+        false,
+        None,
+    )
+    .await?;
+    for removed in ["MENU", "secret=1", "color:red", "onclick="] {
+        assert!(!output.contains(removed), "{output}");
+    }
+    assert!(
+        output.contains("<div>KEEP</div>") && output.contains("<b>SHADOW</b>"),
+        "{output}"
+    );
+    // Inert owners have no live child Document. Preserve their raw srcdoc;
+    // exporting is not an HTML sanitizer and must not parse/load that string.
+    assert!(
+        output
+            .contains("srcdoc=\"&lt;script&gt;inert=1&lt;/script&gt;&lt;p&gt;unparsed&lt;/p&gt;\""),
+        "{output}"
+    );
+    assert_eq!(page.serialize_html_async().await?, before);
+    http_server.abort();
+    Ok(())
+}

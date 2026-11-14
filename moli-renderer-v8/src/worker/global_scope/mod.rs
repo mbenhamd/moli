@@ -80,9 +80,9 @@ use crate::network_host::{
 use crate::opfs_task_result::OpfsTaskResult;
 use crate::protocol_types::{
     PendingSubresourceAuthInfo, PendingSubresourceContinueEvent, PendingSubresourceFetchInfo,
-    PendingSubresourceResponseInfo, SubresourceNetworkRecord, SubresourceNetworkRequestHandle,
-    SubresourceResourceType, SubresourceResponseBody, SubresourceResponseBodyWriter,
-    WebSocketFrameDirection, WebSocketFrameOpcode,
+    PendingSubresourceResponseInfo, SubresourceInterceptionClasses, SubresourceNetworkRecord,
+    SubresourceNetworkRequestHandle, SubresourceResourceType, SubresourceResponseBody,
+    SubresourceResponseBodyWriter, WebSocketFrameDirection, WebSocketFrameOpcode,
 };
 use crate::queue_microtask::worker_queue_microtask_callback;
 use crate::runtime::{
@@ -174,12 +174,15 @@ pub(crate) use content_security_policy::{
 use event_handlers::install_worker_global_event_handler_accessors;
 pub(super) use event_handlers::service_worker_fetch_handler_type;
 use extendable_events::install_service_worker_extendable_event_constructors;
+mod fetch_events;
 pub(super) use extendable_events::{
     PendingServiceWorkerFetchEvent, PendingServiceWorkerLifecycleEvent,
     PendingServiceWorkerMessageEvent, PendingServiceWorkerNavigationPreload,
     PendingServiceWorkerNotificationEvent, PendingServiceWorkerPeriodicSyncEvent,
     PendingServiceWorkerPushEvent, PendingServiceWorkerSyncEvent,
 };
+pub(in crate::worker) use fetch_events::initialize_native_fetch_event;
+use fetch_events::install_service_worker_fetch_event_constructor;
 pub(super) use import_scripts::{
     WORKER_EXCEPTION_COLUMN_SLOT, WORKER_EXCEPTION_LINE_SLOT, WORKER_EXCEPTION_SOURCE_SLOT,
 };
