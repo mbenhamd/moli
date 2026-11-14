@@ -171,6 +171,7 @@ impl Clone for NativeDom {
         serialization_probe::record(serialization_probe::Access::Clone);
         Self {
             nodes: self.nodes.clone(),
+            html_frame_element_count: self.html_frame_element_count,
             document_node_id: self.document_node_id,
             stylesheet_candidate_registries: self.stylesheet_candidate_registries.clone(),
             parse_errors: self.parse_errors.clone(),
