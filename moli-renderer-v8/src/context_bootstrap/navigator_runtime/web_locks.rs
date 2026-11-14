@@ -10,7 +10,7 @@ use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
 
 use crate::{
     native_bridge::{
-        PageScriptHost, NewWebLockRequest, WebLockClient, WebLockClientError, WebLockSettlement,
+        NewWebLockRequest, PageScriptHost, WebLockClient, WebLockClientError, WebLockSettlement,
     },
     page_task_queue::RendererPageMiscPlatformApiTaskKind,
     util::{
