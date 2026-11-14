@@ -220,6 +220,11 @@ impl ScriptVm {
             } else {
                 0
             };
+            if execution_context_retired {
+                self._context_host
+                    .borrow_mut()
+                    .release_web_locks_for_execution_context_owner(execution_context_owner);
+            }
             let retired_websocket_count = if execution_context_retired {
                 self._context_host
                     .borrow_mut()

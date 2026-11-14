@@ -200,6 +200,8 @@ struct RendererBrowserContextRuntimeInner {
     next_auxiliary_window_id: AtomicU64,
     message_port_registry: crate::message_port_runtime::SharedMessagePortRegistry,
     broadcast_channel_registry: crate::broadcast_channel_runtime::SharedBroadcastChannelRegistry,
+    /// Web Locks lock managers for every storage key of this browser context.
+    web_lock_registry: crate::web_locks_runtime::SharedRendererWebLockRegistry,
     browser_resource_runtime: crate::network::BrowserResourceRuntimeBinding,
     shared_worker_runtime: shared_workers::LazySharedWorkerRuntime,
     service_worker_runtime: service_worker_runtime::LazyServiceWorkerRuntime,
@@ -759,6 +761,7 @@ impl RendererBrowserContextRuntime {
                 next_auxiliary_window_id: AtomicU64::new(1),
                 message_port_registry,
                 broadcast_channel_registry,
+                web_lock_registry: crate::web_locks_runtime::new_web_lock_registry(),
                 browser_resource_runtime: browser_resource_runtime.clone(),
                 shared_worker_runtime,
                 service_worker_runtime,
@@ -979,6 +982,12 @@ impl RendererBrowserContextRuntime {
         &self,
     ) -> crate::broadcast_channel_runtime::SharedBroadcastChannelRegistry {
         self.inner.broadcast_channel_registry.clone()
+    }
+
+    pub(crate) fn web_lock_registry(
+        &self,
+    ) -> crate::web_locks_runtime::SharedRendererWebLockRegistry {
+        self.inner.web_lock_registry.clone()
     }
 
     pub(crate) fn worker_context_runtime(&self) -> RendererWorkerContextRuntime {

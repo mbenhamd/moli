@@ -122,6 +122,7 @@ impl JsContextHost {
         let ports = self.retire_message_ports_for_context_token(realm_token);
         let messages = self.retire_window_messages_for_context_token(realm_token);
         let broadcasts = self.close_broadcast_channels_for_context_token(realm_token);
+        let web_lock_clients = self.release_web_locks_for_context_token(realm_token);
         let sockets = self.retire_websockets_for_context_token(realm_token);
         tracing::debug!(
             ?realm_token,
@@ -138,6 +139,7 @@ impl JsContextHost {
             ports,
             messages,
             broadcasts,
+            web_lock_clients,
             sockets,
             "closed Window realm execution resources"
         );
@@ -180,6 +182,7 @@ impl JsContextHost {
             self.retire_window_event_sources_for_execution_context_owner(owner);
             self.retire_window_messages_for_execution_context_owner(owner);
             self.close_broadcast_channels_for_execution_context_owner(owner);
+            self.release_web_locks_for_execution_context_owner(owner);
             self.retire_websockets_for_execution_context_owner(owner);
             self.retire_image_decode_requests_for_execution_context_owner(owner);
             self.retire_message_ports_for_execution_context_owner(owner);

@@ -69,7 +69,9 @@ impl JsContextHost {
         WindowDocumentTaskTarget,
         RendererPageMiscPlatformApiTaskKind,
     )> {
-        let pending = self.misc_platform_api_tasks.pending(task_id)?;
+        let Some(pending) = self.misc_platform_api_tasks.pending(task_id) else {
+            return self.current_pending_web_lock_task(task_id);
+        };
         let current_target = self.current_window_document_task_target_for_dispatch_scope(
             pending.target().dispatch_scope(),
         )?;
@@ -92,6 +94,7 @@ impl JsContextHost {
         task_id: RendererPageMiscPlatformApiTaskId,
     ) -> bool {
         self.misc_platform_api_tasks.remove(task_id).is_some()
+            || self.discard_pending_web_lock_task(task_id)
     }
 
     pub(crate) fn dispatch_authorized_misc_platform_api_task(
@@ -118,5 +121,39 @@ impl JsContextHost {
         };
         dispatch_scope.restore(scope, previous_scope);
         effect
+    }
+
+    /// Run one authorized Web Locks grant or steal task in its exact
+    /// Window/Document realm.
+    ///
+    /// Takes the Host only as a raw pointer: the grant runs page JavaScript,
+    /// which may re-enter this Host (`query()`, another `request()`, removing
+    /// an iframe), so every Host borrow here ends before that call.
+    pub(crate) fn dispatch_authorized_web_lock_task(
+        scope: &mut v8::PinScope<'_, '_>,
+        host_ptr: *mut JsContextHost,
+        target: WindowDocumentTaskTarget,
+        kind: RendererPageMiscPlatformApiTaskKind,
+        request: crate::web_locks_runtime::WebLockRequestId,
+    ) -> PageMiscPlatformApiTargetEffect {
+        let resolved = unsafe { &mut *host_ptr }
+            .resolve_authorized_window_document_task_context(scope, target);
+        let Some(resolved) = resolved else {
+            // The task entry is already taken, so nothing else would retire
+            // the request: return a granted lock to the queue, or drop a stolen
+            // request's state.
+            unsafe { &mut *host_ptr }.retire_web_lock_request(request);
+            return PageMiscPlatformApiTargetEffect::CurrentOwnerCallbackRetired;
+        };
+        let scope = &mut v8::ContextScope::new(scope, resolved.context);
+        let dispatch_scope = target.dispatch_scope();
+        let previous_scope = dispatch_scope.enter(scope);
+        let invoked = crate::context_bootstrap::run_web_lock_task(scope, host_ptr, kind, request);
+        dispatch_scope.restore(scope, previous_scope);
+        if invoked {
+            PageMiscPlatformApiTargetEffect::CallbackInvokedForCurrentOwner
+        } else {
+            PageMiscPlatformApiTargetEffect::CurrentOwnerCallbackRetired
+        }
     }
 }
