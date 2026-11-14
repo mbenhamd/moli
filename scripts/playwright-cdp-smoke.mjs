@@ -761,6 +761,7 @@ async function runSmoke({ chromium, endpoint, fixture }) {
       'Network.webSocketHandshakeResponseReceived',
       'Network.webSocketFrameSent',
       'Network.webSocketFrameReceived',
+      'Network.webSocketClosed',
     ]) {
       cdp.on(method, params => websocketEvents.push({ method, params }));
     }
@@ -1253,25 +1254,23 @@ async function runSmoke({ chromium, endpoint, fixture }) {
     if (blockedWebSocketResult === 'open' || blockedWebSocketResult.startsWith('timeout:')) {
       throw new Error(`blocked WebSocket should fail, got ${blockedWebSocketResult}`);
     }
-    await waitUntil(() => {
-      const events = subresourceNetworkEvents.slice(blockedWebSocketStartIndex);
-      const request = events.find(
-        event =>
-          event.method === 'Network.requestWillBeSent' &&
-          event.params?.type === 'WebSocket' &&
-          event.params?.request?.url === blockedWebSocketUrl,
+    // A blocked handshake is reported through the WebSocket event family
+    // (upstream fed98c8e1d): webSocketCreated, then webSocketClosed, and never
+    // an HTTP requestWillBeSent or loadingFailed.
+    const blockedWebSocketClosedId = () => {
+      const created = websocketEvents.find(
+        event => event.method === 'Network.webSocketCreated' && event.params?.url === blockedWebSocketUrl,
       );
-      const requestId = request?.params?.requestId;
-      return (
-        requestId &&
-        events.some(
-          event =>
-            event.method === 'Network.loadingFailed' &&
-            event.params?.requestId === requestId &&
-            event.params?.errorText === 'net::ERR_BLOCKED_BY_CLIENT',
-        )
-      );
-    }, 'blocked WebSocket Network.loadingFailed on auxiliary CDP session');
+      const requestId = created?.params?.requestId;
+      return requestId &&
+        websocketEvents.some(event => event.method === 'Network.webSocketClosed' && event.params?.requestId === requestId)
+        ? requestId
+        : null;
+    };
+    await waitUntil(() => blockedWebSocketClosedId() !== null, 'blocked WebSocket Network.webSocketClosed');
+    if (subresourceNetworkEvents.slice(blockedWebSocketStartIndex).some(event => event.params?.requestId === blockedWebSocketClosedId())) {
+      throw new Error('blocked WebSocket must use its own Network event family');
+    }
     await cdp.send('Network.setBlockedURLs', { urls: [] });
     record(results, 'blocked_websocket_network_events');
     traceStep('blocked_websocket_network_events:done');

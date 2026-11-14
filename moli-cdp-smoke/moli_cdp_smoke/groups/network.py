@@ -2122,21 +2122,22 @@ async def _verify_blocked_websocket_events(state: SmokeState) -> None:
     if blocked_ws_result == "open" or str(blocked_ws_result).startswith("timeout:"):
         raise SmokeError(f"blocked WebSocket should fail, got {blocked_ws_result}")
 
-    def saw_blocked_ws_events() -> bool:
-        events = subresource_events[blocked_ws_start:]
-        request = _find_request(events, "WebSocket", blocked_ws_url)
-        request_id = request and request["params"].get("requestId")
-        return bool(
-            request_id
-            and any(
-                event["method"] == "Network.loadingFailed"
-                and event["params"].get("requestId") == request_id
-                and event["params"].get("errorText") == "net::ERR_BLOCKED_BY_CLIENT"
-                for event in events
-            )
-        )
+    # A blocked handshake is reported through the WebSocket event family
+    # (upstream fed98c8e1d): webSocketCreated, then webSocketClosed, and never
+    # an HTTP requestWillBeSent or loadingFailed.
+    def blocked_ws_closed() -> str | None:
+        created = next((e for e in socket_events if e["method"] == "Network.webSocketCreated"
+                        and e["params"].get("url") == blocked_ws_url), None)
+        request_id = created and created["params"].get("requestId")
+        if request_id and any(e["method"] == "Network.webSocketClosed"
+                              and e["params"].get("requestId") == request_id for e in socket_events):
+            return request_id
+        return None
 
-    await wait_until(saw_blocked_ws_events, "blocked WebSocket Network.loadingFailed")
+    await wait_until(lambda: blocked_ws_closed() is not None, "blocked WebSocket Network.webSocketClosed")
+    assert_equal(any(e["params"].get("requestId") == blocked_ws_closed()
+                     for e in subresource_events[blocked_ws_start:]), False,
+                 "WebSocket uses its own Network event family")
     await state.cdp.send("Network.setBlockedURLs", {"urls": []})
     state.record("blocked_websocket_network_events")
 
