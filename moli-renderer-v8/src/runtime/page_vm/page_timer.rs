@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use anyhow::{Result, ensure};
+use moli_action_window::ActionBarrier;
 
 use crate::page_task_queue::RendererPageTimerSelection;
 use crate::runtime::PageOwnerTurnOutcome;
@@ -36,6 +37,13 @@ impl PageVm {
         expected_deadline: Instant,
         selection: RendererPageTimerSelection,
     ) -> Result<PageOwnerTurnOutcome<PageTimerTurnAction>> {
+        // A due animation frame is a rendering-update boundary: wheel input
+        // admitted before it must be applied first so frame callbacks observe
+        // the scroll. The action window keeps batching between frames. A
+        // flush can queue new timers, so the head is revalidated afterwards.
+        if self.vm().has_ready_animation_frame_callback() {
+            self.flush_page_action_window(ActionBarrier::AnimationFrame)?;
+        }
         let actual_deadline = self.vm().next_ready_timeout_deadline(selection);
         let action = if actual_deadline == Some(expected_deadline) {
             let body = self.vm_mut().run_next_due_timer_callback_body(selection)?;
