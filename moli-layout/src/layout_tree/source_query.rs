@@ -1387,6 +1387,7 @@ mod tests {
                 principal_box: Some(LayoutOutputBoxId::from_index(0)),
                 fragments: [0, 1, 3, 5, 3].map(LayoutFragmentId::from_index).to_vec(),
                 scroll_proxy_boxes: vec![LayoutOutputBoxId::from_index(2)],
+                object_geometry: Vec::new(),
             })
         );
         assert_eq!(tree.source_output(0), None);

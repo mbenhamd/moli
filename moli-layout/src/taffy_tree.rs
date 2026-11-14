@@ -266,6 +266,7 @@ where
     for marker in outside_markers {
         round_layout_to_css_subpixels(world, marker.to_taffy());
     }
+    world.finish_numeric_layout_tracking()
 }
 
 /// Converts Taffy's horizontal block anchors into the physical edges used by
