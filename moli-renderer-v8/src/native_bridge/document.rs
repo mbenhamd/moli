@@ -301,7 +301,6 @@ pub(super) use queries::{
     node_document_create_ns_resolver_callback, node_document_evaluate_callback,
     node_get_element_by_id_callback,
 };
-pub(crate) use state::document_is_in_focus_chain;
 pub(super) use state::{
     node_document_active_element_getter_function, throw_document_domain_security_error,
 };

@@ -9,6 +9,5 @@ use super::super::{
 mod focus;
 mod metadata;
 
-pub(crate) use focus::document_is_in_focus_chain;
 pub(in crate::native_bridge) use focus::node_document_active_element_getter_function;
 pub(in crate::native_bridge) use metadata::throw_document_domain_security_error;
