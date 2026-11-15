@@ -10,7 +10,7 @@ use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
 
 use crate::{
     native_bridge::{
-        JsContextHost, NewWebLockRequest, WebLockClient, WebLockClientError, WebLockSettlement,
+        NewWebLockRequest, PageScriptHost, WebLockClient, WebLockClientError, WebLockSettlement,
     },
     page_task_queue::RendererPageMiscPlatformApiTaskKind,
     util::{
@@ -169,7 +169,7 @@ fn reject_client_error<'s>(
 fn current_web_lock_client(
     scope: &mut v8::PinScope<'_, '_>,
     manager: v8::Local<'_, v8::Object>,
-) -> Result<(*mut JsContextHost, WebLockClient), WebLockClientError> {
+) -> Result<(*mut PageScriptHost, WebLockClient), WebLockClientError> {
     let context = manager
         .get_creation_context(scope)
         .ok_or(WebLockClientError::InvalidState)?;
@@ -422,7 +422,7 @@ fn web_lock_abort_algorithm<'s>(
 /// a live request (its callback ran, its promise settled, or its lock returned).
 pub(crate) fn run_web_lock_task(
     scope: &mut v8::PinScope<'_, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     kind: RendererPageMiscPlatformApiTaskKind,
     request: WebLockRequestId,
 ) -> bool {
@@ -443,7 +443,7 @@ pub(crate) fn run_web_lock_task(
 
 fn run_web_lock_grant(
     scope: &mut v8::PinScope<'_, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     request: WebLockRequestId,
 ) -> bool {
     let Some(grant) = unsafe { &mut *host_ptr }.begin_web_lock_grant(request) else {
@@ -547,7 +547,7 @@ fn run_web_lock_grant(
 /// releases the lock: release it now and reject the request promise.
 fn abandon_web_lock_grant(
     scope: &mut v8::PinScope<'_, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     request: WebLockRequestId,
     message: &str,
 ) {

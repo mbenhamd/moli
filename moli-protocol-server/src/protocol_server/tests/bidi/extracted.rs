@@ -2,12 +2,14 @@ use super::*;
 
 mod bidi_commands;
 mod browsing_contexts;
+mod command_progress;
 mod dialog_policy;
 mod element_references;
 mod events_and_network;
 mod input;
 mod navigation;
 mod network_and_storage;
+mod runtime_admission;
 mod script_preload_channels;
 mod script_runtime;
 mod sessions_and_subscriptions;

@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::super::{
-    CollectionKind, JsContextHost, LiveCollectionDescriptor, LiveCollectionQueryKind, collections,
+    CollectionKind, LiveCollectionDescriptor, LiveCollectionQueryKind, PageScriptHost, collections,
     node::{
         append_child_in_reaction_scope, append_child_to_current_reaction_queue,
         current_or_live_delegate_node_arg_handle, insert_before_in_reaction_scope,
@@ -94,7 +94,7 @@ pub(in crate::native_bridge::element) fn textarea_getter_receiver<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     receiver: v8::Local<'s, v8::Object>,
     member: &'static str,
-) -> Option<(*mut JsContextHost, DomHandle)> {
+) -> Option<(*mut PageScriptHost, DomHandle)> {
     html_element_getter_receiver(scope, receiver, "HTMLTextAreaElement", member, "textarea")
 }
 
@@ -102,7 +102,7 @@ pub(in crate::native_bridge::element) fn textarea_setter_receiver<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     receiver: v8::Local<'s, v8::Object>,
     member: &'static str,
-) -> Option<(*mut JsContextHost, DomHandle)> {
+) -> Option<(*mut PageScriptHost, DomHandle)> {
     html_element_setter_receiver(scope, receiver, "HTMLTextAreaElement", member, "textarea")
 }
 
@@ -232,8 +232,9 @@ pub(crate) use self::submission::{
     perform_implicit_submission_from_control, submit_form_with_submit_event,
 };
 pub(crate) use self::text_control::{
-    dispatch_text_control_event, is_text_control,
+    dispatch_text_control_event, is_text_control, is_text_control_user_editable,
     queue_text_control_document_selection_change_event, replace_text_control_selection,
+    replace_text_control_selection_after_beforeinput,
     replace_text_control_selection_for_insert_html, text_control_set_selection_range_internal,
     text_control_set_selection_range_with_direction_internal, text_control_value,
 };
@@ -287,7 +288,7 @@ fn normalized_form_enctype(value: &str) -> &'static str {
 }
 
 pub(super) fn node_direct_text_content(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
 ) -> Option<String> {
     let dom = runtime.dom_host().dom();

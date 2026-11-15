@@ -7,7 +7,7 @@ use moli_fetch::FetchCancelHandle;
 
 pub(super) fn dispatch_service_worker_fetch(
     scope: &mut v8::PinScope<'_, '_>,
-    host: &mut JsContextHost,
+    host: &mut PageScriptHost,
     resolver: v8::Local<'_, v8::PromiseResolver>,
     prepared: &PreparedWindowFetchRequest,
 ) -> Option<u64> {
@@ -20,6 +20,8 @@ pub(super) fn dispatch_service_worker_fetch(
         &prepared.document_url,
         &prepared.resolved_url,
     )?;
+
+    let native_request = super::paths::native_window_fetch_request(prepared).ok()?;
 
     let request_cookie_report = observe_subresource_request_cookie_report(
         prepared.resource_loader.request_client(),
@@ -91,12 +93,8 @@ pub(super) fn dispatch_service_worker_fetch(
         prepared.redirect_mode,
         prepared.priority,
         ServiceWorkerFetchRequestMetadata {
-            cache: prepared.cache.clone(),
-            referrer: prepared.referrer.clone(),
-            referrer_policy: prepared.referrer_policy.clone(),
-            integrity: prepared.integrity.clone(),
             keepalive: prepared.keepalive,
-            use_cors_preflight: false,
+            ..crate::service_worker_runtime::service_worker_fetch_request_metadata(&native_request)
         },
     );
     let dispatch = ServiceWorkerFetchDispatch {

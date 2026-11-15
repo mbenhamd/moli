@@ -1,5 +1,8 @@
 use super::*;
-use crate::context_bootstrap::indexed_db::indexed_db_object_store_is_deleted;
+use crate::context_bootstrap::indexed_db::{
+    indexed_db_object_store_is_deleted, indexed_db_transaction_status,
+};
+
 use moli_indexeddb::IndexedDbError;
 
 pub(in crate::context_bootstrap::indexed_db) fn object_store_versionchange_common<'s>(
@@ -10,7 +13,7 @@ pub(in crate::context_bootstrap::indexed_db) fn object_store_versionchange_commo
         v8::Local<'s, v8::Object>,
         v8::Local<'s, v8::Object>,
         TransactionHandle,
-        moli_indexeddb::IndexedDbName,
+        crate::context_bootstrap::indexed_db::IndexedDbObjectStoreMetadata,
     ),
     IndexedDbError,
 > {
@@ -28,15 +31,15 @@ pub(in crate::context_bootstrap::indexed_db) fn object_store_versionchange_commo
     {
         return Err(invalid());
     }
-    if !object_bool_property(scope, transaction, INDEXED_DB_TRANSACTION_ACTIVE_SLOT)
-        .unwrap_or(false)
-    {
+    if !indexed_db_transaction_status(scope, transaction).is_some_and(|state| state.active) {
         return Err(IndexedDbError::TransactionInactive(
             "The version change transaction is not active".into(),
         ));
     }
     let database = indexed_db_object_store_database(scope, store).ok_or_else(invalid)?;
     let handle = transaction_handle_from_value(scope, transaction.into()).ok_or_else(invalid)?;
-    let store_name = indexed_db_object_store_name(scope, store).ok_or_else(invalid)?;
-    Ok((transaction, database, handle, store_name))
+    let metadata =
+        crate::context_bootstrap::indexed_db::indexed_db_object_store_metadata(scope, store)
+            .ok_or_else(invalid)?;
+    Ok((transaction, database, handle, metadata))
 }

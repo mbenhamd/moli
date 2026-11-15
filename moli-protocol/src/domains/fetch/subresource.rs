@@ -1,3 +1,4 @@
+use moli_protocol_cdp_defs::LocalCdpEvent;
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
@@ -12,7 +13,7 @@ use crate::conn::{
     BackgroundProtocolEvent, CdpConnection, CommandOwnerScope, DEFAULT_LOADER_ID,
     FetchRequestStage, PendingSubresourceFetchOwnerKind, PendingSubresourceFetchRequest,
     PendingSubresourceFetchRequestStage, PendingSubresourceFetchRequestStageChain,
-    PendingSubresourceFetchResponseRequest, build_event, monotonic_timestamp_seconds,
+    PendingSubresourceFetchResponseRequest, monotonic_timestamp_seconds,
 };
 use crate::domains::network;
 use moli_core::runtime::DetachedParserScriptFetchContinuation;
@@ -57,6 +58,8 @@ struct PendingSubresourceFetchPauseSource {
     /// A child frame navigation keeps Chromium's document identity: its
     /// Network request id is the loader id of the Document it creates.
     child_document: Option<moli_core::page::ChildDocumentFetchRequest>,
+    native_network: bool,
+    redirect: Option<moli_page_types::NavigationRedirect>,
 }
 
 pub(crate) fn subresource_fetch_pause_prepared_outputs_for_renderer_record(
@@ -64,7 +67,9 @@ pub(crate) fn subresource_fetch_pause_prepared_outputs_for_renderer_record(
     owner: &CommandOwnerScope,
     source_document: moli_core::RendererDocumentLifecycleIdentity,
     info: moli_core::page::PendingSubresourceFetchInfo,
+    network_pause: Option<moli_core::network::ResourceInterceptionPause>,
     child_document: Option<moli_core::page::ChildDocumentFetchRequest>,
+    redirect: Option<moli_core::page::NavigationRedirect>,
     page_source: Option<(
         crate::conn::TargetPageResidenceIdentity,
         crate::conn::RendererPageResidenceIdentity,
@@ -80,7 +85,7 @@ pub(crate) fn subresource_fetch_pause_prepared_outputs_for_renderer_record(
     if source.attachment().page_owner() != &page_owner {
         return network::NetworkPreparedOutputs::default();
     }
-    let Ok(command_target) = conn.capture_document_output_command_target(
+    let Ok(mut command_target) = conn.capture_document_output_command_target(
         owner,
         &page_owner,
         renderer_page,
@@ -88,6 +93,15 @@ pub(crate) fn subresource_fetch_pause_prepared_outputs_for_renderer_record(
     ) else {
         return network::NetworkPreparedOutputs::default();
     };
+    let native_network = network_pause.is_some();
+    let network_redirect = network_pause
+        .as_ref()
+        .and_then(|pause| pause.request_redirect().cloned())
+        .map(Into::into);
+    let redirect = redirect.or(network_redirect);
+    if let Some(pause) = network_pause {
+        command_target = command_target.with_network_pause(pause);
+    }
     prepare_subresource_fetch_pause_sources(
         conn,
         owner,
@@ -101,6 +115,8 @@ pub(crate) fn subresource_fetch_pause_prepared_outputs_for_renderer_record(
             info,
             detached_parser_script_fetch_continuation: None,
             child_document,
+            native_network,
+            redirect,
         }],
     )
 }
@@ -128,6 +144,8 @@ pub(crate) fn detached_parser_script_fetch_pause_prepared_outputs_for_renderer_r
             info,
             detached_parser_script_fetch_continuation: Some(continuation),
             child_document: None,
+            native_network: false,
+            redirect: None,
         }],
     )
 }
@@ -186,7 +204,16 @@ fn prepare_subresource_fetch_pause_sources(
             info,
             detached_parser_script_fetch_continuation,
             child_document,
+            native_network,
+            redirect,
         } = source;
+        let redirect = redirect.or_else(|| {
+            child_document
+                .as_ref()
+                .and_then(|document| document.redirect.clone())
+        });
+        let per_hop_fetch = child_document.is_some()
+            || info.resource_type == moli_core::page::SubresourceResourceType::Fetch;
         let Some((request_id, network_request_id)) =
             conn.allocate_pending_subresource_fetch_request_ids_for_owner(owner)
         else {
@@ -197,9 +224,34 @@ fn prepare_subresource_fetch_pause_sources(
             continue_detached_script_fetches_unintercepted(sources);
             return network::NetworkPreparedOutputs::from_subresource_fetch_pauses_and_continuations(outputs, automatic);
         };
+        let network_request_id = if native_network {
+            info.network_request_handle
+                .and_then(|handle| {
+                    conn.network_request_id_for_subresource_handle_for_owner(owner, handle)
+                })
+                .unwrap_or(network_request_id)
+        } else {
+            network_request_id
+        };
         let (network_request_id, request_loader_id) = match &child_document {
             Some(document) => (document.loader_id.clone(), document.loader_id.clone()),
-            None => (network_request_id, loader_id.clone()),
+            None => {
+                let network_request_id = if per_hop_fetch {
+                    info.network_request_handle
+                        .and_then(|handle| {
+                            conn.runtime_session_owner_slot_mut_for_owner(owner)?
+                                .record_subresource_request_id_for_handle_if_absent(
+                                    handle,
+                                    network_request_id.clone(),
+                                );
+                            conn.network_request_id_for_subresource_handle_for_owner(owner, handle)
+                        })
+                        .unwrap_or(network_request_id)
+                } else {
+                    network_request_id
+                };
+                (network_request_id, loader_id.clone())
+            }
         };
         let document_url = document_url
             .cloned()
@@ -214,14 +266,14 @@ fn prepare_subresource_fetch_pause_sources(
         // Each Fetch handler owns an interception id for every HTTP hop,
         // including hops that do not match that handler's URL patterns.
         let mut child_fetch_ids = HashMap::new();
-        if let Some(document) = child_document.as_ref() {
+        if per_hop_fetch {
             let Some(ids) = super::navigation_interception::navigation_hop_ids(
                 conn,
                 owner,
                 &fetch_snapshot,
                 &network_request_id,
                 &request_id,
-                document.redirect.is_some(),
+                redirect.is_some(),
             ) else {
                 continue_detached_script_fetches_unintercepted(sources);
                 return network::NetworkPreparedOutputs::from_subresource_fetch_pauses_and_continuations(outputs, automatic);
@@ -229,7 +281,7 @@ fn prepare_subresource_fetch_pause_sources(
             child_fetch_ids = ids;
         }
         if request_stage_pause_sessions.is_empty() {
-            if child_document.is_some() {
+            if per_hop_fetch || native_network {
                 let network_output =
                     network::TargetSubresourceFetchPauseNetworkOutput::from_pending_fetch_info(
                         network_request_id.clone(),
@@ -240,7 +292,8 @@ fn prepare_subresource_fetch_pause_sources(
                         &info,
                     )
                     .with_fetch_request_id(request_id.clone())
-                    .with_child_document(child_document.clone());
+                    .with_child_document(child_document.clone())
+                    .with_redirect(redirect.clone());
                 outputs.push(network::TargetSubresourceFetchPauseOutput::network_only(
                     network_output,
                 ));
@@ -454,7 +507,8 @@ fn prepare_subresource_fetch_pause_sources(
             )
             .with_blocked_intercepts(blocked_intercepts)
             .with_fetch_request_id(request_id.clone())
-            .with_child_document(child_document);
+            .with_child_document(child_document)
+            .with_redirect(redirect);
         let mut payload = subresource_request_paused_payload(
             &request_id,
             &pending,
@@ -489,16 +543,42 @@ pub(crate) fn emit_subresource_fetch_pause_outputs(
 ) {
     for output in outputs {
         let network_request_id = output.network_output().network_request_id().to_owned();
-        if output.network_output().child_document().is_some()
+        // Detached parser-script completions use the same native handle as
+        // their pause, just like renderer-owned subresource completions.
+        if let Some(handle) = output.network_output().request_handle()
             && let Some(slot) = conn.runtime_session_owner_slot_mut_for_owner(owner)
         {
-            if let Some(handle) = output.network_output().request_handle() {
-                slot.record_subresource_request_id_for_handle_if_absent(
-                    handle,
-                    network_request_id.clone(),
-                );
-            }
+            slot.record_subresource_request_id_for_handle_if_absent(
+                handle,
+                network_request_id.clone(),
+            );
+        }
+        if output.network_output().child_document().is_some()
+            && output.network_output().redirect().is_none()
+        {
+            // This output represents the first HTTP hop, before any handler
+            // in its interception chain. ID allocation already reserves the
+            // announcement entry, so its presence cannot deduplicate starts.
+            let network = output.network_output();
+            crate::domains::page::emit_navigation_started_for_session_owner(
+                conn,
+                out,
+                owner,
+                network.frame_id(),
+                network.loader_id(),
+                network.request_url().as_str(),
+                crate::domains::page::NavigationStartInitiator::RendererChildFrame,
+            );
+        }
+        if (output.network_output().child_document().is_some()
+            || output.network_output().resource_type()
+                == moli_core::page::SubresourceResourceType::Fetch)
+            && let Some(slot) = conn.runtime_session_owner_slot_mut_for_owner(owner)
+        {
             slot.record_fetch_pause_announced_request_id(network_request_id.clone());
+            if output.network_output().redirect().is_some() {
+                slot.record_fetch_pause_announced_redirect(&network_request_id);
+            }
         }
         if !network_session_ids.is_empty() {
             // A request is already observable at the Fetch pause. Its body
@@ -622,7 +702,9 @@ fn subresource_request_paused_event(
         payload["redirectedRequestId"] = redirected_request_id.clone();
     }
     BackgroundProtocolEvent::immediate_automation_event(
-        build_event("Fetch.requestPaused", payload, session_id),
+        LocalCdpEvent::FetchRequestPaused,
+        payload,
+        session_id,
         AutomationEvent::RequestPaused(network_event),
     )
 }

@@ -1,5 +1,118 @@
 use super::*;
 
+#[tokio::test]
+async fn first_document_retains_captured_window_identity_after_close() {
+    assert_document_retains_window_identity_after_close(false).await;
+}
+
+#[tokio::test]
+async fn replacement_document_retains_window_identity_after_target_unregistration() {
+    assert_document_retains_window_identity_after_close(true).await;
+}
+
+async fn assert_document_retains_window_identity_after_close(replacement: bool) {
+    use crate::{
+        network::{RendererResourceTaskRunner, context::DocumentResourceLoaderBootstrap},
+        runtime::{
+            RendererBrowserContextRuntime, RendererOutputStreamIdentity, RendererTurnOutputJournal,
+        },
+        script_vm::{RendererIsolateHandle, RendererPageScriptEnvironment},
+    };
+
+    crate::ensure_v8_for_test();
+    for (auxiliary, window_name) in [
+        (false, ""),
+        (false, "retiring-page"),
+        (true, ""),
+        (true, "retiring-page"),
+    ] {
+        let runtime_owner = RendererBrowserContextRuntime::new();
+        let runtime = runtime_owner.handle();
+        let root_frame_id = "TID-retiring-page";
+        let name = crate::runtime::RendererBrowsingContextName::default();
+        name.set(window_name.to_owned());
+        let group = name.group();
+        let window = auxiliary.then(|| runtime.new_auxiliary_window());
+        let identity =
+            crate::runtime::RendererPageWindowIdentity::new(name.clone(), window.clone());
+        let tasks = crate::page_task_queue::PageTaskQueueTestHarness::new();
+        let task_sender = tasks.owner_attached_runtime_page_task_sender_for_test();
+        let bootstrap = RendererIsolateHandle::new_standalone_without_owner_reservation_for_test(
+            task_sender.v8_foreground_task_sender(),
+        )
+        .expect("Page isolate");
+        let environment = RendererPageScriptEnvironment::new(
+            12346,
+            bootstrap.clone_renderer_document_isolate_handle_for_owner_retention(),
+            bootstrap.inspector_isolate_backend_handle(),
+            tasks.residence().runtime_source(),
+            RendererTurnOutputJournal::new(
+                RendererOutputStreamIdentity::new_page_for_protocol_test(
+                    crate::PageId::new_for_testing(12346),
+                ),
+            ),
+            identity.clone(),
+        );
+        // The protocol owner can unregister a Target before admitted
+        // Document work finishes. Bootstrap needs only its captured identity.
+        environment.close_browsing_context();
+        if let Some(window) = &window {
+            window.close();
+        }
+        let loader =
+            ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+        let document = DomHost::from_dom(NativeDom::new(
+            Url::parse("https://retiring-page.test/replacement").unwrap(),
+        ));
+        let document_bootstrap = if replacement {
+            environment
+                .bootstrap_replacement_document_isolate()
+                .expect("replacement isolate")
+        } else {
+            bootstrap.with_renderer_page_script_environment(environment.clone())
+        };
+        let mut vm = ScriptVmDefaultWorldBootstrap::from_dom_host_with_resource_completion_sender_browser_context_runtime_and_document_isolate(
+            document,
+            &Default::default(),
+            task_sender,
+            tasks.parser_boundary_sender(),
+            RendererResourceCompletionSender::direct_completion_only(),
+            DocumentResourceLoaderBootstrap::new(
+                loader.handle(),
+                RendererResourceTaskRunner::from_current_tokio().unwrap(),
+            ),
+            runtime,
+            identity,
+            Default::default(),
+            document_bootstrap,
+            &[],
+            crate::runtime::new_shared_renderer_backend_node_registry(),
+            Some(root_frame_id.to_owned()),
+            None,
+            None,
+            None,
+        )
+        .expect("replacement bootstrap")
+        .finish()
+        .expect("replacement ownership");
+
+        assert!(vm._context_host.borrow().browsing_context_is_closed());
+        assert_eq!(*vm._context_host.borrow().browsing_context_name(), name);
+        assert_eq!(
+            vm._context_host.borrow().browsing_context_name().group(),
+            group
+        );
+        assert_eq!(vm._context_host.borrow().auxiliary_window(), window);
+        assert_eq!(vm.eval("window.name").unwrap(), window_name);
+        if let Some(window) = window {
+            assert!(
+                window.is_closed(),
+                "replacement must retain the closed auxiliary identity"
+            );
+        }
+    }
+}
+
 #[test]
 fn strict_window_binding_resolves_registry_policy_and_rejects_retired_realm() {
     let mut vm = new_storage_test_vm("https://strict-window-binding.test/");
@@ -111,7 +224,11 @@ fn strict_window_binding_resolves_registry_policy_and_rejects_retired_realm() {
 #[test]
 fn borrowed_fetch_enforces_cross_origin_receiver_before_entering_its_realm() {
     let mut vm = new_storage_test_vm("https://fetch-accessing-origin.test/");
-    vm.set_fetch_subresource_interception(true, Some(crate::types::SubresourceResourceType::Fetch));
+    vm.set_fetch_subresource_interception(
+        crate::types::SubresourceInterceptionClasses::for_resource_type(
+            crate::types::SubresourceResourceType::Fetch,
+        ),
+    );
     vm.exec(
         r#"
         const frame = document.createElement("iframe");
@@ -149,7 +266,11 @@ fn borrowed_fetch_enforces_cross_origin_receiver_before_entering_its_realm() {
 #[test]
 fn chromium_fetch_promise_realm_matrix_uses_current_realm_for_pre_idl_errors() {
     let mut vm = new_storage_test_vm("https://fetch-promise-realm.test/");
-    vm.set_fetch_subresource_interception(true, Some(crate::types::SubresourceResourceType::Fetch));
+    vm.set_fetch_subresource_interception(
+        crate::types::SubresourceInterceptionClasses::for_resource_type(
+            crate::types::SubresourceResourceType::Fetch,
+        ),
+    );
     vm.eval(
         r#"
         const frame = document.createElement("iframe");
@@ -199,7 +320,11 @@ fn chromium_fetch_promise_realm_matrix_uses_current_realm_for_pre_idl_errors() {
 #[test]
 fn fetch_receiver_generation_is_frozen_before_request_init_getters_run() {
     let mut vm = new_storage_test_vm("https://fetch-receiver-generation.test/");
-    vm.set_fetch_subresource_interception(true, Some(crate::types::SubresourceResourceType::Fetch));
+    vm.set_fetch_subresource_interception(
+        crate::types::SubresourceInterceptionClasses::for_resource_type(
+            crate::types::SubresourceResourceType::Fetch,
+        ),
+    );
     vm.eval(
         r#"
         const frame = document.createElement("iframe");
@@ -269,7 +394,11 @@ fn fetch_receiver_generation_is_frozen_before_request_init_getters_run() {
 #[test]
 fn detached_fetch_receiver_returns_a_rejected_current_realm_promise() {
     let mut vm = new_storage_test_vm("https://detached-fetch-receiver.test/");
-    vm.set_fetch_subresource_interception(true, Some(crate::types::SubresourceResourceType::Fetch));
+    vm.set_fetch_subresource_interception(
+        crate::types::SubresourceInterceptionClasses::for_resource_type(
+            crate::types::SubresourceResourceType::Fetch,
+        ),
+    );
 
     assert_eq!(
         vm.eval(
@@ -363,7 +492,11 @@ fn chromium_discarded_window_fetch_rejects_in_the_detached_function_realm() {
 #[test]
 fn borrowed_fetch_uses_receiver_realm_and_keeps_reaction_realm_independent() {
     let mut vm = new_storage_test_vm("https://borrowed-fetch-context.test/top/");
-    vm.set_fetch_subresource_interception(true, Some(crate::types::SubresourceResourceType::Fetch));
+    vm.set_fetch_subresource_interception(
+        crate::types::SubresourceInterceptionClasses::for_resource_type(
+            crate::types::SubresourceResourceType::Fetch,
+        ),
+    );
     vm.eval(
         r#"
         const frame = document.createElement("iframe");
@@ -1687,12 +1820,14 @@ fn renderer_output_settlement_records_contexts_without_materializing_ordinary_me
         ));
     // Bind a real journal to this standalone VM to exercise settlement,
     // independently of Page-owner admission and scheduler residence.
+    let window_identity = vm.page_window_identity();
     vm.renderer_page_script_environment = Some(super::super::RendererPageScriptEnvironment::new(
         12345,
         vm.renderer_document_isolate.clone(),
         vm.page_inspector.isolate_backend_handle(),
         crate::page_task_queue::PageRuntimeTaskSource::new(None),
         journal,
+        window_identity,
     ));
     let raw = format!(
         r#"{{"method":"Debugger.scriptParsed","params":{{"sourceMapURL":"{}","text":"\ud800"}}}}"#,

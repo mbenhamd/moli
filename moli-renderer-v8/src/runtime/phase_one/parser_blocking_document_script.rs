@@ -249,18 +249,6 @@ impl ParserClassicDocumentScriptExecutionHooks
                 crate::host::ScriptEventKind::Error,
                 script_handle,
             );
-        if let Some((script, _, source_network_result)) = failure.into_execution_failure_parts()
-            && let Some(network_result) = source_network_result.as_deref()
-        {
-            owner
-                .page_vm
-                .vm_mut()
-                .record_script_subresource_network_result(
-                    script.initiator_url,
-                    script.url,
-                    network_result,
-                );
-        }
         tracing::debug!(
             expected_owner = ?target.owner(),
             ?script_handle,

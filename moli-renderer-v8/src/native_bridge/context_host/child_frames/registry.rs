@@ -35,7 +35,7 @@ struct ChildWindowRetirement {
     local_window: Option<crate::frame_owner_model::LocalWindowId>,
 }
 
-impl JsContextHost {
+impl PageScriptHost {
     /// Stop every outgoing Document in this subtree from admitting another
     /// browsing context before cancellation dispatches author callbacks.
     pub(crate) fn disable_subframe_loading_for_document_subtree(
@@ -480,10 +480,6 @@ impl JsContextHost {
                         committed_navigation_entry_seed,
                         cached_snapshot,
                         document_policy_container,
-                        completed_document_network: existing.as_ref().and_then(|entry| {
-                            entry
-                                .completed_document_network_for_refresh(attribute_bootstrap_changed)
-                        }),
                         completed_frame_owner_resource_timing: existing.as_ref().and_then(
                             |entry| {
                                 entry.completed_frame_owner_resource_timing_for_refresh(
@@ -558,6 +554,11 @@ impl JsContextHost {
                             "new child frame refresh must capture initial-empty init inputs",
                         ),
                     );
+                    if initial_about_blank_document_is_complete
+                        || initial_navigation_uses_initial_empty_load
+                    {
+                        self.publish_child_frame_navigation_commit(handle, None);
+                    }
                     if initial_about_blank_document_is_complete {
                         let _ = self.dispatch_ready_child_initial_empty_load_synchronously(
                             scope,

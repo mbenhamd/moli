@@ -1,5 +1,7 @@
+mod admission;
 mod dispatch;
 mod workflow;
+pub use admission::PendingAutomationCommandAdmission;
 pub(crate) use dispatch::AutomationCommandResult;
 pub use dispatch::{
     AutomationCommandTaskStep, CompletedAutomationCommandDispatch, PendingAutomationCommandDispatch,
@@ -150,6 +152,7 @@ impl CdpConnection {
             | AutomationCommand::GetJavaScriptDialog(_)
             | AutomationCommand::SetJavaScriptDialogPromptText(_)
             | AutomationCommand::HandleJavaScriptDialog(_)
+            | AutomationCommand::StopLoading(_)
             | AutomationCommand::GetNavigationHistory(_)) => {
                 crate::domains::page::execute_immediate_devtools_page_command_with_protocol_events(self, command)
             }
@@ -193,9 +196,6 @@ impl CdpConnection {
         dispatch_context: &mut CommandDispatchContext,
         protocol_events: &mut Vec<BackgroundProtocolEvent>,
     ) {
-        if self.has_pending_javascript_dialog() {
-            return;
-        }
         let session_id = context
             .session_id
             .as_ref()
@@ -210,6 +210,9 @@ impl CdpConnection {
             }
             None => CommandOwnerScope::capture(self, session_id),
         };
+        if self.owner_has_pending_javascript_dialog(&owner) {
+            return;
+        }
         crate::domains::activity::project_protocol_local_command_outputs(
             self,
             &owner,

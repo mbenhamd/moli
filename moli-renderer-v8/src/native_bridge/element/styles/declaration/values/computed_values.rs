@@ -2,7 +2,7 @@ use super::*;
 pub(super) use crate::css_style::compress_box_components;
 
 pub(super) fn resolve_moli_computed_style_value(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
     value: &str,
@@ -103,7 +103,7 @@ pub(super) fn resolve_moli_computed_style_value(
 }
 
 fn resolved_grid_template_tracks(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
 ) -> Option<String> {
@@ -178,7 +178,7 @@ fn serialize_used_grid_track_list(
 }
 
 pub(super) fn computed_axis_position_shorthand_value(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property_prefix: &str,
     context: StyleComputationContext,
@@ -210,7 +210,7 @@ pub(super) fn computed_axis_position_shorthand_value(
 }
 
 pub(super) fn resolve_computed_animation_duration(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     value: &str,
 ) -> String {
@@ -236,7 +236,7 @@ pub(super) fn resolve_computed_animation_duration(
 }
 
 pub(super) fn resolve_computed_zoom_with_resolution(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     value: &str,
     resolution: StyleResolutionContext<'_>,
@@ -282,7 +282,7 @@ fn resolve_css_zoom_numeric(
     })
 }
 
-fn animation_timeline_is_initial_auto(runtime: &JsContextHost, handle: DomHandle) -> bool {
+fn animation_timeline_is_initial_auto(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     let Some(entry) = inline_style_entry_for_inline_style(runtime, handle, "animation-timeline")
     else {
         return true;
@@ -296,7 +296,7 @@ fn animation_timeline_is_initial_auto(runtime: &JsContextHost, handle: DomHandle
 }
 
 pub(in crate::native_bridge::element::styles) fn style_property_value_for_pseudo_with_context(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     pseudo_element: &str,
     property: &str,
@@ -399,7 +399,7 @@ fn layout_pseudo(pseudo_element: &str) -> Option<moli_layout::LayoutPseudo> {
 /// element inside an `<svg>`, whose default `view-box` reference this does not
 /// model.
 pub(super) fn resolve_computed_transform_value(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     pseudo: Option<moli_layout::LayoutPseudo>,
     value: &str,
@@ -423,7 +423,7 @@ pub(super) fn resolve_computed_transform_value(
     }
 }
 
-fn is_svg_content_element(runtime: &JsContextHost, handle: DomHandle) -> bool {
+fn is_svg_content_element(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     let host = runtime.dom_host();
     let is_svg = |node: DomHandle| {
         host.node(node)
@@ -437,7 +437,7 @@ fn is_svg_content_element(runtime: &JsContextHost, handle: DomHandle) -> bool {
 }
 
 fn resolve_computed_text_decoration_length(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
     value: &str,
@@ -453,7 +453,7 @@ fn resolve_computed_text_decoration_length(
 }
 
 fn resolve_computed_pseudo_width(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     value: &str,
 ) -> String {
@@ -472,7 +472,7 @@ fn resolve_computed_pseudo_width(
     .unwrap_or_else(|| value.to_owned())
 }
 
-fn computed_pseudo_width_basis(runtime: &JsContextHost, handle: DomHandle) -> Option<f64> {
+fn computed_pseudo_width_basis(runtime: &PageScriptHost, handle: DomHandle) -> Option<f64> {
     let width = style_property_value(runtime, handle, StyleMode::Computed, "width");
     if let Some(px) = width.strip_suffix("px")
         && let Some(width) = moli_css_parse::parse_number(px)
@@ -488,7 +488,7 @@ fn computed_pseudo_width_basis(runtime: &JsContextHost, handle: DomHandle) -> Op
 }
 
 fn default_pseudo_display(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     pseudo_element: &str,
 ) -> String {
@@ -525,7 +525,7 @@ pub(super) fn border_width_longhands() -> &'static [&'static str] {
 }
 
 pub(super) fn border_width_from_shorthand(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
 ) -> Option<String> {
@@ -535,7 +535,7 @@ pub(super) fn border_width_from_shorthand(
 }
 
 pub(super) fn border_component_from_component_shorthand(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     shorthand: &str,
     index: usize,
@@ -545,7 +545,7 @@ pub(super) fn border_component_from_component_shorthand(
 }
 
 pub(super) fn border_component_style_entry_from_component_shorthand(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     shorthand: &str,
     longhand: &str,
@@ -595,7 +595,7 @@ pub(super) fn border_color_longhands() -> &'static [&'static str] {
 }
 
 pub(super) fn border_color_from_shorthand(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
 ) -> Option<String> {
     inline_style_entry_for_inline_style(runtime, handle, "border")
@@ -633,7 +633,7 @@ pub(super) fn border_style_longhands() -> &'static [&'static str] {
 }
 
 pub(super) fn border_style_from_shorthand(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
 ) -> Option<String> {
     inline_style_entry_for_inline_style(runtime, handle, "border")
@@ -654,7 +654,7 @@ pub(super) fn color_property_is_resolved_color(property: &str) -> bool {
 }
 
 fn resolve_computed_inset(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
     value: &str,
@@ -672,7 +672,7 @@ fn resolve_computed_inset(
 }
 
 fn resolve_computed_auto_min_size(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     resolution: StyleResolutionContext<'_>,
 ) -> String {
@@ -696,7 +696,7 @@ fn resolve_computed_auto_min_size(
 }
 
 fn display_none_ancestor(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     resolution: StyleResolutionContext<'_>,
 ) -> bool {
@@ -711,7 +711,7 @@ fn display_none_ancestor(
 }
 
 fn resolve_computed_font_relative_length(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     value: &str,
 ) -> Option<String> {
@@ -737,7 +737,7 @@ fn resolve_computed_font_relative_length(
 }
 
 fn resolve_computed_inset_length_percentage(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
     value: &str,
@@ -762,13 +762,13 @@ fn resolve_computed_inset_length_percentage(
     Some(format_css_px(resolved))
 }
 
-fn computed_position(runtime: &JsContextHost, handle: DomHandle) -> String {
+fn computed_position(runtime: &PageScriptHost, handle: DomHandle) -> String {
     let read = ComputedStyleRead::new(runtime, handle);
     computed_position_with_resolution(runtime, handle, read.resolution_context())
 }
 
 fn computed_position_with_resolution(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     resolution: StyleResolutionContext<'_>,
 ) -> String {
@@ -781,7 +781,7 @@ fn computed_position_with_resolution(
 }
 
 pub(super) fn logical_inset_style_entry(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
 ) -> Option<StyleEntry> {
@@ -790,7 +790,7 @@ pub(super) fn logical_inset_style_entry(
 }
 
 pub(super) fn inset_shorthand_style_entry(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
 ) -> Option<StyleEntry> {
@@ -808,7 +808,7 @@ pub(super) fn inset_shorthand_style_entry(
 }
 
 fn physical_inset_logical_source(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
 ) -> Option<&'static str> {
@@ -827,13 +827,13 @@ fn physical_inset_logical_source(
     }
 }
 
-fn computed_direction(runtime: &JsContextHost, handle: DomHandle) -> String {
+fn computed_direction(runtime: &PageScriptHost, handle: DomHandle) -> String {
     let read = ComputedStyleRead::new(runtime, handle);
     computed_direction_with_resolution(runtime, handle, read.resolution_context())
 }
 
 pub(super) fn computed_direction_with_resolution(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     resolution: StyleResolutionContext<'_>,
 ) -> String {
@@ -860,7 +860,7 @@ pub(super) fn computed_direction_with_resolution(
 }
 
 pub(super) fn raw_stylo_computed_style_value(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
 ) -> String {
@@ -870,7 +870,7 @@ pub(super) fn raw_stylo_computed_style_value(
 }
 
 pub(super) fn raw_stylo_computed_style_value_with_inputs(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
     inputs: &FullStyleWorldSnapshot,
@@ -889,7 +889,7 @@ pub(super) fn raw_stylo_computed_style_value_with_inputs(
 }
 
 pub(super) fn raw_stylo_computed_style_value_with_context(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
     context: StyleComputationContext,
@@ -898,7 +898,7 @@ pub(super) fn raw_stylo_computed_style_value_with_context(
 }
 
 fn computed_inset_containing_block_size(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     position: &str,
     property: &str,
@@ -942,7 +942,7 @@ fn computed_inset_containing_block_size(
 }
 
 fn inline_text_containing_block_width(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     containing_block: DomHandle,
 ) -> Option<f64> {
     let display = style_property_value(runtime, containing_block, StyleMode::Computed, "display");
@@ -959,7 +959,7 @@ fn inline_text_containing_block_width(
 }
 
 fn computed_inset_containing_block(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     position: &str,
 ) -> Option<DomHandle> {
@@ -991,7 +991,7 @@ fn computed_inset_containing_block(
     }
 }
 
-fn flat_ancestor_chain(runtime: &JsContextHost, handle: DomHandle) -> Vec<DomHandle> {
+fn flat_ancestor_chain(runtime: &PageScriptHost, handle: DomHandle) -> Vec<DomHandle> {
     let mut ancestors = Vec::new();
     let mut current = runtime.dom_host().node(handle).and_then(Node::parent_node);
     while let Some(handle) = current {
@@ -1002,7 +1002,7 @@ fn flat_ancestor_chain(runtime: &JsContextHost, handle: DomHandle) -> Vec<DomHan
 }
 
 fn computed_box_component_px(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     longhand: &str,
     shorthand: &str,
@@ -1022,7 +1022,7 @@ fn computed_box_component_px(
 }
 
 fn resolve_computed_auto_inset(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
     value: &str,
@@ -1081,7 +1081,7 @@ fn resolve_computed_auto_inset(
     Some(format_css_px(containing_block_size - opposite - own_size))
 }
 
-fn grid_column_is_positioned(runtime: &JsContextHost, handle: DomHandle) -> bool {
+fn grid_column_is_positioned(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     ["grid-column-start", "grid-column-end"]
         .into_iter()
         .map(|property| raw_stylo_computed_style_value(runtime, handle, property))
@@ -1099,7 +1099,7 @@ fn opposite_inset_property(property: &str) -> Option<&'static str> {
 }
 
 fn resolve_computed_both_auto_inset(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
     position: &str,
@@ -1127,7 +1127,7 @@ fn resolve_computed_both_auto_inset(
 }
 
 fn static_position_offset(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     containing_block: DomHandle,
     property: &str,
     position: &str,
@@ -1143,7 +1143,7 @@ fn static_position_offset(
 }
 
 fn runtime_static_position_offset(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     containing_block: DomHandle,
     property: &str,
 ) -> Option<f64> {
@@ -1163,12 +1163,12 @@ fn runtime_static_position_offset(
     .filter(|offset| *offset > 0.0)
 }
 
-fn computed_style_geometry_rect(runtime: &JsContextHost, handle: DomHandle) -> Option<ClientRect> {
+fn computed_style_geometry_rect(runtime: &PageScriptHost, handle: DomHandle) -> Option<ClientRect> {
     read_bounding_client_rect(runtime, handle).ok()
 }
 
 fn inset_uses_start_static_position(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     containing_block: DomHandle,
     property: &str,
 ) -> bool {
@@ -1206,7 +1206,7 @@ fn inset_uses_start_static_position(
 }
 
 fn computed_auto_inset_own_size(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
 ) -> Option<f64> {
@@ -1223,7 +1223,7 @@ fn computed_auto_inset_own_size(
 }
 
 fn resolve_computed_horizontal_auto_margin(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
     value: &str,
@@ -1257,7 +1257,7 @@ fn resolve_computed_horizontal_auto_margin(
 }
 
 fn resolve_computed_horizontal_margin(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     value: &str,
     context: StyleComputationContext,
@@ -1282,7 +1282,7 @@ fn resolve_computed_horizontal_margin(
 }
 
 fn resolve_computed_horizontal_margin_with_inline_fallback(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
     value: &str,
@@ -1321,7 +1321,7 @@ fn resolve_computed_horizontal_margin_with_inline_fallback(
 }
 
 fn resolve_computed_line_height_with_resolution(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     value: &str,
     resolution: StyleResolutionContext<'_>,
@@ -1340,7 +1340,7 @@ fn resolve_computed_line_height_with_resolution(
 }
 
 pub(super) fn computed_line_height_px_with_resolution(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     resolution: StyleResolutionContext<'_>,
 ) -> Option<f64> {
@@ -1352,12 +1352,12 @@ pub(super) fn computed_line_height_px_with_resolution(
         .and_then(|value| parse_css_px(&value))
 }
 
-fn computed_font_size_px(runtime: &JsContextHost, handle: DomHandle) -> Option<f64> {
+fn computed_font_size_px(runtime: &PageScriptHost, handle: DomHandle) -> Option<f64> {
     let read = ComputedStyleRead::new(runtime, handle);
     computed_font_size_px_with_resolution(runtime, handle, read.resolution_context())
 }
 
-pub(super) fn inline_font_size_px(runtime: &JsContextHost, handle: DomHandle) -> Option<f64> {
+pub(super) fn inline_font_size_px(runtime: &PageScriptHost, handle: DomHandle) -> Option<f64> {
     parse_css_px(&style_property_value(
         runtime,
         handle,
@@ -1367,7 +1367,7 @@ pub(super) fn inline_font_size_px(runtime: &JsContextHost, handle: DomHandle) ->
 }
 
 pub(super) fn computed_font_size_px_with_resolution(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     resolution: StyleResolutionContext<'_>,
 ) -> Option<f64> {
@@ -1375,7 +1375,7 @@ pub(super) fn computed_font_size_px_with_resolution(
 }
 
 fn computed_font_size_px_with_resolution_and_depth(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     resolution: StyleResolutionContext<'_>,
     depth: usize,
@@ -1398,7 +1398,7 @@ fn computed_font_size_px_with_resolution_and_depth(
 }
 
 fn resolve_computed_width(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     value: &str,
     context: StyleComputationContext,
@@ -1419,7 +1419,7 @@ fn resolve_computed_width(
 }
 
 fn resolve_computed_width_with_inline_fallback(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     value: &str,
     context: StyleComputationContext,
@@ -1441,7 +1441,7 @@ fn resolve_computed_width_with_inline_fallback(
 }
 
 fn element_has_no_used_box_size(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     resolution: StyleResolutionContext<'_>,
 ) -> bool {
@@ -1454,7 +1454,7 @@ fn element_has_no_used_box_size(
 }
 
 fn containing_block_width_with_resolution(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     context: StyleComputationContext,
     resolution: StyleResolutionContext<'_>,
@@ -1494,7 +1494,7 @@ fn containing_block_width_with_resolution(
 }
 
 fn resolve_computed_height(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     value: &str,
     context: StyleComputationContext,
@@ -1517,7 +1517,7 @@ fn resolve_computed_height(
 }
 
 fn resolve_computed_height_with_inline_fallback(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     value: &str,
     context: StyleComputationContext,
@@ -1559,7 +1559,7 @@ fn resolve_length_percentage_with_context(
 }
 
 fn containing_block_height(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     context: StyleComputationContext,
     resolution: StyleResolutionContext<'_>,
@@ -1602,7 +1602,7 @@ fn containing_block_height(
 }
 
 fn raw_computed_width_px(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     resolution: StyleResolutionContext<'_>,
 ) -> Option<f64> {
@@ -1610,7 +1610,7 @@ fn raw_computed_width_px(
 }
 
 fn raw_computed_width_percent(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     resolution: StyleResolutionContext<'_>,
 ) -> Option<f64> {
@@ -1618,7 +1618,7 @@ fn raw_computed_width_percent(
 }
 
 fn raw_computed_height_px(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     resolution: StyleResolutionContext<'_>,
 ) -> Option<f64> {
@@ -1626,7 +1626,7 @@ fn raw_computed_height_px(
 }
 
 fn raw_computed_height_percent(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     resolution: StyleResolutionContext<'_>,
 ) -> Option<f64> {
@@ -1741,7 +1741,7 @@ fn normalize_computed_color(value: &str) -> String {
 }
 
 pub(super) fn resolve_computed_color_property_value(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     property: &str,
     value: &str,

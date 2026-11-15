@@ -9,7 +9,6 @@
 
 //! Raster output and resource-budget regressions.
 
-use crate::MAX_PAINT_LAYER_DEPTH;
 use moli_layout::{
     PaintBlendMode, PaintBorderColors, PaintBrush, PaintCaptureSurface, PaintColor,
     PaintCompositeMode, PaintCornerRadii, PaintCornerRadius, PaintEdgeSizes, PaintFilter,
@@ -98,10 +97,7 @@ fn resource_budget_is_byte_based_instead_of_using_a_pixel_count_limit() {
         u64::from(dimensions.width) * u64::from(dimensions.height) > 16 * 1024 * 1024,
         "test surface must exceed the removed 16M-pixel limit"
     );
-    assert_eq!(
-        validate_resource_budget(dimensions, PaintStreamMetrics::default()),
-        Ok(())
-    );
+    assert_eq!(validate_resource_budget(dimensions, 0), Ok(()));
 }
 
 #[test]
@@ -131,18 +127,16 @@ fn rejects_nested_filters_over_transient_surface_budget() {
 }
 
 #[test]
-fn rejects_excessive_layer_depth_before_backend_creation() {
+fn deep_balanced_clip_scopes_pass_snapshot_validation() {
     let mut snapshot = snapshot(1, 1, 1.0);
-    for _ in 0..=MAX_PAINT_LAYER_DEPTH {
+    for _ in 0..4_097 {
         snapshot.push_fragment(PaintFragment::push_clip(PaintRect::new(0.0, 0.0, 1.0, 1.0)));
     }
-    assert_eq!(
-        raster_snapshot(&snapshot),
-        Err(PaintError::PaintLayerDepthBudgetExceeded {
-            depth: MAX_PAINT_LAYER_DEPTH + 1,
-            max_depth: MAX_PAINT_LAYER_DEPTH,
-        })
-    );
+    for _ in 0..4_097 {
+        snapshot.push_fragment(PaintFragment::PopLayer);
+    }
+
+    assert_eq!(validate_fragment_stream(&snapshot), Ok(0));
 }
 
 #[test]
@@ -254,6 +248,41 @@ fn snapshot_svg_resource_rasterizes_at_its_resolved_destination_size() {
     assert_eq!(pixel(&rendered, 17, 5), [0, 255, 0, 255]);
     drop(snapshot);
     assert_eq!(Arc::strong_count(&svg), 1);
+}
+
+#[test]
+fn transformed_svg_text_matches_equivalent_authored_coordinates() {
+    let render = |content: &str| {
+        let source = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="60" font-family="DejaVu Sans" font-size="18">{content}</svg>"#
+        );
+        let svg = Arc::new(moli_image::decode_svg_image(source.as_bytes()).unwrap());
+        let mut snapshot = snapshot(100, 60, 1.0);
+        let image = snapshot.add_svg_image(svg);
+        snapshot.push_fragment(PaintFragment::SvgImage(PaintSvgImage {
+            image,
+            destination: PaintRect::new(0.0, 0.0, 100.0, 60.0),
+            transform: PaintTransform2D::IDENTITY,
+        }));
+        raster_snapshot(&snapshot).unwrap()
+    };
+    let grouped = render(
+        r#"<g transform="translate(10 8)"><g transform="translate(10 7)"><text x="5" y="20">SVG</text></g></g>"#,
+    );
+    let positioned = render(r#"<text x="25" y="35">SVG</text>"#);
+    assert!(
+        positioned
+            .rgba
+            .chunks_exact(4)
+            .filter(|pixel| pixel[0] < 128)
+            .count()
+            > 20,
+        "the reference must contain glyph pixels"
+    );
+    assert_eq!(
+        grouped.rgba, positioned.rgba,
+        "flattened glyphs must apply their absolute ancestor transform exactly once"
+    );
 }
 
 #[test]

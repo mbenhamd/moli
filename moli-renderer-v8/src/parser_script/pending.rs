@@ -58,7 +58,7 @@ impl ParserPendingClassicScript {
         &mut self,
         load_id: Option<u64>,
         source_result: ParserClassicScriptSourceResult,
-    ) -> Option<Result<Option<SharedNavigationResponseResult>, String>> {
+    ) -> Option<Result<(), String>> {
         if !self
             .source_identity(load_id)
             .matches_source_result(&source_result)
@@ -219,8 +219,6 @@ enum ParserPendingClassicScriptReadiness {
         metadata: ParserClassicScriptMetadata,
         script_url: Url,
         error: String,
-        prepared_script: Option<Box<PreparedScript>>,
-        source_network_result: Option<SharedNavigationResponseResult>,
     },
 }
 
@@ -265,8 +263,6 @@ impl ParserPendingClassicScriptReadiness {
             metadata,
             script_url,
             error: error.into(),
-            prepared_script: None,
-            source_network_result: None,
         }
     }
 
@@ -341,13 +337,10 @@ impl ParserPendingClassicScriptReadiness {
         };
         let metadata = script.metadata();
         let script_url = script.script_url().clone();
-        let prepared_script = Some(Box::new(script.script().clone()));
         *self = Self::ExternalFailed {
             metadata,
             script_url,
             error,
-            prepared_script,
-            source_network_result: None,
         };
         true
     }
@@ -370,8 +363,6 @@ impl ParserPendingClassicScriptReadiness {
             metadata,
             script_url,
             error,
-            prepared_script,
-            source_network_result,
         } = self
         else {
             return None;
@@ -380,8 +371,6 @@ impl ParserPendingClassicScriptReadiness {
             metadata: *metadata,
             script_url: script_url.clone(),
             error: error.clone(),
-            prepared_script: prepared_script.clone(),
-            source_network_result: source_network_result.clone(),
         })
     }
 
@@ -450,27 +439,23 @@ impl ParserPendingClassicScriptReadiness {
         let mut script = script.clone();
         let metadata = script.metadata();
         let script_url = script.script_url().clone();
-        let prepared_script = script.script().clone();
-        let source_network_result = source_result.network_result().cloned();
-        match script.apply_source_result(source_identity.load_id(), source_result) {
-            Some(Ok(network_result)) => {
-                *self = Self::ExternalReady { script };
-                Some((
-                    ParserPendingClassicScriptNotification::SourceReady,
-                    network_result,
-                ))
-            }
-            Some(Err(error)) => {
-                *self = Self::ExternalFailed {
-                    metadata,
-                    script_url,
-                    error,
-                    prepared_script: Some(Box::new(prepared_script)),
-                    source_network_result,
-                };
-                Some((ParserPendingClassicScriptNotification::SourceFailed, None))
-            }
-            None => None,
-        }
+        let network_result = source_result.network_result().cloned();
+        let notification =
+            match script.apply_source_result(source_identity.load_id(), source_result) {
+                Some(Ok(())) => {
+                    *self = Self::ExternalReady { script };
+                    ParserPendingClassicScriptNotification::SourceReady
+                }
+                Some(Err(error)) => {
+                    *self = Self::ExternalFailed {
+                        metadata,
+                        script_url,
+                        error,
+                    };
+                    ParserPendingClassicScriptNotification::SourceFailed
+                }
+                None => return None,
+            };
+        Some((notification, network_result))
     }
 }

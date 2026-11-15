@@ -71,10 +71,18 @@ where
                 .scroll_proxy_boxes
                 .push(*box_id);
         }
+        for (index, object) in tree.object_geometry.iter().enumerate() {
+            outputs
+                .entry(object.source)
+                .or_default()
+                .object_geometry
+                .push(index);
+        }
         // Exact-size storage keeps the retained index within its bound.
         for output in outputs.values_mut() {
             output.fragments.shrink_to_fit();
             output.scroll_proxy_boxes.shrink_to_fit();
+            output.object_geometry.shrink_to_fit();
         }
         outputs.shrink_to_fit();
         Self { outputs }
@@ -98,7 +106,9 @@ where
                             .saturating_add(geometry.saturating_mul(layout_box.fragments.len())),
                     )
                 });
-        let keys = keys.saturating_add(tree.scroll_proxy_links.len());
+        let keys = keys
+            .saturating_add(tree.scroll_proxy_links.len())
+            .saturating_add(tree.object_geometry.len());
         // A shrunk table holds at most twice its entries, and never fewer
         // than seven.
         let table = keys
@@ -111,6 +121,11 @@ where
                 tree.scroll_proxy_links
                     .len()
                     .saturating_mul(std::mem::size_of::<LayoutOutputBoxId>()),
+            )
+            .saturating_add(
+                tree.object_geometry
+                    .len()
+                    .saturating_mul(std::mem::size_of::<usize>()),
             )
     }
 
@@ -136,6 +151,12 @@ where
                         .capacity()
                         .saturating_mul(std::mem::size_of::<LayoutOutputBoxId>()),
                 )
+                .saturating_add(
+                    output
+                        .object_geometry
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<usize>()),
+                )
         })
     }
 }
@@ -147,8 +168,8 @@ where
     /// Derives the source view from canonical box provenance.
     ///
     /// The first source query on this tree derives one provenance index in a
-    /// single walk over the boxes and scroll-proxy links; later queries look
-    /// the source up directly. The index is owned by this tree and dropped
+    /// single walk over the boxes, scroll-proxy links and SVG object geometry;
+    /// later queries look the source up directly. The index is owned by this tree and dropped
     /// with it, so no source table survives into the next pass, and a tree
     /// that is never queried by source never builds one. The returned IDs are
     /// copied into one short-lived query value.
@@ -500,7 +521,24 @@ where
                 self.coordinate_space(fragment.coordinate_space)
                     .map(|space| space.local_to_viewport.map_rect(fragment.rect))
             })
+            .chain(self.object_quads_for_output(output))
             .collect()
+    }
+
+    fn object_quads_for_output<'a>(
+        &'a self,
+        output: &'a LayoutNodeOutput,
+    ) -> impl Iterator<Item = LayoutQuad> + 'a {
+        output.object_geometry.iter().filter_map(|index| {
+            let object = self.object_geometry.get(*index)?;
+            let space = &self.boxes.get(object.owner.index())?.coordinate_space;
+            Some(LayoutQuad {
+                points: object
+                    .quad
+                    .points
+                    .map(|point| space.local_to_viewport.map_point(point)),
+            })
+        })
     }
 
     pub fn content_quads_for_source(&self, source: N) -> Vec<LayoutQuad> {
@@ -522,13 +560,15 @@ where
                 )
             })
             .filter_map(|fragment| {
+                // Chromium's content quads are border-box quads.
                 let rect = fragment
                     .box_model
-                    .map(|model| model.content)
+                    .map(|model| model.border)
                     .unwrap_or(fragment.rect);
                 self.coordinate_space(fragment.coordinate_space)
                     .map(|space| space.local_to_viewport.map_rect(rect))
             })
+            .chain(self.object_quads_for_output(output))
             .collect()
     }
 
@@ -1054,10 +1094,53 @@ mod tests {
                 fragment(valid_fragment, Some(valid_box_model)),
             ],
             Vec::new(),
+            Vec::new(),
             identity_space(None),
             Vec::new(),
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn object_geometry_uses_owner_coordinates_and_batch_source_provenance() {
+        let mut tree = inline_fragment_tree();
+        tree.boxes[0].coordinate_space.local_to_viewport =
+            LayoutTransform2D::translation(100.0, 200.0);
+        tree.object_geometry.push(crate::LayoutObjectGeometry {
+            source: 2,
+            owner: LayoutOutputBoxId::from_index(0),
+            quad: LayoutQuad {
+                points: [
+                    LayoutPoint::new(10.0, 20.0),
+                    LayoutPoint::new(40.0, 20.0),
+                    LayoutPoint::new(40.0, 60.0),
+                    LayoutPoint::new(10.0, 60.0),
+                ],
+            },
+        });
+        let expected = LayoutQuad {
+            points: [
+                LayoutPoint::new(110.0, 220.0),
+                LayoutPoint::new(140.0, 220.0),
+                LayoutPoint::new(140.0, 260.0),
+                LayoutPoint::new(110.0, 260.0),
+            ],
+        };
+        assert_eq!(tree.client_rects_for_source(2), vec![expected]);
+        assert_eq!(tree.content_quads_for_source(2), vec![expected]);
+        let mut outputs = HashMap::from([(1, None), (2, None), (3, None)]);
+        tree.source_outputs(&mut outputs);
+        assert_eq!(
+            tree.client_rects_for_output(outputs[&2].as_ref().unwrap()),
+            vec![expected]
+        );
+        assert_eq!(outputs[&2].as_ref().unwrap().principal_box, None);
+        assert!(outputs[&3].is_none());
+        assert_eq!(
+            tree.boxes.len(),
+            1,
+            "SVG objects must not become synthetic CSS boxes"
+        );
     }
 
     #[test]
@@ -1070,6 +1153,7 @@ mod tests {
             principal_box: Some(box_id),
             fragments: vec![skipped_fragment, valid_fragment],
             scroll_proxy_boxes: Vec::new(),
+            object_geometry: Vec::new(),
         };
 
         let geometry = tree
@@ -1303,6 +1387,7 @@ mod tests {
                 principal_box: Some(LayoutOutputBoxId::from_index(0)),
                 fragments: [0, 1, 3, 5, 3].map(LayoutFragmentId::from_index).to_vec(),
                 scroll_proxy_boxes: vec![LayoutOutputBoxId::from_index(2)],
+                object_geometry: Vec::new(),
             })
         );
         assert_eq!(tree.source_output(0), None);

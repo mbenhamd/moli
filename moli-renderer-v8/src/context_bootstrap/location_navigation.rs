@@ -455,6 +455,27 @@ fn navigate_location_object_with_source_element_and_child_navigate_event<'s>(
         {
             return;
         }
+        // Hyperlink fragment activation runs after navigate accepts it.
+        // Intercepted navigation controls its own scroll timing.
+        if source_element.is_some()
+            && runtime_window_is_global(scope, owner)
+            && !navigate_outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.intercepted)
+            && let Some(host_ptr) = context_host_ptr_from_global_bridge(scope)
+            && let Err(error) = crate::native_bridge::element::scroll_to_document_fragment_target(
+                scope, host_ptr, &resolved,
+            )
+        {
+            if let Some(message) = v8_string(
+                scope,
+                &format!("Layout failed while scrolling to fragment: {error}"),
+            ) {
+                let exception = v8::Exception::error(scope, message);
+                scope.throw_exception(exception);
+            }
+            return;
+        }
         if let Some(navigation) = navigation {
             cancel_pending_same_document_navigation_finishes(scope, navigation);
         }
@@ -827,7 +848,7 @@ pub(crate) fn sandbox_blocks_ancestor_or_top_navigation_from_source<'s>(
 }
 
 fn child_browsing_context_is_ancestor(
-    host: &JsContextHost,
+    host: &PageScriptHost,
     ancestor: crate::document_runtime::DomHandle,
     child: crate::document_runtime::DomHandle,
 ) -> bool {

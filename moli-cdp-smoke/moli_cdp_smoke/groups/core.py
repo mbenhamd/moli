@@ -177,7 +177,6 @@ async def run_core_group(state: SmokeState) -> None:
     for suffix in (
         "/backend-api/f/conversation/prepare",
         "/backend-api/f/conversation",
-        *(("/ws-chatgpt-live?conversation_id=smoke-live",) if is_moli_browser() else ()),
     ):
         request = next(
             (
@@ -195,17 +194,18 @@ async def run_core_group(state: SmokeState) -> None:
             live_loader_id,
             f"ChatGPT-like live channel subresource loaderId for {suffix}",
         )
-    if not is_moli_browser():
-        socket_url = fixture.replace("http:", "ws:", 1) + "/ws-chatgpt-live?conversation_id=smoke-live"
-        created = next((e for e in state.websocket_events if e["method"] == "Network.webSocketCreated"
-                        and e["params"].get("url") == socket_url), None)
-        if created is None:
-            raise SmokeError("missing live channel Network.webSocketCreated")
-        socket_id = created["params"]["requestId"]
-        await wait_until(lambda: any(e["method"] == "Network.webSocketHandshakeResponseReceived"
-                                    and e["params"].get("requestId") == socket_id
-                                    and e["params"].get("response", {}).get("status") == 101
-                                    for e in state.websocket_events), "live channel WebSocket handshake")
+    # WebSocket handshakes use their own Network.webSocket* family on both
+    # browsers (upstream fed98c8e1d), never an HTTP requestWillBeSent.
+    socket_url = fixture.replace("http:", "ws:", 1) + "/ws-chatgpt-live?conversation_id=smoke-live"
+    created = next((e for e in state.websocket_events if e["method"] == "Network.webSocketCreated"
+                    and e["params"].get("url") == socket_url), None)
+    if created is None:
+        raise SmokeError("missing live channel Network.webSocketCreated")
+    socket_id = created["params"]["requestId"]
+    await wait_until(lambda: any(e["method"] == "Network.webSocketHandshakeResponseReceived"
+                                and e["params"].get("requestId") == socket_id
+                                and e["params"].get("response", {}).get("status") == 101
+                                for e in state.websocket_events), "live channel WebSocket handshake")
     state.record("chatgpt_like_live_channel_dom")
 
     await page.goto(f"{fixture}/chatgpt-client-id-map-page", wait_until="load", timeout=10_000)

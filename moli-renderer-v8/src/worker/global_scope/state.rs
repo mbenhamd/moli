@@ -5,8 +5,17 @@ use crate::content_security_policy::ContentSecurityPolicy;
 use super::*;
 
 impl WorkerGlobalState {
+    pub(in crate::worker) fn subresource_interception_config(
+        &self,
+    ) -> SubresourceInterceptionClasses {
+        self.loader
+            .request_client()
+            .page_network_policy()
+            .subresource_interception_config()
+    }
+
     pub(crate) fn callback_invocation_allowed(&self) -> bool {
-        !self.termination_requested.load(Ordering::Acquire)
+        !self.termination_requested.load(Ordering::Acquire) && !self.network_cancel.is_cancelled()
     }
 
     pub(crate) fn callback_task_delivery_allowed(&self) -> bool {
@@ -15,6 +24,9 @@ impl WorkerGlobalState {
 }
 
 pub(crate) struct WorkerGlobalState {
+    pub(in crate::worker) interception_context:
+        Option<crate::network::interception_output::ResourceInterceptionContext>,
+    pub(in crate::worker) network_cancel: moli_fetch::FetchCancelHandle,
     pub(crate) message_source_security: crate::context_bootstrap::RuntimeMessageSourceSecurity,
     /// Components shared with Window runtimes, owned by this Worker run.
     pub(crate) common: Rc<crate::common_runtime::CommonRuntimeState>,
@@ -78,10 +90,6 @@ pub(crate) struct WorkerGlobalState {
     pub(in crate::worker) network_partition_key: Option<String>,
     /// COEP/DIP policy container state inherited by worker-owned subresource requests.
     pub(in crate::worker) policy_context: crate::types::SubresourcePolicyContext,
-    /// Fetch domain subresource interception inherited from the owning page/CDP session.
-    pub(in crate::worker) fetch_subresource_interception_enabled: bool,
-    pub(in crate::worker) fetch_subresource_interception_resource_type:
-        Option<SubresourceResourceType>,
     /// Async fetch completions routed back onto the worker event loop.
     pub(in crate::worker) fetch_completion_tx: mpsc::UnboundedSender<WorkerFetchEvent>,
     /// Promise resolvers pending async fetch completion.

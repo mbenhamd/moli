@@ -72,12 +72,13 @@ pub use crate::protocol_types::{
     ScriptRunOutcome, ScriptSkipReason, ScriptSourceKind, SubresourceAuthChallenge,
     SubresourceAuthCredentials, SubresourceAuthScheme, SubresourceAuthTarget,
     SubresourceBodyFinished, SubresourceBodyFinishedResult, SubresourceDataReceived,
-    SubresourceEventSourceMessageReceived, SubresourceJsonPathEquals, SubresourceJsonPathRegex,
-    SubresourceNetworkOutcome, SubresourceNetworkRecord, SubresourceNetworkRequestHandle,
-    SubresourceRequestInitiatorType, SubresourceRequestStarted, SubresourceResourceType,
-    SubresourceResponseBody, SubresourceResponseBodyWriter, SubresourceResponseStarted,
-    SubresourceResponseWaitCriteria, WebSocketFrameDirection, WebSocketFrameOpcode,
-    WebSocketLifecycleEvent, WebSocketLifecycleKind, WebSocketNetworkEvent,
+    SubresourceEventSourceMessageReceived, SubresourceInterceptionClasses,
+    SubresourceJsonPathEquals, SubresourceJsonPathRegex, SubresourceNetworkOutcome,
+    SubresourceNetworkRecord, SubresourceNetworkRequestHandle, SubresourceRequestInitiatorType,
+    SubresourceRequestStarted, SubresourceResourceType, SubresourceResponseBody,
+    SubresourceResponseBodyWriter, SubresourceResponseStarted, SubresourceResponseWaitCriteria,
+    WebSocketFrameDirection, WebSocketFrameOpcode, WebSocketLifecycleEvent, WebSocketLifecycleKind,
+    WebSocketNetworkEvent,
 };
 
 pub(super) enum PendingSubresourceContinuation {
@@ -245,6 +246,7 @@ impl PendingSubresourceContinuation {
 }
 
 pub(super) struct PendingWindowFetchContinuation {
+    pub(super) intercepted_request: Option<Box<moli_fetch::Request>>,
     promise: PendingWindowFetchPromise,
     resource_timing: crate::context_bootstrap::FetchResourceTiming,
     keepalive: bool,
@@ -268,6 +270,7 @@ impl PendingWindowFetchContinuation {
         csp_report_context: crate::network_host::WindowCspReportRequestContext,
     ) -> Self {
         Self {
+            intercepted_request: None,
             promise: PendingWindowFetchPromise::Active(resolver),
             resource_timing,
             keepalive,
@@ -275,6 +278,22 @@ impl PendingWindowFetchContinuation {
             connect_policy,
             csp_report_context,
         }
+    }
+
+    pub(super) fn with_intercepted_request(mut self, request: moli_fetch::Request) -> Self {
+        self.intercepted_request = Some(Box::new(request));
+        self
+    }
+
+    pub(super) fn initial_request_url<'a>(&'a self, fallback: &'a Url) -> &'a Url {
+        self.intercepted_request
+            .as_deref()
+            .map_or(fallback, |request| {
+                request
+                    .redirect_chain()
+                    .first()
+                    .map_or(&request.url, |redirect| &redirect.from_url)
+            })
     }
 
     pub(super) fn cache_mode(&self) -> moli_fetch::RequestCacheMode {
@@ -886,6 +905,13 @@ pub(crate) enum AsyncSubresourceFetchEventTarget {
 
 #[derive(Debug)]
 pub(super) enum AsyncSubresourceFetchEvent {
+    InterceptionOutputReady(crate::network::interception_output::InterceptionOutputWake),
+    InterceptedXhrCompleted(Box<crate::network_host::controlled_xhr::XhrLoadResult>),
+    InterceptedXhrStreamingStarted {
+        info: Box<PendingSubresourceFetchInfo>,
+        started: Box<AsyncSubresourceStreamingStarted>,
+        body: crate::network::ResourceInterceptionBody,
+    },
     Completion(Box<AsyncSubresourceFetchCompletion>),
     ObservedNetworkRecord(Box<SubresourceNetworkRecord>),
     StreamingStarted(Box<AsyncSubresourceStreamingStarted>),
@@ -896,11 +922,22 @@ pub(super) enum AsyncSubresourceFetchEvent {
 impl AsyncSubresourceFetchEvent {
     pub(crate) fn target(&self) -> AsyncSubresourceFetchEventTarget {
         match self {
+            Self::InterceptedXhrCompleted(completed) => {
+                AsyncSubresourceFetchEventTarget::Completion {
+                    internal_id: completed.info.internal_id,
+                }
+            }
             Self::Completion(completion) => AsyncSubresourceFetchEventTarget::Completion {
                 internal_id: completion.internal_id,
             },
-            Self::ObservedNetworkRecord(_) => {
+            Self::InterceptionOutputReady(_) | Self::ObservedNetworkRecord(_) => {
                 AsyncSubresourceFetchEventTarget::ObservedNetworkRecord
+            }
+            Self::InterceptedXhrStreamingStarted { started, .. } => {
+                AsyncSubresourceFetchEventTarget::StreamingStart {
+                    internal_id: started.internal_id,
+                    body_source_id: started.body_source_id,
+                }
             }
             Self::StreamingStarted(started) => AsyncSubresourceFetchEventTarget::StreamingStart {
                 internal_id: started.internal_id,
@@ -1052,6 +1089,42 @@ pub(super) struct ServiceWorkerControllerChangeCompletion {
     pub(super) target: ServiceWorkerWindowClientTarget,
 }
 
+/// Page-owned streams capture locally. Native XHR only tracks delivery and
+/// shares the transport capture, including on cancellation before EOF.
+pub(super) enum StreamingSubresourceBody {
+    Local(SubresourceResponseBodyWriter),
+    Native {
+        body: crate::network::ResourceInterceptionBody,
+        delivered: usize,
+    },
+}
+
+impl StreamingSubresourceBody {
+    pub(super) fn new(
+        disk_pool: Option<moli_disk_pool::DiskPool>,
+        native: Option<crate::network::ResourceInterceptionBody>,
+    ) -> Self {
+        match native {
+            Some(body) => Self::Native { body, delivered: 0 },
+            None => Self::Local(SubresourceResponseBodyWriter::with_disk_pool(disk_pool)),
+        }
+    }
+
+    pub(super) fn append(&mut self, bytes: &[u8]) {
+        match self {
+            Self::Local(writer) => writer.append(bytes),
+            Self::Native { delivered, .. } => *delivered = delivered.saturating_add(bytes.len()),
+        }
+    }
+
+    pub(super) fn finish(self) -> SubresourceResponseBody {
+        match self {
+            Self::Local(writer) => writer.finish(),
+            Self::Native { body, delivered } => body.finish_capture(delivered),
+        }
+    }
+}
+
 pub(super) struct StreamingSubresourceFetchState {
     pub(super) response_filter: Option<AsyncSubresourceFetchResponseFilter>,
     pub(super) pending: PendingSubresourceFetchState,
@@ -1062,7 +1135,7 @@ pub(super) struct StreamingSubresourceFetchState {
     pub(super) body_source_id: NetworkBodySourceId,
     pub(super) head: moli_fetch::ResponseHead,
     pub(super) network_request_headers: Option<Vec<(String, String)>>,
-    pub(super) body_writer: SubresourceResponseBodyWriter,
+    pub(super) body_capture: StreamingSubresourceBody,
     pub(super) event_source_parser: Option<crate::network_host::EventSourceParser>,
     pub(super) xhr_response: Option<XhrStreamingResponseState>,
 }

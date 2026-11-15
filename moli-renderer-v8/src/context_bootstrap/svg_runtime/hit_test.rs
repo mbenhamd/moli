@@ -21,7 +21,7 @@ use super::builders::{
 };
 use super::screen::{svg_nested_viewport_transform, svg_view_box_transform};
 use crate::document_runtime::DomHandle;
-use crate::native_bridge::JsContextHost;
+use crate::native_bridge::PageScriptHost;
 use crate::native_bridge::document::SVG_NS;
 
 /// The geometry model cannot answer exactly; keep the outer `<svg>` result.
@@ -42,7 +42,7 @@ pub(crate) struct Coarse;
 /// viewport clipping. Shapes test their exact fill and their stroke (width,
 /// caps, dashing, `pathLength`). Painted text tests its SVG bounding box.
 pub(crate) fn svg_content_hits_at_point(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     root: DomHandle,
     content_box: [f64; 4],
     point: [f64; 2],
@@ -104,7 +104,7 @@ enum Content {
 /// a transform or a length the model does not reproduce. Stops at the first
 /// such node.
 fn eligible_children(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     parent: DomHandle,
     viewport: Option<(f64, f64)>,
     content: Content,
@@ -143,7 +143,7 @@ fn eligible_children(
 
 /// `<defs>` content is never rendered in place; only paint servers, which
 /// fills and strokes reference, are on the allowlist.
-fn eligible_definitions(runtime: &JsContextHost, defs: DomHandle) -> Result<(), Coarse> {
+fn eligible_definitions(runtime: &PageScriptHost, defs: DomHandle) -> Result<(), Coarse> {
     for child in runtime.dom_host().child_handles(defs).collect::<Vec<_>>() {
         let Some(node) = runtime.dom_host().node(child) else {
             continue;
@@ -162,7 +162,7 @@ fn eligible_definitions(runtime: &JsContextHost, defs: DomHandle) -> Result<(), 
 }
 
 fn eligible_element(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     local_name: &str,
     viewport: Option<(f64, f64)>,
@@ -218,7 +218,7 @@ struct Scope {
 }
 
 struct Walk<'a> {
-    runtime: &'a JsContextHost,
+    runtime: &'a PageScriptHost,
     point: [f64; 2],
     first_only: bool,
     hits: Vec<DomHandle>,
@@ -375,13 +375,13 @@ impl Walk<'_> {
 }
 
 fn computed_values(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
 ) -> Option<style::servo_arc::Arc<ComputedValues>> {
     crate::native_bridge::element::ComputedStyleRead::new(runtime, handle).computed_values()
 }
 
-fn bbox_contains(runtime: &JsContextHost, handle: DomHandle, local: SvgGeometryPoint) -> bool {
+fn bbox_contains(runtime: &PageScriptHost, handle: DomHandle, local: SvgGeometryPoint) -> bool {
     svg_bbox_for_handle(
         runtime,
         handle,
@@ -400,7 +400,7 @@ fn bbox_contains(runtime: &JsContextHost, handle: DomHandle, local: SvgGeometryP
 /// Clipping, masking, filters, markers and `vector-effect` change what is
 /// painted or hit in ways the model does not reproduce.
 fn has_unmodelled_effects(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     computed: &ComputedValues,
 ) -> bool {
@@ -511,7 +511,7 @@ fn skip_whitespace_and_comments(bytes: &[u8], mut index: usize) -> usize {
     }
 }
 
-fn element_declares_svg_pointer_events(runtime: &JsContextHost, handle: DomHandle) -> bool {
+fn element_declares_svg_pointer_events(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     let host = runtime.dom_host();
     host.get_attribute(handle, "pointer-events")
         .is_some_and(|value| is_unmodelled_pointer_events_keyword(value.trim()))
@@ -527,7 +527,7 @@ fn element_declares_svg_pointer_events(runtime: &JsContextHost, handle: DomHandl
 /// from the current attribute alike, so the runtime remembers it instead.
 /// Once the runtime has noted one, nothing is read; otherwise the current
 /// attribute is scanned in place, without a copy.
-pub(crate) fn note_inline_style_write(runtime: &JsContextHost, handle: DomHandle, declares: bool) {
+pub(crate) fn note_inline_style_write(runtime: &PageScriptHost, handle: DomHandle, declares: bool) {
     if runtime.svg_pointer_events_keyword_seen() {
         return;
     }
@@ -560,7 +560,7 @@ pub(crate) fn note_cssom_write(scope: &mut v8::PinScope<'_, '_>, declares: bool)
 /// dropped before any computed value can show it, so its presence in the
 /// document, or in any author text the runtime parsed or the CSSOM wrote
 /// whose text is gone, makes every query coarse.
-fn document_declares_svg_pointer_events(runtime: &JsContextHost, root: DomHandle) -> bool {
+fn document_declares_svg_pointer_events(runtime: &PageScriptHost, root: DomHandle) -> bool {
     if runtime.svg_pointer_events_keyword_seen() {
         return true;
     }
@@ -583,7 +583,7 @@ fn document_declares_svg_pointer_events(runtime: &JsContextHost, root: DomHandle
 /// initial value. An author `transform-origin: 50% 50%` is
 /// indistinguishable from that and is read as `0 0`.
 fn transform_is_the_attribute(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     computed: &ComputedValues,
 ) -> bool {
@@ -646,7 +646,7 @@ fn matrices_agree(left: SvgMatrixComponents, right: SvgMatrixComponents) -> bool
 /// computed path, so CSS `d` that differs from the attribute, or `d: none`
 /// over a non-empty attribute, is not modelled.
 fn path_data_is_the_attribute(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     computed: &ComputedValues,
 ) -> bool {
@@ -686,7 +686,7 @@ struct NestedSvg {
 /// viewport by default, but this stylesheet set computes `overflow:
 /// visible` for it, which is then indistinguishable from an author's.
 fn nested_svg(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     svg: DomHandle,
     computed: &ComputedValues,
 ) -> Result<NestedSvg, Coarse> {
@@ -756,7 +756,7 @@ impl NestedSvg {
 /// Whether a `fill` or `stroke` paints. An unresolved same-document paint
 /// server uses its fallback, and `none` without one.
 fn paint_is_painted(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     paint: &style::values::computed::SVGPaint,
 ) -> Result<bool, Coarse> {
@@ -776,7 +776,7 @@ fn paint_is_painted(
 }
 
 fn paint_server_resolves(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     url: &style::values::computed::url::ComputedUrl,
 ) -> Result<bool, Coarse> {
@@ -844,7 +844,7 @@ impl Lengths {
     /// parse (which may be valid CSS lengths), are not modelled.
     fn attribute(
         self,
-        runtime: &JsContextHost,
+        runtime: &PageScriptHost,
         handle: DomHandle,
         attribute: &str,
         axis: Axis,
@@ -866,7 +866,7 @@ impl Lengths {
 /// Shape geometry from the computed geometry properties, which carry the
 /// presentation attributes and any CSS that overrides them.
 fn geometry_element(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     local_name: &str,
     computed: &ComputedValues,
@@ -976,7 +976,7 @@ fn stroke_dashes(computed: &ComputedValues, lengths: Lengths) -> Result<Vec<f64>
 
 /// A positive `pathLength`, which recalibrates dashing. Zero or an invalid
 /// value is not modelled.
-fn path_length(runtime: &JsContextHost, handle: DomHandle) -> Result<Option<f64>, Coarse> {
+fn path_length(runtime: &PageScriptHost, handle: DomHandle) -> Result<Option<f64>, Coarse> {
     let Some(raw) = runtime.dom_host().get_attribute(handle, "pathLength") else {
         return Ok(None);
     };

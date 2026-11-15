@@ -25,6 +25,7 @@ from .groups.agent_browser import run_agent_browser_group
 from .groups.agent_episode import run_agent_episode_group
 from .groups.browser_semantics import run_browser_semantics_group
 from .groups.cdp_ordering import run_cdp_ordering_group
+from .groups.protocol_progress import run_protocol_progress_group
 from .groups.classic_scrollbar import run_classic_scrollbar_group
 from .groups.cdp_use import run_cdp_use_group
 from .groups.chrome_remote_interface import run_chrome_remote_interface_group
@@ -73,8 +74,10 @@ from .groups.protocol_regressions import (
 )
 from .groups.proxy_auth import run_proxy_auth_group
 from .groups.puppeteer import run_puppeteer_group
+from .groups.protocol_schema import run_protocol_schema_group
 from .groups.stagehand import run_stagehand_group
 from .groups.svg_rect import run_svg_rect_group
+from .groups.text_input import run_text_input_group
 from .groups.target_semantics import run_target_semantics_group
 from .groups.target_lifecycle import run_target_lifecycle_group
 from .groups.tracing import run_raw_tracing_group, run_tracing_group
@@ -125,6 +128,12 @@ async def _await_group(group: SmokeGroup, awaitable: Awaitable[None]) -> None:
 
 
 RAW_GROUPS: tuple[SmokeGroup, ...] = (
+    SmokeGroup(
+        "protocol-progress",
+        "Session-local navigation queues and unsolicited output from independent pages during a modal dialog.",
+        "raw",
+        run_protocol_progress_group,
+    ),
     SmokeGroup(
         "lazy-main-world",
         "Chromium-calibrated native DOM access before Runtime, first script/Inspector activation, preload ordering, and scriptless navigation/close.",
@@ -397,6 +406,12 @@ PAGE_GROUPS: tuple[SmokeGroup, ...] = (
 
 BROWSER_GROUPS: tuple[SmokeGroup, ...] = (
     SmokeGroup(
+        "text-input",
+        "Native legacy TextEvent order, cancellation, payload, focus and target lifetime.",
+        "browser",
+        run_text_input_group,
+    ),
+    SmokeGroup(
         "fetch-resource-dispatch",
         "SW routing and page policy after automatic and explicit resource continuation.",
         "browser",
@@ -472,6 +487,12 @@ BROWSER_GROUPS: tuple[SmokeGroup, ...] = (
 )
 
 MANAGED_EXTERNAL_GROUPS: tuple[SmokeGroup, ...] = (
+    SmokeGroup(
+        "protocol-schema",
+        "Generate client methods and event subscriptions from the live /json/protocol schema.",
+        "external",
+        run_protocol_schema_group,
+    ),
     SmokeGroup(
         "puppeteer",
         "Puppeteer over CDP workflows using the smoke project's pinned puppeteer-core module.",

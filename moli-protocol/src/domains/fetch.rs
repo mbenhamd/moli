@@ -1,3 +1,4 @@
+use crate::conn::DrainedFetchRequests;
 use anyhow::Result;
 
 mod auth;
@@ -105,7 +106,7 @@ pub(in crate::domains) fn prepare_target_close(
 pub(in crate::domains) fn prepare_page_close(
     conn: &mut CdpConnection,
     owner: &CommandOwnerScope,
-    pending: FetchDisablePendingState,
+    pending: DrainedFetchRequests,
 ) -> PreparedFetchCleanup {
     PreparedFetchCleanup::new(
         conn,
@@ -120,13 +121,13 @@ pub(in crate::domains) fn prepare_page_close(
 pub(in crate::domains) fn prepare_browser_context_disposal(
     conn: &mut CdpConnection,
     owner: &CommandOwnerScope,
-    mut pending: FetchDisablePendingState,
+    mut pending: DrainedFetchRequests,
 ) -> PreparedFetchCleanup {
     // The renderer lifetime retires subresource promises without synthetic
     // loadingFailed events; only main-document commands still owe terminals.
-    pending.3.clear();
-    pending.4.clear();
-    pending.5.clear();
+    pending.subresource_requests.clear();
+    pending.subresource_auth_requests.clear();
+    pending.subresource_responses.clear();
     PreparedFetchCleanup::new(
         conn,
         owner,
@@ -140,7 +141,7 @@ pub(in crate::domains) fn prepare_browser_context_disposal(
 pub(in crate::domains) fn prepare_page_stop_loading(
     conn: &mut CdpConnection,
     owner: &CommandOwnerScope,
-    pending: FetchDisablePendingState,
+    pending: DrainedFetchRequests,
 ) -> PreparedFetchCleanup {
     PreparedFetchCleanup::new(
         conn,
@@ -155,7 +156,7 @@ pub(in crate::domains) fn prepare_page_stop_loading(
 pub(in crate::domains) fn prepare_page_crash(
     conn: &mut CdpConnection,
     owner: &CommandOwnerScope,
-    pending: FetchDisablePendingState,
+    pending: DrainedFetchRequests,
 ) -> PreparedFetchCleanup {
     PreparedFetchCleanup::new(
         conn,
@@ -189,7 +190,7 @@ pub(crate) enum FetchCommandCompletion {
     Workflow(crate::conn::PreparedCommandWorkflow),
 }
 
-enum PageFetchCompletion {
+enum ResourceFetchCompletion {
     Enable,
     AddNetworkIntercept {
         intercept_id: String,
@@ -221,9 +222,9 @@ enum PendingFetchCommandOperation {
         pending: Box<document_navigation::PendingDocumentNavigation>,
         termination: Option<navigation::NavigationTermination>,
     },
-    Page {
-        pending: moli_core::page::PendingPageCommand,
-        finish: PageFetchCompletion,
+    Resource {
+        pending: moli_core::page::PendingResourceCommand,
+        finish: ResourceFetchCompletion,
     },
     MaterializeResponseBody(Box<body_stream::PreparedFetchBodyRead>),
 }
@@ -234,21 +235,12 @@ enum CompletedFetchCommandOperation {
         completed: Box<document_navigation::CompletedDocumentNavigation>,
         termination: Option<navigation::NavigationTermination>,
     },
-    Page {
-        completed: Box<Result<moli_core::page::CompletedPageCommand>>,
-        finish: PageFetchCompletion,
+    Resource {
+        completed: Box<Result<moli_core::page::CompletedResourceCommand>>,
+        finish: ResourceFetchCompletion,
     },
     MaterializeResponseBody(Box<body_stream::CompletedFetchBodyRead>),
 }
-
-type FetchDisablePendingState = (
-    Vec<crate::conn::PendingFetchNavigation>,
-    Vec<crate::conn::PendingFetchAuthNavigation>,
-    Vec<crate::conn::PausedDocumentTransfer>,
-    Vec<(String, crate::conn::PendingSubresourceFetchRequest)>,
-    Vec<(String, crate::conn::PendingSubresourceFetchAuthRequest)>,
-    Vec<(String, crate::conn::PendingSubresourceFetchResponseRequest)>,
-);
 
 #[derive(Default)]
 pub(super) struct FetchCommandOutput {
@@ -360,8 +352,8 @@ impl PendingFetchCommandDispatch {
                     termination,
                 }
             }
-            PendingFetchCommandOperation::Page { pending, finish } => {
-                CompletedFetchCommandOperation::Page {
+            PendingFetchCommandOperation::Resource { pending, finish } => {
+                CompletedFetchCommandOperation::Resource {
                     completed: Box::new(pending.wait().await),
                     finish,
                 }
@@ -555,9 +547,9 @@ fn start_enable_command(conn: &mut CdpConnection, cmd: &Cmd<'_>) -> FetchCommand
             conn,
             cmd.id,
             cmd.session_id,
-            PendingFetchCommandOperation::Page {
-                pending,
-                finish: PageFetchCompletion::Enable,
+            PendingFetchCommandOperation::Resource {
+                pending: pending.into(),
+                finish: ResourceFetchCompletion::Enable,
             },
         )),
         Ok(None) => FetchCommandTaskStep::Complete(CommandOutputPlan::success()),
@@ -602,9 +594,9 @@ fn start_devtools_add_network_intercept_command(
             FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new_for_owner(
                 command_id,
                 owner.clone(),
-                PendingFetchCommandOperation::Page {
-                    pending,
-                    finish: PageFetchCompletion::AddNetworkIntercept {
+                PendingFetchCommandOperation::Resource {
+                    pending: pending.into(),
+                    finish: ResourceFetchCompletion::AddNetworkIntercept {
                         intercept_id: command.intercept_id.as_str().to_owned(),
                     },
                 },
@@ -639,9 +631,9 @@ fn start_devtools_remove_network_intercept_command(
             FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new_for_owner(
                 command_id,
                 owner.clone(),
-                PendingFetchCommandOperation::Page {
-                    pending,
-                    finish: PageFetchCompletion::RemoveNetworkIntercept,
+                PendingFetchCommandOperation::Resource {
+                    pending: pending.into(),
+                    finish: ResourceFetchCompletion::RemoveNetworkIntercept,
                 },
             ))
         }
@@ -735,18 +727,18 @@ pub(crate) fn complete_pending_fetch_command(
         }
         CompletedFetchCommandOperation::Cleanup(cleanup) => cleanup.into_command_plan(),
         CompletedFetchCommandOperation::MaterializeResponseBody(read) => read.finish(conn, &owner),
-        CompletedFetchCommandOperation::Page { completed, finish } => {
-            complete_page_fetch_command(conn, &owner, *completed, finish)
+        CompletedFetchCommandOperation::Resource { completed, finish } => {
+            complete_resource_fetch_command(conn, &owner, *completed, finish)
         }
     };
     FetchCommandCompletion::Complete(plan)
 }
 
-fn complete_page_fetch_command(
+fn complete_resource_fetch_command(
     conn: &mut CdpConnection,
     owner: &CommandOwnerScope,
-    completed: Result<moli_core::page::CompletedPageCommand>,
-    finish: PageFetchCompletion,
+    completed: Result<moli_core::page::CompletedResourceCommand>,
+    finish: ResourceFetchCompletion,
 ) -> CommandOutputPlan {
     let mut output = FetchCommandOutput::default();
     if let Ok(completed) = &completed
@@ -755,7 +747,7 @@ fn complete_page_fetch_command(
         output.set_renderer_output_predecessor(predecessor);
     }
     match finish {
-        PageFetchCompletion::Enable | PageFetchCompletion::RemoveNetworkIntercept => {
+        ResourceFetchCompletion::Enable | ResourceFetchCompletion::RemoveNetworkIntercept => {
             output.extend_plan_as_command_response(complete_fetch_config_update_command(
                 conn,
                 owner,
@@ -763,7 +755,7 @@ fn complete_page_fetch_command(
                 AutomationResult::Empty,
             ));
         }
-        PageFetchCompletion::AddNetworkIntercept { intercept_id } => {
+        ResourceFetchCompletion::AddNetworkIntercept { intercept_id } => {
             let result = AutomationResult::AddNetworkIntercept(DevToolsAddNetworkInterceptResult {
                 intercept_id: intercept_id.into(),
             });
@@ -771,19 +763,19 @@ fn complete_page_fetch_command(
                 conn, owner, completed, result,
             ));
         }
-        PageFetchCompletion::ContinueRequest { state } => {
+        ResourceFetchCompletion::ContinueRequest { state } => {
             commands::complete_continue_request_command(conn, completed, *state, &mut output);
         }
-        PageFetchCompletion::ContinueWithAuth { state } => {
+        ResourceFetchCompletion::ContinueWithAuth { state } => {
             auth::complete_continue_with_auth_command(conn, owner, completed, *state, &mut output);
         }
-        PageFetchCompletion::FailRequest { state } => {
+        ResourceFetchCompletion::FailRequest { state } => {
             commands::complete_fail_request_command(conn, owner, completed, *state, &mut output);
         }
-        PageFetchCompletion::FulfillRequest { state } => {
+        ResourceFetchCompletion::FulfillRequest { state } => {
             commands::complete_fulfill_request_command(conn, owner, completed, *state, &mut output);
         }
-        PageFetchCompletion::ContinueResponse { state } => {
+        ResourceFetchCompletion::ContinueResponse { state } => {
             commands::complete_continue_response_command(
                 conn,
                 owner,
@@ -792,7 +784,7 @@ fn complete_page_fetch_command(
                 &mut output,
             );
         }
-        PageFetchCompletion::WebSocket { operation } => {
+        ResourceFetchCompletion::WebSocket { operation } => {
             commands::complete_websocket_page_command(
                 conn,
                 owner,
@@ -808,13 +800,14 @@ fn complete_page_fetch_command(
 fn complete_fetch_config_update_command(
     conn: &mut CdpConnection,
     owner: &CommandOwnerScope,
-    completed: Result<moli_core::page::CompletedPageCommand>,
+    completed: Result<moli_core::page::CompletedResourceCommand>,
     result: AutomationResult,
 ) -> CommandOutputPlan {
-    let completion = match completed {
-        Ok(completion) => completion,
-        Err(error) => return CommandOutputPlan::error(-32000, format!("{error:#}")),
-    };
+    let completion =
+        match completed.and_then(moli_core::page::CompletedResourceCommand::into_page_command) {
+            Ok(completion) => completion,
+            Err(error) => return CommandOutputPlan::error(-32000, format!("{error:#}")),
+        };
     // Fetch policy belongs to the target and may finish updating while a
     // navigation is replacing its document.
     let Some(page) = conn.loaded_page_mut_for_owner(owner) else {

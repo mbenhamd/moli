@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Awaitable
 
 from . import SmokeState
@@ -151,6 +152,7 @@ async def run_page_network_group(state: SmokeState) -> None:
             await scenario(isolated)
     await _verify_redirect_chain_network_events(state)
     await _verify_parser_script_network_events(state)
+    await _verify_intercepted_parser_script_networkidle(state)
     await _verify_parser_stylesheet_network_events(state)
     await _verify_parser_stylesheet_network_events_without_script_gate(state)
     await _verify_chromium_resource_type_network_matrix(state)
@@ -354,6 +356,33 @@ async def run_download_group(state: SmokeState) -> None:
     download_path = await download.path()
     assert_equal(Path(download_path).read_text(encoding="utf-8"), "download contents", "download artifact contents")
     state.record("download_event_and_artifact")
+
+    # Ordinary attachment links first start a Document navigation. Use real
+    # pointer input so Playwright also waits for that navigation to terminate.
+    for selector, name in [
+        ("#attachment-download", "attachment_download_mouse_click"),
+        ("#redirect-download", "redirect_attachment_download_mouse_click"),
+    ]:
+        source_url = f"{fixture}/download-page"
+        await page.goto(source_url, wait_until="load", timeout=10_000)
+        await page.evaluate("globalThis.__attachmentDownloadSource = {}")
+        async with page.expect_download(timeout=10_000) as attachment_info:
+            await page.locator(selector).click(timeout=10_000)
+        attachment = await attachment_info.value
+        assert_equal(attachment.suggested_filename, "smoke-download.txt", f"{name} filename")
+        assert_equal(attachment.url, f"{fixture}/download", f"{name} final URL")
+        with TemporaryDirectory(prefix="moli-attachment-") as directory:
+            saved_path = Path(directory) / "saved.txt"
+            await attachment.save_as(saved_path)
+            assert_equal(saved_path.read_bytes(), b"download contents", f"{name} saved contents")
+        assert_equal(await attachment.failure(), None, f"{name} completed download")
+        assert_equal(page.url, source_url, f"{name} retained Document URL")
+        assert_equal(
+            await page.evaluate("typeof globalThis.__attachmentDownloadSource"),
+            "object",
+            f"{name} retained source realm",
+        )
+        state.record(name)
 
     await page.goto(f"{fixture}/download-page", wait_until="load", timeout=10_000)
     async with page.expect_download(timeout=10_000) as slow_download_info:
@@ -1778,6 +1807,62 @@ async def _verify_parser_script_network_events(state: SmokeState) -> None:
     state.record("parser_script_network_events")
 
 
+async def _verify_intercepted_parser_script_networkidle(state: SmokeState) -> None:
+    script_body = 'globalThis.__smokeParserScriptValue = "parser script loaded";'
+    for action in ("fulfill", "continue", "abort", "fulfill_http_error"):
+        async with isolated_network_page(state) as isolated:
+            page = isolated.page
+            script_url = f"{state.fixture}/parser-script.js"
+            handled: list[Any] = []
+            finished: list[Any] = []
+            failed: list[Any] = []
+            page.on("requestfinished", lambda request: finished.append(request))
+            page.on("requestfailed", lambda request: failed.append(request))
+
+            async def handle(route: Any) -> None:
+                handled.append(route.request)
+                if action in ("fulfill", "fulfill_http_error"):
+                    await route.fulfill(status=404 if action == "fulfill_http_error" else 200,
+                                        content_type="text/javascript", body=script_body)
+                elif action == "continue":
+                    await route.continue_()
+                else:
+                    await route.abort("blockedbyclient")
+
+            await page.route("**/parser-script.js", handle)
+            event_start = len(isolated.subresource_events)
+            # No evaluation or polling command after the route resumes: the
+            # original Network request must finish autonomously so Playwright
+            # can remove it from its inflight set and observe networkidle.
+            await page.goto(f"{state.fixture}/parser-script-page", wait_until="networkidle", timeout=10_000)
+            assert_equal(len(handled), 1, f"{action} parser script route count")
+            expect_failure = action in ("abort", "fulfill_http_error")
+            terminals = failed if expect_failure else finished
+            assert_equal(terminals.count(handled[0]), 1, f"{action} original Playwright request terminal")
+            events = isolated.subresource_events[event_start:]
+            requests = [event for event in events if event["method"] == "Network.requestWillBeSent"
+                        and event["params"].get("request", {}).get("url") == script_url]
+            assert_equal(len(requests), 1, f"{action} parser script Network request count")
+            request_id = requests[0]["params"]["requestId"]
+            network_terminals = [event for event in events
+                                 if event["method"] in ("Network.loadingFinished", "Network.loadingFailed")
+                                 and event["params"].get("requestId") == request_id]
+            assert_equal(len(network_terminals), 1, f"{action} original Network request terminal count")
+            expected = "Network.loadingFailed" if expect_failure else "Network.loadingFinished"
+            assert_equal(network_terminals[0]["method"], expected, f"{action} parser script terminal")
+            if action == "fulfill_http_error":
+                responses = [event for event in events if event["method"] == "Network.responseReceived"
+                             and event["params"].get("requestId") == request_id]
+                assert_equal(len(responses), 1, "HTTP error script response count")
+                assert_equal(responses[0]["params"]["response"]["status"], 404, "HTTP error script status")
+                assert_equal(network_terminals[0]["params"]["errorText"], "net::ERR_ABORTED", "HTTP error script failure")
+                assert_equal(network_terminals[0]["params"]["canceled"], True, "HTTP error script canceled")
+            if not expect_failure:
+                body = await isolated.cdp.send("Network.getResponseBody", {"requestId": request_id})
+                assert_equal(body.get("body"), script_body, f"{action} parser script response body")
+            state.record(f"route_{action}_parser_script_networkidle")
+
+
 async def _verify_parser_stylesheet_network_events(state: SmokeState) -> None:
     page = state.page
     fixture = state.fixture
@@ -2037,21 +2122,22 @@ async def _verify_blocked_websocket_events(state: SmokeState) -> None:
     if blocked_ws_result == "open" or str(blocked_ws_result).startswith("timeout:"):
         raise SmokeError(f"blocked WebSocket should fail, got {blocked_ws_result}")
 
-    def saw_blocked_ws_events() -> bool:
-        events = subresource_events[blocked_ws_start:]
-        request = _find_request(events, "WebSocket", blocked_ws_url)
-        request_id = request and request["params"].get("requestId")
-        return bool(
-            request_id
-            and any(
-                event["method"] == "Network.loadingFailed"
-                and event["params"].get("requestId") == request_id
-                and event["params"].get("errorText") == "net::ERR_BLOCKED_BY_CLIENT"
-                for event in events
-            )
-        )
+    # A blocked handshake is reported through the WebSocket event family
+    # (upstream fed98c8e1d): webSocketCreated, then webSocketClosed, and never
+    # an HTTP requestWillBeSent or loadingFailed.
+    def blocked_ws_closed() -> str | None:
+        created = next((e for e in socket_events if e["method"] == "Network.webSocketCreated"
+                        and e["params"].get("url") == blocked_ws_url), None)
+        request_id = created and created["params"].get("requestId")
+        if request_id and any(e["method"] == "Network.webSocketClosed"
+                              and e["params"].get("requestId") == request_id for e in socket_events):
+            return request_id
+        return None
 
-    await wait_until(saw_blocked_ws_events, "blocked WebSocket Network.loadingFailed")
+    await wait_until(lambda: blocked_ws_closed() is not None, "blocked WebSocket Network.webSocketClosed")
+    assert_equal(any(e["params"].get("requestId") == blocked_ws_closed()
+                     for e in subresource_events[blocked_ws_start:]), False,
+                 "WebSocket uses its own Network event family")
     await state.cdp.send("Network.setBlockedURLs", {"urls": []})
     state.record("blocked_websocket_network_events")
 

@@ -2,30 +2,30 @@ use super::*;
 use anyhow::Result;
 use std::{cell::RefCell, ffi::c_void, ptr::NonNull, rc::Rc};
 
-pub(crate) struct JsContextHostBridgeRef {
-    ptr: NonNull<RefCell<JsContextHost>>,
+pub(crate) struct PageScriptHostBridgeRef {
+    ptr: NonNull<RefCell<PageScriptHost>>,
     #[cfg(test)]
     bridge_ref_count: Rc<std::cell::Cell<usize>>,
 }
 
-impl JsContextHostBridgeRef {
+impl PageScriptHostBridgeRef {
     #[cfg(not(test))]
-    fn new(ptr: *const RefCell<JsContextHost>) -> Self {
+    fn new(ptr: *const RefCell<PageScriptHost>) -> Self {
         Self {
             ptr: NonNull::new(ptr.cast_mut())
-                .expect("V8 bridge JsContextHost Rc pointer should not be null"),
+                .expect("V8 bridge PageScriptHost Rc pointer should not be null"),
         }
     }
 
     #[cfg(test)]
     fn new(
-        ptr: *const RefCell<JsContextHost>,
+        ptr: *const RefCell<PageScriptHost>,
         bridge_ref_count: Rc<std::cell::Cell<usize>>,
     ) -> Self {
         bridge_ref_count.set(bridge_ref_count.get() + 1);
         Self {
             ptr: NonNull::new(ptr.cast_mut())
-                .expect("V8 bridge JsContextHost Rc pointer should not be null"),
+                .expect("V8 bridge PageScriptHost Rc pointer should not be null"),
             bridge_ref_count,
         }
     }
@@ -35,7 +35,7 @@ impl JsContextHostBridgeRef {
     }
 }
 
-impl Drop for JsContextHostBridgeRef {
+impl Drop for PageScriptHostBridgeRef {
     fn drop(&mut self) {
         // SAFETY: this token is created only from the matching Rc::into_raw in
         // `install_into_bridge`, is not Clone, and is dropped exactly once by
@@ -55,7 +55,7 @@ impl Drop for JsContextHostBridgeRef {
     }
 }
 
-impl JsContextHost {
+impl PageScriptHost {
     pub(crate) fn install_default_world_wrapper_cache_for_context(
         &self,
         context: v8::Local<'_, v8::Context>,
@@ -73,19 +73,19 @@ impl JsContextHost {
     /// Install this host into the V8 global bridge object and return the Rust
     /// owner token for the V8-side Rc ref-count.
     pub(crate) fn install_into_bridge<'s>(
-        host_rc: &Rc<RefCell<JsContextHost>>,
+        host_rc: &Rc<RefCell<PageScriptHost>>,
         scope: &mut v8::PinScope<'s, '_>,
         global: v8::Local<'s, v8::Object>,
-    ) -> Result<JsContextHostBridgeRef> {
-        let host_ptr: *mut JsContextHost = (*host_rc).as_ptr();
+    ) -> Result<PageScriptHostBridgeRef> {
+        let host_ptr: *mut PageScriptHost = (*host_rc).as_ptr();
         #[cfg(test)]
         let bridge_ref_count = unsafe { &*host_ptr }.bridge_ref_count.clone();
         #[cfg(not(test))]
-        let bridge_ref = JsContextHostBridgeRef::new(Rc::into_raw(host_rc.clone()));
+        let bridge_ref = PageScriptHostBridgeRef::new(Rc::into_raw(host_rc.clone()));
         #[cfg(test)]
         let bridge_ref =
-            JsContextHostBridgeRef::new(Rc::into_raw(host_rc.clone()), bridge_ref_count);
-        // The actual JsContextHost pointer for runtime_ptr_from_object compatibility.
+            PageScriptHostBridgeRef::new(Rc::into_raw(host_rc.clone()), bridge_ref_count);
+        // The actual PageScriptHost pointer for runtime_ptr_from_object compatibility.
         let bridge = unsafe { &mut (*host_ptr).bridge };
         bridge.install_global(scope, global, host_ptr, bridge_ref.as_external_ptr())?;
         crate::util::install_context_host_pointer_slot(

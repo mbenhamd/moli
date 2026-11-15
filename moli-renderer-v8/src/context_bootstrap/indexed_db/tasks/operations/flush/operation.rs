@@ -1,10 +1,12 @@
 use super::*;
-use crate::context_bootstrap::indexed_db::indexed_db_typed_storage_scope;
+use crate::context_bootstrap::indexed_db::{
+    indexed_db_index_object_store, indexed_db_object_store_id, indexed_db_typed_storage_scope,
+};
 
 pub(super) struct TransactionOperation<'s> {
     pub(super) source: v8::Local<'s, v8::Object>,
     pub(super) handle: TransactionHandle,
-    pub(super) store_name: moli_indexeddb::IndexedDbName,
+    pub(super) store: moli_indexeddb::sqlite::StoreId,
     pub(super) kind: IndexedDbTransactionOperation,
 }
 
@@ -104,7 +106,6 @@ pub(in crate::context_bootstrap::indexed_db) fn schedule_transaction_operation<'
     transaction: v8::Local<'s, v8::Object>,
     source: v8::Local<'s, v8::Object>,
     request: v8::Local<'s, v8::Object>,
-    store_name: &moli_indexeddb::IndexedDbName,
     input: IndexedDbTransactionOperation,
 ) {
     let transaction_context = transaction
@@ -159,16 +160,20 @@ pub(in crate::context_bootstrap::indexed_db) fn schedule_transaction_operation<'
         store_request_error(scope, request, error);
         return;
     };
-    let kind = match sql::prepare_operation(
-        scope,
-        &client,
-        TransactionOperation {
-            source,
-            handle,
-            store_name: store_name.to_owned(),
-            kind: input,
-        },
-    ) {
+    // Preserve the retained source's identity, including after reentrant
+    // conversions. Renames change only labels, never an admitted SQL target.
+    let kind = match operation_store_id(scope, source, &input).and_then(|store| {
+        sql::prepare_operation(
+            scope,
+            &client,
+            TransactionOperation {
+                source,
+                handle,
+                store,
+                kind: input,
+            },
+        )
+    }) {
         Ok(kind) => kind,
         Err(error) => IndexedDbTransactionOperation::sql(move |scope, request| {
             let error = request_error_object(scope, &error);
@@ -185,4 +190,20 @@ pub(in crate::context_bootstrap::indexed_db) fn schedule_transaction_operation<'
     // The API path restores its caller immediately. Transaction-start and SQL
     // completion tasks keep their existing deferred owner restoration.
     pump_operations(scope, transaction, true);
+}
+
+fn operation_store_id<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    source: v8::Local<'s, v8::Object>,
+    kind: &IndexedDbTransactionOperation,
+) -> Result<moli_indexeddb::sqlite::StoreId, IndexedDbError> {
+    let source = if matches!(kind, IndexedDbTransactionOperation::CursorIterate { .. }) {
+        crate::context_bootstrap::indexed_db::cursor_source(scope, source)
+            .ok_or_else(|| IndexedDbError::InvalidState("SQL cursor lost its source".into()))?
+    } else {
+        source
+    };
+    let store = indexed_db_index_object_store(scope, source).unwrap_or(source);
+    indexed_db_object_store_id(scope, store)
+        .ok_or_else(|| IndexedDbError::InvalidState("IndexedDB store lost its metadata".into()))
 }

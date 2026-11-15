@@ -117,7 +117,7 @@ fn new_client_label() -> Option<String> {
     )
 }
 
-impl JsContextHost {
+impl PageScriptHost {
     #[cfg(test)]
     pub(crate) fn web_lock_request_count(&self) -> usize {
         self.web_locks.requests.len()

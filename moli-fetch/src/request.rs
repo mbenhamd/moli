@@ -44,7 +44,11 @@ pub struct Request {
     pub url: Url,
     pub method: String,
     /// Immutable upload bytes, shared when a request is cloned or redirected.
+    /// Use `set_body` when replacing an upload that has a separate text view.
     pub body: Option<bytes::Bytes>,
+    /// Optional protocol view supplied by the body serializer (e.g. multipart
+    /// with file contents omitted). Never used as the transport upload.
+    body_text: Option<std::sync::Arc<str>>,
     /// Wire bytes, with the source encoding resolved before header merging.
     pub request_headers: crate::RequestHeaders,
     redirect_headers: Option<crate::RequestHeaders>,
@@ -140,6 +144,56 @@ impl RequestHeaderOverride {
 impl From<crate::RequestHeaders> for RequestHeaderOverride {
     fn from(headers: crate::RequestHeaders) -> Self {
         Self::RedirectChain(headers)
+    }
+}
+
+/// Accumulated request-stage interception edits, independent of the eventual
+/// decision to continue on the network or fulfill a redirect response.
+#[derive(Clone, Debug, Default)]
+pub struct RequestOverrides {
+    pub url: Option<Url>,
+    pub method: Option<String>,
+    /// None leaves the upload intact; Some(None) explicitly removes it.
+    pub body: Option<Option<bytes::Bytes>>,
+    pub headers: Option<RequestHeaderOverride>,
+}
+
+impl RequestOverrides {
+    pub fn apply(self, request: &mut Request) {
+        if let Some(url) = self.url {
+            request.url = url;
+        }
+        if let Some(method) = self.method {
+            request.method = method;
+            request.cookie_context.set_request_method(&request.method);
+        }
+        request.cookie_context = request
+            .cookie_context
+            .clone()
+            .recompute_site_context_for_request(&request.url);
+        if let Some(body) = self.body {
+            let text = body
+                .as_ref()
+                .map(|bytes| std::sync::Arc::from(String::from_utf8_lossy(bytes).as_ref()));
+            request.set_body(body, text);
+        }
+        if let Some(headers) = self.headers {
+            match headers {
+                RequestHeaderOverride::CurrentRequest {
+                    headers,
+                    redirect_headers,
+                } => {
+                    request.set_redirect_headers(Some(
+                        redirect_headers.unwrap_or_else(|| request.request_headers.clone()),
+                    ));
+                    request.request_headers = headers;
+                }
+                RequestHeaderOverride::RedirectChain(headers) => {
+                    request.set_redirect_headers(None);
+                    request.request_headers = headers;
+                }
+            }
+        }
     }
 }
 
@@ -591,6 +645,7 @@ impl Request {
             url,
             method: "GET".to_owned(),
             body: None,
+            body_text: None,
             request_headers: crate::RequestHeaders::default(),
             redirect_headers: None,
             additional_cookies: None,
@@ -627,6 +682,7 @@ impl Request {
             url,
             method: "GET".to_owned(),
             body: None,
+            body_text: None,
             request_headers: crate::RequestHeaders::default(),
             redirect_headers: None,
             additional_cookies: None,
@@ -696,6 +752,7 @@ impl Request {
             url,
             method: method.to_owned(),
             body,
+            body_text: None,
             request_headers: request_headers.into(),
             redirect_headers: None,
             additional_cookies: None,
@@ -1138,6 +1195,7 @@ impl Request {
         if redirect_status_rewrites_to_get(status, &self.method) {
             self.method = "GET".to_owned();
             self.body = None;
+            self.body_text = None;
             self.request_headers
                 .retain(|(name, _)| !is_request_body_header_name(name));
         }
@@ -1147,6 +1205,10 @@ impl Request {
     pub fn with_redirect_headers(mut self, headers: Option<crate::RequestHeaders>) -> Self {
         self.set_redirect_headers(headers);
         self
+    }
+
+    pub fn redirect_headers(&self) -> Option<&crate::RequestHeaders> {
+        self.redirect_headers.as_ref()
     }
 
     pub fn set_redirect_headers(&mut self, headers: Option<crate::RequestHeaders>) {
@@ -1180,6 +1242,71 @@ impl Request {
         self
     }
 
+    /// Preserve refined dispatch snapshots without discarding the owner's
+    /// already-followed hops when a synthetic response has no transport chain.
+    pub fn observe_redirect_requests(&mut self, observed: &[RedirectInfo]) {
+        if observed.len() < self.redirect_chain.len()
+            || !self
+                .redirect_chain
+                .iter()
+                .zip(observed)
+                .all(|(recorded, observed)| {
+                    recorded.source == observed.source
+                        && recorded.from_url == observed.from_url
+                        && recorded.to_url == observed.to_url
+                        && recorded.status == observed.status
+                })
+        {
+            return;
+        }
+        for (recorded, observed) in self.redirect_chain.iter_mut().zip(observed) {
+            if observed.dispatched_request.is_some() {
+                recorded
+                    .dispatched_request
+                    .clone_from(&observed.dispatched_request);
+            }
+        }
+        // Internal transport redirects have already passed Fetch's admission.
+        self.redirect_chain
+            .extend_from_slice(&observed[self.redirect_chain.len()..]);
+    }
+
+    /// Capture the effective request at its destination's admission boundary.
+    /// HTTP transports pass their finalized headers; synthetic destinations use
+    /// the Fetch request's headers. Bytes clones share the upload allocation.
+    pub fn capture_dispatched_request(
+        &self,
+        headers: Vec<(String, String)>,
+    ) -> std::sync::Arc<crate::DispatchedRequest> {
+        std::sync::Arc::new(crate::DispatchedRequest {
+            method: self.method.clone(),
+            headers,
+            body: self.body.clone(),
+            body_text: self.body_text.clone(),
+        })
+    }
+
+    /// Attach the serializer's text view without decoding the upload bytes.
+    pub fn with_body_text(mut self, text: Option<std::sync::Arc<str>>) -> Self {
+        self.body_text = text;
+        self
+    }
+
+    /// Replace an upload and its protocol view together during interception.
+    /// `None` uses the replacement bytes' ordinary UTF-8 lossy text view.
+    pub fn set_body(&mut self, body: Option<bytes::Bytes>, text: Option<std::sync::Arc<str>>) {
+        self.body = body;
+        self.body_text = text;
+    }
+
+    pub fn body_text(&self) -> Option<std::borrow::Cow<'_, str>> {
+        self.body.as_deref().map(|body| {
+            self.body_text
+                .as_deref()
+                .map_or_else(|| String::from_utf8_lossy(body), std::borrow::Cow::Borrowed)
+        })
+    }
+
     pub fn redirect_chain(&self) -> &[RedirectInfo] {
         &self.redirect_chain
     }
@@ -1192,7 +1319,13 @@ impl Request {
 
     /// Records a followed redirect. The caller controls method and current URL
     /// updates so this also supports transports that retain the original URL.
-    pub fn record_redirect(&mut self, redirect: RedirectInfo) {
+    pub fn record_redirect(&mut self, mut redirect: RedirectInfo) {
+        // Keep the accepted next request even if cache/transport admission
+        // subsequently fails. Its destination can refine the finalized headers.
+        if redirect.dispatched_request.is_none() {
+            redirect.dispatched_request =
+                Some(self.capture_dispatched_request(self.request_headers.to_byte_strings()));
+        }
         self.redirect_chain.push(redirect);
     }
 

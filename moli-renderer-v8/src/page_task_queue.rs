@@ -97,7 +97,7 @@ impl<T: Copy> RendererPageWindowDocumentTaskOwner<T> {
 }
 
 /// Scheduler envelope for a concrete exact Window/Document task whose mutable
-/// V8/DOM payload remains in the creating `JsContextHost` ledger.
+/// V8/DOM payload remains in the creating `PageScriptHost` ledger.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RendererPageWindowDocumentTask<I, K, T = WindowDocumentTaskTarget> {
     owner: RendererPageWindowDocumentTaskOwner<T>,
@@ -839,6 +839,7 @@ mod tests {
             source_result: Ok(source.into()),
             source_bytes: None,
             network_result: None,
+            network_request_handle: None,
         }
     }
 

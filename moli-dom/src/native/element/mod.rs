@@ -61,7 +61,20 @@ fn initial_custom_element_state_for_identity(
 }
 
 fn is_element_reference_attribute(name: &str) -> bool {
-    matches!(name, "commandfor" | "interestfor" | "popovertarget")
+    matches!(
+        name,
+        "commandfor"
+            | "interestfor"
+            | "popovertarget"
+            | "aria-activedescendant"
+            | "aria-controls"
+            | "aria-describedby"
+            | "aria-details"
+            | "aria-errormessage"
+            | "aria-flowto"
+            | "aria-labelledby"
+            | "aria-owns"
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -1124,6 +1137,10 @@ impl Element {
         self.control_state().dialog_modal()
     }
 
+    pub fn dialog_modal_generation(&self) -> u64 {
+        self.control_state().dialog_modal_generation()
+    }
+
     pub fn dialog_return_value(&self) -> &str {
         self.control_state().dialog_return_value()
     }
@@ -1344,6 +1361,18 @@ impl Element {
         true
     }
 
+    fn invalidate_dialog_modal_opening_for_removed_attribute(&mut self, attribute: &Attribute) {
+        if self.is_html_element("dialog")
+            && self.dialog_modal()
+            && attribute.namespace().is_empty()
+            && attribute.local_name() == "open"
+        {
+            // Removing open ends the close request without running the node's
+            // removing steps or changing its modal/top-layer registration.
+            self.control_state_mut().invalidate_dialog_modal_opening();
+        }
+    }
+
     pub fn remove_attribute(&mut self, name: &str) -> bool {
         self.synchronize_element_reference_attribute("", name);
         let Some(index) = self
@@ -1353,8 +1382,9 @@ impl Element {
         else {
             return false;
         };
-        let local_name = self.attributes.remove(index).local_name;
-        self.sync_control_state_from_attribute(local_name.as_ref(), None);
+        let attribute = self.attributes.remove(index);
+        self.invalidate_dialog_modal_opening_for_removed_attribute(&attribute);
+        self.sync_control_state_from_attribute(attribute.local_name.as_ref(), None);
         true
     }
 
@@ -1365,8 +1395,9 @@ impl Element {
         }) else {
             return false;
         };
-        let local_name = self.attributes.remove(index).local_name;
-        self.sync_control_state_from_attribute(local_name.as_ref(), None);
+        let attribute = self.attributes.remove(index);
+        self.invalidate_dialog_modal_opening_for_removed_attribute(&attribute);
+        self.sync_control_state_from_attribute(attribute.local_name.as_ref(), None);
         true
     }
 

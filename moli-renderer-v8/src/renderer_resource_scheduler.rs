@@ -126,7 +126,7 @@ impl RendererResourceScheduler {
 
     pub(crate) fn schedule_main_parser_module_graph_fetch(
         &self,
-        host: &crate::native_bridge::JsContextHost,
+        host: &crate::native_bridge::PageScriptHost,
         loader: DocumentResourceLoader,
         target: MainParserModuleGraphFetchTarget,
         request: NativeModuleGraphFetchRequest,
@@ -143,7 +143,7 @@ impl RendererResourceScheduler {
 
     pub(crate) fn schedule_main_runtime_module_graph_fetch(
         &self,
-        host: &crate::native_bridge::JsContextHost,
+        host: &crate::native_bridge::PageScriptHost,
         loader: DocumentResourceLoader,
         target: MainRuntimeModuleGraphFetchTarget,
         request: NativeModuleGraphFetchRequest,
@@ -160,7 +160,7 @@ impl RendererResourceScheduler {
 
     pub(crate) fn schedule_main_modulepreload_fetch(
         &self,
-        host: &crate::native_bridge::JsContextHost,
+        host: &crate::native_bridge::PageScriptHost,
         loader: DocumentResourceLoader,
         target: MainModulepreloadFetchTarget,
         request: NativeModuleGraphFetchRequest,
@@ -177,7 +177,7 @@ impl RendererResourceScheduler {
 
     pub(crate) fn schedule_main_dynamic_import_graph_fetch(
         &self,
-        host: &crate::native_bridge::JsContextHost,
+        host: &crate::native_bridge::PageScriptHost,
         loader: DocumentResourceLoader,
         target: MainDynamicImportGraphFetchTarget,
         request: NativeModuleGraphFetchRequest,
@@ -194,7 +194,7 @@ impl RendererResourceScheduler {
 
     fn schedule_main_module_fetch(
         &self,
-        host: &crate::native_bridge::JsContextHost,
+        host: &crate::native_bridge::PageScriptHost,
         loader: DocumentResourceLoader,
         schedule: MainModuleFetchSchedule,
         request: NativeModuleGraphFetchRequest,
@@ -251,7 +251,7 @@ impl RendererResourceScheduler {
 
     pub(crate) fn schedule_child_dynamic_module_graph_fetch(
         &self,
-        host: &crate::native_bridge::JsContextHost,
+        host: &crate::native_bridge::PageScriptHost,
         loader: DocumentResourceLoader,
         target: ChildDocumentModuleFetchTarget,
         load_id: u64,
@@ -314,7 +314,7 @@ impl RendererResourceScheduler {
 
     pub(crate) fn schedule_child_modulepreload_graph_fetch(
         &self,
-        host: &crate::native_bridge::JsContextHost,
+        host: &crate::native_bridge::PageScriptHost,
         loader: DocumentResourceLoader,
         target: ChildDocumentModuleFetchTarget,
         load_id: u64,

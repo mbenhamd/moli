@@ -1,4 +1,4 @@
-use super::{FrameDocumentLoadDeliveryTask, JsContextHost};
+use super::{FrameDocumentLoadDeliveryTask, PageScriptHost};
 use crate::{
     context_bootstrap::{
         construct_original_event, construct_original_page_transition_event,
@@ -40,8 +40,6 @@ pub(crate) struct ChildFrameNavigationSnapshot {
     pub(crate) security_origin_inherited: bool,
     #[serde(default)]
     pub(crate) security_origin_opaque: bool,
-    #[serde(default)]
-    pub(crate) document_network: Option<crate::protocol_types::ChildFrameDocumentNetworkSnapshot>,
 }
 
 impl ChildFrameNavigationSnapshot {
@@ -55,7 +53,6 @@ impl ChildFrameNavigationSnapshot {
             document_open_replacement: self.document_open_replacement,
             security_origin_inherited: self.security_origin_inherited,
             security_origin_opaque: self.security_origin_opaque,
-            document_network: self.document_network,
         }
     }
 }
@@ -106,7 +103,7 @@ impl ChildFrameLoadDeliveryPhaseResult {
     }
 }
 
-impl JsContextHost {
+impl PageScriptHost {
     pub(in crate::native_bridge::context_host) fn dispatch_ready_child_initial_empty_load_synchronously(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
@@ -119,7 +116,7 @@ impl JsContextHost {
         {
             return false;
         }
-        let host_ptr = self as *mut JsContextHost;
+        let host_ptr = self as *mut PageScriptHost;
         self.run_child_browsing_context_load_delivery(scope, host_ptr, task)
             .callback_dispatched
     }
@@ -323,7 +320,7 @@ impl JsContextHost {
     fn run_child_browsing_context_load_delivery(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         task: FrameDocumentLoadDeliveryTask,
     ) -> ChildFrameLoadDeliveryResult {
         let mut task = task;
@@ -381,7 +378,7 @@ impl JsContextHost {
                 }
                 Some(FrameDocumentLoadDeliveryProgress::Finished(finish)) => {
                     let finished_child_handle = finish.child_handle;
-                    let runtime = unsafe { &mut *self.runtime };
+                    let runtime = unsafe { &mut *self.document_runtime };
                     self.arm_child_meta_refresh_navigation(scope, runtime, finished_child_handle);
                     self.publish_child_frame_load_finish(finish);
                     self.note_lightweight_popup_child_frame_load_finished(finished_child_handle);
@@ -426,7 +423,7 @@ impl JsContextHost {
     fn dispatch_child_owner_element_load_phase(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         action: FrameDocumentLoadDeliveryAction,
     ) -> ChildFrameLoadDeliveryPhaseResult {
         let handle = action.child_handle();
@@ -436,7 +433,7 @@ impl JsContextHost {
             return ChildFrameLoadDeliveryPhaseResult::without_callback(None);
         };
         self.enter_child_browsing_context_host_load_dispatch(handle);
-        let runtime = unsafe { &mut *self.runtime };
+        let runtime = unsafe { &mut *self.document_runtime };
         let _ = runtime.dispatch_public_event_best_effort(
             scope,
             host_ptr,
@@ -452,7 +449,7 @@ impl JsContextHost {
             self.trace_stale_child_load_delivery(action, "owner_element_load");
             return ChildFrameLoadDeliveryPhaseResult::after_callback(None);
         }
-        let runtime = unsafe { &mut *self.runtime };
+        let runtime = unsafe { &mut *self.document_runtime };
         self.arm_child_meta_refresh_navigation(scope, runtime, handle);
         ChildFrameLoadDeliveryPhaseResult::after_callback(progress)
     }
@@ -503,6 +500,46 @@ impl JsContextHost {
                 stage = "child_host_load_tail_stale",
             );
         }
+    }
+
+    pub(in crate::native_bridge::context_host) fn publish_child_frame_navigation_commit(
+        &self,
+        handle: DomHandle,
+        document_network: Option<crate::protocol_types::ChildFrameDocumentNetworkActivitySnapshot>,
+    ) {
+        let parent_frame_id = self.child_browsing_context_parent_frame_id(handle);
+        let Some(url) = self.child_browsing_context_current_url(handle) else {
+            return;
+        };
+        let Some(entry) = self.child_browsing_contexts.get(&handle) else {
+            return;
+        };
+        let identity = entry.frame_identity_snapshot();
+        let event = crate::protocol_types::ChildFrameNavigationSnapshot {
+            frame_id: identity.frame_id,
+            parent_frame_id: self.protocol_child_frame_parent_id(parent_frame_id),
+            loader_id: entry.current_document_loader_id().map(ToOwned::to_owned),
+            name: identity.name,
+            url: url.to_string(),
+            document_open_replacement: false,
+            security_origin_inherited: identity.security_origin_inherited,
+            security_origin_opaque: self.child_browsing_context_has_opaque_origin(handle),
+        };
+        let published = self
+            .root_document_lifecycle_identity()
+            .is_some_and(|source_document| {
+                self.append_live_turn_owner_action(
+                    crate::runtime::RendererOwnerAction::ChildFrameCommit {
+                        source_document,
+                        event,
+                        document_network: document_network.map(Box::new),
+                    },
+                )
+            });
+        assert!(
+            published || cfg!(test),
+            "a production child-frame commit must have a concrete renderer output sink"
+        );
     }
 
     fn publish_child_frame_load_finish(
@@ -594,7 +631,6 @@ impl JsContextHost {
             document_open_replacement,
             security_origin_inherited: identity.security_origin_inherited,
             security_origin_opaque,
-            document_network: entry.take_completed_document_network_for_owner(finish.owner),
         })
     }
 
@@ -742,14 +778,14 @@ impl JsContextHost {
             return;
         };
         if let Some(timer_id) = task.timer_id {
-            unsafe { &mut *self.runtime }.cancel_timer(timer_id);
+            unsafe { &mut *self.document_runtime }.cancel_timer(timer_id);
         }
     }
 
     pub(crate) fn run_child_browsing_context_host_load_task_work(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         task: FrameDocumentLoadDeliveryTask,
     ) -> ChildFrameHostLoadTaskOutcome {
         let mut task_outcome = ChildFrameHostLoadTaskOutcome::ConsumedWithoutCallback;

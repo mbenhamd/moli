@@ -657,7 +657,7 @@ fn document_or_shadow_root_get_animations_callback<'s>(
 }
 
 /// Element descendants of `root` in tree order, without entering shadow trees.
-fn tree_element_handles(runtime: &JsContextHost, root: DomHandle) -> Vec<DomHandle> {
+fn tree_element_handles(runtime: &PageScriptHost, root: DomHandle) -> Vec<DomHandle> {
     let host = runtime.dom_host();
     let mut elements = Vec::new();
     let mut stack = host.child_handles_reversed(root).collect::<Vec<_>>();

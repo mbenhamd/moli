@@ -395,7 +395,7 @@ impl SelectionRecord {
     }
 }
 
-impl JsContextHost {
+impl PageScriptHost {
     pub(crate) fn create_selection_record(&mut self) -> Option<SelectionRecordHandle> {
         self.selection_record_registry.create_record()
     }
@@ -431,7 +431,7 @@ impl JsContextHost {
         composed_start: (DomHandle, u32),
         composed_end: (DomHandle, u32),
     ) -> bool {
-        let runtime = self.runtime;
+        let runtime = self.document_runtime;
         let dom_host = unsafe { &*runtime }.dom_host();
         self.selection_record_registry.store(
             dom_host,
@@ -461,7 +461,7 @@ impl JsContextHost {
         handle: SelectionRecordHandle,
         role: SelectionBoundaryRole,
     ) -> Option<SelectionBoundarySnapshot> {
-        let runtime = self.runtime;
+        let runtime = self.document_runtime;
         let dom_host = unsafe { &*runtime }.dom_host();
         self.selection_record_registry
             .boundary(dom_host, handle, role)
@@ -474,17 +474,30 @@ impl JsContextHost {
         container: DomHandle,
         offset: u32,
     ) -> bool {
-        let runtime = self.runtime;
+        let runtime = self.document_runtime;
         let dom_host = unsafe { &*runtime }.dom_host();
         self.selection_record_registry
             .set_boundary(dom_host, handle, role, container, offset)
     }
 
     pub(crate) fn selection_record_is_collapsed(&mut self, handle: SelectionRecordHandle) -> bool {
-        let runtime = self.runtime;
+        let runtime = self.document_runtime;
         let dom_host = unsafe { &*runtime }.dom_host();
         self.selection_record_registry
             .is_collapsed(dom_host, handle)
+    }
+
+    pub(crate) fn selection_records_for_range(
+        &self,
+        range: RangeRecordHandle,
+    ) -> Vec<SelectionRecordHandle> {
+        self.selection_record_registry
+            .records
+            .iter()
+            .filter_map(|(&handle, record)| {
+                (record.associated_range == Some(range)).then_some(handle)
+            })
+            .collect()
     }
 
     pub(crate) fn document_selection_snapshot(
@@ -493,5 +506,18 @@ impl JsContextHost {
     ) -> Option<DocumentSelectionSnapshot> {
         self.selection_record_registry
             .document_snapshot(self.dom_host(), document)
+    }
+
+    pub(crate) fn selection_record_spans_dom_roots(&self, handle: SelectionRecordHandle) -> bool {
+        let Some(record) = self.selection_record_registry.records.get(&handle) else {
+            return false;
+        };
+        let (Some(start), Some(end)) = (record.composed_start, record.composed_end) else {
+            return false;
+        };
+        let dom = self.dom_host();
+        dom.root_node_handle(start.container())
+            .zip(dom.root_node_handle(end.container()))
+            .is_some_and(|(start, end)| start != end)
     }
 }

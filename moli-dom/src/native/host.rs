@@ -25,7 +25,9 @@ mod types;
 
 pub use adoption::{DomAdoptionTarget, DomAssociatedTreeEdgeKind};
 pub use document::attribute_reaches_layout_only_through_selectors;
-pub use html_serialization::{ShadowRootInclusion, ShadowRootRegistryAttributePolicy};
+pub use html_serialization::{
+    ShadowRootInclusion, ShadowRootMarkupProfile, ShadowRootRegistryAttributePolicy,
+};
 pub use stylesheet_candidates::StylesheetCandidateTreeScopeSnapshots;
 pub(crate) use stylesheet_candidates::{StylesheetCandidateChanges, StylesheetCandidateRegistries};
 

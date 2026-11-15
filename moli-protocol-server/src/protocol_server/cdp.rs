@@ -7,7 +7,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use moli_protocol::{DevToolsTargetInfo, DevToolsTargetKind, version};
-use moli_protocol_cdp::CDP_PROTOCOL_JSON;
 use percent_encoding::percent_decode_str;
 use serde_json::json;
 
@@ -51,7 +50,7 @@ pub(super) async fn json_list(State(state): State<AppState>, uri: Uri) -> impl I
 pub(super) async fn json_protocol() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "application/json")],
-        CDP_PROTOCOL_JSON,
+        moli_protocol_cdp::advertised_protocol_json(),
     )
 }
 

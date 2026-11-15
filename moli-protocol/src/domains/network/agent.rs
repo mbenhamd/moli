@@ -510,6 +510,23 @@ impl TargetNetworkAgentState {
             .record_fetch_pause_announced_request_id(request_id);
     }
 
+    pub(crate) fn record_fetch_pause_announced_redirect(&mut self, request_id: &str) {
+        self.artifacts
+            .subresource_network_artifacts
+            .fetch_pause_announced_request_ids
+            .entry(request_id.to_owned())
+            .or_default()
+            .announced_redirects += 1;
+    }
+
+    pub(crate) fn fetch_pause_announced_redirects(&self, request_id: &str) -> usize {
+        self.artifacts
+            .subresource_network_artifacts
+            .fetch_pause_announced_request_ids
+            .get(request_id)
+            .map_or(0, |announcement| announcement.announced_redirects)
+    }
+
     pub(crate) fn replace_navigation_fetch_request_id(
         &mut self,
         network_id: String,
@@ -745,7 +762,7 @@ impl TargetNetworkAgentState {
     pub(crate) fn insert_io_stream_body_source(
         &mut self,
         handle: String,
-        body: CapturedBody,
+        body: impl Into<crate::conn::ProtocolResponseBody>,
         offset: usize,
     ) {
         self.artifacts
@@ -1410,7 +1427,7 @@ impl CapturedResponseBodyStore {
         collector_ids: impl IntoIterator<Item = String>,
         collection_was_gated: bool,
     ) {
-        let byte_len = body.len();
+        let byte_charge = body.retained_size_bytes();
         let captured = CapturedResponseBody::from_captured_body_with_collector_scope(
             body,
             session_ids,
@@ -1418,7 +1435,10 @@ impl CapturedResponseBodyStore {
             collection_was_gated,
         );
         self.bodies.remove(&request_id);
-        match self.buffered_bodies.insert(request_id, captured, byte_len) {
+        match self
+            .buffered_bodies
+            .insert(request_id, captured, byte_charge)
+        {
             InsertOutcome::Stored { evicted } => {
                 for (evicted_request_id, mut evicted_body) in evicted {
                     evicted_body.mark_evicted();
@@ -1789,7 +1809,7 @@ impl TargetNetworkBodyArtifacts {
     pub(crate) fn insert_stream_body_source(
         &mut self,
         handle: String,
-        body: CapturedBody,
+        body: impl Into<crate::conn::ProtocolResponseBody>,
         offset: usize,
     ) {
         self.io_stream_artifacts
@@ -1858,7 +1878,13 @@ struct SubresourceNetworkArtifacts {
     emitted_record_counts_by_session: HashMap<Option<String>, usize>,
     request_ids_by_handle: HashMap<SubresourceNetworkRequestHandle, String>,
     completed_request_ids: HashSet<String>,
-    fetch_pause_announced_request_ids: HashMap<String, HashMap<Option<String>, String>>,
+    fetch_pause_announced_request_ids: HashMap<String, FetchPauseAnnouncement>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FetchPauseAnnouncement {
+    fetch_ids: HashMap<Option<String>, String>,
+    announced_redirects: usize,
 }
 
 impl SubresourceNetworkArtifacts {
@@ -1944,6 +1970,7 @@ impl SubresourceNetworkArtifacts {
         self.fetch_pause_announced_request_ids
             .entry(network_id)
             .or_default()
+            .fetch_ids
             .insert(session_id, fetch_id)
     }
 
@@ -2197,7 +2224,7 @@ impl WebSocketRequestIdState {
 
 #[derive(Debug, Clone)]
 pub struct IoStreamState {
-    body: CapturedBody,
+    body: crate::conn::ProtocolResponseBody,
     cursor: std::sync::Arc<tokio::sync::Mutex<usize>>,
 }
 
@@ -2217,7 +2244,7 @@ type IoReadTurn = futures_util::future::Either<
 /// Owns one stream's cursor turn, not a connection borrow. Queue the turn at
 /// admission so task polling order cannot reverse two accepted sequential reads.
 pub(crate) struct PreparedIoStreamRead {
-    body: CapturedBody,
+    body: crate::conn::ProtocolResponseBody,
     turn: IoReadTurn,
     offset: Option<usize>,
     size: Option<usize>,
@@ -2226,11 +2253,24 @@ pub(crate) struct PreparedIoStreamRead {
 impl PreparedIoStreamRead {
     pub(crate) async fn run(self) -> Result<serde_json::Value> {
         let mut cursor = self.turn.await;
-        let len = self.body.len();
+        if let crate::conn::ProtocolResponseBody::Network(body) = self.body {
+            anyhow::ensure!(self.offset.is_none(), "OffsetNotSupportedForStream");
+            let (bytes, eof) = body
+                .read_chunk(*cursor, self.size.unwrap_or(10 * 1024 * 1024))
+                .await?;
+            *cursor += bytes.len();
+            return crate::conn::run_body_storage_work(move || {
+                Ok(crate::domains::io::read_output_value(&bytes, eof))
+            })
+            .await;
+        }
+        let crate::conn::ProtocolResponseBody::Captured(body) = self.body else {
+            unreachable!()
+        };
+        let len = body.len();
         let start = self.offset.unwrap_or(*cursor).min(len);
         let requested = self.size.unwrap_or_else(|| len.saturating_sub(start));
-        let (value, end) = self
-            .body
+        let (value, end) = body
             .process_in_worker(move |body| {
                 let bytes = body.read_range(start, requested).unwrap_or_default();
                 let end = start.saturating_add(bytes.len()).min(len);
@@ -2251,9 +2291,12 @@ impl IoStreamState {
         Self::from_body_source(CapturedBody::from_bytes_spooled(bytes), offset)
     }
 
-    pub(crate) fn from_body_source(body: CapturedBody, offset: usize) -> Self {
+    pub(crate) fn from_body_source(
+        body: impl Into<crate::conn::ProtocolResponseBody>,
+        offset: usize,
+    ) -> Self {
         Self {
-            body,
+            body: body.into(),
             cursor: std::sync::Arc::new(tokio::sync::Mutex::new(offset)),
         }
     }
@@ -2287,10 +2330,13 @@ impl IoStreamState {
         size: Option<usize>,
     ) -> TargetIoStreamRead {
         let mut cursor = self.cursor.try_lock().expect("no test read is in flight");
-        let len = self.body.len();
-        let start = offset.unwrap_or(*cursor).min(len);
-        let bytes = self
+        let body = self
             .body
+            .captured()
+            .expect("test read requires a captured body");
+        let len = body.len();
+        let start = offset.unwrap_or(*cursor).min(len);
+        let bytes = body
             .read_range(start, size.unwrap_or_else(|| len.saturating_sub(start)))
             .unwrap_or_default();
         *cursor = start.saturating_add(bytes.len()).min(len);
@@ -2332,7 +2378,7 @@ impl TargetIoStreamArtifacts {
     pub(crate) fn insert_stream_body_source(
         &mut self,
         handle: String,
-        body: CapturedBody,
+        body: impl Into<crate::conn::ProtocolResponseBody>,
         offset: usize,
     ) {
         self.streams
@@ -2340,7 +2386,11 @@ impl TargetIoStreamArtifacts {
     }
 
     pub(crate) fn remove(&mut self, handle: &str) -> Option<IoStreamState> {
-        self.streams.remove(handle)
+        let stream = self.streams.remove(handle)?;
+        if let crate::conn::ProtocolResponseBody::Network(body) = &stream.body {
+            body.cancel();
+        }
+        Some(stream)
     }
 
     #[cfg(test)]
@@ -2354,12 +2404,17 @@ impl TargetIoStreamArtifacts {
     }
 
     pub(crate) fn clear_streams(&mut self) {
+        for stream in self.streams.values() {
+            if let crate::conn::ProtocolResponseBody::Network(body) = &stream.body {
+                body.cancel();
+            }
+        }
         self.streams.clear();
     }
 
     pub(crate) fn reset_all(&mut self) {
         self.next_stream_id = 0;
-        self.streams.clear();
+        self.clear_streams();
     }
 
     #[cfg(test)]
@@ -2459,6 +2514,92 @@ mod tests {
                 .expect("third response body should remain readable"),
             b"ccc"
         );
+    }
+
+    #[test]
+    fn response_body_store_charges_shared_prefix_backing_for_both_limits() {
+        use moli_page_types::{SubresourceResponseBody, SubresourceResponseBodyWriter};
+
+        let loader =
+            moli_core::network::ResourceRequestClient::new(&moli_fetch::FetchConfig::default())
+                .unwrap();
+        let pool = loader.handle().disk_pool().unwrap();
+        for (disk, visible) in [(false, 0), (false, 1), (true, 0), (true, 1)] {
+            let prefix = || {
+                let full = if disk {
+                    let mut writer = SubresourceResponseBodyWriter::with_memory_limit_and_disk_pool(
+                        2,
+                        Some(pool.clone()),
+                    );
+                    writer.append(b"abcdef");
+                    writer.finish()
+                } else {
+                    SubresourceResponseBody::from_bytes(b"abcdef".to_vec())
+                };
+                let protocol_reader = CapturedBody::from_subresource_response_body(&full);
+                let body = CapturedBody::from_subresource_response_body(&full.prefix(visible));
+                drop(full);
+                drop(protocol_reader);
+                assert_eq!(body.len(), visible);
+                body
+            };
+            let mut store =
+                CapturedResponseBodyStore::with_limits(moli_bounded_buffer::ByteLimits::new(10, 8));
+            for id in ["first", "second", "third"] {
+                store.insert_captured_body_with_collector_scope(
+                    id.to_owned(),
+                    prefix(),
+                    [None],
+                    std::iter::empty::<String>(),
+                    false,
+                );
+                assert_eq!(store.buffered_body_bytes(), 6, "disk={disk} id={id}");
+            }
+            for id in ["first", "second"] {
+                assert_eq!(
+                    store
+                        .get(id)
+                        .unwrap()
+                        .body_bytes_limited(1)
+                        .unwrap_err()
+                        .to_string(),
+                    "Request content was evicted from inspector cache"
+                );
+            }
+            assert_eq!(
+                store.get("third").unwrap().body_bytes_limited(1).unwrap(),
+                &b"a"[..visible]
+            );
+            if disk {
+                let usage = pool.diagnostics();
+                assert_eq!(usage.disk_footprint_bytes - usage.free_bytes as u64, 6);
+            }
+            store.clear();
+            assert_eq!(store.buffered_body_bytes(), 0);
+            if disk {
+                let usage = pool.diagnostics();
+                assert_eq!(usage.disk_footprint_bytes, usage.free_bytes as u64);
+            }
+            let mut single_entry =
+                CapturedResponseBodyStore::with_limits(moli_bounded_buffer::ByteLimits::new(10, 5));
+            single_entry.insert_captured_body_with_collector_scope(
+                "too-large".to_owned(),
+                prefix(),
+                [None],
+                std::iter::empty::<String>(),
+                false,
+            );
+            assert_eq!(single_entry.buffered_body_bytes(), 0);
+            assert_eq!(
+                single_entry
+                    .get("too-large")
+                    .unwrap()
+                    .body_bytes_limited(1)
+                    .unwrap_err()
+                    .to_string(),
+                "Request content was evicted from inspector cache"
+            );
+        }
     }
 
     #[test]

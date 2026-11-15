@@ -1,5 +1,7 @@
 use super::*;
 
+mod window_container;
+
 #[tokio::test]
 async fn navigator_service_worker_shim_controls_window_fetch() {
     let (base_url, server) = spawn_service_worker_response_server(vec![(
@@ -510,8 +512,9 @@ async fn csp_report_fetch_pause_continue_preserves_service_worker_dispatch() {
     .await;
 
     vm.set_fetch_subresource_interception(
-        true,
-        Some(crate::types::SubresourceResourceType::CspReport),
+        crate::types::SubresourceInterceptionClasses::for_resource_type(
+            crate::types::SubresourceResourceType::CspReport,
+        ),
     );
     vm.eval(
         r#"
@@ -688,8 +691,9 @@ async fn worker_csp_report_fetch_pause_continue_preserves_service_worker_dispatc
     .await;
 
     vm.set_fetch_subresource_interception(
-        true,
-        Some(crate::types::SubresourceResourceType::CspReport),
+        crate::types::SubresourceInterceptionClasses::for_resource_type(
+            crate::types::SubresourceResourceType::CspReport,
+        ),
     );
     vm.eval(
         r#"
@@ -829,13 +833,14 @@ async fn navigator_service_worker_fetch_event_request_preserves_window_fetch_pol
     )
     .expect("service worker request policy metadata probe should evaluate");
 
+    // Fetch applies the origin referrer policy before constructing FetchEvent.request.
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
         &loader,
         "String(globalThis.__serviceWorkerFetchRequestPolicyMetadataProbe)",
         &format!(
-            "200|cache=reload|referrer={base_url}/app/referrer.html|referrerPolicy=origin|integrity=sha256-test|keepalive=true"
+            "200|cache=reload|referrer={base_url}/|referrerPolicy=origin|integrity=sha256-test|keepalive=true"
         ),
     )
     .await;

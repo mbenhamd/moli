@@ -2681,7 +2681,7 @@ async fn popup_close_routes_script_and_protocol_requests_to_the_same_target() {
             evaluate_window_name_probe(
                 &mut opener,
                 100 + index as u64,
-                "window.popup = window.open('about:blank', 'closable'); popup.closed"
+                "window.selfCloseTailRan = false; window.popup = window.open('about:blank', 'closable'); popup.closed"
             )
             .await,
             false
@@ -2700,15 +2700,41 @@ async fn popup_close_routes_script_and_protocol_requests_to_the_same_target() {
         match close_kind {
             "self" => {
                 let mut popup = connect_dynamic_page(addr, &popup_id).await;
-                assert_eq!(
-                    evaluate_window_name_probe(
-                        &mut popup,
-                        1,
-                        "window.close(); 'response-before-detach'"
-                    )
-                    .await,
-                    "response-before-detach"
-                );
+                send_cdp_command_without_wait(
+                    &mut popup, 1, "Runtime.evaluate", None,
+                    json!({"expression": "const liveOpener = window.opener; window.close(); liveOpener.selfCloseTailRan = true; 'closed-self'", "returnByValue": true}),
+                ).await;
+                // The current JS task must finish (as in Blink Page::CloseSoon),
+                // but retiring its own endpoint need not wait for a writer flush.
+                // Validate a delivered reply; otherwise require an orderly close.
+                let replied = timeout(Duration::from_secs(5), async {
+                    loop {
+                        let message: serde_json::Value = match popup
+                            .next()
+                            .await
+                            .expect("self-close terminal")
+                            .expect("self-close transport")
+                        {
+                            WsMessage::Text(text) => serde_json::from_str(&text).unwrap(),
+                            WsMessage::Binary(bytes) => serde_json::from_slice(&bytes).unwrap(),
+                            WsMessage::Close(_) => break false,
+                            WsMessage::Ping(_) | WsMessage::Pong(_) => continue,
+                            other => panic!("unexpected self-close message: {other:?}"),
+                        };
+                        if message.get("id").is_some() {
+                            assert_eq!(message["id"], 1, "{message}");
+                            assert!(message["error"].is_null(), "{message}");
+                            assert!(message["result"]["exceptionDetails"].is_null(), "{message}");
+                            assert_eq!(message["result"]["result"]["value"], "closed-self");
+                            break true;
+                        }
+                    }
+                })
+                .await
+                .expect("self-close reply or close");
+                if replied {
+                    wait_for_websocket_close(&mut popup, "self-closed popup").await;
+                }
             }
             "reference" => {
                 assert_eq!(
@@ -2733,6 +2759,13 @@ async fn popup_close_routes_script_and_protocol_requests_to_the_same_target() {
             !current.iter().any(|target| target["id"] == popup_id)
         })
         .await;
+        if close_kind == "self" {
+            assert_eq!(
+                evaluate_window_name_probe(&mut opener, 500, "selfCloseTailRan").await,
+                true,
+                "self-close must not interrupt the remainder of its JavaScript task"
+            );
+        }
         assert_eq!(
             evaluate_window_name_probe(
                 &mut opener,
@@ -2870,7 +2903,7 @@ async fn named_popup_references_from_sibling_pages_share_the_close_lifetime() {
             name => panic!("unexpected popup name {name}"),
         }
     }
-    let mut child = child_page.unwrap();
+    let _child = child_page.unwrap();
     let mut sibling = sibling_page.unwrap();
     assert_eq!(
         evaluate_window_name_probe(
@@ -2889,8 +2922,10 @@ async fn named_popup_references_from_sibling_pages_share_the_close_lifetime() {
             .len(),
         targets.len()
     );
+    // Observe the close through the sibling's retained reference. The closing
+    // child's own transport may retire before its final evaluation replies.
     assert_eq!(
-        evaluate_window_name_probe(&mut child, 2, "close(); 'closed'").await,
+        evaluate_window_name_probe(&mut sibling, 3, "other.close(); 'closed'").await,
         "closed"
     );
     wait_for_target_list(addr, "shared child target closed", |current| {
@@ -2898,7 +2933,7 @@ async fn named_popup_references_from_sibling_pages_share_the_close_lifetime() {
     })
     .await;
     assert_eq!(
-        evaluate_window_name_probe(&mut sibling, 3, "other.closed").await,
+        evaluate_window_name_probe(&mut sibling, 4, "other.closed").await,
         true
     );
     assert_eq!(
@@ -4760,6 +4795,85 @@ async fn websocket_cdp_dynamic_page_pending_runtime_command_does_not_block_later
         json!("released")
     );
 
+    abort_test_cdp_server(server).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_loading_stops_parsing_a_streaming_document() {
+    let release_tail = Arc::new(tokio::sync::Notify::new());
+    let release_for_route = Arc::clone(&release_tail);
+    let (fixture_addr, _fixture) = spawn_dedicated_fixture_server(
+        Router::new().route(
+            "/stream",
+            get(move || {
+                let release = Arc::clone(&release_for_route);
+                async move {
+                    let body = futures_util::stream::unfold(0, move |state| {
+                        let release = Arc::clone(&release);
+                        async move {
+                            match state {
+                                0 => Some((
+                                    Ok::<_, std::io::Error>("<html><body><p id=prefix>prefix</p>"),
+                                    1,
+                                )),
+                                1 => {
+                                    release.notified().await;
+                                    Some((Ok("<p id=tail>tail</p></body></html>"), 2))
+                                }
+                                _ => None,
+                            }
+                        }
+                    });
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "text/html")],
+                        axum::body::Body::from_stream(body),
+                    )
+                }
+            }),
+        ),
+        "stop-loading-streaming",
+    );
+    let (addr, server) = spawn_test_protocol_server().await;
+    let (mut browser, _) = connect_async(
+        discover_browser_websocket_url(addr)
+            .await
+            .expect("discover browser endpoint"),
+    )
+    .await
+    .unwrap();
+    let target_id = create_dynamic_target(&mut browser, 1).await;
+    let mut page = connect_dynamic_page(addr, &target_id).await;
+    send_cdp_command(&mut page, 1, "Page.enable", None, json!({})).await;
+    let navigation = send_cdp_command(
+        &mut page,
+        2,
+        "Page.navigate",
+        None,
+        json!({"url": format!("http://{fixture_addr}/stream")}),
+    )
+    .await;
+    assert!(response_by_id(&navigation, 2)["error"].is_null());
+    timeout(Duration::from_secs(5), async {
+        while evaluate_window_name_probe(&mut page, 3, "!!document.getElementById('prefix')").await
+            != json!(true)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the streamed prefix is parsed");
+    send_cdp_command(&mut page, 4, "Page.stopLoading", None, json!({})).await;
+    release_tail.notify_one();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        evaluate_window_name_probe(
+            &mut page,
+            5,
+            "[document.readyState, !!document.getElementById('tail')]"
+        )
+        .await,
+        json!(["complete", false])
+    );
     abort_test_cdp_server(server).await;
 }
 

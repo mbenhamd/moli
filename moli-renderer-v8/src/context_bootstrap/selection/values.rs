@@ -1,9 +1,11 @@
 use super::super::range::{
-    RangeBoundarySide, new_range_for_document, range_boundary_container_object,
-    range_boundary_offset, range_is_collapsed, range_native_record_handle, set_range_boundary,
+    RangeBoundarySide, current_document_object, new_range_for_document,
+    range_boundary_container_object, range_boundary_offset, range_in_current_world,
+    range_native_record_handle, set_range_boundary,
 };
 use super::*;
 use crate::document_runtime::DomHandle;
+use crate::native_bridge::document::document_associated_window_for_handle;
 use crate::native_bridge::element::contenteditable_editing_host;
 use crate::native_bridge::wrapped_handle_value;
 use crate::native_bridge::{
@@ -16,7 +18,6 @@ use moli_webapi_declare::WebApiObject;
 
 const SELECTION_RECORD_INTERNAL_FIELD_INDEX: usize = 0;
 const SELECTION_WRAPPER_INTERNAL_FIELD_COUNT: usize = 1;
-const RANGE_ASSOCIATED_SELECTION_SLOT: &str = "__moliRangeAssociatedSelection";
 
 #[derive(WebApiObject)]
 #[webapi(interface = web_api_interfaces::Selection)]
@@ -59,7 +60,6 @@ pub(in crate::context_bootstrap) fn new_selection_runtime_object<'s>(
     SelectionObjectDeclaration::empty()
         .bind_into(scope, selection)
         .expect("Selection declaration should bind");
-    let _ = ensure_selection_record_handle(scope, selection);
     selection
 }
 
@@ -67,7 +67,7 @@ pub(in crate::context_bootstrap) fn selection_clear<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     selection: v8::Local<'s, v8::Object>,
 ) {
-    clear_selection_range_association(scope, selection);
+    let selection = world_wrappers::owner(scope, selection);
     SelectionObjectDeclaration::empty()
         .initialize(scope, selection)
         .expect("Selection declaration should initialize object");
@@ -121,9 +121,10 @@ pub(in crate::context_bootstrap) fn selection_range<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     selection: v8::Local<'s, v8::Object>,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    selection_slot_value(scope, selection, SELECTION_RANGE_SLOT)
+    let range = selection_slot_value(scope, selection, SELECTION_RANGE_SLOT)
         .and_then(|value| (!value.is_null_or_undefined()).then_some(value))
-        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())?;
+    range_in_current_world(scope, range)
 }
 
 pub(in crate::context_bootstrap) fn selection_composed_start_node<'s>(
@@ -181,9 +182,8 @@ pub(in crate::context_bootstrap) fn selection_bind_owner_document<'s>(
         return;
     };
     if unsafe { &*host_ptr }.selection_record_owner_document(handle) != Some(document_handle) {
-        clear_selection_range_association(scope, selection);
+        selection_clear(scope, selection);
         let host = unsafe { &mut *host_ptr };
-        host.clear_selection_record(handle);
         host.set_selection_record_owner_document(handle, document_handle);
     }
 }
@@ -210,6 +210,18 @@ pub(in crate::context_bootstrap) fn selection_is_collapsed_internal<'s>(
                 .map(|host_ptr| unsafe { &mut *host_ptr }.selection_record_is_collapsed(handle))
         })
         .unwrap_or(true)
+}
+
+pub(in crate::context_bootstrap) fn selection_spans_dom_roots<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    selection: v8::Local<'s, v8::Object>,
+) -> bool {
+    selection_record_handle(scope, selection)
+        .and_then(|handle| {
+            context_host_ptr_from_global_bridge(scope)
+                .map(|host_ptr| unsafe { &*host_ptr }.selection_record_spans_dom_roots(handle))
+        })
+        .unwrap_or(false)
 }
 
 pub(in crate::context_bootstrap) fn selection_store<'s>(
@@ -326,39 +338,62 @@ pub(in crate::context_bootstrap) fn selection_store_with_composed_boundaries<'s>
     );
 }
 
-pub(in crate::context_bootstrap) fn selection_range_update_state<'s>(
+pub(in crate::context_bootstrap) fn selection_range_update_states<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     range: v8::Local<'s, v8::Object>,
-) -> Option<SelectionRangeUpdateState<'s>> {
-    let range_handle = range_native_record_handle(scope, range)?;
-    let backing = moli_webapi_declare::web_api_object_target(scope, range)?;
-    let selection = get_private_value(scope, backing, RANGE_ASSOCIATED_SELECTION_SLOT)
-        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())?;
-    if !selection_has_range(scope, selection) {
-        return None;
-    }
-    let selected_range = selection_range(scope, selection)?;
-    if range_native_record_handle(scope, selected_range) != Some(range_handle) {
-        return None;
-    }
-    let old_composed_start_node = selection_composed_start_node(scope, selection)
-        .or_else(|| range_boundary_container_object(scope, range, RangeBoundarySide::Start))?;
-    let old_composed_start_offset = selection_composed_start_node(scope, selection)
-        .map(|_| selection_composed_start_offset(scope, selection))
-        .unwrap_or_else(|| range_boundary_offset(scope, range, RangeBoundarySide::Start) as u32);
-    let old_composed_end_node = selection_composed_end_node(scope, selection)
-        .or_else(|| range_boundary_container_object(scope, range, RangeBoundarySide::End))?;
-    let old_composed_end_offset = selection_composed_end_node(scope, selection)
-        .map(|_| selection_composed_end_offset(scope, selection))
-        .unwrap_or_else(|| range_boundary_offset(scope, range, RangeBoundarySide::End) as u32);
-    Some(SelectionRangeUpdateState {
-        selection,
-        associated_range: selected_range,
-        old_composed_start_node,
-        old_composed_start_offset,
-        old_composed_end_node,
-        old_composed_end_offset,
-    })
+) -> Vec<SelectionRangeUpdateState<'s>> {
+    let Some(range_handle) = range_native_record_handle(scope, range) else {
+        return Vec::new();
+    };
+    let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
+        return Vec::new();
+    };
+    // Adoption can leave the same Range associated with several Documents.
+    // Snapshot every matching Selection before changing the Range so clearing
+    // an obsolete association cannot prevent a valid one from being updated.
+    let records = unsafe { &*host_ptr }.selection_records_for_range(range_handle);
+    records
+        .into_iter()
+        .filter_map(|record_handle| {
+            let document = unsafe { &*host_ptr }.selection_record_owner_document(record_handle)?;
+            let window = document_associated_window_for_handle(scope, host_ptr, document)?;
+            let selection = get_private_value(scope, window, WINDOW_SELECTION_SLOT)
+                .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())?;
+            if selection_record_handle(scope, selection) != Some(record_handle) {
+                return None;
+            }
+            let selected_range = selection_range(scope, selection)?;
+            if range_native_record_handle(scope, selected_range) != Some(range_handle) {
+                return None;
+            }
+            let old_composed_start_node =
+                selection_composed_start_node(scope, selection).or_else(|| {
+                    range_boundary_container_object(scope, range, RangeBoundarySide::Start)
+                })?;
+            let old_composed_start_offset = selection_composed_start_node(scope, selection)
+                .map(|_| selection_composed_start_offset(scope, selection))
+                .unwrap_or_else(|| {
+                    range_boundary_offset(scope, range, RangeBoundarySide::Start) as u32
+                });
+            let old_composed_end_node =
+                selection_composed_end_node(scope, selection).or_else(|| {
+                    range_boundary_container_object(scope, range, RangeBoundarySide::End)
+                })?;
+            let old_composed_end_offset = selection_composed_end_node(scope, selection)
+                .map(|_| selection_composed_end_offset(scope, selection))
+                .unwrap_or_else(|| {
+                    range_boundary_offset(scope, range, RangeBoundarySide::End) as u32
+                });
+            Some(SelectionRangeUpdateState {
+                selection,
+                associated_range: selected_range,
+                old_composed_start_node,
+                old_composed_start_offset,
+                old_composed_end_node,
+                old_composed_end_offset,
+            })
+        })
+        .collect()
 }
 
 pub(in crate::context_bootstrap) fn selection_sync_associated_range<'s>(
@@ -382,16 +417,23 @@ pub(in crate::context_bootstrap) fn selection_sync_associated_range<'s>(
         selection_clear(scope, state.selection);
         return;
     };
-    if !selection_boundary_is_connected(scope, range_start_node)
-        || !selection_boundary_is_connected(scope, range_end_node)
-    {
+    if !selection_range_belongs_to_document(
+        scope,
+        state.selection,
+        range_start_node,
+        range_end_node,
+    ) {
         selection_clear(scope, state.selection);
         return;
     }
 
     let range_start_offset = range_boundary_offset(scope, range, RangeBoundarySide::Start) as u32;
     let range_end_offset = range_boundary_offset(scope, range, RangeBoundarySide::End) as u32;
-    let direction = if range_is_collapsed(scope, range) {
+    // A collapsed DOM Range can still project a composed span across roots.
+    let direction = if composed_start_offset == composed_end_offset
+        && callback_value_dom_handle(scope, composed_start_node.into())
+            == callback_value_dom_handle(scope, composed_end_node.into())
+    {
         "none"
     } else {
         "forward"
@@ -414,7 +456,7 @@ pub(in crate::context_bootstrap) fn selection_sync_associated_range<'s>(
 
 pub(in crate::context_bootstrap) fn selection_update_composed_boundaries_for_child_removal(
     scope: &mut v8::PinScope<'_, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     dom_host: &crate::dom::native::DomHost,
     parent: DomHandle,
     removed_child: DomHandle,
@@ -544,7 +586,7 @@ pub(in crate::context_bootstrap) fn selection_update_composed_boundaries_for_chi
 }
 
 fn selection_should_rescope_observable_for_child_removal(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     dom_host: &crate::dom::native::DomHost,
     anchor: Option<(DomHandle, u32)>,
     focus: Option<(DomHandle, u32)>,
@@ -619,7 +661,7 @@ fn selection_shadow_including_descendant_or_self(
 
 fn selection_wrap_boundary_handle<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     handle: DomHandle,
 ) -> Option<v8::Local<'s, v8::Object>> {
     wrapped_handle_value(scope, host_ptr, handle)
@@ -657,23 +699,40 @@ fn selection_update_slots_with_composed_boundaries<'s>(
     );
 }
 
-fn selection_boundary_is_connected<'s>(
+pub(in crate::context_bootstrap) fn selection_range_belongs_to_document<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    node: v8::Local<'s, v8::Object>,
+    selection: v8::Local<'s, v8::Object>,
+    start_node: v8::Local<'s, v8::Object>,
+    end_node: v8::Local<'s, v8::Object>,
 ) -> bool {
+    let Some(document) =
+        selection_owner_document(scope, selection).or_else(|| current_document_object(scope))
+    else {
+        return true;
+    };
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
-        return true;
+        return false;
     };
-    let Some(handle) = callback_value_dom_handle(scope, node.into()) else {
-        return true;
+    let Some(document) = callback_value_dom_handle(scope, document.into()) else {
+        return false;
     };
-    unsafe { &*host_ptr }.dom_host().is_connected(handle)
+    // Connectivity and ownership are native relationships. Author properties
+    // named parentNode, nodeType or host must not change Selection membership
+    // (or run script while checking an associated Range).
+    let dom = unsafe { &*host_ptr }.dom_host();
+    [start_node, end_node].into_iter().all(|node| {
+        callback_value_dom_handle(scope, node.into()).is_some_and(|handle| {
+            dom.is_connected_to_document(handle)
+                && (handle == document || dom.owner_document_handle(handle) == Some(document))
+        })
+    })
 }
 
 fn selection_record_handle<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     selection: v8::Local<'s, v8::Object>,
 ) -> Option<SelectionRecordHandle> {
+    let selection = world_wrappers::owner(scope, selection);
     if selection.internal_field_count() < SELECTION_WRAPPER_INTERNAL_FIELD_COUNT {
         return None;
     }
@@ -687,6 +746,7 @@ fn ensure_selection_record_handle<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     selection: v8::Local<'s, v8::Object>,
 ) -> Option<SelectionRecordHandle> {
+    let selection = world_wrappers::owner(scope, selection);
     if selection.internal_field_count() < SELECTION_WRAPPER_INTERNAL_FIELD_COUNT {
         return None;
     }
@@ -775,41 +835,16 @@ fn selection_store_native_record<'s>(
         (composed_start_handle, composed_start_offset),
         (composed_end_handle, composed_end_offset),
     ) {
-        clear_selection_range_association(scope, selection);
+        // Retain one live Range; world-local views share its native record and
+        // preserve getRangeAt() identity without sharing prototypes or expandos.
+        let range = world_wrappers::owner(scope, range);
         set_selection_slot_value(scope, selection, SELECTION_RANGE_SLOT, range.into());
-        if associated_range.is_some()
-            && let Some(backing) = moli_webapi_declare::web_api_object_target(scope, range)
-        {
-            set_private_value(
-                scope,
-                backing,
-                RANGE_ASSOCIATED_SELECTION_SLOT,
-                selection.into(),
-            );
-        }
-    }
-}
-
-fn clear_selection_range_association<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    selection: v8::Local<'s, v8::Object>,
-) {
-    let Some(range) = selection_range(scope, selection)
-        .and_then(|range| moli_webapi_declare::web_api_object_target(scope, range))
-    else {
-        return;
-    };
-    if get_private_value(scope, range, RANGE_ASSOCIATED_SELECTION_SLOT)
-        .is_some_and(|owner| owner.strict_equals(selection.into()))
-    {
-        let empty = v8::undefined(scope).into();
-        set_private_value(scope, range, RANGE_ASSOCIATED_SELECTION_SLOT, empty);
     }
 }
 
 fn selection_dom_handle_for_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    host_ptr: *mut JsContextHost,
+    host_ptr: *mut PageScriptHost,
     object: v8::Local<'s, v8::Object>,
 ) -> Option<DomHandle> {
     callback_value_dom_handle(scope, object.into()).or_else(|| {
@@ -822,15 +857,17 @@ fn selection_slot_value<'s>(
     selection: v8::Local<'s, v8::Object>,
     key: &'static str,
 ) -> Option<v8::Local<'s, v8::Value>> {
+    let selection = world_wrappers::owner(scope, selection);
     get_private_value(scope, selection, key)
 }
 
-fn set_selection_slot_value(
-    scope: &mut v8::PinScope<'_, '_>,
-    selection: v8::Local<'_, v8::Object>,
+fn set_selection_slot_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    selection: v8::Local<'s, v8::Object>,
     key: &'static str,
-    value: v8::Local<'_, v8::Value>,
+    value: v8::Local<'s, v8::Value>,
 ) {
+    let selection = world_wrappers::owner(scope, selection);
     set_private_value(scope, selection, key, value);
 }
 

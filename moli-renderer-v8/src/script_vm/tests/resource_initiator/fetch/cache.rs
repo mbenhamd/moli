@@ -1,4 +1,5 @@
 use super::*;
+use crate::types::SubresourceInterceptionClasses;
 
 #[tokio::test]
 async fn cached_fetch_keeps_timing_authorization_for_ready_and_pending_bodies() {
@@ -11,8 +12,9 @@ async fn cached_fetch_keeps_timing_authorization_for_ready_and_pending_bodies() 
             let mut vm =
                 new_storage_page_task_executor_test_vm_with_loader(document.as_str(), &loader);
             vm.set_fetch_subresource_interception(
-                true,
-                Some(crate::types::SubresourceResourceType::Fetch),
+                SubresourceInterceptionClasses::for_resource_type(
+                    crate::types::SubresourceResourceType::Fetch,
+                ),
             );
             vm.exec(
                 "caches.open('timing').then(cache=>globalThis.cache=cache)",
@@ -90,6 +92,7 @@ async fn cached_fetch_keeps_timing_authorization_for_ready_and_pending_bodies() 
                     headers: Vec::new(),
                     network_extra_info_available: false,
                     request_extra_info: None,
+                    dispatched_request: None,
                     response_extra_info: None,
                     redirect_has_extra_info: false,
                     request_cookie_report: None,

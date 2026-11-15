@@ -13,6 +13,7 @@ members = [
     "moli-cookie-db",
     "moli-cookie-import",
     "moli-protocol-cdp",
+    "moli-protocol-cdp-defs",
     "moli-cookie-store",
     "moli-content-type",
     "moli-css-parse",
@@ -128,8 +129,8 @@ stylo_dom = { git = "https://github.com/mbenhamd/stylo", rev = "ed8e815e4c3bee2a
 stylo_static_prefs = { git = "https://github.com/mbenhamd/stylo", rev = "ed8e815e4c3bee2a6f1bb849f2bee0b2a5dfdcad" }
 stylo_traits = { git = "https://github.com/mbenhamd/stylo", rev = "ed8e815e4c3bee2a6f1bb849f2bee0b2a5dfdcad" }
 svgtypes = { git = "https://github.com/lexmount/svgtypes", branch = "moli" }
-# Resolve SVG relative font weights using the CSS inherited-weight ranges.
-usvg = { git = "https://github.com/lexmount/resvg", rev = "02b16a3cc3ca4dd019293c45aacf89ca11875ed9" }
+# Preserve original SVG selector inputs and collect unclipped source geometry.
+usvg = { git = "https://github.com/lexmount/resvg", rev = "614aaf4d21ca03a4773f1e4d07c6a404407589a2" }
 taffy = { git = "https://github.com/mbenhamd/taffy", rev = "5976d56ad9a78b3a256cdfbe19aa445f5d8bb340" }
 
 [patch."https://github.com/DioxusLabs/taffy"]

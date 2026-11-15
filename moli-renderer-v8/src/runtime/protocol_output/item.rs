@@ -54,6 +54,15 @@ pub enum RendererOwnerAction {
         source_document: RendererDocumentLifecycleIdentity,
         event: ChildFrameDocumentNetworkActivitySnapshot,
     },
+    /// The new Document is installed, before its parser can attach child Frames.
+    ChildFrameCommit {
+        source_document: RendererDocumentLifecycleIdentity,
+        event: ChildFrameNavigationSnapshot,
+        /// Co-published before commit; stale loads use ChildFrameDocumentNetwork.
+        document_network: Option<Box<ChildFrameDocumentNetworkActivitySnapshot>>,
+    },
+    /// Load delivery finished, including any descendant Document blockers.
+    /// This must not be projected as another navigation commit.
     ChildFrameLoad {
         source_document: RendererDocumentLifecycleIdentity,
         event: ChildFrameNavigationSnapshot,
@@ -66,13 +75,16 @@ pub enum RendererOwnerAction {
     TopLevelLocationNavigation(RendererDocumentSourcedTopLevelLocationNavigation),
     TopLevelHistoryTraversal(RendererPendingTopLevelHistoryTraversal),
     SubresourceFetchPause {
+        network_pause: Option<crate::network::ResourceInterceptionPause>,
         source_document: RendererDocumentLifecycleIdentity,
         info: Box<PendingSubresourceFetchInfo>,
         /// Set for a child frame navigation, whose Network request id is the
         /// loader id of the Document it creates.
         child_document: Option<Box<crate::protocol_types::ChildDocumentFetchRequest>>,
+        redirect: Option<Box<crate::protocol_types::NavigationRedirect>>,
     },
     SubresourceContinue {
+        network_pause: Option<crate::network::ResourceInterceptionPause>,
         source_document: RendererDocumentLifecycleIdentity,
         event: Box<PendingSubresourceContinueEvent>,
     },

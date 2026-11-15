@@ -32,9 +32,7 @@ use crate::script_vm::{
     ScriptVmBootstrapError, ScriptVmDefaultWorldBootstrap,
 };
 #[cfg(test)]
-use crate::script_vm::{
-    PostParseLifecycleAdvance, PostParsePageOwnedTask, RendererDocumentIsolateHandle,
-};
+use crate::script_vm::{PostParseLifecycleAdvance, PostParsePageOwnedTask, RendererIsolateHandle};
 use crate::script_vm::{PreparedScriptExecutionOutcome, RendererDocumentIsolateBootstrap};
 use crate::types::ScriptErrorConstructorKind;
 use crate::types::ScriptSkipReason;
@@ -1074,6 +1072,8 @@ async fn execute_page_owned_work_on_script_execution_lane(
 /// environment setup does not grow owner-loop wiring fields.
 #[derive(Clone)]
 pub(crate) struct PageVmEnvConfig {
+    /// Creation input for a new Page. Replacements use the existing Page identity.
+    pub(crate) window_identity: super::RendererPageWindowIdentity,
     pub(crate) root_frame_id: Option<String>,
     pub(crate) main_document_commit: Option<super::RendererMainDocumentCommit>,
     pub(crate) top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
@@ -1094,8 +1094,7 @@ pub(crate) struct PageVmEnvConfig {
     pub(crate) blocked_url_patterns: Vec<String>,
     pub(crate) indexed_db_manager: Option<crate::context_bootstrap::WeakIndexedDbManager>,
     pub(crate) storage_bucket_store: Option<crate::context_bootstrap::SharedStorageBucketStore>,
-    pub(crate) fetch_subresource_interception_enabled: bool,
-    pub(crate) fetch_subresource_interception_resource_type: Option<crate::SubresourceResourceType>,
+    pub(crate) fetch_subresource_interception_classes: crate::SubresourceInterceptionClasses,
     pub(crate) layout_configuration: moli_page_types::LayoutConfiguration,
     pub(crate) wpt_extensions_enabled: bool,
     pub(crate) navigation_bootstrap_entry: Option<crate::native_bridge::NavigationHistoryEntrySeed>,
@@ -1232,6 +1231,7 @@ impl Default for PageVmRuntimeHooks {
 }
 
 struct PageVmRendererDocumentIsolateBootstrap {
+    window_identity: super::RendererPageWindowIdentity,
     renderer_document_isolate_bootstrap: RendererDocumentIsolateBootstrap,
 }
 
@@ -1504,6 +1504,7 @@ impl PageVmRuntimeHooks {
     fn create_renderer_document_isolate_bootstrap(
         &mut self,
         page_runtime_task_source: crate::page_task_queue::PageRuntimeTaskSource,
+        window_identity: &super::RendererPageWindowIdentity,
     ) -> Result<PageVmRendererDocumentIsolateBootstrap> {
         if let Some(prepared) = self.prepared_renderer_document_isolate_bootstrap.take() {
             let bootstrap = prepared.borrow_mut().take().ok_or_else(|| {
@@ -1521,6 +1522,7 @@ impl PageVmRuntimeHooks {
                 "prepared renderer document isolate did not retain its Page runtime task source"
             );
             return Ok(PageVmRendererDocumentIsolateBootstrap {
+                window_identity: environment.window_identity().clone(),
                 renderer_document_isolate_bootstrap: bootstrap,
             });
         }
@@ -1537,6 +1539,7 @@ impl PageVmRuntimeHooks {
             let renderer_document_isolate_bootstrap =
                 environment.bootstrap_replacement_document_isolate()?;
             return Ok(PageVmRendererDocumentIsolateBootstrap {
+                window_identity: environment.window_identity().clone(),
                 renderer_document_isolate_bootstrap,
             });
         }
@@ -1545,12 +1548,22 @@ impl PageVmRuntimeHooks {
             &self.renderer_document_isolate_mode,
         ) {
             (Some(allocator), _) => {
-                let (renderer_document_isolate_bootstrap, reservation) =
-                    allocator.reserve_renderer_document_isolate(page_runtime_task_source)?;
+                let (renderer_document_isolate_bootstrap, reservation) = allocator
+                    .reserve_renderer_document_isolate(
+                        page_runtime_task_source,
+                        window_identity.clone(),
+                    )?;
                 self.renderer_page_script_environment =
                     renderer_document_isolate_bootstrap.renderer_page_script_environment();
                 self.renderer_document_isolate_reservation = Some(reservation);
+                let window_identity = self
+                    .renderer_page_script_environment
+                    .as_ref()
+                    .expect("an owner reservation provides a complete Page environment")
+                    .window_identity()
+                    .clone();
                 Ok(PageVmRendererDocumentIsolateBootstrap {
+                    window_identity,
                     renderer_document_isolate_bootstrap,
                 })
             }
@@ -1569,11 +1582,12 @@ impl PageVmRuntimeHooks {
                         )
                     })?;
                 let renderer_document_isolate_bootstrap = residence.with_owner_runtime(|| {
-                    RendererDocumentIsolateHandle::new_standalone_without_owner_reservation_for_test(
+                    RendererIsolateHandle::new_standalone_without_owner_reservation_for_test(
                         v8_foreground_task_sender,
                     )
                 });
                 Ok(PageVmRendererDocumentIsolateBootstrap {
+                    window_identity: window_identity.clone(),
                     renderer_document_isolate_bootstrap: renderer_document_isolate_bootstrap?,
                 })
             }
@@ -1684,8 +1698,6 @@ pub(crate) struct PageVm {
     pub(super) blocked_url_patterns: Vec<String>,
     pub(super) indexed_db_manager: Option<crate::context_bootstrap::WeakIndexedDbManager>,
     pub(super) storage_bucket_store: Option<crate::context_bootstrap::SharedStorageBucketStore>,
-    pub(super) fetch_subresource_interception_enabled: bool,
-    pub(super) fetch_subresource_interception_resource_type: Option<crate::SubresourceResourceType>,
     pub(super) layout_configuration: moli_page_types::LayoutConfiguration,
     pub(super) wpt_extensions_enabled: bool,
     pub(crate) runtime_hooks: PageVmRuntimeHooks,
@@ -1945,6 +1957,14 @@ impl PageVm {
     #[cfg(test)]
     pub(super) fn drain_document_lifecycle_events(&self) -> Vec<RendererDocumentLifecycleEvent> {
         self.document_lifecycle.drain_live_events()
+    }
+
+    /// Whether `Page.stopLoading` stopped the current Document's loading.
+    pub(in crate::runtime) fn document_loading_was_stopped(&self) -> bool {
+        self.document_lifecycle
+            .current_snapshot()
+            .terminated
+            .is_some_and(|stamp| stamp.reason == RendererDocumentTerminationReason::Stopped)
     }
 
     pub(super) fn stop_document_lifecycle(&mut self) -> Result<()> {
@@ -4314,8 +4334,10 @@ impl PageVm {
         let page_task_queue =
             PageTaskQueue::new_with_page_runtime_task_source(page_runtime_task_source.clone());
         let page_vm_isolate_bootstrap = match runtime_hooks
-            .create_renderer_document_isolate_bootstrap(page_runtime_task_source.clone())
-        {
+            .create_renderer_document_isolate_bootstrap(
+                page_runtime_task_source.clone(),
+                &env.window_identity,
+            ) {
             Ok(result) => result,
             Err(error) => return Err(Box::new((error, bootstrap_document))),
         };
@@ -4367,6 +4389,7 @@ impl PageVm {
             document_lifecycle_identity.document,
         );
         let PageVmRendererDocumentIsolateBootstrap {
+            window_identity,
             renderer_document_isolate_bootstrap,
         } = page_vm_isolate_bootstrap;
         let inherited_env = renderer_document_isolate_bootstrap
@@ -4411,6 +4434,7 @@ impl PageVm {
             resource_completion_sender,
             initial_document_loader_bootstrap,
             runtime_hooks.browser_context_runtime.clone(),
+            window_identity,
             runtime_hooks.javascript_dialog_runtime.clone(),
             renderer_document_isolate_bootstrap,
             &env.runtime_inspector_session_restore_snapshots,
@@ -4501,9 +4525,6 @@ impl PageVm {
             blocked_url_patterns: env.blocked_url_patterns.clone(),
             indexed_db_manager: env.indexed_db_manager.clone(),
             storage_bucket_store: env.storage_bucket_store.clone(),
-            fetch_subresource_interception_enabled: env.fetch_subresource_interception_enabled,
-            fetch_subresource_interception_resource_type: env
-                .fetch_subresource_interception_resource_type,
             layout_configuration: env.layout_configuration,
             wpt_extensions_enabled: env.wpt_extensions_enabled,
             runtime_hooks,
@@ -4565,10 +4586,8 @@ impl PageVm {
         self.vm_mut().set_network_offline(env.network_offline);
         self.vm_mut()
             .set_blocked_url_patterns(&env.blocked_url_patterns);
-        self.vm_mut().set_fetch_subresource_interception(
-            env.fetch_subresource_interception_enabled,
-            env.fetch_subresource_interception_resource_type,
-        );
+        self.vm_mut()
+            .set_fetch_subresource_interception(env.fetch_subresource_interception_classes);
         if matches!(
             mode,
             AuxiliaryEnvironmentApply::Navigation | AuxiliaryEnvironmentApply::InheritedNavigation

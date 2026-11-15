@@ -4,7 +4,7 @@ use moli_protocol::{
     AutomationCommandTaskStep, CompletedCdpCommandDispatch, OwnedProtocolWaitFailure,
     OwnedProtocolWaitTask, PendingAutomationCommandDispatch,
     automation::{AutomationCommand, DevToolsError, DevToolsErrorKind},
-    conn::BackgroundProtocolEvent,
+    conn::{BackgroundProtocolEvent, PendingAutomationCommandAdmission},
 };
 use tokio::{
     sync::mpsc,
@@ -50,6 +50,25 @@ pub(crate) enum AutomationCommandProgress {
 }
 
 impl CdpScheduler {
+    pub(crate) fn automation_page_host_scope(
+        &mut self,
+        context: &moli_protocol::automation::AutomationContext,
+    ) -> Option<moli_protocol::conn::ProtocolPageHostScope> {
+        self.state
+            .with_state(|state| state.automation_page_host_scope(context))
+            .ok()
+            .flatten()
+    }
+
+    pub(crate) fn automation_page_host_can_start_operation(
+        &mut self,
+        scope: &moli_protocol::conn::ProtocolPageHostScope,
+    ) -> bool {
+        self.state
+            .with_state(|state| state.automation_page_host_can_start_operation(scope))
+            .unwrap_or(false)
+    }
+
     pub(super) async fn execute_owned_automation_command_with_interleaved_progress(
         &mut self,
         receivers: &mut CdpSchedulerEventReceivers,
@@ -184,22 +203,56 @@ impl CdpScheduler {
         receivers: &mut CdpSchedulerEventReceivers,
         sender: &mpsc::UnboundedSender<AutomationWorkflowReady>,
         command: AutomationCommand,
-    ) -> AutomationCommandProgress {
+        background_command_id: Option<u64>,
+    ) -> Result<AutomationCommandProgress, Box<PendingAutomationCommandAdmission>> {
         let step = self
             .state
-            .with_state(|state| state.start_automation_command_dispatch(command))
-            .expect("live protocol actor state");
-        self.advance_automation_command_step(
-            receivers,
-            sender,
-            step,
-            ProtocolOutputSequence::empty(),
-            0,
-        )
-        .await
+            .with_state(|state| {
+                if super::devtools_command_bypasses_document_admission(&command) {
+                    Ok(
+                        state.start_automation_command_dispatch_with_background_command_id(
+                            command,
+                            background_command_id,
+                        ),
+                    )
+                } else {
+                    state.start_automation_command_with_navigation_admission(command)
+                }
+            })
+            .expect("live protocol actor state")?;
+        Ok(self
+            .advance_automation_command_step(
+                receivers,
+                sender,
+                step,
+                ProtocolOutputSequence::empty(),
+                0,
+            )
+            .await)
     }
 
-    pub(crate) fn route_devtools_runtime_protocol_output(
+    pub(crate) async fn resume_owned_automation_command_admission(
+        &mut self,
+        receivers: &mut CdpSchedulerEventReceivers,
+        sender: &mpsc::UnboundedSender<AutomationWorkflowReady>,
+        pending: Box<PendingAutomationCommandAdmission>,
+    ) -> Result<AutomationCommandProgress, Box<PendingAutomationCommandAdmission>> {
+        let step = self
+            .state
+            .with_state(|state| state.resume_automation_command_admission(pending))
+            .expect("live protocol actor state")?;
+        Ok(self
+            .advance_automation_command_step(
+                receivers,
+                sender,
+                step,
+                ProtocolOutputSequence::empty(),
+                0,
+            )
+            .await)
+    }
+
+    pub(crate) fn route_automation_command_output(
         &mut self,
         mut pending: Box<PendingAutomationExecution>,
         output: ProtocolOutputSequence,
@@ -263,7 +316,7 @@ impl CdpScheduler {
             .await
     }
 
-    pub(crate) async fn cancel_devtools_runtime_command(
+    pub(crate) async fn cancel_automation_command_progress(
         &mut self,
         receivers: &mut CdpSchedulerEventReceivers,
         mut pending: Box<PendingAutomationExecution>,
@@ -420,7 +473,7 @@ mod tests {
     #[test]
     fn runtime_deferred_initial_output_preserves_typed_event_sidecars() {
         let output = super::ProtocolOutputSequence::from_background_events(vec![
-            BackgroundProtocolEvent::immediate_automation_event(
+            BackgroundProtocolEvent::inspector_message(
                 json!({
                     "method": "Page.fileChooserOpened",
                     "params": {
@@ -430,12 +483,14 @@ mod tests {
                     },
                     "sessionId": "SID-runtime"
                 }),
-                AutomationEvent::PageFileChooserOpened(PageFileChooserOpenedEvent {
-                    frame_id: DevToolsFrameId::from("FRAME-runtime"),
-                    backend_node_id: 91,
-                    mode: "selectSingle".to_owned(),
-                    element_shared_id: None,
-                }),
+                Some(AutomationEvent::PageFileChooserOpened(
+                    PageFileChooserOpenedEvent {
+                        frame_id: DevToolsFrameId::from("FRAME-runtime"),
+                        backend_node_id: 91,
+                        mode: "selectSingle".to_owned(),
+                        element_shared_id: None,
+                    },
+                )),
             ),
         ]);
 
@@ -459,11 +514,14 @@ mod tests {
     #[test]
     fn runtime_deferred_initial_output_keeps_command_responses_sidecar_free() {
         let mut output = super::ProtocolOutputSequence::from_background_events(vec![
-            BackgroundProtocolEvent::immediate(json!({
-                "id": 71,
-                "result": {},
-                "sessionId": "SID-runtime"
-            })),
+            BackgroundProtocolEvent::inspector_message(
+                json!({
+                    "id": 71,
+                    "result": {},
+                    "sessionId": "SID-runtime"
+                }),
+                None,
+            ),
         ]);
 
         let responses = output

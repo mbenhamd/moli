@@ -10,12 +10,18 @@ pub(in crate::domains::runtime) struct RuntimeWorkflow {
     pub(in crate::domains::runtime) driver: ProtocolWorkflowDriver,
     pub(in crate::domains::runtime) context: CommandWorkflowContext,
     command_id: u64,
+    operation_group: Option<String>,
     pub(in crate::domains::runtime) scope: Option<crate::conn::RuntimePageScope>,
     inventory_scope: Option<crate::conn::RuntimePageScope>,
 }
 
 pub(in crate::domains::runtime) fn workflow_error(error: impl std::fmt::Display) -> DevToolsError {
     DevToolsError::new(DevToolsErrorKind::Internal, format!("{error:#}"))
+}
+
+enum RuntimeReferenceInput {
+    Frontend,
+    Native,
 }
 
 impl RuntimeWorkflow {
@@ -102,7 +108,24 @@ impl RuntimeWorkflow {
     }
     pub(in crate::domains::runtime) async fn execute(
         &mut self,
+        command: AutomationCommand,
+    ) -> Result<AutomationResult, DevToolsError> {
+        self.execute_with_references(command, RuntimeReferenceInput::Frontend)
+            .await
+    }
+
+    pub(in crate::domains::runtime) async fn execute_native_references(
+        &mut self,
+        command: AutomationCommand,
+    ) -> Result<AutomationResult, DevToolsError> {
+        self.execute_with_references(command, RuntimeReferenceInput::Native)
+            .await
+    }
+
+    async fn execute_with_references(
+        &mut self,
         mut command: AutomationCommand,
+        references: RuntimeReferenceInput,
     ) -> Result<AutomationResult, DevToolsError> {
         match command {
             AutomationCommand::GetRealms(command) => {
@@ -119,6 +142,8 @@ impl RuntimeWorkflow {
             }
             _ => {}
         }
+        let is_bidi = matches!(&command, AutomationCommand::EvaluateScript(call) if call.context.protocol == FrontendProtocol::WebDriverBidi)
+            || matches!(&command, AutomationCommand::CallFunction(call) if call.context.protocol == FrontendProtocol::WebDriverBidi);
         let result_kind = devtools_runtime_command_result_kind(&command);
         let ownership = devtools_runtime_result_ownership(&command);
         let options = devtools_runtime_serialization_options(&command);
@@ -129,81 +154,114 @@ impl RuntimeWorkflow {
             None
         };
         let owner = CommandOwnerScope::for_route(target.route.clone());
-        let remapped_nodes = if let AutomationCommand::CallFunction(call) = &mut command
-            && call.context.protocol == FrontendProtocol::WebDriverBidi
-        {
-            remap_bidi_node_shared_references_for_target_using(self, &target, call, realm.as_ref())
-                .await?
+        if matches!(references, RuntimeReferenceInput::Frontend) {
+            self.state(|state| state.validate_runtime_node_references(&owner, &command))??;
+        }
+        let lease = if is_bidi && target.window_context_id.is_some() {
+            Some(self.state(|state| state.allocate_runtime_object_group_for_owner(&owner))??)
         } else {
             None
         };
-        self.state(|state| {
-            state.validate_runtime_automation_handles(&owner, &command, realm.as_ref())
-        })??;
-        let response = self.native(target.clone(), command).await;
-        if let Some(lease) = remapped_nodes {
-            // Cleanup follows the original Page even if the script navigated;
-            // checking the current scope would reject its accepted result.
+        let previous_group = std::mem::replace(
+            &mut self.operation_group,
+            lease.as_ref().map(|lease| lease.name().to_owned()),
+        );
+        let result = async {
+            let remapped_nodes = if let AutomationCommand::CallFunction(call) = &mut command
+                && call.context.protocol == FrontendProtocol::WebDriverBidi
+            {
+                remap_bidi_node_shared_references_for_target_using(
+                    self,
+                    &target,
+                    call,
+                    realm.as_ref(),
+                )
+                .await?
+            } else {
+                None
+            };
+            if matches!(references, RuntimeReferenceInput::Frontend) {
+                self.state(|state| {
+                    state.resolve_runtime_automation_handles(&owner, &mut command, realm.as_ref())
+                })??;
+            }
+            let response = self.native(target.clone(), command).await;
+            if let Some(lease) = remapped_nodes {
+                // Cleanup follows the original Page even if the script navigated;
+                // checking the current scope would reject its accepted result.
+                self.context
+                    .with_state(&mut self.driver, move |state, _| {
+                        state.release_runtime_object_group(lease)
+                    })
+                    .map_err(workflow_error)?;
+            }
+            let response = response?;
+            if result_kind == DevToolsRuntimeCommandResultKind::Empty {
+                return devtools_empty_result_from_response(response);
+            }
+            let mut result =
+                devtools_script_result_from_response(response, ownership, realm.clone())?;
+            // An accepted public-script result still belongs to its original
+            // command after navigation. Do not materialize or register its handles
+            // against a replacement Document.
+            if let Some(scope) = self.scope.clone() {
+                let current = self
+                    .context
+                    .with_state(&mut self.driver, move |state, _| {
+                        state.runtime_scope_accepts_work(&scope)
+                    })
+                    .map_err(workflow_error)?;
+                if !current {
+                    return Ok(result);
+                }
+            }
+            materialize_devtools_script_dom_collection_remote_value_using(
+                self,
+                &mut result,
+                options.as_ref(),
+                &target,
+                realm.as_ref(),
+            )
+            .await;
+            materialize_devtools_script_deep_serialized_root_value_using(
+                self,
+                &mut result,
+                options.as_ref(),
+                &target,
+            )
+            .await;
+            materialize_devtools_script_node_remote_value_using(
+                self,
+                &mut result,
+                options.as_ref(),
+                &target,
+                realm.as_ref(),
+            )
+            .await;
+            materialize_devtools_script_deep_serialized_node_remote_values_using(
+                self,
+                &mut result,
+                options.as_ref(),
+                &target,
+                realm.as_ref(),
+            )
+            .await;
+            materialize_devtools_script_window_remote_value(&mut result, &target);
+            if is_bidi && matches!(references, RuntimeReferenceInput::Frontend) {
+                self.register_result(&owner, &mut result, realm.as_ref())?;
+            }
+            Ok(result)
+        }
+        .await;
+        self.operation_group = previous_group;
+        if let Some(lease) = lease {
             self.context
                 .with_state(&mut self.driver, move |state, _| {
-                    state.release_runtime_object_group(lease)
+                    state.finish_runtime_object_group(lease)
                 })
                 .map_err(workflow_error)?;
         }
-        let response = response?;
-        if result_kind == DevToolsRuntimeCommandResultKind::Empty {
-            return devtools_empty_result_from_response(response);
-        }
-        let mut result = devtools_script_result_from_response(response, ownership, realm.clone())?;
-        // An accepted public-script result still belongs to its original
-        // command after navigation. Do not materialize or register its handles
-        // against a replacement Document.
-        if let Some(scope) = self.scope.clone() {
-            let current = self
-                .context
-                .with_state(&mut self.driver, move |state, _| {
-                    state.runtime_scope_accepts_work(&scope)
-                })
-                .map_err(workflow_error)?;
-            if !current {
-                return Ok(result);
-            }
-        }
-        self.register_result(&owner, &result, None)?;
-        materialize_devtools_script_dom_collection_remote_value_using(
-            self,
-            &mut result,
-            options.as_ref(),
-            &target,
-            realm.as_ref(),
-        )
-        .await;
-        materialize_devtools_script_deep_serialized_root_value_using(
-            self,
-            &mut result,
-            options.as_ref(),
-            &target,
-        )
-        .await;
-        materialize_devtools_script_node_remote_value_using(
-            self,
-            &mut result,
-            options.as_ref(),
-            &target,
-            realm.as_ref(),
-        )
-        .await;
-        materialize_devtools_script_deep_serialized_node_remote_values_using(
-            self,
-            &mut result,
-            options.as_ref(),
-            &target,
-            realm.as_ref(),
-        )
-        .await;
-        materialize_devtools_script_window_remote_value(&mut result, &target);
-        self.register_result(&owner, &result, realm.as_ref())?;
-        Ok(result)
+        result
     }
 
     pub(in crate::domains::runtime) async fn native(
@@ -213,7 +271,7 @@ impl RuntimeWorkflow {
     ) -> Result<Value, DevToolsError> {
         let owner = CommandOwnerScope::for_route(target.route.clone());
         let mut listeners = Vec::new();
-        let (command, params) = match command {
+        let (command, mut params) = match command {
             AutomationCommand::EvaluateScript(command) => {
                 let params = devtools_evaluate_script_params(&command, target.execution_context_id);
                 (AutomationCommand::EvaluateScript(command), params)
@@ -245,13 +303,43 @@ impl RuntimeWorkflow {
                 ));
             }
         };
+        let cleanup_group = if let Some(group) = &self.operation_group {
+            if params
+                .get("objectGroup")
+                .and_then(Value::as_str)
+                .is_none_or(|group| group == "webdriver-bidi")
+            {
+                params["objectGroup"] = json!(group);
+            }
+            params
+                .get("objectGroup")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        } else if matches!(&command, AutomationCommand::CallFunction(call) if call.context.protocol == FrontendProtocol::WebDriverBidi && call.object_group.is_some())
+        {
+            // Internal proxy creation already owns a separate private lease.
+            params
+                .get("objectGroup")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        } else {
+            None
+        };
         let id = self.command_id;
         let scope = self.scope.clone();
         let (prepared, identity) = self
             .context
             .with_state(&mut self.driver, move |state, context| {
                 state.with_runtime_scope(scope.as_ref(), move |state| {
-                    state.prepare_runtime_script(owner, command, params, id, listeners, context)
+                    state.prepare_runtime_script(
+                        owner,
+                        command,
+                        params,
+                        id,
+                        cleanup_group,
+                        listeners,
+                        context,
+                    )
                 })
             })
             .map_err(workflow_error)?
@@ -310,10 +398,13 @@ impl RuntimeWorkflow {
     pub(in crate::domains::runtime) fn register_result(
         &mut self,
         owner: &CommandOwnerScope,
-        result: &AutomationResult,
+        result: &mut AutomationResult,
         realm: Option<&DevToolsRealmId>,
     ) -> Result<(), DevToolsError> {
-        self.state(|state| state.register_runtime_script_result(owner, result, realm))
+        let group = self.operation_group.clone();
+        self.state(|state| {
+            state.export_runtime_script_result(owner, result, realm, group.as_deref())
+        })
     }
 
     pub(in crate::domains::runtime) fn node_snapshot(
@@ -414,6 +505,26 @@ impl RuntimeWorkflow {
         Ok(AutomationResult::NodeReference(shared_id))
     }
 
+    pub(in crate::domains::runtime) fn export_node_reference(
+        &mut self,
+        owner: &CommandOwnerScope,
+        object_id: &str,
+        realm: Option<&DevToolsRealmId>,
+    ) -> Option<String> {
+        let group = self.operation_group.clone();
+        self.state(|state| {
+            state.register_runtime_node_reference(
+                owner,
+                object_id.to_owned(),
+                realm.cloned(),
+                None,
+                group.as_deref(),
+            )
+        })
+        .ok()
+        .flatten()
+    }
+
     pub(in crate::domains::runtime) fn register_node_reference(
         &mut self,
         owner: &CommandOwnerScope,
@@ -421,12 +532,14 @@ impl RuntimeWorkflow {
         realm: Option<&DevToolsRealmId>,
         shared_id: Option<&str>,
     ) {
+        let group = self.operation_group.clone();
         if let Err(error) = self.state(|state| {
             state.register_runtime_node_reference(
                 owner,
                 object_id.to_owned(),
                 realm.cloned(),
                 shared_id.map(str::to_owned),
+                group.as_deref(),
             )
         }) {
             tracing::debug!(?error, "failed to register Runtime node reference");
@@ -444,6 +557,7 @@ impl RuntimeWorkflow {
             command_id,
             scope: None,
             inventory_scope: None,
+            operation_group: None,
         }
     }
 
@@ -511,7 +625,7 @@ impl RuntimeWorkflow {
     async fn realms_inner(
         &mut self,
         route: CdpSessionRoute,
-        allow_missing_document: bool,
+        allow_unavailable_document: bool,
     ) -> Result<Vec<RuntimeExecutionContextEvent>, DevToolsError> {
         self.inventory_scope = None;
         let facts_route = route.clone();
@@ -533,7 +647,14 @@ impl RuntimeWorkflow {
         };
         match result {
             Ok(realms) => Ok(realms),
-            Err(error) if allow_missing_document && error.is::<crate::conn::NoDocumentLoaded>() => {
+            // A realm search may inspect several independent Pages. One
+            // unavailable Document must not prevent resolving another Page's
+            // exact realm; the selected inventory scope is still pinned.
+            Err(error)
+                if allow_unavailable_document
+                    && (error.is::<crate::conn::NoDocumentLoaded>()
+                        || error.is::<crate::conn::DocumentNavigationInProgress>()) =>
+            {
                 Ok(Vec::new())
             }
             Err(error) => Err(workflow_error(error)),

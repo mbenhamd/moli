@@ -1115,26 +1115,17 @@ pub(super) fn cache_resolved_node_snapshot(
 }
 
 pub(super) fn register_resolve_node_result(
-    conn: &mut CdpConnection,
-    owner: &CommandOwnerScope,
+    _conn: &mut CdpConnection,
+    _owner: &CommandOwnerScope,
     mut remote_object: Value,
-    object_group: Option<String>,
+    _object_group: Option<String>,
 ) -> DevToolsResolveNodeResult {
     if let Some(remote_object) = remote_object.as_object_mut() {
         remote_object
             .entry("subtype".to_owned())
             .or_insert_with(|| json!("node"));
     }
-    let result = json!({ "object": remote_object.clone() });
-    if let Some(object_group) = object_group.as_deref() {
-        conn.register_runtime_remote_object_ids_from_value_for_owner_with_group(
-            owner,
-            &result,
-            object_group,
-        );
-    } else {
-        conn.register_runtime_remote_object_ids_from_value_for_owner(owner, &result);
-    }
+
     DevToolsResolveNodeResult {
         object: remote_object,
     }
@@ -1294,11 +1285,11 @@ pub(in crate::domains::dom) fn push_set_child_nodes_event_from_snapshots(
 }
 
 pub(super) fn push_resolve_node_result(
-    conn: &mut CdpConnection,
-    owner: &CommandOwnerScope,
+    _conn: &mut CdpConnection,
+    _owner: &CommandOwnerScope,
     out: &mut DomCommandOutput,
     mut remote_object: Value,
-    object_group: Option<String>,
+    _object_group: Option<String>,
 ) {
     if let Some(remote_object) = remote_object.as_object_mut() {
         remote_object
@@ -1306,15 +1297,7 @@ pub(super) fn push_resolve_node_result(
             .or_insert_with(|| json!("node"));
     }
     let result = json!({ "object": remote_object });
-    if let Some(object_group) = object_group.as_deref() {
-        conn.register_runtime_remote_object_ids_from_value_for_owner_with_group(
-            owner,
-            &result,
-            object_group,
-        );
-    } else {
-        conn.register_runtime_remote_object_ids_from_value_for_owner(owner, &result);
-    }
+
     out.push_result(result);
 }
 
@@ -1563,24 +1546,27 @@ pub(super) fn complete_push_nodes_by_backend_ids_to_frontend_result(
 
 pub(super) fn node_for_describe_node_object_snapshot(
     snapshot: &DocumentNodeSnapshot,
-    child_frame_id: Option<&str>,
+    owner_frame_id: Option<&str>,
     top_frame_id: Option<&str>,
 ) -> Option<Value> {
-    let top_snapshot_node_id = if child_frame_id.is_some() {
+    let top_snapshot_node_id = if owner_frame_id.is_some() {
         snapshot.parent_id.or(Some(snapshot.node_id))
     } else {
         top_snapshot_node_id_for_live_object_snapshot(snapshot)
     };
-    let frame_id_for_html = if child_frame_id.is_some() {
+    let frame_id_for_html = if owner_frame_id.is_some() {
         None
     } else {
         top_frame_id
     };
     let mut node = node_snapshot_to_cdp(snapshot, top_snapshot_node_id, frame_id_for_html)?;
-    if let Some(child_frame_id) = child_frame_id
+    if let Some(owner_frame_id) = owner_frame_id
         && let Some(node) = node.as_object_mut()
     {
-        node.insert("frameId".to_owned(), json!(child_frame_id));
+        // An iframe's frameId identifies its hosted Frame, which can differ
+        // from the Frame owning the element's Document.
+        node.entry("frameId")
+            .or_insert_with(|| json!(owner_frame_id));
     }
     Some(node)
 }

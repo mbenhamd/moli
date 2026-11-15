@@ -1,6 +1,6 @@
 use crate::automation::DevToolsNetworkResourceType;
 use moli_cookie_jar::new_shared_browser_cookie_store;
-use moli_core::page::{SessionHistoryUpdateKind, SubresourceResourceType};
+use moli_core::page::{SessionHistoryUpdateKind, SubresourceInterceptionClasses};
 
 use super::super::fetch_support::{
     FetchAuthChallenge, PendingFetchAuthNavigation, PendingFetchNavigation,
@@ -166,8 +166,8 @@ fn target_fetch_owner_projects_config_without_exposing_slots() {
     let snapshot = owner.subresource_interception_snapshot();
     assert_eq!(
         owner.subresource_interception_config(),
-        (true, None),
-        "Fetch + WebSocket filters require broad subresource interception"
+        SubresourceInterceptionClasses::ALL.difference(SubresourceInterceptionClasses::WEBSOCKET),
+        "handleAuthRequests routes HTTP classes through the protocol"
     );
     assert_eq!(
         snapshot.event_session_id(None),
@@ -186,7 +186,7 @@ fn target_fetch_owner_projects_config_without_exposing_slots() {
             DevToolsNetworkResourceType::WebSocket,
             &Url::parse("wss://example.test/ws").unwrap(),
         ),
-        Some(FetchRequestStage::Request)
+        None
     );
     assert_eq!(
         owner.matching_document_request_stage(&Url::parse("https://example.test/api").unwrap()),
@@ -209,14 +209,14 @@ fn target_fetch_owner_projects_config_without_exposing_slots() {
     );
     assert_eq!(
         owner.subresource_interception_config(),
-        (true, None),
-        "aggregate subresource config still includes the FETCH-SID WebSocket pattern"
+        SubresourceInterceptionClasses::ALL.difference(SubresourceInterceptionClasses::WEBSOCKET),
+        "aggregate subresource config keeps handleAuthRequests broad admission"
     );
     let root_config = owner.config_snapshot_for_session(None);
     assert_eq!(root_config.session_id(), None);
     assert_eq!(
         root_config.subresource_interception_config(),
-        (true, Some(SubresourceResourceType::Fetch))
+        SubresourceInterceptionClasses::FETCH_LIKE
     );
 
     owner.configure(
@@ -239,7 +239,10 @@ fn target_fetch_owner_projects_config_without_exposing_slots() {
 
     owner.reset_config();
     assert!(!owner.is_enabled());
-    assert_eq!(owner.subresource_interception_config(), (false, None));
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::NONE
+    );
     assert_eq!(
         owner.matching_document_request_stage(&Url::parse("https://example.test/doc").unwrap()),
         None
@@ -308,7 +311,10 @@ fn target_fetch_owner_aggregates_network_intercepts_by_id() {
     assert!(!owner.remove_network_intercept("missing-intercept"));
     assert!(owner.remove_network_intercept("intercept-response"));
     assert!(!owner.is_enabled());
-    assert_eq!(owner.subresource_interception_config(), (false, None));
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::NONE
+    );
 }
 
 #[test]
@@ -339,7 +345,8 @@ fn target_fetch_owner_keeps_fetch_enable_configs_per_session() {
     assert!(aggregate.handle_auth_requests());
     assert_eq!(
         owner.subresource_interception_config(),
-        (true, Some(SubresourceResourceType::Fetch))
+        SubresourceInterceptionClasses::ALL.difference(SubresourceInterceptionClasses::WEBSOCKET),
+        "aggregate handleAuthRequests broadens the renderer class set"
     );
 
     let primary = owner.config_snapshot_for_session(Some("SID-primary"));
@@ -352,7 +359,8 @@ fn target_fetch_owner_keeps_fetch_enable_configs_per_session() {
     );
     assert_eq!(
         primary.subresource_interception_config(),
-        (true, Some(SubresourceResourceType::Fetch))
+        SubresourceInterceptionClasses::ALL.difference(SubresourceInterceptionClasses::WEBSOCKET),
+        "session handleAuthRequests broadens the renderer class set"
     );
 
     let aux = owner.config_snapshot_for_session(Some("SID-attached"));
@@ -362,7 +370,7 @@ fn target_fetch_owner_keeps_fetch_enable_configs_per_session() {
     assert_eq!(aux.patterns()[0].url_pattern, "https://example.test/aux");
     assert_eq!(
         aux.subresource_interception_config(),
-        (true, Some(SubresourceResourceType::Xhr))
+        SubresourceInterceptionClasses::FETCH_LIKE
     );
 
     assert!(owner.remove_fetch_session(Some("SID-primary")));
@@ -627,7 +635,10 @@ fn target_fetch_owner_keeps_dormant_network_intercept_removable() {
     );
 
     assert!(!owner.is_enabled());
-    assert_eq!(owner.subresource_interception_config(), (false, None));
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::NONE
+    );
     assert_eq!(owner.config_snapshot().patterns(), &[]);
     assert!(
         owner
@@ -769,7 +780,10 @@ fn target_fetch_owner_reports_matching_auth_required_network_intercepts() {
     let matching_url = Url::parse("https://example.test/protected/basic").unwrap();
     let other_url = Url::parse("https://other.test/protected/basic").unwrap();
     let config = owner.config_snapshot();
-    assert_eq!(owner.subresource_interception_config(), (true, None));
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::ALL.difference(SubresourceInterceptionClasses::WEBSOCKET)
+    );
     assert!(config.matches_auth_required(&matching_url));
     assert!(config.matches_auth_required(&other_url));
     assert_eq!(
@@ -811,6 +825,145 @@ fn target_fetch_owner_reports_matching_auth_required_network_intercepts() {
     assert!(owner.remove_network_intercept("intercept-auth"));
     assert!(owner.is_enabled());
     assert!(!owner.config_snapshot().matches_auth_required(&matching_url));
+}
+
+#[test]
+fn cdp_auth_is_independent_of_network_intercept_registration() {
+    let mut owner = TargetFetchOwner::default();
+    let image_patterns = vec![FetchInterceptionPattern {
+        url_pattern: "*".to_owned(),
+        resource_type_filter: Some(FetchResourceTypeFilter::Image),
+        request_stage: FetchRequestStage::Request,
+    }];
+    owner.configure(Some("SID-fetch".to_owned()), true, image_patterns.clone());
+    owner.configure(Some("SID-other".to_owned()), true, image_patterns.clone());
+    owner.add_network_intercept(
+        "intercept-no-auth".to_owned(),
+        Some("BIDI-SID".to_owned()),
+        false,
+        vec!["*".to_owned()],
+        image_patterns.clone(),
+    );
+
+    let any_url = Url::parse("https://example.test/protected/basic").unwrap();
+    let config = owner.config_snapshot();
+    assert!(owner.handle_auth_requests());
+    assert!(config.matches_auth_required(&any_url));
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::ALL.difference(SubresourceInterceptionClasses::WEBSOCKET)
+    );
+    assert!(owner.remove_network_intercept("intercept-no-auth"));
+    assert!(owner.config_snapshot().matches_auth_required(&any_url));
+    owner.add_network_intercept(
+        "intercept-no-auth".to_owned(),
+        Some("BIDI-SID".to_owned()),
+        false,
+        Vec::new(),
+        image_patterns.clone(),
+    );
+
+    // A scoped network auth rule adds an owner only for its own URL. It
+    // cannot remove either CDP handler's authority over other challenges.
+    owner.add_network_intercept(
+        "intercept-auth".to_owned(),
+        Some("BIDI-SID".to_owned()),
+        true,
+        vec!["https://other.test/protected*".to_owned()],
+        Vec::new(),
+    );
+    let config = owner.config_snapshot();
+    let snapshot = config.subresource_interception_snapshot();
+    assert!(config.matches_auth_required(&any_url));
+    assert!(snapshot.matches_auth_required(&any_url));
+    assert!(
+        snapshot
+            .matching_auth_required_network_intercepts(&any_url)
+            .is_empty()
+    );
+    assert_eq!(
+        snapshot.auth_required_owner_kind(&any_url),
+        Some(PendingSubresourceFetchOwnerKind::Fetch)
+    );
+    assert_eq!(
+        snapshot
+            .matching_auth_required_pause_sessions(None, &any_url)
+            .len(),
+        2
+    );
+    assert!(owner.remove_fetch_session(Some("SID-fetch")));
+    assert!(owner.config_snapshot().matches_auth_required(&any_url));
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::ALL.difference(SubresourceInterceptionClasses::WEBSOCKET)
+    );
+
+    owner.configure(Some("SID-other".to_owned()), false, image_patterns);
+    let config = owner.config_snapshot();
+    let snapshot = config.subresource_interception_snapshot();
+    let other_url = Url::parse("https://other.test/protected/basic").unwrap();
+    assert!(!config.matches_auth_required(&any_url));
+    assert!(!snapshot.matches_auth_required(&any_url));
+    assert!(
+        snapshot
+            .matching_auth_required_pause_sessions(None, &any_url)
+            .is_empty()
+    );
+    assert!(config.matches_auth_required(&other_url));
+    assert!(snapshot.matches_auth_required(&other_url));
+    assert_eq!(
+        snapshot.auth_required_owner_kind(&other_url),
+        Some(PendingSubresourceFetchOwnerKind::NetworkOrBidi)
+    );
+    // A real auth rule still requires all HTTP resource classes even though it
+    // no longer authorizes unrelated URLs after the last CDP handler stops.
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::ALL.difference(SubresourceInterceptionClasses::WEBSOCKET)
+    );
+    assert!(owner.remove_network_intercept("intercept-auth"));
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::IMAGE
+    );
+    assert!(!owner.config_snapshot().matches_auth_required(&other_url));
+    assert!(owner.remove_fetch_session(Some("SID-other")));
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::IMAGE
+    );
+    assert!(owner.remove_network_intercept("intercept-no-auth"));
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::NONE
+    );
+}
+
+#[test]
+fn network_auth_without_url_patterns_does_not_broaden_or_authorize_requests() {
+    let mut owner = TargetFetchOwner::default();
+    owner.add_network_intercept(
+        "intercept-empty-auth".to_owned(),
+        Some("BIDI-SID".to_owned()),
+        true,
+        Vec::new(),
+        vec![FetchInterceptionPattern {
+            url_pattern: "*".to_owned(),
+            resource_type_filter: Some(FetchResourceTypeFilter::Image),
+            request_stage: FetchRequestStage::Request,
+        }],
+    );
+    let url = Url::parse("https://example.test/protected/basic").unwrap();
+    let config = owner.config_snapshot();
+    let snapshot = config.subresource_interception_snapshot();
+    assert!(owner.handle_auth_requests());
+    assert!(!config.matches_auth_required(&url));
+    assert!(!snapshot.matches_auth_required(&url));
+    assert_eq!(snapshot.auth_required_owner_kind(&url), None);
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::IMAGE
+    );
 }
 
 #[test]
@@ -1340,7 +1493,7 @@ fn committed_document_navigation_state_clears_document_local_runtime_state() {
 fn devtools_session_runtime_context_clear_resets_child_default_emission_cursor() {
     let mut state = DevToolsSessionState::default();
     state.mark_child_default_execution_context_id_emitted(99);
-    state.clear_runtime_remote_object_tracking();
+    state.clear_runtime_context_metadata();
 
     assert!(
         !state.has_emitted_child_default_execution_context_id(99),
@@ -1772,4 +1925,69 @@ fn committed_document_navigation_accepts_matching_late_body_only_until_next_navi
         "starting a newer navigation must make the previous body completion stale"
     );
     assert!(context.accepts_document_body_completion_event(&second));
+}
+
+#[test]
+fn interception_eligibility_includes_authentication_independent_of_resource_type() {
+    let mut owner = TargetFetchOwner::default();
+    let pattern = |url: &str, kind, stage| FetchInterceptionPattern {
+        url_pattern: url.to_owned(),
+        resource_type_filter: kind,
+        request_stage: stage,
+    };
+    owner.configure(
+        Some("CDP".to_owned()),
+        false,
+        vec![
+            pattern(
+                "*/image",
+                Some(FetchResourceTypeFilter::Image),
+                FetchRequestStage::Request,
+            ),
+            pattern(
+                "*/api-a",
+                Some(FetchResourceTypeFilter::Xhr),
+                FetchRequestStage::Request,
+            ),
+            pattern(
+                "*/api-b",
+                Some(FetchResourceTypeFilter::Xhr),
+                FetchRequestStage::Response,
+            ),
+        ],
+    );
+    owner.add_network_intercept(
+        "auth".to_owned(),
+        Some("BIDI".to_owned()),
+        true,
+        vec!["*/auth-only".to_owned()],
+        Vec::new(),
+    );
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::ALL.difference(SubresourceInterceptionClasses::WEBSOCKET)
+    );
+    owner.configure(
+        Some("CDP".to_owned()),
+        true,
+        vec![pattern(
+            "*/image",
+            Some(FetchResourceTypeFilter::Image),
+            FetchRequestStage::Request,
+        )],
+    );
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::ALL.difference(SubresourceInterceptionClasses::WEBSOCKET)
+    );
+    owner.remove_fetch_session(Some("CDP"));
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::ALL.difference(SubresourceInterceptionClasses::WEBSOCKET)
+    );
+    owner.remove_network_intercept("auth");
+    assert_eq!(
+        owner.subresource_interception_config(),
+        SubresourceInterceptionClasses::NONE
+    );
 }

@@ -3120,7 +3120,8 @@ document.body.appendChild(replacementFrame);
                                     ),
                                     source_bytes: None,
                                     network_result: None,
-                                },
+                                    network_request_handle: None,
+},
                             ),
                             MainParserDeferredClassicSourceNetworkAttribution::new(
                                 Url::parse("https://old-document.test/").unwrap(),
@@ -3718,6 +3719,22 @@ fn runtime_evaluate_without_enable_uses_inspector_default_context() {
 }
 
 #[test]
+fn page_native_inspector_owns_object_namespaces_and_groups() {
+    let mut page_vm = test_page_vm();
+    crate::inspector_session::tests::object_lifecycle::assert_object_namespaces_and_groups(
+        |session, request| {
+            page_vm
+                .vm_mut()
+                .dispatch_inspector_protocol_message_for_session(Some(session), request)
+                .expect("Page native Inspector dispatch")
+                .into_iter()
+                .map(RendererRuntimeInspectorMessage::into_v8_inspector_message)
+                .collect()
+        },
+    );
+}
+
+#[test]
 fn runtime_stack_capture_follows_session_lifecycle() {
     let mut page_vm = test_page_vm();
     crate::inspector_session::tests::assert_session_lifecycle(|request| {
@@ -3978,7 +3995,9 @@ fn serialize_html_reads_current_document_after_document_open() {
         .vm()
         .current_main_document_task_owner()
         .expect("initial document owner");
-    let before_html = page_vm.serialize_html();
+    let before_html = page_vm
+        .serialize_html(crate::RendererHtmlSerializeOptions::default())
+        .unwrap();
     assert!(before_html.contains(">before<"));
 
     page_vm
@@ -3994,7 +4013,9 @@ document.close();"#,
         .vm()
         .current_main_document_task_owner()
         .expect("replacement document owner");
-    let after_html = page_vm.serialize_html();
+    let after_html = page_vm
+        .serialize_html(crate::RendererHtmlSerializeOptions::default())
+        .unwrap();
 
     assert_ne!(before_owner.document_id, after_owner.document_id);
     assert!(

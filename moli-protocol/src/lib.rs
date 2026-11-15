@@ -9,6 +9,7 @@ pub mod automation;
 mod cdp_projection;
 pub mod conn;
 pub mod domains;
+
 pub mod frame_index;
 #[cfg(feature = "test-support")]
 pub mod test_support;
@@ -47,9 +48,9 @@ pub use conn::{
 };
 pub use domains::activity::{
     ProtocolNavigationDependency, ProtocolSchedulerWork, ProtocolSchedulerWorkKind,
-    ProtocolWorkPublishSequence, RuntimeCommandOutputBarrierCompletion,
-    RuntimeCommandOutputBarrierPermit, RuntimeCommandOutputBarrierTerminal,
-    RuntimeCommandOutputBarriers,
+    ProtocolWorkPublishSequence, RendererFencedProtocolOutput,
+    RuntimeCommandOutputBarrierCompletion, RuntimeCommandOutputBarrierPermit,
+    RuntimeCommandOutputBarrierTerminal, RuntimeCommandOutputBarriers,
 };
 pub use domains::page::{
     BackgroundNavigationCompletion, CompletedPageScreencastCapture,

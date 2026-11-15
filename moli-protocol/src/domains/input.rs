@@ -1139,6 +1139,7 @@ fn start_devtools_dispatch_mouse_event_command(
     let event_name = mouse_event_name(command.event_type);
     let pointer = RendererPointerEventProperties {
         pointer_id: 1,
+        is_primary: true,
         pointer_type: match command.pointer_type {
             DevToolsPointerType::Mouse => "mouse",
             DevToolsPointerType::Pen => "pen",
@@ -1667,7 +1668,7 @@ async fn handle_input_dispatch_outcome(
         })??;
         let mut events = Vec::new();
         if let Some(prepared) = prepared {
-            prepared.run(&mut events, command_context).await;
+            prepared.run(&mut events).await;
         }
         out.extend_protocol_events(command_context, events);
         // Keep accepted side effects with the command while a later renderer
@@ -1961,6 +1962,7 @@ mod producer_tests {
         RendererLifecycleEpoch, RendererLifecycleEventStamp, RendererPageCreationArtifacts,
         RendererPendingDownloadActivation, RendererPendingFileChooserActivation,
     };
+    use moli_protocol_cdp_defs::LocalCdpEvent;
     use serde_json::json;
 
     use crate::automation::{
@@ -1969,7 +1971,7 @@ mod producer_tests {
     };
     use crate::conn::{
         BackgroundProtocolEvent, BrowserContext, CdpConnection, CommandDispatchContext,
-        CommandOwnerScope, TargetPageResidenceIdentity, build_event,
+        CommandOwnerScope, TargetPageResidenceIdentity,
     };
     use crate::domains::activity::ProtocolOutputPayloads;
 
@@ -2090,16 +2092,14 @@ mod producer_tests {
         side_effects.extend_protocol_events(
             &mut command_context,
             vec![BackgroundProtocolEvent::immediate_automation_event(
-                build_event(
-                    "Browser.downloadWillBegin",
-                    json!({
-                        "frameId": "FRAME-download",
-                        "guid": "GUID-download",
-                        "url": "https://example.test/download",
-                        "suggestedFilename": "download.txt"
-                    }),
-                    None,
-                ),
+                LocalCdpEvent::BrowserDownloadWillBegin,
+                json!({
+                    "frameId": "FRAME-download",
+                    "guid": "GUID-download",
+                    "url": "https://example.test/download",
+                    "suggestedFilename": "download.txt"
+                }),
+                None,
                 AutomationEvent::BrowserDownloadWillBegin(BrowserDownloadWillBeginEvent {
                     frame_id: DevToolsFrameId::from("FRAME-download"),
                     guid: "GUID-download".to_owned(),
@@ -2131,17 +2131,15 @@ mod producer_tests {
         let mut command_context = CommandDispatchContext::default();
         command_context.extend_post_response_events(vec![
             BackgroundProtocolEvent::immediate_automation_event(
-                build_event(
-                    "Browser.downloadProgress",
-                    json!({
-                        "guid": "GUID-download",
-                        "state": "completed",
-                        "receivedBytes": 123,
-                        "totalBytes": 123,
-                        "filePath": "/tmp/download.txt"
-                    }),
-                    None,
-                ),
+                LocalCdpEvent::BrowserDownloadProgress,
+                json!({
+                    "guid": "GUID-download",
+                    "state": "completed",
+                    "receivedBytes": 123,
+                    "totalBytes": 123,
+                    "filePath": "/tmp/download.txt"
+                }),
+                None,
                 AutomationEvent::BrowserDownloadProgress(BrowserDownloadProgressEvent {
                     guid: "GUID-download".to_owned(),
                     state: "completed".to_owned(),

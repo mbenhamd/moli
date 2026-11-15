@@ -1,4 +1,5 @@
 use anyhow::Result;
+pub(crate) use state::DrainedFetchRequests;
 
 use std::{
     cell::{OnceCell, RefCell},
@@ -54,6 +55,8 @@ pub(crate) struct DocumentNavigationInProgress;
 mod activity_source;
 mod automation_command;
 mod bidi_channel_work;
+mod bidi_handles;
+pub(crate) use bidi_handles::BidiHandleRelease;
 mod body_spool;
 mod browser_context;
 mod command_owner_scope;
@@ -82,7 +85,7 @@ mod output;
 mod owned_wait_task;
 mod page_host_scope;
 mod page_state;
-pub(crate) use page_host_scope::ProtocolPageHostScope;
+pub use page_host_scope::ProtocolPageHostScope;
 mod popup_activation_work;
 mod popup_navigation_work;
 mod renderer_output_dependencies;
@@ -126,7 +129,8 @@ pub use crate::domains::network::IoStreamState;
 pub(crate) use automation_command::AutomationCommandResult;
 pub use automation_command::{
     AutomationCommandDispatchOutcome, AutomationCommandTaskStep,
-    CompletedAutomationCommandDispatch, PendingAutomationCommandDispatch,
+    CompletedAutomationCommandDispatch, PendingAutomationCommandAdmission,
+    PendingAutomationCommandDispatch,
 };
 #[cfg(test)]
 pub(crate) use bidi_channel_work::BidiChannelOwnerActionKind;
@@ -134,7 +138,9 @@ pub(crate) use bidi_channel_work::{
     BidiChannelListenerResidence, BidiChannelOwnerAction, BidiChannelOwnerActionBody,
     BidiChannelPageOwner,
 };
-pub(crate) use body_spool::{CapturedBody, CapturedBodyWriter, run_body_storage_work};
+pub(crate) use body_spool::{
+    CapturedBody, CapturedBodyWriter, ProtocolResponseBody, run_body_storage_work,
+};
 #[cfg(test)]
 pub(crate) use browser_context::{ClosedPageTarget, PendingPageTargetClose};
 pub(crate) use browser_context::{
@@ -177,7 +183,7 @@ pub use fetch_support::{
     PendingSubresourceFetchRequestStage, PendingSubresourceFetchRequestStageChain,
     PendingSubresourceFetchResponseRequest, PendingSubresourceFetchResponseStage,
     PendingSubresourceFetchResponseStageChain, ResponseStageUrlMatchPolicy,
-    fetch_subresource_interception_config, fetch_subresource_interception_config_for_patterns,
+    fetch_subresource_interception_config_for_patterns,
 };
 pub use moli_protocol_cdp::{
     CdpRendererCommandAccess, CdpRendererCommandPolicy, CdpRendererCommandReplacement,
@@ -438,6 +444,7 @@ impl CommandResponseFlushContext {
         self.receiver.is_some()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn receiver(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
         self.receiver.clone()
     }
@@ -681,18 +688,18 @@ pub(crate) use moli_protocol_cdp::{DEFAULT_LOADER_ID, monotonic_timestamp_second
 pub(crate) use navigation_error::{
     NavigationNetworkError, NavigationNetworkErrorKind, NavigationRequestBlocked,
 };
-pub(crate) use output::NavigationBackgroundEvent;
 #[cfg(test)]
 pub(crate) use output::build_command_success_response;
 pub use output::{
     BackgroundCommandResponsePayload, BackgroundEventSender, BackgroundProtocolEvent,
     PageScreencastFrameMetadata, RuntimeInspectorAsyncCompletionReceiver,
-    RuntimeInspectorResponseReady, RuntimeInspectorResponseReadySender, build_event,
+    RuntimeInspectorResponseReady, RuntimeInspectorResponseReadySender,
 };
 pub(crate) use output::{
     BackgroundCommandResponsePayloadRef, BackgroundServiceWorkerErrorMessage,
     BackgroundServiceWorkerRegistration, BackgroundServiceWorkerVersion,
 };
+pub(crate) use output::{NavigationBackgroundEvent, build_event};
 pub(crate) use page_state::{
     InstalledNavigationPage, LoadedNavigationPageCommit, LoadedNavigationRendererAttachmentCommit,
 };
@@ -711,7 +718,6 @@ pub(crate) use runtime_eval::{
     PreparedRuntimeDomQuery, PreparedRuntimeHelper, PreparedRuntimePageQuery,
     PreparedRuntimeRealmInventory, RuntimeBindingCallEvent, RuntimeEnableEventsReplay,
     RuntimeEnableReplayEvent, RuntimeHelperIdentity, RuntimeInspectorError, SessionWorkerCleanup,
-    runtime_remote_object_ids_in_map,
 };
 pub use runtime_eval::{
     CompletedMoliDiagnosticsDispatch, CompletedRuntimeBindingPageCommandDispatch,
@@ -982,21 +988,14 @@ impl DeferredMainDocumentLoadPredecessorCandidate {
 pub(crate) struct RuntimeAwaitJob {
     command_id: u64,
     owner: CommandOwnerScope,
-    object_group: Option<String>,
     action: &'static str,
 }
 
 impl RuntimeAwaitJob {
-    pub(crate) fn new(
-        command_id: u64,
-        owner: &CommandOwnerScope,
-        object_group: Option<&str>,
-        action: &'static str,
-    ) -> Self {
+    pub(crate) fn new(command_id: u64, owner: &CommandOwnerScope, action: &'static str) -> Self {
         Self {
             command_id,
             owner: owner.clone(),
-            object_group: object_group.map(str::to_owned),
             action,
         }
     }
@@ -1006,7 +1005,6 @@ impl RuntimeAwaitJob {
             "commandId": self.command_id,
             "sessionId": self.owner.session_id(),
             "ownerRoute": self.owner.explicit_route().map(|route| format!("{route:?}")),
-            "objectGroup": self.object_group,
             "action": self.action,
         })
     }
@@ -1855,9 +1853,16 @@ impl CdpConnection {
     ) -> Option<String> {
         event
             .navigation_gate_target_id()
-            .filter(|target_id| self.browser_context_id_for_target(target_id).is_some())
+            .filter(|target_id| self.target_session_route_for_target_id(target_id).is_some())
             .map(str::to_owned)
-            .or_else(|| self.target_id_for_session_owner(event.protocol_session_id()))
+            .or_else(|| match self.session_route(event.protocol_session_id()) {
+                Some(
+                    CdpSessionRoute::DedicatedWorkerTarget { target_id, .. }
+                    | CdpSessionRoute::SharedWorkerTarget { target_id, .. }
+                    | CdpSessionRoute::ServiceWorkerTarget { target_id, .. },
+                ) => Some(target_id),
+                _ => self.target_id_for_session_owner(event.protocol_session_id()),
+            })
     }
 
     pub fn has_inflight_background_navigation_for_devtools_context(

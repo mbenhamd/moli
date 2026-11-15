@@ -62,10 +62,9 @@ pub(crate) struct DevToolsSessionState {
     pub(crate) emulation_session_state: DevToolsEmulationSessionState,
     pub(crate) runtime_bindings: Vec<RuntimeBindingDefinition>,
     pub(crate) runtime_binding_replay_pending: BTreeSet<(String, Option<String>)>,
-    pub(crate) runtime_remote_object_ids: HashSet<String>,
-    pub(crate) runtime_remote_object_groups: HashMap<String, String>,
-    pub(crate) runtime_remote_object_realms: HashMap<String, String>,
-    pub(crate) runtime_remote_object_aliases: HashMap<String, String>,
+    pub(crate) dom_remote_object_node_cache: HashMap<String, serde_json::Value>,
+    pub(crate) bidi_handles: crate::conn::bidi_handles::BidiHandles,
+
     // Exported node identities outlive their Document so a first Classic use
     // after navigation still reports stale. Entries contain no JS roots.
     pub(crate) webdriver_node_references: HashMap<String, super::WebDriverNodeReference>,
@@ -847,9 +846,8 @@ impl DevToolsSessionState {
         &mut self,
         cdp_request_id: u64,
         session_id: Option<&str>,
-        object_group: Option<&str>,
     ) {
-        self.try_register_pending_inspector_await(cdp_request_id, session_id, object_group)
+        self.try_register_pending_inspector_await(cdp_request_id, session_id)
             .expect("pending Inspector await frontend command id must be unique per session");
     }
 
@@ -857,23 +855,21 @@ impl DevToolsSessionState {
         &mut self,
         cdp_request_id: u64,
         session_id: Option<&str>,
-        object_group: Option<&str>,
     ) -> Result<(), DuplicatePendingRendererCommand> {
         self.pending_inspector_awaits
-            .try_insert(cdp_request_id, session_id, object_group)
+            .try_insert(cdp_request_id, session_id)
     }
 
     pub(crate) fn register_pending_bidi_channel_listener(
         &mut self,
         cdp_request_id: u64,
         session_id: Option<&str>,
-        object_group: Option<&str>,
+
         listener: crate::conn::BidiChannelListenerResidence,
     ) {
         self.pending_inspector_awaits.insert_bidi_channel_listener(
             cdp_request_id,
             session_id,
-            object_group,
             listener,
         );
     }
@@ -905,18 +901,6 @@ impl DevToolsSessionState {
     ) -> Option<RendererCommandCorrelation> {
         self.pending_inspector_awaits
             .renderer_call_for_frontend(cdp_request_id)
-    }
-
-    pub(crate) fn renderer_command_descriptor_for_renderer_if_attachment_matches(
-        &self,
-        renderer_call_id: moli_page_types::RendererCallId,
-        dispatched_attachment_id: Option<moli_page_types::RendererAgentAttachmentId>,
-    ) -> Option<RendererCommandDescriptor> {
-        self.pending_inspector_awaits
-            .renderer_command_descriptor_for_renderer_if_attachment_matches(
-                renderer_call_id,
-                dispatched_attachment_id,
-            )
     }
 
     pub(crate) fn prepare_renderer_call_replays(
@@ -990,98 +974,9 @@ impl DevToolsSessionState {
         self.pending_inspector_awaits.drain_all()
     }
 
-    pub(crate) fn register_runtime_remote_object_ids<I>(&mut self, object_ids: I)
-    where
-        I: IntoIterator<Item = String>,
-    {
-        self.runtime_remote_object_ids.extend(object_ids);
-    }
+    pub(crate) fn clear_runtime_context_metadata(&mut self) {
+        self.bidi_handles.clear();
 
-    pub(crate) fn register_runtime_remote_object_ids_with_realm<I>(
-        &mut self,
-        object_ids: I,
-        realm_id: &str,
-    ) where
-        I: IntoIterator<Item = String>,
-    {
-        for object_id in object_ids {
-            self.runtime_remote_object_ids.insert(object_id.clone());
-            self.runtime_remote_object_realms
-                .insert(object_id, realm_id.to_owned());
-        }
-    }
-
-    pub(crate) fn register_runtime_remote_object_alias_with_realm(
-        &mut self,
-        alias_id: String,
-        object_id: String,
-        realm_id: &str,
-    ) {
-        self.runtime_remote_object_ids.insert(object_id.clone());
-        self.runtime_remote_object_realms
-            .insert(object_id.clone(), realm_id.to_owned());
-        self.runtime_remote_object_aliases
-            .insert(alias_id.clone(), object_id);
-        self.runtime_remote_object_realms
-            .insert(alias_id, realm_id.to_owned());
-    }
-
-    pub(crate) fn register_runtime_remote_object_ids_with_group<I>(
-        &mut self,
-        object_ids: I,
-        object_group: &str,
-    ) where
-        I: IntoIterator<Item = String>,
-    {
-        for object_id in object_ids {
-            self.runtime_remote_object_ids.insert(object_id.clone());
-            self.runtime_remote_object_groups
-                .insert(object_id, object_group.to_owned());
-        }
-    }
-
-    pub(crate) fn unregister_runtime_remote_object_ids(&mut self, object_ids: &[String]) {
-        let object_ids = object_ids
-            .iter()
-            .map(String::as_str)
-            .collect::<HashSet<_>>();
-        let alias_ids_to_remove = self
-            .runtime_remote_object_aliases
-            .iter()
-            .filter_map(|(alias_id, object_id)| {
-                (object_ids.contains(alias_id.as_str()) || object_ids.contains(object_id.as_str()))
-                    .then_some(alias_id.clone())
-            })
-            .collect::<Vec<_>>();
-
-        for object_id in object_ids {
-            self.runtime_remote_object_ids.remove(object_id);
-            self.runtime_remote_object_groups.remove(object_id);
-            self.runtime_remote_object_realms.remove(object_id);
-        }
-
-        for alias_id in alias_ids_to_remove {
-            self.runtime_remote_object_aliases.remove(&alias_id);
-            self.runtime_remote_object_realms.remove(&alias_id);
-        }
-    }
-
-    pub(crate) fn unregister_runtime_remote_object_group(&mut self, object_group: &str) {
-        let object_ids = self
-            .runtime_remote_object_groups
-            .iter()
-            .filter_map(|(object_id, group)| {
-                (group == object_group).then_some(object_id.to_owned())
-            })
-            .collect::<Vec<_>>();
-        self.unregister_runtime_remote_object_ids(&object_ids);
-    }
-
-    pub(crate) fn clear_runtime_remote_object_tracking(&mut self) {
-        self.runtime_remote_object_ids.clear();
-        self.runtime_remote_object_groups.clear();
-        self.runtime_remote_object_realms.clear();
-        self.runtime_remote_object_aliases.clear();
         self.clear_child_default_context_emission_state();
     }
 
@@ -1115,71 +1010,8 @@ impl DevToolsSessionState {
         self.emitted_child_default_execution_context_ids.clear();
     }
 
-    pub(crate) fn clear_runtime_remote_objects_for_realm(&mut self, realm_id: &str) {
-        let object_ids = self
-            .runtime_remote_object_realms
-            .iter()
-            .filter_map(|(object_id, realm)| (realm == realm_id).then_some(object_id.clone()))
-            .collect::<Vec<_>>();
-        self.unregister_runtime_remote_object_ids(&object_ids);
-    }
-
-    pub(crate) fn runtime_remote_object_group(&self, object_id: &str) -> Option<&str> {
-        self.runtime_remote_object_groups
-            .get(object_id)
-            .or_else(|| {
-                self.runtime_remote_object_aliases
-                    .get(object_id)
-                    .and_then(|object_id| self.runtime_remote_object_groups.get(object_id))
-            })
-            .map(String::as_str)
-    }
-
-    pub(crate) fn has_runtime_remote_object_id(&self, object_id: &str) -> bool {
-        self.runtime_remote_object_ids.contains(object_id)
-            || self.runtime_remote_object_aliases.contains_key(object_id)
-    }
-
-    pub(crate) fn runtime_remote_object_realm(&self, object_id: &str) -> Option<&str> {
-        self.runtime_remote_object_realms
-            .get(object_id)
-            .or_else(|| {
-                self.runtime_remote_object_aliases
-                    .get(object_id)
-                    .and_then(|object_id| self.runtime_remote_object_realms.get(object_id))
-            })
-            .map(String::as_str)
-    }
-
-    pub(crate) fn runtime_remote_object_alias(&self, object_id: &str) -> Option<&str> {
-        self.runtime_remote_object_aliases
-            .get(object_id)
-            .map(String::as_str)
-    }
-
-    pub(crate) fn take_runtime_remote_object_cleanup_plan(&mut self) -> (Vec<String>, Vec<String>) {
-        let grouped_object_ids = self
-            .runtime_remote_object_groups
-            .keys()
-            .cloned()
-            .collect::<HashSet<_>>();
-        let mut object_groups = self
-            .runtime_remote_object_groups
-            .values()
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let mut ungrouped_object_ids = self
-            .runtime_remote_object_ids
-            .iter()
-            .filter(|object_id| !grouped_object_ids.contains(*object_id))
-            .cloned()
-            .collect::<Vec<_>>();
-        object_groups.sort();
-        ungrouped_object_ids.sort();
-        self.clear_runtime_remote_object_tracking();
-        (object_groups, ungrouped_object_ids)
+    pub(crate) fn clear_bidi_references_for_realm(&mut self, realm_id: &str) {
+        self.bidi_handles.clear_realm(realm_id);
     }
 }
 
@@ -1688,10 +1520,10 @@ mod tests {
         let mut sessions = DevToolsSessionRegistry::default();
         sessions
             .primary_mut()
-            .register_pending_inspector_await(1, Some("SID-primary"), None);
+            .register_pending_inspector_await(1, Some("SID-primary"));
         sessions
             .ensure_attached("SID-attached")
-            .register_pending_inspector_await(2, Some("SID-attached"), Some("group"));
+            .register_pending_inspector_await(2, Some("SID-attached"));
 
         assert!(sessions.has_pending_inspector_awaits());
         assert_eq!(sessions.pending_inspector_await_count(), 2);

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use super::super::element::{ClientRect, observable_caret_position, observable_geometry_batch};
 use super::super::node::{node_is_document, node_runtime_and_handle_from_args};
 use crate::document_runtime::DomHandle;
-use crate::native_bridge::{JsContextHost, set_wrapped_handle_or_null_for_receiver};
+use crate::native_bridge::{PageScriptHost, set_wrapped_handle_or_null_for_receiver};
 use crate::util::{
     context_host_ptr_from_global_bridge, get_private_value, node_wrapper_from_handle,
     serialize_v8_array, throw_type_error, v8_string, v8str,
@@ -67,7 +67,7 @@ struct DocumentElementsFromPointArgs {
 
 fn parse_caret_shadow_roots_argument(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     args: &v8::FunctionCallbackArguments<'_>,
 ) -> Option<Vec<DomHandle>> {
     if args.length() < 3 || args.get(2).is_null_or_undefined() {
@@ -133,7 +133,7 @@ fn visual_line_starts(text: &str, cols: usize) -> Vec<usize> {
 }
 
 fn textarea_caret_offset_and_rect(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     rect: ClientRect,
     x: f64,
@@ -211,7 +211,7 @@ fn textarea_caret_offset_and_rect(
     )
 }
 
-fn child_offset(runtime: &JsContextHost, parent: DomHandle, child: DomHandle) -> u32 {
+fn child_offset(runtime: &PageScriptHost, parent: DomHandle, child: DomHandle) -> u32 {
     runtime.dom_host().child_index(parent, child).unwrap_or(0) as u32
 }
 
@@ -225,7 +225,7 @@ fn box_rect_for_source(
 }
 
 fn caret_candidate_from_layout(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     position: &moli_layout::LayoutCaretPosition<DomHandle>,
     x: f64,
     y: f64,
@@ -269,7 +269,7 @@ fn caret_candidate_from_layout(
 }
 
 fn shadow_host_parent_caret(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     shadow_root: DomHandle,
     ancestor_boxes: &[(DomHandle, moli_layout::LayoutBoxModel)],
     fallback_rect: ClientRect,
@@ -292,7 +292,7 @@ fn shadow_host_parent_caret(
 }
 
 fn retarget_caret_position(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     mut node: DomHandle,
     mut offset: u32,
     mut rect: ClientRect,
@@ -428,7 +428,7 @@ fn build_caret_position_object<'s>(
 fn document_runtime_and_handle_from_args<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: &v8::FunctionCallbackArguments<'s>,
-) -> anyhow::Result<(*mut JsContextHost, DomHandle)> {
+) -> anyhow::Result<(*mut PageScriptHost, DomHandle)> {
     node_runtime_and_handle_from_args(scope, args).or_else(|error| {
         let Some(runtime_ptr) = context_host_ptr_from_global_bridge(scope) else {
             return Err(error);
@@ -439,7 +439,7 @@ fn document_runtime_and_handle_from_args<'s>(
     })
 }
 
-fn element_for_hit_source(runtime: &JsContextHost, mut handle: DomHandle) -> Option<DomHandle> {
+fn element_for_hit_source(runtime: &PageScriptHost, mut handle: DomHandle) -> Option<DomHandle> {
     loop {
         let node = runtime.dom_host().node(handle)?;
         if node.is_element() {
@@ -453,7 +453,7 @@ fn element_for_hit_source(runtime: &JsContextHost, mut handle: DomHandle) -> Opt
     }
 }
 
-fn list_hit_accepts_non_element_source(runtime: &JsContextHost, source: DomHandle) -> bool {
+fn list_hit_accepts_non_element_source(runtime: &PageScriptHost, source: DomHandle) -> bool {
     let Some(parent) = runtime
         .dom_host()
         .node(source)
@@ -476,7 +476,7 @@ fn list_hit_accepts_non_element_source(runtime: &JsContextHost, source: DomHandl
     parent.is_html_element("slot") || parent.is_svg_text_content_element()
 }
 
-fn element_for_list_hit_source(runtime: &JsContextHost, source: DomHandle) -> Option<DomHandle> {
+fn element_for_list_hit_source(runtime: &PageScriptHost, source: DomHandle) -> Option<DomHandle> {
     let node = runtime.dom_host().node(source)?;
     if !node.is_element() && !list_hit_accepts_non_element_source(runtime, source) {
         return None;
@@ -485,7 +485,7 @@ fn element_for_list_hit_source(runtime: &JsContextHost, source: DomHandle) -> Op
 }
 
 fn retarget_element_to_tree_scope(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     mut element: DomHandle,
     tree_scope: DomHandle,
 ) -> Option<DomHandle> {
@@ -519,7 +519,7 @@ fn point_is_inside_viewport(
 /// Answers `hit_queries` from one frozen-layout pass, together with whether
 /// the point is inside the viewport's client area. `None` without a layout.
 fn point_answers(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     document: DomHandle,
     x: f64,
     y: f64,
@@ -594,7 +594,7 @@ fn hit_test_all_query(
 
 /// The outermost `<svg>` a hit lands on, with its content box.
 fn outer_svg_hit(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     hit: &moli_layout::LayoutHit<DomHandle>,
 ) -> Option<moli_layout::LayoutRect> {
     let content_box = hit.local_content_box?;
@@ -607,7 +607,7 @@ fn outer_svg_hit(
 /// foremost first. Where the geometry model is not exact, no content is
 /// reported and the `<svg>` box answers on its own.
 fn svg_content_hits(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     hit: &moli_layout::LayoutHit<DomHandle>,
     first_only: bool,
 ) -> Vec<DomHandle> {
@@ -631,7 +631,7 @@ fn svg_content_hits(
 
 /// CSSOM View appends the document element to a hit list inside the viewport,
 /// so a point over no box still yields the root.
-fn document_root_element(runtime: &JsContextHost, document: DomHandle) -> Option<DomHandle> {
+fn document_root_element(runtime: &PageScriptHost, document: DomHandle) -> Option<DomHandle> {
     runtime
         .dom_host()
         .dom()
@@ -639,7 +639,7 @@ fn document_root_element(runtime: &JsContextHost, document: DomHandle) -> Option
 }
 
 fn element_at_point(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     document: DomHandle,
     tree_scope: DomHandle,
     x: f64,
@@ -732,7 +732,7 @@ fn element_at_point(
 }
 
 fn elements_at_point(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     document: DomHandle,
     tree_scope: DomHandle,
     x: f64,

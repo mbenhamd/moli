@@ -14,7 +14,7 @@ use crate::modulepreload::{
 /// CSP events are returned to the caller because only the V8 entry that owns the
 /// current scope may enqueue DOM events. The module-map reservation is
 /// completed before this value is returned; the resource fetch starts when the
-/// caller consumes it with the page's `JsContextHost`, which may pause it for
+/// caller consumes it with the page's `PageScriptHost`, which may pause it for
 /// CDP `Fetch` interception. Keeping the host out of the `DocumentRuntime`
 /// borrow lets callers that reach the host through a raw pointer hold it only
 /// for that start.
@@ -38,7 +38,7 @@ impl MainDocumentModulepreloadFetchOutcome {
     /// Starts the reserved fetch, if any, and returns the observable parts.
     pub(crate) fn into_parts(
         self,
-        host: &crate::native_bridge::JsContextHost,
+        host: &crate::native_bridge::PageScriptHost,
     ) -> (
         Option<ModulePreloadJobRun>,
         Vec<DocumentContentSecurityPolicyViolation>,

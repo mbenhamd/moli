@@ -17,6 +17,7 @@ use chromiumoxide_cdp::cdp::browser_protocol::page::{
     PrintToPdfTransferMode, SetBypassCspParams, SetDocumentContentParams,
     SetInterceptFileChooserDialogParams, SetLifecycleEventsEnabledParams as LifecycleParams,
 };
+use moli_core::RendererDocumentTitleChanged;
 use moli_core::page::{
     ChildFrameDocumentNetworkActivitySnapshot, ChildFrameDocumentOpenedSnapshot,
     ChildFrameNavigationSnapshot, ChildFrameTreeEventSnapshot, ChildFrameTreeSnapshot,
@@ -31,7 +32,6 @@ use moli_core::page::{
     RendererScreenshotClip, RendererScreenshotFormat, RendererScreenshotRegion,
     RendererSetDocumentContentResult, RendererVisualStateToken,
 };
-use moli_core::{RendererDocumentTitleChanged, RendererRuntimeCommandCausalIdentity};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -78,8 +78,8 @@ pub(crate) mod native;
 mod navigation;
 pub(crate) use navigation::{
     AutomationNavigationResult, CompletedContinueNavigationWithoutRequestPauseCommand,
-    CompletedNavigateLoadCommand, prepare_automation_navigation,
-    superseded_intercepted_navigation_events,
+    CompletedNavigateLoadCommand, emit_navigation_started_for_session_owner,
+    prepare_automation_navigation, superseded_intercepted_navigation_events,
 };
 mod output;
 use capture::*;
@@ -102,9 +102,7 @@ mod resource_tree;
 pub(crate) use resource_tree::child_frame_security_identity;
 use resource_tree::*;
 mod termination;
-pub(crate) use termination::{
-    PreparedPageCrash, PreparedPageStopLoading, PreparedPageTargetTermination,
-};
+pub(crate) use termination::{PreparedPageCrash, PreparedPageTargetTermination};
 #[cfg(test)]
 mod tests;
 
@@ -124,7 +122,7 @@ pub(crate) use child_frame_activity::{
     PagePreparedChildFrameActivity, PagePreparedChildFrameTreeEvent,
 };
 pub(crate) use lifecycle::{
-    emit_bound_renderer_document_lifecycle_background_events,
+    NavigationStartInitiator, emit_bound_renderer_document_lifecycle_background_events,
     emit_navigation_frame_commit_background_events,
     emit_navigation_frame_stop_after_download_background_events,
     emit_navigation_frame_stopped_loading_background_events,
@@ -230,7 +228,6 @@ enum PendingPageCommandKind {
     ContinueNavigationWithoutRequestPause(
         Box<navigation::PendingContinueNavigationWithoutRequestPauseCommand>,
     ),
-    StopLoading(PreparedPageStopLoading),
     Crash(Box<PreparedPageCrash>),
     Close(PreparedPageTargetTermination),
     CreateIsolatedWorld(preload::PendingCreateIsolatedWorldCommand),
@@ -296,7 +293,6 @@ enum CompletedPageCommandKind {
     ContinueNavigationWithoutRequestPause(
         Box<navigation::CompletedContinueNavigationWithoutRequestPauseCommand>,
     ),
-    StopLoading(PreparedPageStopLoading),
     Crash(Box<PreparedPageCrash>),
     Close(PreparedPageTargetTermination),
     CreateIsolatedWorld(Box<preload::CompletedCreateIsolatedWorldCommand>),
@@ -333,7 +329,6 @@ impl CompletedPageCommandKind {
             | Self::AddScriptToEvaluateOnNewDocument(_)
             | Self::Navigate(_)
             | Self::ContinueNavigationWithoutRequestPause(_)
-            | Self::StopLoading(_)
             | Self::Crash(_)
             | Self::Close(_)
             // createIsolatedWorld may restart on a replacement renderer attachment. Its
@@ -463,9 +458,6 @@ impl PendingPageCommandDispatch {
                 CompletedPageCommandKind::ContinueNavigationWithoutRequestPause(Box::new(
                     pending.wait().await,
                 ))
-            }
-            PendingPageCommandKind::StopLoading(prepared) => {
-                CompletedPageCommandKind::StopLoading(prepared)
             }
             PendingPageCommandKind::Crash(prepared) => CompletedPageCommandKind::Crash(prepared),
             PendingPageCommandKind::Close(prepared) => CompletedPageCommandKind::Close(prepared),
@@ -1447,6 +1439,12 @@ pub(crate) fn execute_immediate_devtools_page_command_with_protocol_events(
     Vec<crate::conn::BackgroundProtocolEvent>,
 ) {
     let result = match command {
+        AutomationCommand::StopLoading(command) => {
+            page_command_owner(conn, &command.context).map(|owner| {
+                termination::stop_loading(conn, &owner);
+                AutomationResult::Empty
+            })
+        }
         AutomationCommand::GetNavigationHistory(command) => {
             navigation::execute_devtools_get_navigation_history_command(conn, command)
         }

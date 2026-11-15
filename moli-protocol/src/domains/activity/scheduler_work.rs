@@ -91,10 +91,11 @@ enum ProtocolWorkExecution {
     AfterCommandOutput(Box<crate::CommandResponseFlushContext>),
 }
 
+/// Frozen protocol output with exact whole-batch projection dependencies.
 #[derive(Debug)]
-pub(crate) struct RendererFencedProtocolOutput {
-    pub(crate) events: Vec<BackgroundProtocolEvent>,
-    pub(crate) predecessors: Vec<RendererOutputFence>,
+pub struct RendererFencedProtocolOutput {
+    pub events: Vec<BackgroundProtocolEvent>,
+    pub predecessors: Vec<RendererOutputFence>,
     target_id: Option<String>,
 }
 
@@ -225,13 +226,9 @@ impl ProtocolSchedulerWork {
 
     /// Frozen output from an original projection can remain in that complete
     /// publication instead of escaping into a separately delivered work item.
-    pub fn into_renderer_fenced_output(
-        self,
-    ) -> Result<(Vec<BackgroundProtocolEvent>, Vec<RendererOutputFence>), Box<Self>> {
+    pub fn into_renderer_fenced_output(self) -> Result<RendererFencedProtocolOutput, Box<Self>> {
         match self.payload {
-            ProtocolSchedulerWorkPayload::RendererFencedOutput(output) => {
-                Ok((output.events, output.predecessors))
-            }
+            ProtocolSchedulerWorkPayload::RendererFencedOutput(output) => Ok(output),
             _ => Err(Box::new(self)),
         }
     }
@@ -477,14 +474,15 @@ impl ProtocolSchedulerWork {
         }
     }
 
-    /// A current-document navigation must reach the owner that cancels the
-    /// old request, including when earlier observations are waiting on it.
-    /// Independent activation still preserves ordering with earlier work.
+    /// Spell out each payload's navigation dependency. Navigation and
+    /// retirement must reach the owner that cancels an old request. Other
+    /// work retains its explicit Page, output and command prerequisites.
     pub fn navigation_dependency(&self) -> ProtocolNavigationDependency {
         match &self.payload {
             ProtocolSchedulerWorkPayload::TopLevelNavigationOwnerAction(_)
             | ProtocolSchedulerWorkPayload::NavigationRequestContinuation(..)
-            | ProtocolSchedulerWorkPayload::NavigationProtocolCompletion(_) => {
+            | ProtocolSchedulerWorkPayload::NavigationProtocolCompletion(_)
+            | ProtocolSchedulerWorkPayload::PageTargetTerminationOwnerAction(_) => {
                 // A settled native commit must get past the old document's
                 // load residence: its final publication releases that very
                 // lifecycle observation. Independent activation preserves a
@@ -496,10 +494,15 @@ impl ProtocolSchedulerWork {
             {
                 ProtocolNavigationDependency::ReplacesPendingLoad
             }
-            ProtocolSchedulerWorkPayload::RendererFencedOutput(_) => {
+            ProtocolSchedulerWorkPayload::RendererFencedOutput(_)
+            | ProtocolSchedulerWorkPayload::BidiChannelOwnerAction(_) => {
                 ProtocolNavigationDependency::Independent
             }
-            _ => ProtocolNavigationDependency::AfterLoad,
+            ProtocolSchedulerWorkPayload::ProtocolObservation(_)
+            | ProtocolSchedulerWorkPayload::MainDocumentLoadOwnerAction(_)
+            | ProtocolSchedulerWorkPayload::PopupTargetNavigationOwnerAction(_) => {
+                ProtocolNavigationDependency::AfterLoad
+            }
         }
     }
 

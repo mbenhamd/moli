@@ -62,7 +62,7 @@ fn text_control_selection_offset_value<'s>(
     }
 }
 
-fn text_control_selection_idl_owner(runtime: &JsContextHost, handle: DomHandle) -> &'static str {
+fn text_control_selection_idl_owner(runtime: &PageScriptHost, handle: DomHandle) -> &'static str {
     runtime
         .dom_host()
         .node(handle)
@@ -76,7 +76,7 @@ fn text_control_selection_idl_owner(runtime: &JsContextHost, handle: DomHandle) 
 
 pub(crate) fn text_control_set_selection_range_internal(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
     start: u32,
     end: u32,
@@ -93,7 +93,7 @@ pub(crate) fn text_control_set_selection_range_internal(
 
 pub(crate) fn text_control_set_selection_range_with_direction_internal(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
     start: u32,
     end: u32,
@@ -117,7 +117,7 @@ pub(crate) fn text_control_set_selection_range_with_direction_internal(
 
 pub(crate) fn replace_text_control_selection(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
     replacement_text: &str,
     input_type: TextEditInputType,
@@ -134,7 +134,7 @@ pub(crate) fn replace_text_control_selection(
 
 pub(crate) fn replace_text_control_selection_for_insert_html(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
     replacement_text: &str,
 ) -> bool {
@@ -157,6 +157,28 @@ pub(crate) fn replace_text_control_selection_for_insert_html(
         },
         TextControlEditEvents::InputOnly {
             include_noop: multiline,
+            caret_start: None,
+        },
+    )
+}
+
+pub(crate) fn replace_text_control_selection_after_beforeinput(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    handle: DomHandle,
+    replacement_text: &str,
+    input_type: TextEditInputType,
+    caret_start: Option<u32>,
+) -> bool {
+    replace_text_control_selection_with_events(
+        scope,
+        runtime_ptr,
+        handle,
+        replacement_text,
+        input_type,
+        TextControlEditEvents::InputOnly {
+            include_noop: false,
+            caret_start,
         },
     )
 }
@@ -164,12 +186,26 @@ pub(crate) fn replace_text_control_selection_for_insert_html(
 #[derive(Clone, Copy)]
 enum TextControlEditEvents {
     BeforeInputAndInput,
-    InputOnly { include_noop: bool },
+    InputOnly {
+        include_noop: bool,
+        caret_start: Option<u32>,
+    },
+}
+
+pub(crate) fn is_text_control_user_editable(runtime: &PageScriptHost, handle: DomHandle) -> bool {
+    is_text_control(runtime, handle)
+        && runtime.dom_host().is_connected(handle)
+        && !crate::native_bridge::element::form_control_is_effectively_disabled(runtime, handle)
+        && runtime
+            .dom_host()
+            .node(handle)
+            .and_then(Node::as_element)
+            .is_none_or(|element| element.attribute("readonly").is_none())
 }
 
 fn replace_text_control_selection_with_events(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
+    runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,
     replacement_text: &str,
     input_type: TextEditInputType,
@@ -192,15 +228,7 @@ fn replace_text_control_selection_with_events(
     }
 
     let runtime = unsafe { &*runtime_ptr };
-    if !is_text_control(runtime, handle)
-        || !runtime.dom_host().is_connected(handle)
-        || crate::native_bridge::element::form_control_is_effectively_disabled(runtime, handle)
-        || runtime
-            .dom_host()
-            .node(handle)
-            .and_then(Node::as_element)
-            .is_some_and(|element| element.attribute("readonly").is_some())
-    {
+    if !is_text_control_user_editable(runtime, handle) {
         return false;
     }
     let value = text_control_value(runtime, handle);
@@ -258,7 +286,8 @@ fn replace_text_control_selection_with_events(
     if matches!(
         events,
         TextControlEditEvents::InputOnly {
-            include_noop: false
+            include_noop: false,
+            ..
         }
     ) && start == end
         && replacement_units.is_empty()
@@ -279,14 +308,25 @@ fn replace_text_control_selection_with_events(
     if changed {
         runtime.mark_text_control_change_pending(handle, &value);
     }
-    let caret = u32::try_from(start.saturating_add(replacement_units.len())).unwrap_or(u32::MAX);
+    let caret_start = match events {
+        TextControlEditEvents::InputOnly {
+            caret_start: Some(start),
+            ..
+        } => start as usize,
+        _ => start,
+    };
+    let caret =
+        u32::try_from(caret_start.saturating_add(replacement_units.len())).unwrap_or(u32::MAX);
     let selection_changed =
         text_control_set_selection_range_internal(scope, runtime_ptr, handle, caret, caret);
     if changed
         || selection_changed
         || matches!(
             events,
-            TextControlEditEvents::InputOnly { include_noop: true }
+            TextControlEditEvents::InputOnly {
+                include_noop: true,
+                ..
+            }
         )
     {
         // beforeinput describes the request; input describes the text actually
@@ -302,7 +342,7 @@ fn replace_text_control_selection_with_events(
 }
 
 fn text_control_user_edit_replacement_units(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     current_value_len: usize,
     selection_start: usize,
@@ -368,7 +408,7 @@ fn normalize_single_line_text_insertion(value: &str) -> String {
 }
 
 fn current_selection_or_end(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     handle: DomHandle,
     value_len: u32,
 ) -> (u32, u32) {

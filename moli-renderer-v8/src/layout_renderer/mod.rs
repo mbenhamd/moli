@@ -1,4 +1,6 @@
 mod inline_svg;
+#[cfg(test)]
+pub(crate) use inline_svg::parse_count as svg_parse_count;
 mod source_view;
 mod style_resolver;
 
@@ -9,7 +11,7 @@ use moli_layout::{
     LayoutViewport, build_layout_pass_with_embedded_frames,
 };
 
-use crate::{document_runtime::DomHandle, native_bridge::JsContextHost};
+use crate::{document_runtime::DomHandle, native_bridge::PageScriptHost};
 
 /// Kill switch for retained-world relayout under the live-geometry policy.
 fn incremental_layout_enabled() -> bool {
@@ -20,7 +22,7 @@ fn incremental_layout_enabled() -> bool {
 }
 
 pub(crate) fn build_native_layout_pass(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     root: DomHandle,
     services: &mut DocumentLayoutServices,
     embedded_document_services: &mut HashMap<DomHandle, DocumentLayoutServices>,
@@ -50,7 +52,7 @@ pub(crate) fn build_native_layout_pass(
 /// publishes, keeps the Document's retained world, and does not update the
 /// Document's container-query sizes.
 pub(crate) fn build_foreign_object_layout_pass(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     foreign_object: DomHandle,
     services: &mut DocumentLayoutServices,
     embedded_document_services: &mut HashMap<DomHandle, DocumentLayoutServices>,
@@ -73,7 +75,7 @@ pub(crate) fn build_foreign_object_layout_pass(
 
 #[allow(clippy::too_many_arguments)]
 fn build_native_layout_pass_recursive(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     root: DomHandle,
     services: &mut DocumentLayoutServices,
     embedded_document_services: &mut HashMap<DomHandle, DocumentLayoutServices>,
@@ -103,6 +105,12 @@ fn build_native_layout_pass_recursive(
     let source = source_view::NativeLayoutSourceView::with_paint_resources(
         runtime,
         root,
+        style_resolver::layout_style_read_scope(
+            runtime,
+            document,
+            request.viewport,
+            environment_override,
+        ),
         request.requests_paint(),
     );
     let source_ready = profile_started.map(|_| std::time::Instant::now());
@@ -194,7 +202,7 @@ fn build_native_layout_pass_recursive(
 }
 
 struct NativeEmbeddedFrameRenderer<'a> {
-    runtime: &'a JsContextHost,
+    runtime: &'a PageScriptHost,
     reason: moli_layout::LayoutFlushReason,
     capture_paint: bool,
     include_backgrounds: bool,
@@ -263,7 +271,7 @@ impl EmbeddedFrameRenderer<DomHandle> for NativeEmbeddedFrameRenderer<'_> {
 
 #[cfg(test)]
 pub(crate) fn build_normalized_native_box_tree_for_test(
-    runtime: &JsContextHost,
+    runtime: &PageScriptHost,
     root: DomHandle,
 ) -> Result<moli_layout::NormalizedBoxTree, moli_layout::LayoutError> {
     let document = runtime

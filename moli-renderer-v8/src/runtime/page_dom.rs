@@ -3524,14 +3524,6 @@ impl PageVm {
             .outer_html_for_live_node_handle(handle, include_shadow_dom)
     }
 
-    pub(crate) fn serialize_html(&self) -> String {
-        self.vm()
-            .document_runtime
-            .dom_host()
-            .dom()
-            .serialize_document()
-    }
-
     pub(crate) fn client_rect_for_object_id(
         &mut self,
         inspector_session_id: Option<&str>,

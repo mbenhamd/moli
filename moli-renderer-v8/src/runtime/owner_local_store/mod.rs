@@ -40,7 +40,7 @@ use crate::page_task_queue::{
 };
 use crate::script_vm::{
     DocumentInspectorBinding, PendingRuntimeEvaluateCall, RendererDocumentIsolateBootstrap,
-    RendererDocumentIsolateHandle, RendererDocumentIsolateReservationAccounting,
+    RendererDocumentIsolateReservationAccounting, RendererIsolateHandle,
     RendererPageScriptEnvironment, RuntimeEvaluateResultMode,
 };
 use crate::{RendererNavigationReplyPolicy, RendererTopLevelNavigationDispatch};
@@ -645,7 +645,7 @@ impl Drop for RendererOwnerLocalPageSlot {
 #[derive(Debug)]
 struct RendererDocumentIsolateReservationEntry {
     id: u64,
-    handle: RendererDocumentIsolateHandle,
+    handle: RendererIsolateHandle,
     /// The stream opens together with the isolate reservation, before that
     /// isolate is attached to a stable Page slot. Until attachment transfers
     /// lifetime ownership to `RendererPageScriptEnvironmentPin`, this entry
@@ -684,6 +684,7 @@ impl RendererDocumentIsolateAllocator {
     pub(crate) fn reserve_renderer_document_isolate(
         &self,
         page_runtime_task_source: crate::page_task_queue::PageRuntimeTaskSource,
+        window_identity: super::RendererPageWindowIdentity,
     ) -> Result<(
         RendererDocumentIsolateBootstrap,
         RendererDocumentIsolateReservation,
@@ -692,6 +693,7 @@ impl RendererDocumentIsolateAllocator {
             &self.owner,
             self.page_id,
             page_runtime_task_source,
+            window_identity,
         )
     }
 }
@@ -742,6 +744,7 @@ impl RendererOwnerLocalStoreSession<'_> {
         owner: &RendererOwnerLocalContext,
         page_id: PageId,
         page_runtime_task_source: crate::page_task_queue::PageRuntimeTaskSource,
+        window_identity: super::RendererPageWindowIdentity,
     ) -> Result<(
         RendererDocumentIsolateBootstrap,
         RendererDocumentIsolateReservation,
@@ -750,6 +753,7 @@ impl RendererOwnerLocalStoreSession<'_> {
             owner,
             page_id,
             page_runtime_task_source,
+            window_identity,
         )
     }
 
@@ -984,10 +988,8 @@ impl RendererOwnerLocalStore {
                     .loader
                     .set_cache_disabled(configuration.cache_disabled);
                 request.blocked_url_patterns = configuration.blocked_url_patterns;
-                request.fetch_subresource_interception_enabled =
-                    configuration.fetch_subresource_interception_enabled;
-                request.fetch_subresource_interception_resource_type =
-                    configuration.fetch_subresource_interception_resource_type;
+                request.fetch_subresource_interception_classes =
+                    configuration.fetch_subresource_interception_classes;
             }};
         }
         apply_configuration!(&mut residence.request);
@@ -1205,6 +1207,7 @@ impl RendererOwnerLocalStore {
         owner: &RendererOwnerLocalContext,
         page_id: PageId,
         page_runtime_task_source: crate::page_task_queue::PageRuntimeTaskSource,
+        window_identity: super::RendererPageWindowIdentity,
     ) -> Result<(
         RendererDocumentIsolateBootstrap,
         RendererDocumentIsolateReservation,
@@ -1270,7 +1273,7 @@ impl RendererOwnerLocalStore {
         let v8_foreground_task_sender = page_runtime_task_source
             .v8_foreground_task_sender()
             .ok_or_else(|| anyhow!("owner-reserved Page is missing its V8 foreground source"))?;
-        let bootstrap = RendererDocumentIsolateHandle::new_owner_reserved_page(
+        let bootstrap = RendererIsolateHandle::new_owner_reserved_page(
             v8_foreground_task_sender,
             &owner.owner_state.devtools_target_shutdown_registry,
             owner.owner_state.inspector_io_wake_tx.clone(),
@@ -1304,6 +1307,7 @@ impl RendererOwnerLocalStore {
             bootstrap.inspector_isolate_backend_handle(),
             page_runtime_task_source,
             output_journal.clone(),
+            window_identity,
         );
         page_script_environment
             .bind_auxiliary_allocator(RendererAuxiliaryPageAllocator::new(owner.clone(), page_id));

@@ -15,14 +15,14 @@ use super::{FetchCommandTaskStep, PendingFetchCommandDispatch, PendingFetchComma
 const RESPONSE_BODY_NOT_AVAILABLE_AFTER_STREAM_TAKEN: &str =
     "Can only get response body on requests captured after headers received.";
 
-pub(super) struct BufferedFetchBody {
+pub(super) struct FetchResponseBodySource {
     request_id: String,
     action_session_id: Option<String>,
     host: Option<crate::conn::ProtocolPageHostScope>,
-    body: crate::conn::CapturedBody,
+    body: crate::conn::ProtocolResponseBody,
 }
 
-impl BufferedFetchBody {
+impl FetchResponseBodySource {
     fn capture(
         conn: &mut CdpConnection,
         owner: &CommandOwnerScope,
@@ -46,7 +46,7 @@ impl BufferedFetchBody {
             request_id: request_id.to_owned(),
             action_session_id: owner.session_id().map(str::to_owned),
             host: crate::conn::ProtocolPageHostScope::capture(conn, owner).ok(),
-            body: pending.response_body,
+            body: response_body_source(&pending),
         }))
     }
 
@@ -60,8 +60,21 @@ impl BufferedFetchBody {
             )
             .is_some_and(|pending| {
                 !pending.response_body_taken_as_stream
-                    && pending.response_body.same_storage(&self.body)
+                    && response_body_source(&pending).same_storage(&self.body)
             })
+    }
+}
+
+fn response_body_source(
+    pending: &crate::conn::PendingSubresourceFetchResponseRequest,
+) -> crate::conn::ProtocolResponseBody {
+    match pending
+        .command_target
+        .as_ref()
+        .and_then(|target| target.native_response_body())
+    {
+        Some(body) => crate::conn::ProtocolResponseBody::Network(body.clone()),
+        None => pending.response_body.clone().into(),
     }
 }
 
@@ -69,28 +82,28 @@ pub(super) enum PreparedFetchBodyRead {
     Transfer {
         request_id: String,
         read: Box<crate::conn::PendingDocumentBodyRead>,
-        fallback: Result<Option<BufferedFetchBody>, CommandOutputPlan>,
+        fallback: Result<Option<FetchResponseBodySource>, CommandOutputPlan>,
         limit: usize,
     },
-    Buffered {
-        body: BufferedFetchBody,
+    ResponseBody {
+        body: FetchResponseBodySource,
         limit: usize,
     },
 }
 
 pub(super) enum MaterializedFetchBody {
     Transfer(serde_json::Value),
-    Buffered(serde_json::Value),
+    ResponseBody(serde_json::Value),
 }
 
 pub(super) enum CompletedFetchBodyRead {
     Transfer {
         request_id: String,
         completed: Box<crate::conn::CompletedDocumentBodyRead<Option<MaterializedFetchBody>>>,
-        fallback: Result<Option<BufferedFetchBody>, CommandOutputPlan>,
+        fallback: Result<Option<FetchResponseBodySource>, CommandOutputPlan>,
     },
-    Buffered {
-        body: BufferedFetchBody,
+    ResponseBody {
+        body: FetchResponseBodySource,
         result: Result<serde_json::Value>,
     },
 }
@@ -108,7 +121,7 @@ impl PreparedFetchBodyRead {
                     .as_ref()
                     .ok()
                     .and_then(|body| body.as_ref())
-                    .map(|body| body.body.clone());
+                    .and_then(|body| body.body.captured().cloned());
                 let completed = read
                     .materialize(limit)
                     .await
@@ -118,7 +131,7 @@ impl PreparedFetchBodyRead {
                                 Some(MaterializedFetchBody::Transfer(response_body_result(bytes)))
                             }
                             None => match fallback_body {
-                                Some(body) => Some(MaterializedFetchBody::Buffered(
+                                Some(body) => Some(MaterializedFetchBody::ResponseBody(
                                     response_body_result(body.materialize_bytes_limited(limit)?),
                                 )),
                                 None => None,
@@ -132,15 +145,17 @@ impl PreparedFetchBodyRead {
                     fallback,
                 }
             }
-            Self::Buffered { body, limit } => {
-                let result = body
-                    .body
-                    .clone()
-                    .process_in_worker(move |body| {
-                        Ok(response_body_result(body.materialize_bytes_limited(limit)?))
-                    })
-                    .await;
-                CompletedFetchBodyRead::Buffered { body, result }
+            Self::ResponseBody { body, limit } => {
+                let result = match body.body.clone().materialize(limit).await {
+                    Ok(body) => {
+                        body.process_in_worker(move |body| {
+                            Ok(response_body_result(body.materialize_bytes_limited(limit)?))
+                        })
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
+                CompletedFetchBodyRead::ResponseBody { body, result }
             }
         }
     }
@@ -167,7 +182,7 @@ impl CompletedFetchBodyRead {
                     Ok(Some(MaterializedFetchBody::Transfer(value))) => {
                         CommandOutputPlan::result(value)
                     }
-                    Ok(Some(MaterializedFetchBody::Buffered(value))) => match fallback {
+                    Ok(Some(MaterializedFetchBody::ResponseBody(value))) => match fallback {
                         Ok(Some(body)) if body.is_current(conn, owner) => {
                             CommandOutputPlan::result(value)
                         }
@@ -183,7 +198,7 @@ impl CompletedFetchBodyRead {
                     Err(error) => CommandOutputPlan::error(-32000, format!("{error:#}")),
                 }
             }
-            Self::Buffered { body, result } => {
+            Self::ResponseBody { body, result } => {
                 if !body.is_current(conn, owner) {
                     return CommandOutputPlan::error(-32000, FetchBodyReadError::RequestNotFound);
                 }
@@ -211,7 +226,7 @@ pub(super) fn start_get_response_body_command(
         }
     };
     let read = conn.start_pending_fetch_response_body_read_for_owner(&owner, &params.request_id);
-    let fallback = BufferedFetchBody::capture(conn, &owner, &params.request_id);
+    let fallback = FetchResponseBodySource::capture(conn, &owner, &params.request_id);
     let limit = conn.response_body_materialize_limit();
     let prepared = match read {
         Some(read) => PreparedFetchBodyRead::Transfer {
@@ -221,7 +236,7 @@ pub(super) fn start_get_response_body_command(
             limit,
         },
         None => match fallback {
-            Ok(Some(body)) => PreparedFetchBodyRead::Buffered { body, limit },
+            Ok(Some(body)) => PreparedFetchBodyRead::ResponseBody { body, limit },
             Ok(None) => {
                 return FetchCommandTaskStep::Complete(pending_request_action_output_plan(
                     conn,
@@ -291,9 +306,10 @@ pub(super) fn take_response_body_as_stream_command(
                 RESPONSE_BODY_NOT_AVAILABLE_AFTER_STREAM_TAKEN,
             );
         }
-        match conn
-            .open_io_stream_body_source_for_session_owner(cmd.session_id, pending.response_body)
-        {
+        match conn.open_io_stream_body_source_for_session_owner(
+            cmd.session_id,
+            response_body_source(&pending),
+        ) {
             Ok(handle) => {
                 mark_pending_subresource_response_body_taken_as_stream_for_action_session(
                     conn,

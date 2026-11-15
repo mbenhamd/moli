@@ -4,7 +4,7 @@ use super::*;
 
 pub(crate) struct ScriptVmCapturedDocumentEnvironment {
     environment: Option<ScriptVmInitialDocumentEnvironment>,
-    isolate: RendererDocumentIsolateHandle,
+    isolate: RendererIsolateHandle,
 }
 
 impl ScriptVmInitialDocumentEnvironment {
@@ -24,7 +24,7 @@ impl ScriptVmCapturedDocumentEnvironment {
 
     pub(super) fn new(
         environment: ScriptVmInitialDocumentEnvironment,
-        isolate: RendererDocumentIsolateHandle,
+        isolate: RendererIsolateHandle,
     ) -> Self {
         Self {
             environment: Some(environment),
@@ -283,11 +283,9 @@ impl ScriptVm {
         &self,
         resource_type: crate::types::SubresourceResourceType,
     ) -> bool {
-        let host = self._context_host.borrow();
-        host.fetch_subresource_interception_enabled()
-            && host
-                .fetch_subresource_interception_resource_type()
-                .is_none_or(|intercepted| intercepted == resource_type)
+        self._context_host
+            .borrow()
+            .should_intercept_subresource(resource_type)
     }
 
     pub(crate) fn set_viewport_surface(
@@ -409,12 +407,11 @@ impl ScriptVm {
 
     pub(crate) fn set_fetch_subresource_interception(
         &mut self,
-        enabled: bool,
-        resource_type: Option<SubresourceResourceType>,
+        classes: SubresourceInterceptionClasses,
     ) {
         self._context_host
             .borrow_mut()
-            .set_fetch_subresource_interception(enabled, resource_type);
+            .set_fetch_subresource_interception(classes);
     }
 }
 
@@ -423,7 +420,7 @@ impl ScriptVm {
         &mut self,
         preserve_navigation_referrer: bool,
     ) -> Result<ScriptVmInitialDocumentEnvironment> {
-        let capture = |host: &mut crate::native_bridge::JsContextHost, security_token| {
+        let capture = |host: &mut crate::native_bridge::PageScriptHost, security_token| {
             let origin = host
                 .current_main_document_resource_loader()
                 .expect("a live Document has a resource authority")

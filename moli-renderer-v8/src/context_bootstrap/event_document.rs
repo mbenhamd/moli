@@ -125,26 +125,24 @@ pub(super) fn document_create_event_callback<'s>(
 pub(super) fn document_has_focus_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
 ) {
-    let document = args.this();
-    let has_browsing_context = document
-        .get(scope, v8str(scope, "defaultView").into())
-        .is_some_and(|default_view| default_view.is_object());
-    // A nested Document has focus while the focused area sits in it or below
-    // it, including when its container is focused with nothing inside.
-    let focused = has_browsing_context
-        && crate::native_bridge::node_runtime_and_handle_from_object_or_detached(scope, document)
-            .is_ok_and(|(runtime_ptr, document_handle)| {
-                crate::native_bridge::document_is_in_focus_chain(
-                    unsafe { &*runtime_ptr },
-                    document_handle,
-                )
-            });
-    let focused = focused
-        && context_host_ptr_from_global_bridge(scope)
-            .is_some_and(|host_ptr| unsafe { &*host_ptr }.document_activity().focused);
-    rv.set_bool(focused);
+    let Ok((host_ptr, document)) =
+        crate::native_bridge::node_runtime_and_handle_from_object_or_detached(scope, args.this())
+    else {
+        webidl::throw_type_error(scope, "Document.hasFocus called on incompatible receiver.");
+        return;
+    };
+    let host = unsafe { &*host_ptr };
+    if !host
+        .dom_host()
+        .node(document)
+        .is_some_and(crate::dom::native::Node::is_document)
+    {
+        webidl::throw_type_error(scope, "Document.hasFocus called on incompatible receiver.");
+        return;
+    }
+    rv.set_bool(host.document_has_focus(document));
 }
 
 #[cfg(test)]

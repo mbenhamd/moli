@@ -151,7 +151,7 @@ async fn asynchronous_window_xhr_records_resource_timing_with_xmlhttprequest_ini
 fn pending_fetch_continuation<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     resolver: v8::Local<'s, v8::PromiseResolver>,
-    host: &crate::native_bridge::JsContextHost,
+    host: &crate::native_bridge::PageScriptHost,
 ) -> crate::types::PendingSubresourceContinuation {
     let dispatch_scope = crate::native_bridge::OwnerDispatchScope::Top;
     crate::types::PendingSubresourceContinuation::Fetch(
@@ -2180,7 +2180,11 @@ globalThis.__pendingReader.read().then(({ value, done }) => {
 #[test]
 fn streaming_xhr_coalesces_progress_while_publishing_partial_text_before_done() {
     let mut vm = new_storage_test_vm("https://xhr-streaming-visible.test/");
-    vm.set_fetch_subresource_interception(true, Some(crate::types::SubresourceResourceType::Xhr));
+    vm.set_fetch_subresource_interception(
+        crate::types::SubresourceInterceptionClasses::for_resource_type(
+            crate::types::SubresourceResourceType::Xhr,
+        ),
+    );
     vm.eval(
         r#"
 globalThis.__streamingXhrEvents = [];
@@ -2293,7 +2297,11 @@ __streamingXhr.send();
 async fn streaming_xhr_progress_gate_can_expire_without_pending_data_and_cancel_on_reopen() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_test_vm("https://xhr-progress-gate.test/");
-    vm.set_fetch_subresource_interception(true, Some(crate::types::SubresourceResourceType::Xhr));
+    vm.set_fetch_subresource_interception(
+        crate::types::SubresourceInterceptionClasses::for_resource_type(
+            crate::types::SubresourceResourceType::Xhr,
+        ),
+    );
     vm.eval(
         r#"
 globalThis.__xhrGate = new XMLHttpRequest();
@@ -2492,6 +2500,7 @@ async fn streaming_subresource_finish_preserves_response_head_cache_state() {
                                 )],
                                 network_extra_info_available: false,
                                 request_extra_info: None,
+                                dispatched_request: None,
                                 response_extra_info: None,
                                 redirect_has_extra_info: false,
                                 request_cookie_report: None,
@@ -2504,7 +2513,7 @@ async fn streaming_subresource_finish_preserves_response_head_cache_state() {
                             negotiated_http_version: None,
                         },
                         network_request_headers: None,
-                        body_writer,
+                        body_capture: crate::types::StreamingSubresourceBody::Local(body_writer),
                         event_source_parser: None,
                         xhr_response: None,
                     });
@@ -2786,7 +2795,7 @@ async fn streaming_fetch_body_error_records_response_started_then_body_failed() 
                             negotiated_http_version: None,
                         },
                         network_request_headers: None,
-                        body_writer,
+                        body_capture: crate::types::StreamingSubresourceBody::Local(body_writer),
                         event_source_parser: None,
                         xhr_response: None,
                     });
@@ -2950,7 +2959,7 @@ fn install_streaming_fetch_response_fixture(
                         negotiated_http_version: None,
                     },
                     network_request_headers: None,
-                    body_writer: Default::default(),
+                    body_capture: crate::types::StreamingSubresourceBody::new(None, None),
                     event_source_parser: None,
                     xhr_response: None,
                 });
@@ -3063,7 +3072,7 @@ async fn streaming_fetch_body_cancel_aborts_streaming_subresource() {
                             negotiated_http_version: None,
                         },
                         network_request_headers: None,
-                        body_writer: Default::default(),
+                        body_capture: crate::types::StreamingSubresourceBody::new(None, None),
                         event_source_parser: None,
                         xhr_response: None,
                     });
@@ -3723,7 +3732,7 @@ async fn streaming_xhr_materialization_failure_errors_body_source_before_close()
                         negotiated_http_version: None,
                     },
                     network_request_headers: None,
-                    body_writer,
+                    body_capture: crate::types::StreamingSubresourceBody::Local(body_writer),
                     event_source_parser: None,
                     xhr_response: None,
                 });
@@ -3930,8 +3939,9 @@ fn xhr_response_documents_keep_distinct_source_modification_times() {
                 .set_document_source_last_modified(Some(5_025_000.0));
             environment.set_timezone(Some("UTC")).unwrap();
             vm.set_fetch_subresource_interception(
-                true,
-                Some(crate::types::SubresourceResourceType::Xhr),
+                crate::types::SubresourceInterceptionClasses::for_resource_type(
+                    crate::types::SubresourceResourceType::Xhr,
+                ),
             );
             vm.eval(
                 r#"
@@ -4225,8 +4235,9 @@ fn xml_http_request_document_response_requires_an_eligible_mime_and_well_formed_
             ] {
                 let mut vm = new_storage_test_vm("https://xhr-document-eligibility.test/");
                 vm.set_fetch_subresource_interception(
-                    true,
-                    Some(crate::types::SubresourceResourceType::Xhr),
+                    crate::types::SubresourceInterceptionClasses::for_resource_type(
+                        crate::types::SubresourceResourceType::Xhr,
+                    ),
                 );
                 vm.eval(&format!(
                     r#"globalThis.__documentXhr = new XMLHttpRequest();

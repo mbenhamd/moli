@@ -36,6 +36,7 @@ impl RendererCreateStreamingRawPageRequest {
         navigation_bootstrap_entry: Option<crate::native_bridge::NavigationHistoryEntrySeed>,
     ) -> Result<StreamingNavigationPageCreationResult> {
         let RendererCreateStreamingRawPageRequest {
+            window_identity,
             web_mcp_invocation,
             document_replacement: _document_replacement,
             root_frame_id,
@@ -58,8 +59,7 @@ impl RendererCreateStreamingRawPageRequest {
             blocked_url_patterns,
             indexed_db_manager,
             storage_bucket_store,
-            fetch_subresource_interception_enabled,
-            fetch_subresource_interception_resource_type,
+            fetch_subresource_interception_classes,
             layout_configuration,
             wpt_extensions_enabled,
             stage,
@@ -84,6 +84,7 @@ impl RendererCreateStreamingRawPageRequest {
         let document_last_modified =
             crate::document_last_modified::document_last_modified_from_headers(&response_headers);
         let mut env = PageVmEnvConfig {
+            window_identity,
             web_storage,
             document_start_scripts,
             runtime_bindings,
@@ -100,8 +101,7 @@ impl RendererCreateStreamingRawPageRequest {
             blocked_url_patterns,
             indexed_db_manager,
             storage_bucket_store,
-            fetch_subresource_interception_enabled,
-            fetch_subresource_interception_resource_type,
+            fetch_subresource_interception_classes,
             layout_configuration,
             wpt_extensions_enabled,
             root_frame_id,

@@ -54,21 +54,47 @@ fn cdp_session_has_pending_dialog(conn: &CdpConnection, session_id: Option<&str>
         return false;
     };
     let owner = CommandOwnerScope::capture(conn, session_id);
-    let current_page_owner = javascript_dialog_page_owner(conn, &owner);
-    conn.target_javascript_dialog_state_for_owner(&owner)
+    current_javascript_dialog_for_owner(conn, &owner)
+        .is_some_and(|dialog| dialog.was_opened_for_subscription(generation))
+}
+
+fn current_javascript_dialog_for_owner<'a>(
+    conn: &'a CdpConnection,
+    owner: &CommandOwnerScope,
+) -> Option<&'a crate::conn::TargetJavaScriptDialog> {
+    let page_owners = javascript_dialog_page_owners(conn, owner);
+    conn.target_javascript_dialog_state_for_owner(owner)
         .and_then(|state| state.peek_next())
-        .is_some_and(|dialog| {
-            current_page_owner.as_ref() == Some(dialog.page_owner())
-                && dialog.was_opened_for_subscription(generation)
+        .filter(|dialog| {
+            page_owners
+                .iter()
+                .flatten()
+                .any(|page| page == dialog.page_owner())
         })
 }
 
-fn javascript_dialog_page_owner(
+impl CdpConnection {
+    /// Uses the same exact Page check as Get/Set/Handle. A queued stale dialog,
+    /// or a dialog on another target, cannot interrupt Classic navigation wait.
+    pub fn has_current_javascript_dialog_for_devtools_context(
+        &self,
+        context: &AutomationContext,
+    ) -> bool {
+        self.command_owner_scope_for_devtools_context(context)
+            .is_some_and(|owner| current_javascript_dialog_for_owner(self, &owner).is_some())
+    }
+}
+
+fn javascript_dialog_page_owners(
     conn: &CdpConnection,
     owner: &CommandOwnerScope,
-) -> Option<TargetPageResidenceIdentity> {
-    conn.pending_target_page_residence_identity_for_owner(owner)
-        .or_else(|| conn.target_page_residence_identity_for_owner(owner))
+) -> [Option<TargetPageResidenceIdentity>; 2] {
+    // Reserving a replacement does not retire the installed Page. Either exact
+    // residence can still own a live dialog until the replacement is adopted.
+    [
+        conn.target_page_residence_identity_for_owner(owner),
+        conn.pending_target_page_residence_identity_for_owner(owner),
+    ]
 }
 
 fn no_javascript_dialog_error() -> DevToolsError {
@@ -139,7 +165,7 @@ fn dismiss_matching_dialogs(
     owner: &CommandOwnerScope,
     matches: impl FnMut(&crate::conn::TargetJavaScriptDialog) -> bool,
 ) -> Vec<BackgroundProtocolEvent> {
-    let current_page = javascript_dialog_page_owner(conn, owner);
+    let page_owners = javascript_dialog_page_owners(conn, owner);
     let dialogs = conn
         .with_target_javascript_dialog_state_for_owner_mut(owner, |state| {
             state.take_matching(matches)
@@ -148,7 +174,11 @@ fn dismiss_matching_dialogs(
     let mut events = Vec::new();
     for dialog in dialogs {
         let _ = dialog.finish(false, String::new());
-        if current_page.as_ref() == Some(dialog.page_owner()) {
+        if page_owners
+            .iter()
+            .flatten()
+            .any(|page| page == dialog.page_owner())
+        {
             events.extend(broadcast_javascript_dialog_closed(
                 conn,
                 owner,
@@ -241,12 +271,8 @@ pub(super) fn finish_devtools_get_javascript_dialog_command(
     conn: &CdpConnection,
     owner: &CommandOwnerScope,
 ) -> Result<DevToolsJavaScriptDialogResult, DevToolsError> {
-    let current_page_owner = javascript_dialog_page_owner(conn, owner);
-    let dialog = conn
-        .target_javascript_dialog_state_for_owner(owner)
-        .and_then(|state| state.peek_next())
-        .filter(|dialog| current_page_owner.as_ref() == Some(dialog.page_owner()))
-        .ok_or_else(no_javascript_dialog_error)?;
+    let dialog =
+        current_javascript_dialog_for_owner(conn, owner).ok_or_else(no_javascript_dialog_error)?;
     Ok(DevToolsJavaScriptDialogResult {
         dialog_type: dialog.dialog_type().to_owned(),
         message: dialog.message().to_owned(),
@@ -259,11 +285,16 @@ pub(super) fn finish_devtools_set_javascript_dialog_prompt_text_command(
     command: DevToolsSetJavaScriptDialogPromptTextCommand,
     owner: &CommandOwnerScope,
 ) -> Result<AutomationResult, DevToolsError> {
-    let current_page_owner = javascript_dialog_page_owner(conn, owner);
+    let page_owners = javascript_dialog_page_owners(conn, owner);
     conn.with_target_javascript_dialog_state_for_owner_mut(owner, |dialog_state| {
         let dialog = dialog_state
             .peek_next_mut()
-            .filter(|dialog| current_page_owner.as_ref() == Some(dialog.page_owner()))
+            .filter(|dialog| {
+                page_owners
+                    .iter()
+                    .flatten()
+                    .any(|page| page == dialog.page_owner())
+            })
             .ok_or_else(no_javascript_dialog_error)?;
         if dialog.dialog_type() != "prompt" {
             return Err(DevToolsError::new(
@@ -283,13 +314,15 @@ pub(super) fn finish_devtools_handle_javascript_dialog_command(
     owner: &CommandOwnerScope,
 ) -> Result<Vec<BackgroundProtocolEvent>, DevToolsError> {
     let command_prompt_text = command.prompt_text;
-    let current_page_owner = javascript_dialog_page_owner(conn, owner);
+    let page_owners = javascript_dialog_page_owners(conn, owner);
     let (dialog, stored_prompt_text) = conn
         .with_target_javascript_dialog_state_for_owner_mut(owner, |dialog_state| {
-            if dialog_state
-                .peek_next()
-                .is_some_and(|dialog| current_page_owner.as_ref() != Some(dialog.page_owner()))
-            {
+            if dialog_state.peek_next().is_some_and(|dialog| {
+                !page_owners
+                    .iter()
+                    .flatten()
+                    .any(|page| page == dialog.page_owner())
+            }) {
                 dialog_state.clear();
                 return None;
             }

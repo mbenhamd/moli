@@ -192,7 +192,9 @@ impl TargetSessionOwnerMut<'_> {
         self.browser_context
             .start_page_policy_update(
                 &self.target_id,
-                moli_core::RendererPageCommand::SetBlockedUrlPatterns(effective_patterns.clone()),
+                moli_core::page::RendererPageRequestPolicyUpdate::BlockedUrls(
+                    effective_patterns.clone(),
+                ),
                 |page| page.start_set_blocked_url_patterns(&effective_patterns),
             )
             .context("failed to update page blocked URLs")
@@ -436,6 +438,19 @@ impl CdpConnection {
                 )
             });
         self.network_request_id_allocator = network_request_id_allocator;
+        result
+    }
+
+    pub(crate) fn network_request_id_for_subresource_handle_for_owner(
+        &mut self,
+        owner: &crate::conn::CommandOwnerScope,
+        handle: moli_core::page::SubresourceNetworkRequestHandle,
+    ) -> Option<String> {
+        let mut allocator = std::mem::take(&mut self.network_request_id_allocator);
+        let result = self
+            .runtime_session_owner_slot_mut_for_owner(owner)
+            .map(|slot| slot.network_request_id_for_subresource_handle(handle, &mut allocator));
+        self.network_request_id_allocator = allocator;
         result
     }
 

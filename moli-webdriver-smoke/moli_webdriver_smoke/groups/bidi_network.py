@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from typing import Any
+from contextlib import asynccontextmanager, contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Callable, Iterator
 from urllib.parse import urlencode
 
 import websockets
@@ -54,6 +56,37 @@ class _BidiNetworkConnection:
         assert_equal(result["type"], "success", f"{self.name}: script completion: {result!r}")
         return result["result"]
 
+    async def pipeline(self, commands: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
+        ids = []
+        for method, params in commands:
+            self.command_id += 1
+            ids.append(self.command_id)
+            await self.websocket.send(json.dumps({"id": self.command_id, "method": method, "params": params}))
+        responses: dict[int, dict[str, Any]] = {}
+        try:
+            async with asyncio.timeout(10):
+                while len(responses) < len(ids):
+                    message = json.loads(await self.websocket.recv())
+                    self.events.append(message)
+                    if message.get("id") in ids:
+                        command_id = message["id"]
+                        assert_true(command_id not in responses, f"{self.name}: duplicate reply: {message!r}")
+                        responses[command_id] = message
+        except TimeoutError as error:
+            raise RuntimeError(f"{self.name}: pipeline timed out; ids={ids!r}; replies={responses!r}; events={self.events!r}") from error
+        return [responses[command_id] for command_id in ids]
+
+    async def wait_event(self, method: str, matches: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
+        try:
+            async with asyncio.timeout(10):
+                while True:
+                    for event in self.events:
+                        if event.get("method") == method and matches(event["params"]):
+                            return event
+                    self.events.append(json.loads(await self.websocket.recv()))
+        except TimeoutError as error:
+            raise RuntimeError(f"{self.name}: missing {method}; events={self.events!r}") from error
+
     async def load_frame(self, context: str, url: str, *, existing: bool = False) -> None:
         frame = "document.querySelector('iframe')" if existing else "document.createElement('iframe')"
         append = "" if existing else "document.body.appendChild(frame);"
@@ -85,11 +118,14 @@ class _BidiNetworkConnection:
 @asynccontextmanager
 async def _bidi_connection(
     target: WebDriverTarget, name: str, *, initial_url: str | None = None,
+    unhandled_prompt_behavior: str | None = None,
 ) -> AsyncIterator[tuple[_BidiNetworkConnection, dict[str, Any]]]:
     # Use the same public-wire commands on Moli and ChromeDriver, without
     # attaching a CDP session to either Page.
     options = create_selenium_options(target)
     options.set_capability("webSocketUrl", True)
+    if unhandled_prompt_behavior is not None:
+        options.set_capability("unhandledPromptBehavior", unhandled_prompt_behavior)
     client = ClassicClient(target.endpoint)
     created = classic_value(client.post("/session", {"capabilities": {"alwaysMatch": options.to_capabilities()}}))
     capabilities = created["capabilities"]
@@ -117,6 +153,23 @@ async def run_bidi_network_group(
     results: list[dict[str, Any]],
     continue_on_failure: bool = False,
 ) -> None:
+    for query in ("realms", "evaluate", "call"):
+        name = f"bidi_pending_admission_{query}_close"
+        try:
+            await _run_pending_admission_close(target, fixture, results, name, query)
+        except Exception as error:
+            if not continue_on_failure:
+                raise
+            record_failure(results, "bidi-network", name, error)
+    for isolated in (False, True):
+        for operation in ("complete", "close", "replace"):
+            name = f"bidi_pending_navigation_{'isolated' if isolated else 'shared'}_{operation}"
+            try:
+                await _run_pending_navigation(target, fixture, results, name, isolated, operation)
+            except Exception as error:
+                if not continue_on_failure:
+                    raise
+                record_failure(results, "bidi-network", name, error)
     for isolated in (False, True):
         for operation in ("insert", "navigate", "nested"):
             name = f"bidi_background_iframe_{'isolated' if isolated else 'shared'}_{operation}"
@@ -179,6 +232,188 @@ async def run_bidi_network_group(
             if not continue_on_failure:
                 raise
             record_failure(results, "bidi-network", name, error)
+
+
+@contextmanager
+def _held_navigation() -> Iterator[tuple[str, threading.Event, threading.Event]]:
+    arrived, release = threading.Event(), threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            arrived.set()
+            # Only the scenario's explicit release or its finally block can
+            # unblock this response; a timer must not rescue a stalled browser.
+            release.wait()
+            body = b"<!doctype html><title>held-navigation-completed</title>"
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except OSError:
+                pass  # A close/replacement legitimately cancels this request.
+
+        def log_message(self, *_args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/held", arrived, release
+    finally:
+        release.set()
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+async def _run_pending_admission_close(
+    target: WebDriverTarget,
+    fixture: str,
+    results: list[dict[str, Any]],
+    name: str,
+    query: str,
+) -> None:
+    # A query of the blocked Page must leave the socket able to receive the
+    # command that cancels its navigation. This is deliberately pipelined;
+    # sequential command() calls cannot expose admission blocking the socket.
+    with _held_navigation() as (held, arrived, release):
+        async with _bidi_connection(target, name, initial_url=f"{fixture}/webdriver/basic") as (bidi, capabilities):
+            try:
+                a = (await bidi.command("browsingContext.getTree", {}))["contexts"][0]["context"]
+                b = (await bidi.command("browsingContext.create", {"type": "tab", "background": True}))["context"]
+                await bidi.command("browsingContext.navigate", {
+                    "context": b, "url": f"{fixture}/webdriver/frame", "wait": "complete",
+                })
+                await bidi.command("session.subscribe", {
+                    "events": ["network.beforeRequestSent", "browsingContext.contextDestroyed"],
+                    "contexts": [a, b],
+                })
+                assert_equal(await bidi.evaluate(a, f"location.href={json.dumps(held)};42"),
+                             {"type": "number", "value": 42}, f"{name}: navigation initiated")
+                await bidi.wait_event("network.beforeRequestSent", lambda p: p["request"]["url"] == held)
+                assert_true(await asyncio.to_thread(arrived.wait, 10), f"{name}: A's request arrived")
+                command = {
+                    "realms": ("script.getRealms", {"context": a, "type": "window"}),
+                    "evaluate": ("script.evaluate", {
+                        "target": {"context": a}, "expression": "42", "awaitPromise": False,
+                    }),
+                    "call": ("script.callFunction", {
+                        "target": {"context": a}, "functionDeclaration": "() => 42", "awaitPromise": False,
+                    }),
+                }[query]
+                responses = await bidi.pipeline([
+                    command, ("browsingContext.close", {"context": a}), ("browsingContext.getTree", {}),
+                ])
+                assert_true(not release.is_set(), f"{name}: control commands finish while HTTP is blocked")
+                assert_equal(responses[1]["type"], "success", f"{name}: close: {responses!r}")
+                assert_equal(responses[2]["type"], "success", f"{name}: getTree: {responses!r}")
+                # Chrome can finish getRealms before close using the old realm.
+                # An unfinished script can instead fail when its context goes.
+                if responses[0]["type"] == "error":
+                    assert_equal(responses[0]["error"], "no such frame", f"{name}: closed-context query")
+                else:
+                    assert_equal(responses[0]["type"], "success", f"{name}: query terminal result")
+                    if query == "realms":
+                        assert_true(any(r.get("context") == a for r in responses[0]["result"]["realms"]),
+                                    f"{name}: original Page's realm")
+                    else:
+                        assert_equal(responses[0]["result"]["result"], {"type": "number", "value": 42},
+                                     f"{name}: original script result")
+                # Pipelined commands may complete out of order. Only a query
+                # sent after close has replied must observe that A is gone.
+                tree = (await bidi.command("browsingContext.getTree", {}))["contexts"]
+                assert_true(all(c["context"] != a for c in tree), f"{name}: closed A absent")
+                assert_equal(await bidi.evaluate(b, "6 * 7"), {"type": "number", "value": 42},
+                             f"{name}: B usable and the pending Runtime slot released")
+                for response in responses:
+                    assert_equal(sum(e.get("id") == response["id"] for e in bidi.events), 1,
+                                 f"{name}: each pipelined command replies once")
+                record(results, name, {"capabilities": capabilities, "responses": responses, "events": bidi.events})
+            finally:
+                release.set()
+
+
+async def _run_pending_navigation(
+    target: WebDriverTarget,
+    fixture: str,
+    results: list[dict[str, Any]],
+    name: str,
+    isolated: bool,
+    operation: str,
+) -> None:
+    # Calibrated with ChromeDriver/Chromium 156. A's HTTP request remains
+    # unfinished while B resolves its exact realm and starts/restarts a channel.
+    # No sleep, navigation completion or cleanup may release the test gate.
+    with _held_navigation() as (held, arrived, release):
+        async with _bidi_connection(target, name, initial_url=f"{fixture}/webdriver/basic") as (bidi, capabilities):
+            try:
+                a = (await bidi.command("browsingContext.getTree", {}))["contexts"][0]["context"]
+                create: dict[str, Any] = {"type": "tab", "background": True}
+                if isolated:
+                    create["userContext"] = (await bidi.command("browser.createUserContext", {}))["userContext"]
+                b = (await bidi.command("browsingContext.create", create))["context"]
+                await bidi.command("browsingContext.navigate", {
+                    "context": b, "url": f"{fixture}/webdriver/frame", "wait": "complete",
+                })
+                await bidi.command("session.subscribe", {
+                    "events": ["network.beforeRequestSent", "browsingContext.load",
+                               "browsingContext.contextDestroyed", "script.message"],
+                    "contexts": [a, b],
+                })
+                bidi.events.clear()
+                assert_equal(await bidi.evaluate(a, f"location.href={json.dumps(held)};42"),
+                             {"type": "number", "value": 42}, f"{name}: navigation initiator completes")
+                await bidi.wait_event("network.beforeRequestSent", lambda p: p["request"]["url"] == held)
+                assert_true(await asyncio.to_thread(arrived.wait, 10), f"{name}: server received A's request")
+                temporary = (await bidi.command("browsingContext.create", {"type": "tab", "background": True}))["context"]
+                await bidi.command("browsingContext.close", {"context": temporary})
+                realms = (await bidi.command("script.getRealms", {"context": b, "type": "window"}))["realms"]
+                realm = next(r["realm"] for r in realms if r.get("context") == b and "sandbox" not in r)
+                called = await bidi.command("script.callFunction", {
+                    "target": {"realm": realm}, "awaitPromise": False,
+                    "functionDeclaration": "channel => { globalThis.pendingNavigationChannel = channel; channel('first'); return 42; }",
+                    "arguments": [{"type": "channel", "value": {"channel": name, "ownership": "root"}}],
+                })
+                assert_equal(called["result"], {"type": "number", "value": 42}, f"{name}: B's function result")
+                for value in ("first", "second"):
+                    if value == "second":
+                        await bidi.evaluate(b, "pendingNavigationChannel('second'); true")
+                    message = await bidi.wait_event("script.message", lambda p: (
+                        p["channel"] == name and p["data"] == {"type": "string", "value": value}
+                    ))
+                    assert_equal(message["params"]["source"]["context"], b, f"{name}: exact channel Page")
+                    assert_equal(message["params"]["source"]["realm"], realm, f"{name}: exact channel realm")
+                assert_true(not release.is_set(), f"{name}: A is still blocked after B's two messages")
+                assert_true(not any(e.get("method") == "browsingContext.load" and e["params"].get("url") == held
+                                    for e in bidi.events), f"{name}: no premature A load")
+                if operation == "complete":
+                    release.set()
+                    await bidi.wait_event("browsingContext.load", lambda p: p["context"] == a and p["url"] == held)
+                    assert_equal(await bidi.evaluate(a, "document.title"),
+                                 {"type": "string", "value": "held-navigation-completed"}, f"{name}: real response committed")
+                elif operation == "close":
+                    await bidi.command("browsingContext.close", {"context": a})
+                    await bidi.wait_event("browsingContext.contextDestroyed", lambda p: p["context"] == a)
+                    release.set()
+                    tree = (await bidi.command("browsingContext.getTree", {}))["contexts"]
+                    assert_true(all(c["context"] != a for c in tree), f"{name}: late response cannot revive A")
+                else:
+                    replacement = f"{fixture}/webdriver/frame?replacement={name}"
+                    await bidi.command("browsingContext.navigate", {"context": a, "url": replacement, "wait": "complete"})
+                    release.set()
+                    assert_equal(await bidi.evaluate(a, "location.href"),
+                                 {"type": "string", "value": replacement}, f"{name}: replacement remains current")
+                assert_equal(await bidi.evaluate(b, "6 * 7"), {"type": "number", "value": 42}, f"{name}: B remains usable")
+                assert_equal([e["params"]["data"] for e in bidi.events
+                              if e.get("method") == "script.message" and e["params"]["channel"] == name],
+                             [{"type": "string", "value": value} for value in ("first", "second")],
+                             f"{name}: each channel call produces one ordered message")
+                record(results, name, {"capabilities": capabilities, "events": bidi.events})
+            finally:
+                release.set()
 
 
 async def _run_background_iframe(

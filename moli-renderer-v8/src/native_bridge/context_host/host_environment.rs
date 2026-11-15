@@ -3,7 +3,7 @@ use crate::content_security_policy::ContentSecurityPolicy;
 use std::collections::HashSet;
 
 use super::{
-    JsContextHost,
+    PageScriptHost,
     layout::LayoutInputChange,
     permissions::{permission_names_match, permission_override_name},
 };
@@ -26,7 +26,7 @@ use crate::{
         context_bootstrap::{
             SharedStorageBucketStore, SharedWebStorageStore, WeakIndexedDbManager,
         },
-        types::SubresourceResourceType,
+        types::{SubresourceInterceptionClasses, SubresourceResourceType},
     },
 };
 use dom::ElementState as StyloElementState;
@@ -37,7 +37,7 @@ fn push_unique_handle(handles: &mut Vec<DomHandle>, handle: DomHandle) {
     }
 }
 
-fn hover_chain_for_input_hit(runtime: &JsContextHost, hit: Option<DomHandle>) -> Vec<DomHandle> {
+fn hover_chain_for_input_hit(runtime: &PageScriptHost, hit: Option<DomHandle>) -> Vec<DomHandle> {
     let mut hovered = Vec::new();
     let mut visited = HashSet::new();
     let mut current = hit;
@@ -74,7 +74,7 @@ fn hover_chain_for_input_hit(runtime: &JsContextHost, hit: Option<DomHandle>) ->
     hovered
 }
 
-impl JsContextHost {
+impl PageScriptHost {
     pub(crate) fn media_query_matches_for_document(
         &self,
         document: DomHandle,
@@ -421,13 +421,17 @@ impl JsContextHost {
         loader: &DocumentResourceLoader,
     ) {
         let loader = loader.clone();
+        // Initial Window reuse installs a new Document authority in an
+        // existing host. Its target policy must replace the retired binding;
+        // a transport-only replacement instead retains the same policy.
+        self.page_network_policy = loader.request_client().page_network_policy().clone();
         self.apply_page_network_policy_to_document_loader(&loader);
         let owner = self
             .current_main_document_task_owner()
             .expect("main Document must have an owner before its resource loader is installed");
         let owner = crate::native_bridge::WindowDocumentOwner::Frame(owner);
         self.document_resource_loaders.register(owner, loader);
-        unsafe { &mut *self.runtime }
+        unsafe { &mut *self.document_runtime }
             .bind_document_resource_loader(self.document_resource_loaders.clone(), owner);
     }
 
@@ -490,7 +494,11 @@ impl JsContextHost {
     }
 
     pub(crate) fn browser_cookie_enabled(&self) -> bool {
-        unsafe { (&*self.runtime).host_document().browser_cookie_enabled() }
+        unsafe {
+            (&*self.document_runtime)
+                .host_document()
+                .browser_cookie_enabled()
+        }
     }
 
     pub(crate) fn web_storage_store(&self) -> SharedWebStorageStore {
@@ -717,7 +725,7 @@ impl JsContextHost {
             context,
             crate::network::context::DocumentResourceAuthoritySource::Inherited(current),
         );
-        unsafe { &mut *self.runtime }.bind_document_resource_loader(
+        unsafe { &mut *self.document_runtime }.bind_document_resource_loader(
             self.document_resource_loaders.clone(),
             crate::native_bridge::WindowDocumentOwner::Frame(transition.current_owner()),
         );
@@ -765,7 +773,7 @@ impl JsContextHost {
     }
 
     pub(crate) fn document_content_security_policies(&self) -> &[ContentSecurityPolicy] {
-        unsafe { &*self.runtime }.document_content_security_policies()
+        unsafe { &*self.document_runtime }.document_content_security_policies()
     }
 
     pub(crate) fn set_permission_overrides(
@@ -844,11 +852,11 @@ impl JsContextHost {
         if self.emulated_media() != overrides {
             self.invalidate_layout_inputs(LayoutInputChange::StyleEnvironment);
         }
-        unsafe { &mut *self.runtime }.set_emulated_media(overrides);
+        unsafe { &mut *self.document_runtime }.set_emulated_media(overrides);
     }
 
     pub(crate) fn emulated_media(&self) -> &crate::protocol_types::EmulatedMediaOverrides {
-        unsafe { &*self.runtime }.emulated_media()
+        unsafe { &*self.document_runtime }.emulated_media()
     }
 
     pub(crate) fn set_viewport_surface(
@@ -859,16 +867,16 @@ impl JsContextHost {
         if changed {
             self.invalidate_layout_inputs(LayoutInputChange::StyleEnvironment);
         }
-        unsafe { &mut *self.runtime }.set_viewport_surface(viewport_surface);
+        unsafe { &mut *self.document_runtime }.set_viewport_surface(viewport_surface);
         changed
     }
 
     pub(crate) fn style_viewport(&self) -> StyleViewport {
-        unsafe { &*self.runtime }.style_viewport()
+        unsafe { &*self.document_runtime }.style_viewport()
     }
 
     pub(crate) fn viewport_surface(&self) -> Option<crate::protocol_types::ViewportSurface> {
-        unsafe { &*self.runtime }.viewport_surface()
+        unsafe { &*self.document_runtime }.viewport_surface()
     }
 
     pub(crate) fn document_base_url_for_handle(&self, document: DomHandle) -> url::Url {
@@ -1067,7 +1075,7 @@ impl JsContextHost {
     pub(crate) fn close_document(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
     ) {
         self.close_root_document_parser_stream(scope, host_ptr);
         self.sync_pending_document_style_sources();
@@ -1109,7 +1117,7 @@ impl JsContextHost {
             stylesheet_id,
         ) {
             let canceled_load_event_bindings =
-                unsafe { &mut *self.runtime }.invalidate_style_related_state(owner);
+                unsafe { &mut *self.document_runtime }.invalidate_style_related_state(owner);
             for binding in canceled_load_event_bindings {
                 let settled = self.settle_main_style_load_event(binding);
                 tracing::debug!(
@@ -1121,7 +1129,7 @@ impl JsContextHost {
                 );
             }
             let host_ptr = self as *mut Self;
-            unsafe { &mut *self.runtime }
+            unsafe { &mut *self.document_runtime }
                 .apply_inline_cssom_source_change_after_invalidation(host_ptr, owner);
             return true;
         }
@@ -1133,7 +1141,8 @@ impl JsContextHost {
             self.clear_layout_rect_cache();
             self.queue_stylesheet_source_css_projection(owner);
             let host_ptr = self as *mut Self;
-            unsafe { &mut *self.runtime }.apply_linked_cssom_source_change(host_ptr, owner);
+            unsafe { &mut *self.document_runtime }
+                .apply_linked_cssom_source_change(host_ptr, owner);
             return true;
         }
         false
@@ -1168,7 +1177,7 @@ impl JsContextHost {
     }
 
     pub(crate) fn stylesheet_owner_is_csp_blocked(&self, owner: DomHandle) -> bool {
-        unsafe { &*self.runtime }.stylesheet_owner_is_csp_blocked(owner)
+        unsafe { &*self.document_runtime }.stylesheet_owner_is_csp_blocked(owner)
     }
 
     pub(crate) fn set_owner_style_sheet_csp_suppressed(
@@ -2127,8 +2136,9 @@ impl JsContextHost {
 
     pub(crate) fn set_media_paused(&mut self, handle: DomHandle, paused: bool) -> bool {
         let old_state = self.retained_current_element_state(handle);
-        let changed =
-            unsafe { DocumentRuntime::set_media_paused(&mut *self.runtime, handle, paused) };
+        let changed = unsafe {
+            DocumentRuntime::set_media_paused(&mut *self.document_runtime, handle, paused)
+        };
         if changed {
             self.note_element_state_style_activity_with_old_state(
                 handle,
@@ -2144,13 +2154,15 @@ impl JsContextHost {
         handle: DomHandle,
         error_code: Option<u32>,
     ) -> bool {
-        unsafe { DocumentRuntime::set_media_error_code(&mut *self.runtime, handle, error_code) }
+        unsafe {
+            DocumentRuntime::set_media_error_code(&mut *self.document_runtime, handle, error_code)
+        }
     }
 
     pub(crate) fn set_media_muted(&mut self, handle: DomHandle, muted: bool) -> bool {
         let old_state = self.retained_current_element_state(handle);
         let changed =
-            unsafe { DocumentRuntime::set_media_muted(&mut *self.runtime, handle, muted) };
+            unsafe { DocumentRuntime::set_media_muted(&mut *self.document_runtime, handle, muted) };
         if changed {
             self.note_element_state_style_activity_with_old_state(
                 handle,
@@ -2163,8 +2175,9 @@ impl JsContextHost {
 
     pub(crate) fn set_media_seeking(&mut self, handle: DomHandle, seeking: bool) -> bool {
         let old_state = self.retained_current_element_state(handle);
-        let changed =
-            unsafe { DocumentRuntime::set_media_seeking(&mut *self.runtime, handle, seeking) };
+        let changed = unsafe {
+            DocumentRuntime::set_media_seeking(&mut *self.document_runtime, handle, seeking)
+        };
         if changed {
             self.note_element_state_style_activity_with_old_state(
                 handle,
@@ -2204,8 +2217,9 @@ impl JsContextHost {
                 ))
             })
             .collect::<Vec<_>>();
-        let changed =
-            unsafe { DocumentRuntime::set_select_value(&mut *self.runtime, handle, value) };
+        let changed = unsafe {
+            DocumentRuntime::set_select_value(&mut *self.document_runtime, handle, value)
+        };
         if changed {
             for (option, was_selected, old_state) in old_states {
                 let selected = self
@@ -2233,7 +2247,7 @@ impl JsContextHost {
         let old_state = self.retained_current_element_state(handle);
         let container_old_states = self.retained_old_states_for_validity_container_change(handle);
         let changed =
-            unsafe { DocumentRuntime::set_input_files(&mut *self.runtime, handle, files) };
+            unsafe { DocumentRuntime::set_input_files(&mut *self.document_runtime, handle, files) };
         if changed {
             self.note_input_value_state_style_activity(handle, old_state, &container_old_states);
         }
@@ -2245,7 +2259,7 @@ impl JsContextHost {
         let old_state = self.retained_current_element_state(handle);
         let container_old_states = self.retained_old_states_for_validity_container_change(handle);
         let changed =
-            unsafe { DocumentRuntime::set_input_value(&mut *self.runtime, handle, value) };
+            unsafe { DocumentRuntime::set_input_value(&mut *self.document_runtime, handle, value) };
         if changed {
             self.note_input_value_state_style_activity(handle, old_state, &container_old_states);
         }
@@ -2262,7 +2276,12 @@ impl JsContextHost {
         let old_state = self.retained_current_element_state(handle);
         let container_old_states = self.retained_old_states_for_validity_container_change(handle);
         let changed = unsafe {
-            DocumentRuntime::set_input_value_with_dirty(&mut *self.runtime, handle, value, dirty)
+            DocumentRuntime::set_input_value_with_dirty(
+                &mut *self.document_runtime,
+                handle,
+                value,
+                dirty,
+            )
         };
         if changed {
             self.note_input_value_state_style_activity(handle, old_state, &container_old_states);
@@ -2278,7 +2297,11 @@ impl JsContextHost {
         let old_state = self.retained_current_element_state(handle);
         let container_old_states = self.retained_old_states_for_validity_container_change(handle);
         let changed = unsafe {
-            DocumentRuntime::set_input_value_from_user_edit(&mut *self.runtime, handle, value)
+            DocumentRuntime::set_input_value_from_user_edit(
+                &mut *self.document_runtime,
+                handle,
+                value,
+            )
         };
         if changed {
             self.note_input_value_state_style_activity(handle, old_state, &container_old_states);
@@ -2288,8 +2311,9 @@ impl JsContextHost {
 
     pub(crate) fn set_autofilled(&mut self, handle: DomHandle, autofilled: bool) -> bool {
         let old_state = self.retained_current_element_state(handle);
-        let changed =
-            unsafe { DocumentRuntime::set_autofilled(&mut *self.runtime, handle, autofilled) };
+        let changed = unsafe {
+            DocumentRuntime::set_autofilled(&mut *self.document_runtime, handle, autofilled)
+        };
         if changed {
             self.note_element_state_style_activity_with_old_state(
                 handle,
@@ -2303,7 +2327,7 @@ impl JsContextHost {
     pub(crate) fn set_web_mcp_activity(&mut self, handle: DomHandle, form: bool, submit: bool) {
         let old_state = self.retained_current_element_state(handle);
         if unsafe {
-            DocumentRuntime::set_web_mcp_activity(&mut *self.runtime, handle, form, submit)
+            DocumentRuntime::set_web_mcp_activity(&mut *self.document_runtime, handle, form, submit)
         } {
             self.note_element_state_style_activity_with_old_state(
                 handle,
@@ -2342,14 +2366,14 @@ impl JsContextHost {
     pub(crate) fn set_checked_state(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         handle: DomHandle,
         checked: bool,
     ) -> bool {
         let old_states = self.retained_old_states_for_checked_state_change(handle, checked);
         unsafe {
             DocumentRuntime::set_checked_state_with_old_states(
-                &mut *self.runtime,
+                &mut *self.document_runtime,
                 scope,
                 host_ptr,
                 handle,
@@ -2361,7 +2385,7 @@ impl JsContextHost {
 
     pub(crate) fn set_checked_state_with_dirty(
         &mut self,
-        host_ptr: *mut JsContextHost,
+        host_ptr: *mut PageScriptHost,
         handle: DomHandle,
         checked: bool,
         dirty: bool,
@@ -2369,7 +2393,7 @@ impl JsContextHost {
         let old_states = self.retained_old_states_for_checked_state_change(handle, checked);
         unsafe {
             DocumentRuntime::set_checked_state_with_dirty_and_old_states(
-                &mut *self.runtime,
+                &mut *self.document_runtime,
                 host_ptr,
                 handle,
                 checked,
@@ -2638,7 +2662,7 @@ impl JsContextHost {
 
     pub(crate) fn permission_state(&self, permission_name: &str) -> &str {
         let current_origin = unsafe {
-            (&*self.runtime)
+            (&*self.document_runtime)
                 .document_url()
                 .origin()
                 .ascii_serialization()
@@ -2751,26 +2775,18 @@ impl JsContextHost {
 
     pub(crate) fn set_fetch_subresource_interception(
         &mut self,
-        enabled: bool,
-        resource_type: Option<SubresourceResourceType>,
+        classes: SubresourceInterceptionClasses,
     ) {
-        self.fetch_subresource_interception_enabled = enabled;
-        self.fetch_subresource_interception_resource_type = resource_type;
-        for worker in self.workers.values() {
-            if let super::workers::WorkerExecutionState::Running { handle } = &worker.execution {
-                handle.set_fetch_subresource_interception(enabled, resource_type);
-            }
-        }
+        self.page_network_policy
+            .set_subresource_interception(classes);
     }
 
     pub(crate) fn should_intercept_subresource(
         &self,
         resource_type: SubresourceResourceType,
     ) -> bool {
-        self.fetch_subresource_interception_enabled
-            && self
-                .fetch_subresource_interception_resource_type
-                .is_none_or(|expected| expected.has_same_cdp_fetch_interception_type(resource_type))
+        self.page_network_policy
+            .should_intercept_subresource(resource_type)
     }
 
     /// Starts one module graph fetch, or pauses it for CDP `Fetch`
@@ -2827,16 +2843,6 @@ impl JsContextHost {
             continuation.continue_request(None);
         }
         Ok(())
-    }
-
-    pub(crate) fn fetch_subresource_interception_enabled(&self) -> bool {
-        self.fetch_subresource_interception_enabled
-    }
-
-    pub(crate) fn fetch_subresource_interception_resource_type(
-        &self,
-    ) -> Option<SubresourceResourceType> {
-        self.fetch_subresource_interception_resource_type
     }
 }
 

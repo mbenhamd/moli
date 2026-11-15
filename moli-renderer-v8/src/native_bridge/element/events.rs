@@ -13,7 +13,7 @@ pub(crate) use self::constructors::{
     construct_mouse_event_with_related_target_for_target, construct_pointer_event,
     construct_pointer_event_with_modifiers, construct_pointer_event_with_related_target,
     construct_pointer_event_with_related_target_and_modifiers, construct_simple_event,
-    construct_submit_event, construct_toggle_event, construct_touch_event,
+    construct_submit_event, construct_text_input_event_for_target, construct_toggle_event,
     construct_touch_event_with_points, construct_wheel_event_for_target,
 };
 pub(crate) use self::dispatch::{

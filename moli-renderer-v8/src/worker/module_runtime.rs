@@ -1,11 +1,23 @@
+mod module_map;
+mod tree;
+
+use module_map::{WorkerModuleMapEntry, WorkerModuleScript};
+use moli_module_script_tree as module_tree;
+use tree::{
+    WorkerModuleTreeHost, WorkerModuleTreeTarget, WorkerModuleTreeTask, WorkerModuleTrees,
+    WorkerSingleModuleCompletion,
+};
+
 use crate::module_runtime::import_attributes_key as worker_import_attributes_key;
 use crate::module_runtime::module_request_attributes as worker_module_request_attributes;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::pin::pin;
 use std::rc::Rc;
 
-use crate::exception_reporting::{V8ExceptionReport, build_event_handler_exception_report};
+use crate::exception_reporting::{
+    V8ExceptionReport, build_event_handler_exception_report, build_exception_report_without_stack,
+};
 use crate::module_runtime::{
     ModuleAttributesKey, ModuleImportPhase, WasmDependencyModuleMessages, WasmImportRecord,
     WasmModuleRecord, ensure_wasm_dependency_module_namespace_ready,
@@ -13,9 +25,7 @@ use crate::module_runtime::{
     throw_wasm_synthetic_module_error, wasm_dependency_export_value,
 };
 use crate::util::{get_private_value, v8_string, v8str};
-use crate::wasm_module_support::{
-    prepare_wasm_module_record, v8_exception_message_or, wasm_evaluation_import_modules,
-};
+use crate::wasm_module_support::{prepare_wasm_module_record, wasm_evaluation_import_modules};
 use moli_fetch::{BrowserRequestMetadata, RequestCredentialsMode};
 use moli_webapi_declare::WebApiObject;
 use tokio::sync::mpsc;
@@ -60,8 +70,9 @@ struct WorkerImportMetaDeclaration<'scope> {
 }
 
 pub(super) struct WorkerModuleGraphFetchCompletion {
+    key: WorkerModuleKey,
     fetch_id: WorkerModuleGraphFetchId,
-    result: Result<WorkerModuleFetchedSource, String>,
+    result: Result<WorkerModuleFetchedSource, module_tree::ModuleLoadError>,
     csp_violations: Vec<ContentSecurityPolicyUrlViolation>,
 }
 
@@ -80,16 +91,7 @@ pub(super) enum WorkerModuleSource {
 
 pub(super) struct WorkerModuleEvaluationCompletion {
     evaluation_id: WorkerModuleEvaluationId,
-    result: Result<(), String>,
-}
-
-pub(super) enum WorkerDynamicModuleImportAdvance {
-    Complete,
-    NeedFetches(WorkerModuleGraphFetchBatch),
-    WaitingFetches,
-    WaitingEvaluation {
-        evaluation_id: WorkerModuleEvaluationId,
-    },
+    result: Result<(), v8::Global<v8::Value>>,
 }
 
 #[derive(Clone, Copy)]
@@ -171,18 +173,6 @@ impl WorkerDynamicModuleImportError {
             stage: WorkerDynamicModuleImportErrorStage::Evaluate,
         }
     }
-
-    fn clone_for_scope(&self, scope: &mut v8::PinScope<'_, '_>) -> Self {
-        Self {
-            message: self.message.clone(),
-            kind: self.kind,
-            rejection: self
-                .rejection
-                .as_ref()
-                .map(|value| v8::Global::new(scope, v8::Local::new(scope, value))),
-            stage: self.stage,
-        }
-    }
 }
 
 impl From<String> for WorkerDynamicModuleImportError {
@@ -191,12 +181,33 @@ impl From<String> for WorkerDynamicModuleImportError {
     }
 }
 
+impl From<Box<WorkerBootstrapError>> for WorkerDynamicModuleImportError {
+    fn from(error: Box<WorkerBootstrapError>) -> Self {
+        let (report, _, _) = *error;
+        Self {
+            message: report.summary,
+            kind: WorkerDynamicModuleImportErrorKind::Type,
+            // Bootstrap failures can contain a synthesized parent-facing
+            // SyntaxError. Only a captured native exception supersedes the
+            // dynamic import TypeError fallback.
+            rejection: report.exception,
+            stage: WorkerDynamicModuleImportErrorStage::Graph,
+        }
+    }
+}
+
 impl WorkerModuleGraphFetchCompletion {
     pub(super) fn new(
         fetch_id: WorkerModuleGraphFetchId,
+        key: WorkerModuleKey,
         result: Result<WorkerModuleFetchedSource, String>,
     ) -> Self {
+        let result = result.map_err(|message| {
+            module_tree::ModuleLoadError::new(module_tree::ModuleLoadStage::Fetch, message)
+                .with_key(tree::tree_key(&key))
+        });
         Self {
+            key,
             fetch_id,
             result,
             csp_violations: Vec::new(),
@@ -221,8 +232,10 @@ impl WorkerModuleGraphFetchCompletion {
         self.csp_violations.iter()
     }
 
-    pub(super) fn result(&self) -> Result<&WorkerModuleFetchedSource, &str> {
-        self.result.as_ref().map_err(String::as_str)
+    pub(super) fn result(
+        &self,
+    ) -> Result<&WorkerModuleFetchedSource, &module_tree::ModuleLoadError> {
+        self.result.as_ref()
     }
 }
 
@@ -318,7 +331,10 @@ impl WorkerModuleSource {
 }
 
 impl WorkerModuleEvaluationCompletion {
-    fn new(evaluation_id: WorkerModuleEvaluationId, result: Result<(), String>) -> Self {
+    fn new(
+        evaluation_id: WorkerModuleEvaluationId,
+        result: Result<(), v8::Global<v8::Value>>,
+    ) -> Self {
         Self {
             evaluation_id,
             result,
@@ -329,8 +345,8 @@ impl WorkerModuleEvaluationCompletion {
         self.evaluation_id
     }
 
-    pub(super) fn result(&self) -> Result<(), &str> {
-        self.result.as_ref().map(|_| ()).map_err(String::as_str)
+    pub(super) fn result(&self) -> Result<(), &v8::Global<v8::Value>> {
+        self.result.as_ref().map(|_| ())
     }
 }
 
@@ -343,48 +359,77 @@ pub(super) fn evaluate_module_worker_bootstrap_source(
     referrer_policy: Option<String>,
     evaluation_completion_tx: mpsc::UnboundedSender<WorkerModuleEvaluationCompletion>,
 ) -> WorkerModuleBootstrapStart {
-    let try_catch = pin!(v8::TryCatch::new(scope));
-    let mut scope = try_catch.init();
     let root_url = match Url::parse(script_url) {
         Ok(url) => url,
         Err(_) => {
             return WorkerModuleBootstrapStart::Failed(Box::new(worker_bootstrap_error(
-                &mut scope,
+                scope,
                 script_url,
                 "Module worker script URL is invalid",
                 WorkerParentErrorEventKind::Event,
             )));
         }
     };
-    let static_import_initiator_url =
-        static_import_initiator_url.unwrap_or_else(|| root_url.clone());
-    let runtime =
-        WorkerModuleRuntime::new(credentials_mode, referrer_policy, evaluation_completion_tx);
+    let runtime = WorkerModuleRuntime::new(
+        credentials_mode,
+        referrer_policy.clone(),
+        evaluation_completion_tx,
+    );
     runtime.install_context_slot(scope.get_current_context());
-    let mut bootstrap = runtime.start_bootstrap(source, root_url, static_import_initiator_url);
-    match bootstrap.advance(&mut scope) {
-        WorkerModuleAdvance::ReadyToInstantiate { root_entry } => {
-            match finish_worker_module_bootstrap(
-                &mut scope,
-                &bootstrap.runtime,
-                root_entry,
-                script_url,
-            ) {
-                Ok(WorkerModuleFinish::Complete) => WorkerModuleBootstrapStart::Complete,
-                Ok(WorkerModuleFinish::PendingEvaluation { evaluation_id }) => {
-                    WorkerModuleBootstrapStart::Pending(Box::new(
-                        WorkerModulePendingBootstrap::new_evaluation(bootstrap, evaluation_id),
-                    ))
-                }
-                Err(error) => WorkerModuleBootstrapStart::Failed(error),
+    let key = WorkerModuleKey::javascript_or_wasm(root_url.clone());
+    let root_entry = create_worker_module_script(
+        scope,
+        &runtime.modules,
+        &source,
+        key.clone(),
+        root_url.clone(),
+        referrer_policy.clone(),
+    );
+    let root = module_tree::ModuleRootInput::Inline(module_tree::ModuleInlineRootInput {
+        root_key: tree::tree_key(&key),
+        root_entry: tree::entry_id(root_entry),
+        source_url: root_url.clone(),
+        base_url: root_url.clone(),
+        phase: module_tree::ModuleImportPhase::Evaluation,
+        fetch_metadata: tree::fetch_metadata(credentials_mode, referrer_policy.as_deref()),
+        referrer: module_tree::ModuleReferrer::client(),
+        position: module_tree::TextPosition::default(),
+    });
+    let task = WorkerModuleTreeTask {
+        tree: module_tree::ModuleScriptTreeJob::new(
+            root,
+            module_tree::ModuleTreeConfig {
+                tree_id: tree::BOOTSTRAP_TREE,
+                owner: module_tree::ModuleTreeOwner {
+                    kind: module_tree::ModuleTreeOwnerKind::WorkerModuleScript,
+                    requester: module_tree::ModuleFetchRequester::RuntimeModuleScript,
+                    ordering: module_tree::ModuleFetchOrdering::Runtime,
+                },
+                custom_fetch_type: module_tree::ModuleScriptCustomFetchType::WorkerConstructor,
+                ..module_tree::ModuleTreeConfig::default()
+            },
+        ),
+        target: WorkerModuleTreeTarget::Bootstrap,
+        options: WorkerModuleGraphFetchOptions {
+            initiator_url: static_import_initiator_url.unwrap_or(root_url),
+            csp_source: WorkerModuleGraphFetchCspSource::StaticModuleGraph,
+            browser_request_metadata: BrowserRequestMetadata::Fetch,
+            referrer_policy,
+        },
+    };
+    let mut bootstrap = WorkerModulePendingBootstrap {
+        script_url: script_url.to_owned(),
+        state: WorkerModulePendingBootstrapState::Tree(tree::BOOTSTRAP_TREE),
+    };
+    match drive_worker_module_tree(scope, &runtime.modules, &runtime.trees, task, None) {
+        Some(terminal) => match bootstrap.resume_tree(scope, terminal.tree_id, terminal.result) {
+            WorkerModuleBootstrapResume::Complete => WorkerModuleBootstrapStart::Complete,
+            WorkerModuleBootstrapResume::Failed(error) => WorkerModuleBootstrapStart::Failed(error),
+            WorkerModuleBootstrapResume::WaitingEvaluation => {
+                WorkerModuleBootstrapStart::Pending(Box::new(bootstrap))
             }
-        }
-        WorkerModuleAdvance::NeedFetches(requests) => {
-            WorkerModuleBootstrapStart::Pending(Box::new(
-                WorkerModulePendingBootstrap::new_fetches(bootstrap, requests),
-            ))
-        }
-        WorkerModuleAdvance::Failed(error) => WorkerModuleBootstrapStart::Failed(error),
+        },
+        None => WorkerModuleBootstrapStart::Pending(Box::new(bootstrap)),
     }
 }
 
@@ -396,108 +441,50 @@ pub(super) enum WorkerModuleBootstrapStart {
 
 pub(super) enum WorkerModuleBootstrapResume {
     Complete,
-    NeedFetches(WorkerModuleGraphFetchBatch),
-    WaitingFetches,
     WaitingEvaluation,
     Failed(Box<WorkerBootstrapError>),
 }
 
 pub(super) struct WorkerModulePendingBootstrap {
-    job: WorkerModuleBootstrapJob,
+    script_url: String,
     state: WorkerModulePendingBootstrapState,
 }
 
 enum WorkerModulePendingBootstrapState {
-    Fetch(WorkerModuleGraphFetchBatch),
+    Tree(module_tree::ModuleTreeId),
     Evaluation {
         evaluation_id: WorkerModuleEvaluationId,
     },
 }
 
 impl WorkerModulePendingBootstrap {
-    fn new_fetches(
-        job: WorkerModuleBootstrapJob,
-        pending_requests: WorkerModuleGraphFetchBatch,
-    ) -> Self {
-        Self {
-            job,
-            state: WorkerModulePendingBootstrapState::Fetch(pending_requests),
-        }
-    }
-
-    fn new_evaluation(
-        job: WorkerModuleBootstrapJob,
-        evaluation_id: WorkerModuleEvaluationId,
-    ) -> Self {
-        Self {
-            job,
-            state: WorkerModulePendingBootstrapState::Evaluation { evaluation_id },
-        }
-    }
-
-    pub(super) fn pending_requests(&self) -> Option<&WorkerModuleGraphFetchBatch> {
-        match &self.state {
-            WorkerModulePendingBootstrapState::Fetch(requests) => Some(requests),
-            WorkerModulePendingBootstrapState::Evaluation { .. } => None,
-        }
-    }
-
-    pub(super) fn resume(
+    fn resume_tree(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        completion: WorkerModuleGraphFetchCompletion,
+        tree_id: module_tree::ModuleTreeId,
+        result: Result<module_tree::ModuleGraphHandle, module_tree::ModuleLoadError>,
     ) -> WorkerModuleBootstrapResume {
-        let fetch_id = completion.fetch_id();
-        let WorkerModulePendingBootstrapState::Fetch(pending_requests) = &mut self.state else {
-            return WorkerModuleBootstrapResume::Failed(Box::new(worker_bootstrap_error(
-                scope,
-                self.job.script_url(),
-                "Module worker graph fetch completion arrived while waiting for evaluation",
-                WorkerParentErrorEventKind::Event,
-            )));
-        };
-        let Some(pending_request) = pending_requests.remove_by_fetch_id(fetch_id) else {
-            return WorkerModuleBootstrapResume::Failed(Box::new(worker_bootstrap_error(
-                scope,
-                self.job.script_url(),
-                &format!(
-                    "Module worker graph fetch completion id {fetch_id} did not match any pending id"
-                ),
-                WorkerParentErrorEventKind::Event,
-            )));
-        };
-        let pending_keys = pending_requests.pending_keys();
-        match self.job.resume_fetch_with_pending_keys(
-            scope,
-            &pending_request,
-            completion,
-            pending_keys,
-        ) {
-            WorkerModuleAdvance::ReadyToInstantiate { root_entry } => {
-                if !pending_requests.is_empty() {
-                    return WorkerModuleBootstrapResume::WaitingFetches;
-                }
-                match finish_worker_module_bootstrap(
+        assert!(
+            matches!(self.state, WorkerModulePendingBootstrapState::Tree(id) if id == tree_id),
+            "module tree completion must match the bootstrap client"
+        );
+        let graph = match result {
+            Ok(graph) => graph,
+            Err(error) => {
+                return WorkerModuleBootstrapResume::Failed(worker_bootstrap_tree_error(
                     scope,
-                    &self.job.runtime,
-                    root_entry,
-                    self.job.script_url(),
-                ) {
-                    Ok(WorkerModuleFinish::Complete) => WorkerModuleBootstrapResume::Complete,
-                    Ok(WorkerModuleFinish::PendingEvaluation { evaluation_id }) => {
-                        self.state =
-                            WorkerModulePendingBootstrapState::Evaluation { evaluation_id };
-                        WorkerModuleBootstrapResume::WaitingEvaluation
-                    }
-                    Err(error) => WorkerModuleBootstrapResume::Failed(error),
-                }
+                    &self.script_url,
+                    error,
+                ));
             }
-            WorkerModuleAdvance::NeedFetches(requests) => {
-                let new_requests = requests.clone();
-                pending_requests.extend(requests);
-                WorkerModuleBootstrapResume::NeedFetches(new_requests)
+        };
+        match finish_worker_module_bootstrap(scope, &graph, &self.script_url) {
+            Ok(WorkerModuleFinish::Complete) => WorkerModuleBootstrapResume::Complete,
+            Ok(WorkerModuleFinish::PendingEvaluation { evaluation_id }) => {
+                self.state = WorkerModulePendingBootstrapState::Evaluation { evaluation_id };
+                WorkerModuleBootstrapResume::WaitingEvaluation
             }
-            WorkerModuleAdvance::Failed(error) => WorkerModuleBootstrapResume::Failed(error),
+            Err(error) => WorkerModuleBootstrapResume::Failed(error),
         }
     }
 
@@ -506,33 +493,21 @@ impl WorkerModulePendingBootstrap {
         scope: &mut v8::PinScope<'_, '_>,
         completion: WorkerModuleEvaluationCompletion,
     ) -> WorkerModuleBootstrapResume {
-        let WorkerModulePendingBootstrapState::Evaluation { evaluation_id } = self.state else {
-            return WorkerModuleBootstrapResume::Failed(Box::new(worker_bootstrap_error(
-                scope,
-                self.job.script_url(),
-                "Module worker evaluation completion arrived while waiting for graph fetch",
-                WorkerParentErrorEventKind::Event,
-            )));
-        };
-        if completion.evaluation_id != evaluation_id {
-            return WorkerModuleBootstrapResume::Failed(Box::new(worker_bootstrap_error(
-                scope,
-                self.job.script_url(),
-                &format!(
-                    "Module worker evaluation completion id {} did not match pending id {evaluation_id}",
-                    completion.evaluation_id
-                ),
-                WorkerParentErrorEventKind::Event,
-            )));
-        }
+        assert!(
+            matches!(self.state, WorkerModulePendingBootstrapState::Evaluation { evaluation_id } if evaluation_id == completion.evaluation_id),
+            "module evaluation completion must match its bootstrap owner"
+        );
         match completion.result {
             Ok(()) => WorkerModuleBootstrapResume::Complete,
-            Err(message) => WorkerModuleBootstrapResume::Failed(Box::new(worker_bootstrap_error(
-                scope,
-                self.job.script_url(),
-                &message,
-                WorkerParentErrorEventKind::ErrorEvent,
-            ))),
+            Err(reason) => {
+                let value = v8::Local::new(scope, reason);
+                WorkerModuleBootstrapResume::Failed(Box::new(worker_bootstrap_value_error(
+                    scope,
+                    &self.script_url,
+                    value,
+                    WorkerParentErrorEventKind::ErrorEvent,
+                )))
+            }
         }
     }
 }
@@ -546,14 +521,17 @@ enum WorkerModuleFinish {
 
 fn finish_worker_module_bootstrap(
     scope: &mut v8::PinScope<'_, '_>,
-    runtime: &WorkerModuleRuntime,
-    root_entry: usize,
+    graph: &module_tree::ModuleGraphHandle,
     script_url: &str,
 ) -> WorkerModuleBootstrapResult<WorkerModuleFinish> {
     let try_catch = pin!(v8::TryCatch::new(scope));
     let mut scope = try_catch.init();
     let scope = &mut scope;
-    let root_module_global = runtime.graph.borrow().module(root_entry).clone();
+    let modules = scope
+        .get_current_context()
+        .get_slot::<RefCell<WorkerModuleMap>>()
+        .expect("worker module map installed");
+    let root_module_global = modules.borrow().module(graph.root_entry.0 as usize).clone();
     let root_module = v8::Local::new(scope, &root_module_global);
 
     // Include dependencies of synthetic Wasm modules, which V8's IsGraphAsync
@@ -564,11 +542,11 @@ fn finish_worker_module_bootstrap(
             state.borrow().global_kind,
             super::thread::WorkerGlobalKind::Service { .. }
         )
-    }) && runtime
-        .graph
-        .borrow()
-        .has_top_level_await(scope, root_entry)
-    {
+    }) && graph.entries.iter().any(|entry| {
+        graph.entry_phases.get(entry) == Some(&module_tree::ModuleImportPhase::Evaluation)
+            && v8::Local::new(scope, modules.borrow().module(entry.0 as usize))
+                .has_top_level_await()
+    }) {
         let message = v8str(scope, "Top-level await is not allowed in service workers.");
         let exception = v8::Exception::type_error(scope, message);
         return Err(Box::new(worker_bootstrap_value_error(
@@ -641,7 +619,8 @@ fn finish_worker_module_bootstrap(
                 )));
             }
             v8::PromiseState::Pending => {
-                let evaluation_id = runtime.reserve_evaluation_id();
+                let evaluation_id = reserve_worker_module_evaluation_id(scope)
+                    .expect("worker evaluation slot installed");
                 let promise = v8::Global::new(scope, promise);
                 attach_worker_module_evaluation_reactions(scope, evaluation_id, promise)?;
                 return Ok(WorkerModuleFinish::PendingEvaluation { evaluation_id });
@@ -652,9 +631,10 @@ fn finish_worker_module_bootstrap(
     Ok(WorkerModuleFinish::Complete)
 }
 
+#[derive(Clone)]
 struct WorkerModuleRuntime {
-    graph: Rc<RefCell<WorkerModuleGraph>>,
-    next_fetch_id: Rc<RefCell<WorkerModuleGraphFetchId>>,
+    modules: Rc<RefCell<WorkerModuleMap>>,
+    trees: Rc<RefCell<WorkerModuleTrees>>,
     next_evaluation_id: Rc<RefCell<WorkerModuleEvaluationId>>,
     dynamic_imports: Rc<RefCell<WorkerDynamicModuleResolver>>,
     evaluation_completion_tx: mpsc::UnboundedSender<WorkerModuleEvaluationCompletion>,
@@ -667,11 +647,11 @@ impl WorkerModuleRuntime {
         evaluation_completion_tx: mpsc::UnboundedSender<WorkerModuleEvaluationCompletion>,
     ) -> Self {
         Self {
-            graph: Rc::new(RefCell::new(WorkerModuleGraph::new(
+            modules: Rc::new(RefCell::new(WorkerModuleMap::new(
                 credentials_mode,
                 referrer_policy,
             ))),
-            next_fetch_id: Rc::new(RefCell::new(0)),
+            trees: Rc::new(RefCell::new(WorkerModuleTrees::default())),
             next_evaluation_id: Rc::new(RefCell::new(0)),
             dynamic_imports: Rc::new(RefCell::new(WorkerDynamicModuleResolver::default())),
             evaluation_completion_tx,
@@ -679,36 +659,13 @@ impl WorkerModuleRuntime {
     }
 
     fn install_context_slot(&self, context: v8::Local<'_, v8::Context>) {
-        let _previous_graph = context.set_slot(self.graph.clone());
-        let _previous_fetch_id = context.set_slot(Rc::new(WorkerModuleRuntimeFetchIdSlot {
-            next_fetch_id: Rc::clone(&self.next_fetch_id),
-        }));
+        let _previous_modules = context.set_slot(self.modules.clone());
+        let _previous_trees = context.set_slot(self.trees.clone());
         let _previous_evaluation = context.set_slot(Rc::new(WorkerModuleRuntimeEvaluationSlot {
-            next_evaluation_id: Rc::clone(&self.next_evaluation_id),
+            next_evaluation_id: self.next_evaluation_id.clone(),
             evaluation_completion_tx: self.evaluation_completion_tx.clone(),
         }));
-        let _previous_dynamic_imports = context.set_slot(self.dynamic_imports.clone());
-    }
-
-    fn start_bootstrap(
-        &self,
-        source: WorkerModuleSource,
-        root_url: Url,
-        static_import_initiator_url: Url,
-    ) -> WorkerModuleBootstrapJob {
-        WorkerModuleBootstrapJob {
-            runtime: self.clone(),
-            source,
-            root_url,
-            static_import_initiator_url,
-        }
-    }
-
-    fn reserve_evaluation_id(&self) -> WorkerModuleEvaluationId {
-        let mut next_evaluation_id = self.next_evaluation_id.borrow_mut();
-        let evaluation_id = *next_evaluation_id;
-        *next_evaluation_id += 1;
-        evaluation_id
+        let _previous_imports = context.set_slot(self.dynamic_imports.clone());
     }
 }
 
@@ -725,151 +682,371 @@ pub(super) fn install_classic_worker_dynamic_module_runtime(
     .install_context_slot(scope.get_current_context());
 }
 
-pub(super) fn run_next_worker_dynamic_module_import(
+struct WorkerModuleTreeTerminal {
+    tree_id: module_tree::ModuleTreeId,
+    target: WorkerModuleTreeTarget,
+    result: Result<module_tree::ModuleGraphHandle, module_tree::ModuleLoadError>,
+}
+
+fn drive_worker_module_tree(
     scope: &mut v8::PinScope<'_, '_>,
-) -> Option<WorkerDynamicModuleImportAdvance> {
+    modules: &Rc<RefCell<WorkerModuleMap>>,
+    work: &Rc<RefCell<WorkerModuleTrees>>,
+    mut task: WorkerModuleTreeTask,
+    completion: Option<WorkerSingleModuleCompletion>,
+) -> Option<WorkerModuleTreeTerminal> {
+    let tree_id = task.tree.tree_id();
+    let drive = {
+        let mut host = WorkerModuleTreeHost {
+            scope,
+            modules: modules.clone(),
+            work: work.clone(),
+            options: &task.options,
+        };
+        match completion {
+            Some(completion) => {
+                let outcome = match completion.result {
+                    Ok(entry) => tree::ready_module(&modules.borrow(), entry),
+                    Err(error) => module_tree::ModuleFetchOutcome::Failed(error),
+                };
+                task.tree.resume_single_module_outcome_and_drive(
+                    &mut host,
+                    completion.client,
+                    outcome,
+                )
+            }
+            None => task.tree.drive(&mut host),
+        }
+    };
+    let result = match drive {
+        module_tree::ModuleScriptTreeDrive::Complete(graph) => Ok(graph),
+        module_tree::ModuleScriptTreeDrive::Failed(error) => {
+            modules.borrow_mut().detach_tree(tree_id);
+            Err(error)
+        }
+        module_tree::ModuleScriptTreeDrive::Aborted(_) => {
+            modules.borrow_mut().detach_tree(tree_id);
+            Err(module_tree::ModuleLoadError::new(
+                module_tree::ModuleLoadStage::Abort,
+                "worker module tree was cancelled",
+            ))
+        }
+        module_tree::ModuleScriptTreeDrive::Pending(_)
+        | module_tree::ModuleScriptTreeDrive::NeedFetches(_)
+        | module_tree::ModuleScriptTreeDrive::WaitingForSingleModuleClients(_)
+        | module_tree::ModuleScriptTreeDrive::IgnoredStaleCompletion(_) => {
+            work.borrow_mut().tasks.insert(tree_id, task);
+            return None;
+        }
+    };
+    Some(WorkerModuleTreeTerminal {
+        tree_id,
+        target: task.target,
+        result,
+    })
+}
+
+pub(super) fn run_next_worker_dynamic_module_import(scope: &mut v8::PinScope<'_, '_>) -> bool {
     let context = scope.get_current_context();
-    let dynamic_imports = context.get_slot::<RefCell<WorkerDynamicModuleResolver>>()?;
-    let mut imports = dynamic_imports.borrow_mut();
-    let index = imports
-        .pending_imports
+    let Some(imports) = context.get_slot::<RefCell<WorkerDynamicModuleResolver>>() else {
+        return false;
+    };
+    let Some(job) = imports.borrow_mut().pending_imports.pop_front() else {
+        return false;
+    };
+    let modules = context
+        .get_slot::<RefCell<WorkerModuleMap>>()
+        .expect("worker module map installed");
+    let work = context
+        .get_slot::<RefCell<WorkerModuleTrees>>()
+        .expect("worker module tree runtime installed");
+    let url = match resolve_worker_module_specifier(&job.specifier, &job.base_url) {
+        Ok(url) => url,
+        Err(message) => {
+            reject_worker_dynamic_module_import(scope, job, message.into());
+            return true;
+        }
+    };
+    let key = match worker_module_key_for_attributes(&url, &job.attributes) {
+        Ok(key) => key,
+        Err(message) => {
+            let error = WorkerDynamicModuleImportError::type_error(format!(
+                "{message} for dynamic import `{}`",
+                job.specifier,
+            ));
+            reject_worker_dynamic_module_import(scope, job, error);
+            return true;
+        }
+    };
+    let referrer_policy = modules.borrow().referrer_policy_for_url(&job.base_url);
+    let metadata = tree::fetch_metadata(
+        modules.borrow().credentials_mode,
+        referrer_policy.as_deref(),
+    );
+    let root = module_tree::ModuleRootInput::External(module_tree::ModuleExternalRootInput {
+        source_url: url.clone(),
+        base_url: url,
+        initiator_url: job.fetch_initiator_url.clone(),
+        attributes: module_tree::ModuleAttributesKey::from_pairs(job.attributes.pairs().to_vec()),
+        phase: tree::tree_phase(job.phase),
+        kind_hint: Some(tree::tree_key(&key).kind),
+        fetch_metadata: metadata,
+        referrer: module_tree::ModuleReferrer::client(),
+        position: module_tree::TextPosition::default(),
+    });
+    let options = WorkerModuleGraphFetchOptions {
+        initiator_url: job.fetch_initiator_url.clone(),
+        csp_source: WorkerModuleGraphFetchCspSource::DynamicImportGraph,
+        browser_request_metadata: job.browser_request_metadata(),
+        referrer_policy,
+    };
+    let task = WorkerModuleTreeTask {
+        tree: module_tree::ModuleScriptTreeJob::new(
+            root,
+            module_tree::ModuleTreeConfig {
+                tree_id: job.tree_id,
+                owner: module_tree::ModuleTreeOwner::dynamic_import(),
+                custom_fetch_type: if job.audio_worklet_bootstrap {
+                    module_tree::ModuleScriptCustomFetchType::WorkletAddModule
+                } else {
+                    module_tree::ModuleScriptCustomFetchType::None
+                },
+                ..module_tree::ModuleTreeConfig::default()
+            },
+        ),
+        target: WorkerModuleTreeTarget::Import(Box::new(job)),
+        options,
+    };
+    if let Some(terminal) = drive_worker_module_tree(scope, &modules, &work, task, None) {
+        let WorkerModuleTreeTarget::Import(job) = terminal.target else {
+            unreachable!("started an import tree");
+        };
+        finish_worker_dynamic_module_tree(scope, *job, terminal.result);
+    }
+    true
+}
+
+pub(super) fn take_worker_module_graph_fetches(
+    scope: &mut v8::PinScope<'_, '_>,
+) -> Vec<WorkerModuleGraphFetchRequest> {
+    let Some(work) = scope
+        .get_current_context()
+        .get_slot::<RefCell<WorkerModuleTrees>>()
+    else {
+        return Vec::new();
+    };
+    std::mem::take(&mut work.borrow_mut().fetches_to_start)
+}
+
+pub(super) struct WorkerModuleGraphFetchOutcome {
+    pub(super) bootstrap_client: bool,
+}
+
+pub(super) fn complete_worker_module_graph_fetch(
+    scope: &mut v8::PinScope<'_, '_>,
+    completion: &WorkerModuleGraphFetchCompletion,
+) -> Option<WorkerModuleGraphFetchOutcome> {
+    let context = scope.get_current_context();
+    let modules = context.get_slot::<RefCell<WorkerModuleMap>>()?;
+    let work = context.get_slot::<RefCell<WorkerModuleTrees>>()?;
+    let (request, clients) = modules
+        .borrow_mut()
+        .take_fetch(&completion.key, completion.fetch_id)?;
+    let result = match &completion.result {
+        Ok(source) => Ok(create_worker_module_script(
+            scope,
+            &modules,
+            source.source(),
+            request.key.clone(),
+            source.final_url().clone(),
+            source.effective_referrer_policy(request.referrer_policy()),
+        )),
+        Err(error) => Err(error.clone()),
+    };
+    let bootstrap_client = clients
         .iter()
-        .position(|job| matches!(job.state, WorkerDynamicModuleImportJobState::Graph))?;
-    let mut job = imports
-        .pending_imports
-        .remove(index)
-        .expect("position came from pending_imports");
-    drop(imports);
-    match advance_worker_dynamic_module_import(scope, &mut job) {
-        Ok(WorkerDynamicModuleImportAdvance::Complete) => {
-            resolve_worker_dynamic_module_import(scope, job);
-            Some(WorkerDynamicModuleImportAdvance::Complete)
+        .any(|client| client.tree_id == tree::BOOTSTRAP_TREE);
+    let mut work = work.borrow_mut();
+    for client in clients {
+        work.notifications.push_back(WorkerSingleModuleCompletion {
+            client,
+            result: result.clone(),
+        });
+    }
+    Some(WorkerModuleGraphFetchOutcome { bootstrap_client })
+}
+
+pub(super) fn resume_worker_module_trees(
+    scope: &mut v8::PinScope<'_, '_>,
+    mut bootstrap: Option<&mut WorkerModulePendingBootstrap>,
+) -> Option<WorkerModuleBootstrapResume> {
+    let context = scope.get_current_context();
+    let modules = context.get_slot::<RefCell<WorkerModuleMap>>()?;
+    let work = context.get_slot::<RefCell<WorkerModuleTrees>>()?;
+    let mut bootstrap_result = None;
+    loop {
+        let Some(completion) = work.borrow_mut().notifications.pop_front() else {
+            break;
+        };
+        let task = work.borrow_mut().tasks.remove(&completion.client.tree_id);
+        let Some(task) = task else {
+            continue;
+        };
+        let Some(terminal) =
+            drive_worker_module_tree(scope, &modules, &work, task, Some(completion))
+        else {
+            continue;
+        };
+        match terminal.target {
+            WorkerModuleTreeTarget::Import(job) => {
+                finish_worker_dynamic_module_tree(scope, *job, terminal.result)
+            }
+            WorkerModuleTreeTarget::Bootstrap => {
+                if let Some(bootstrap) = bootstrap.as_deref_mut() {
+                    bootstrap_result =
+                        Some(bootstrap.resume_tree(scope, terminal.tree_id, terminal.result));
+                }
+            }
         }
-        Ok(WorkerDynamicModuleImportAdvance::NeedFetches(requests)) => {
-            job.state = WorkerDynamicModuleImportJobState::Fetch(requests.clone());
-            dynamic_imports.borrow_mut().pending_imports.push_back(job);
-            Some(WorkerDynamicModuleImportAdvance::NeedFetches(requests))
+    }
+    bootstrap_result
+}
+
+fn worker_bootstrap_tree_error(
+    scope: &mut v8::PinScope<'_, '_>,
+    script_url: &str,
+    error: module_tree::ModuleLoadError,
+) -> Box<WorkerBootstrapError> {
+    let modules = scope
+        .get_current_context()
+        .get_slot::<RefCell<WorkerModuleMap>>()
+        .expect("worker module map installed");
+    if let Some(entry) = error.module_entry
+        && let Err(stored) = &modules.borrow().script(entry.0 as usize).creation
+    {
+        return stored.clone();
+    }
+    Box::new(worker_bootstrap_error(
+        scope,
+        script_url,
+        &error.message,
+        WorkerParentErrorEventKind::Event,
+    ))
+}
+
+fn worker_dynamic_tree_error(
+    scope: &mut v8::PinScope<'_, '_>,
+    error: module_tree::ModuleLoadError,
+) -> WorkerDynamicModuleImportError {
+    let modules = scope
+        .get_current_context()
+        .get_slot::<RefCell<WorkerModuleMap>>()
+        .expect("worker module map installed");
+    if let Some(entry) = error.module_entry
+        && let Err(stored) = &modules.borrow().script(entry.0 as usize).creation
+    {
+        return stored.clone().into();
+    }
+    if error.error_constructor == Some(module_tree::ModuleErrorConstructorKind::SyntaxError) {
+        WorkerDynamicModuleImportError::syntax_error(error.message)
+    } else {
+        WorkerDynamicModuleImportError::type_error(error.message)
+    }
+}
+
+fn finish_worker_dynamic_module_tree(
+    scope: &mut v8::PinScope<'_, '_>,
+    job: WorkerDynamicModuleImportJob,
+    result: Result<module_tree::ModuleGraphHandle, module_tree::ModuleLoadError>,
+) {
+    let graph = match result {
+        Ok(graph) => graph,
+        Err(error) => {
+            let error = worker_dynamic_tree_error(scope, error);
+            reject_worker_dynamic_module_import(scope, job, error);
+            return;
         }
-        Ok(WorkerDynamicModuleImportAdvance::WaitingFetches) => {
-            dynamic_imports.borrow_mut().pending_imports.push_back(job);
-            Some(WorkerDynamicModuleImportAdvance::WaitingFetches)
+    };
+    let root_entry = graph.root_entry.0 as usize;
+    if job.phase == ModuleImportPhase::Source {
+        resolve_worker_dynamic_module_import(scope, job, root_entry);
+        return;
+    }
+    match finish_worker_dynamic_module_import_evaluation(scope, root_entry) {
+        Ok(WorkerModuleFinish::Complete) => {
+            resolve_worker_dynamic_module_import(scope, job, root_entry)
         }
-        Ok(WorkerDynamicModuleImportAdvance::WaitingEvaluation { evaluation_id }) => {
-            job.state = WorkerDynamicModuleImportJobState::Evaluation { evaluation_id };
-            dynamic_imports.borrow_mut().pending_imports.push_back(job);
-            Some(WorkerDynamicModuleImportAdvance::WaitingEvaluation { evaluation_id })
+        Ok(WorkerModuleFinish::PendingEvaluation { evaluation_id }) => {
+            let imports = scope
+                .get_current_context()
+                .get_slot::<RefCell<WorkerDynamicModuleResolver>>()
+                .expect("worker import resolver installed");
+            imports.borrow_mut().evaluations.insert(
+                evaluation_id,
+                WorkerDynamicModuleEvaluation { job, root_entry },
+            );
         }
         Err(error) => {
-            finish_failed_worker_dynamic_module_import(scope, job, error);
-            Some(WorkerDynamicModuleImportAdvance::Complete)
+            if job.audio_worklet_bootstrap
+                && error.stage == WorkerDynamicModuleImportErrorStage::Evaluate
+            {
+                resolve_worker_dynamic_module_import(scope, job, root_entry);
+            } else {
+                reject_worker_dynamic_module_import(scope, job, error);
+            }
         }
     }
 }
 
-pub(super) fn worker_dynamic_module_import_waits_for_fetch(
-    scope: &mut v8::PinScope<'_, '_>,
-    fetch_id: WorkerModuleGraphFetchId,
-) -> bool {
-    let context = scope.get_current_context();
-    let Some(dynamic_imports) = context.get_slot::<RefCell<WorkerDynamicModuleResolver>>() else {
-        return false;
-    };
-    dynamic_imports.borrow().pending_imports.iter().any(|job| {
-        matches!(
-            &job.state,
-            WorkerDynamicModuleImportJobState::Fetch(requests) if requests.contains_fetch_id(fetch_id)
-        )
-    })
-}
-
 pub(super) fn worker_has_pending_dynamic_module_imports(scope: &mut v8::PinScope<'_, '_>) -> bool {
     let context = scope.get_current_context();
-    let Some(dynamic_imports) = context.get_slot::<RefCell<WorkerDynamicModuleResolver>>() else {
-        return false;
-    };
-    !dynamic_imports.borrow().pending_imports.is_empty()
+    context
+        .get_slot::<RefCell<WorkerDynamicModuleResolver>>()
+        .is_some_and(|imports| {
+            let imports = imports.borrow();
+            !imports.pending_imports.is_empty() || !imports.evaluations.is_empty()
+        })
+        || context
+            .get_slot::<RefCell<WorkerModuleTrees>>()
+            .is_some_and(|work| {
+                let work = work.borrow();
+                !work.tasks.is_empty()
+                    || !work.notifications.is_empty()
+                    || !work.fetches_to_start.is_empty()
+            })
+        || context
+            .get_slot::<RefCell<WorkerModuleMap>>()
+            .is_some_and(|modules| modules.borrow().has_pending_fetches())
 }
 
 pub(super) fn worker_has_runnable_dynamic_module_imports(scope: &mut v8::PinScope<'_, '_>) -> bool {
-    let context = scope.get_current_context();
-    let Some(dynamic_imports) = context.get_slot::<RefCell<WorkerDynamicModuleResolver>>() else {
-        return false;
-    };
-    dynamic_imports
-        .borrow()
-        .pending_imports
-        .iter()
-        .any(|job| matches!(job.state, WorkerDynamicModuleImportJobState::Graph))
+    scope
+        .get_current_context()
+        .get_slot::<RefCell<WorkerDynamicModuleResolver>>()
+        .is_some_and(|imports| !imports.borrow().pending_imports.is_empty())
 }
 
-pub(super) fn resume_worker_dynamic_module_fetch(
-    scope: &mut v8::PinScope<'_, '_>,
-    completion: WorkerModuleGraphFetchCompletion,
-) -> Option<WorkerDynamicModuleImportAdvance> {
-    let context = scope.get_current_context();
-    let dynamic_imports = context.get_slot::<RefCell<WorkerDynamicModuleResolver>>()?;
-    let mut imports = dynamic_imports.borrow_mut();
-    let index = imports.pending_imports.iter().position(|job| {
-        matches!(
-            &job.state,
-            WorkerDynamicModuleImportJobState::Fetch(requests)
-                if requests.contains_fetch_id(completion.fetch_id())
-        )
-    })?;
-    let mut job = imports
-        .pending_imports
-        .remove(index)
-        .expect("position came from pending_imports");
-    drop(imports);
-    let fetch_id = completion.fetch_id();
-    let (request, pending_keys) = match &mut job.state {
-        WorkerDynamicModuleImportJobState::Fetch(requests) => {
-            let request = requests
-                .remove_by_fetch_id(fetch_id)
-                .expect("position came from matching pending fetch id");
-            let pending_keys = requests.pending_keys();
-            (request, pending_keys)
+pub(super) fn retire_worker_module_runtime(context: v8::Local<'_, v8::Context>) {
+    if let Some(work) = context.get_slot::<RefCell<WorkerModuleTrees>>() {
+        let mut work = work.borrow_mut();
+        for (_, mut task) in work.tasks.drain() {
+            task.tree
+                .cancel(module_tree::ModuleTreeAbortReason::ContextDestroyed);
         }
-        _ => unreachable!(),
-    };
-    let had_pending_requests = !pending_keys.is_empty();
-    match job_resume_fetch_with_pending_keys(scope, &mut job, &request, completion, pending_keys) {
-        Ok(WorkerDynamicModuleImportAdvance::Complete) => {
-            if had_pending_requests {
-                dynamic_imports.borrow_mut().pending_imports.push_back(job);
-                return Some(WorkerDynamicModuleImportAdvance::WaitingFetches);
-            }
-            resolve_worker_dynamic_module_import(scope, job);
-            Some(WorkerDynamicModuleImportAdvance::Complete)
-        }
-        Ok(WorkerDynamicModuleImportAdvance::NeedFetches(requests)) => {
-            let new_requests = requests.clone();
-            match &mut job.state {
-                WorkerDynamicModuleImportJobState::Fetch(pending_requests) => {
-                    pending_requests.extend(requests);
-                }
-                _ => unreachable!(),
-            }
-            dynamic_imports.borrow_mut().pending_imports.push_back(job);
-            Some(WorkerDynamicModuleImportAdvance::NeedFetches(new_requests))
-        }
-        Ok(WorkerDynamicModuleImportAdvance::WaitingFetches) => {
-            dynamic_imports.borrow_mut().pending_imports.push_back(job);
-            Some(WorkerDynamicModuleImportAdvance::WaitingFetches)
-        }
-        Ok(WorkerDynamicModuleImportAdvance::WaitingEvaluation { evaluation_id }) => {
-            if had_pending_requests {
-                dynamic_imports.borrow_mut().pending_imports.push_back(job);
-                return Some(WorkerDynamicModuleImportAdvance::WaitingFetches);
-            }
-            job.state = WorkerDynamicModuleImportJobState::Evaluation { evaluation_id };
-            dynamic_imports.borrow_mut().pending_imports.push_back(job);
-            Some(WorkerDynamicModuleImportAdvance::WaitingEvaluation { evaluation_id })
-        }
-        Err(error) => {
-            finish_failed_worker_dynamic_module_import(scope, job, error);
-            Some(WorkerDynamicModuleImportAdvance::Complete)
-        }
+        work.notifications.clear();
+        work.fetches_to_start.clear();
+    }
+    if let Some(imports) = context.get_slot::<RefCell<WorkerDynamicModuleResolver>>() {
+        let mut imports = imports.borrow_mut();
+        imports.pending_imports.clear();
+        imports.evaluations.clear();
+    }
+    if let Some(modules) = context.get_slot::<RefCell<WorkerModuleMap>>() {
+        let mut modules = modules.borrow_mut();
+        modules.entries.clear();
+        modules.scripts.clear();
+        modules.module_to_entries.clear();
+        modules.pending_fetch_count = 0;
     }
 }
 
@@ -877,389 +1054,50 @@ pub(super) fn resume_worker_dynamic_module_evaluation(
     scope: &mut v8::PinScope<'_, '_>,
     completion: &WorkerModuleEvaluationCompletion,
 ) -> bool {
-    let context = scope.get_current_context();
-    let Some(dynamic_imports) = context.get_slot::<RefCell<WorkerDynamicModuleResolver>>() else {
+    let Some(imports) = scope
+        .get_current_context()
+        .get_slot::<RefCell<WorkerDynamicModuleResolver>>()
+    else {
         return false;
     };
-    let mut imports = dynamic_imports.borrow_mut();
-    let Some(index) = imports.pending_imports.iter().position(|job| {
-        matches!(
-            job.state,
-            WorkerDynamicModuleImportJobState::Evaluation { evaluation_id }
-                if evaluation_id == completion.evaluation_id
-        )
-    }) else {
+    let Some(evaluation) = imports
+        .borrow_mut()
+        .evaluations
+        .remove(&completion.evaluation_id)
+    else {
         return false;
     };
-    let job = imports
-        .pending_imports
-        .remove(index)
-        .expect("position came from pending_imports");
-    drop(imports);
     match completion.result() {
-        Ok(()) => resolve_worker_dynamic_module_import(scope, job),
-        Err(message) => finish_failed_worker_dynamic_module_import(
-            scope,
-            job,
-            WorkerDynamicModuleImportError {
-                message: message.to_owned(),
-                kind: WorkerDynamicModuleImportErrorKind::Type,
-                rejection: None,
-                stage: WorkerDynamicModuleImportErrorStage::Evaluate,
-            },
-        ),
+        Ok(()) => {
+            resolve_worker_dynamic_module_import(scope, evaluation.job, evaluation.root_entry)
+        }
+        Err(reason) => {
+            if evaluation.job.audio_worklet_bootstrap {
+                resolve_worker_dynamic_module_import(scope, evaluation.job, evaluation.root_entry);
+            } else {
+                let value = v8::Local::new(scope, reason);
+                let error = WorkerDynamicModuleImportError::evaluation_rejection_value(
+                    scope,
+                    value,
+                    "dynamic import module evaluation rejected",
+                );
+                reject_worker_dynamic_module_import(scope, evaluation.job, error);
+            }
+        }
     }
     true
-}
-
-impl Clone for WorkerModuleRuntime {
-    fn clone(&self) -> Self {
-        Self {
-            graph: Rc::clone(&self.graph),
-            next_fetch_id: Rc::clone(&self.next_fetch_id),
-            next_evaluation_id: Rc::clone(&self.next_evaluation_id),
-            dynamic_imports: Rc::clone(&self.dynamic_imports),
-            evaluation_completion_tx: self.evaluation_completion_tx.clone(),
-        }
-    }
-}
-
-#[derive(Default)]
-struct WorkerDynamicModuleResolver {
-    pending_imports: VecDeque<WorkerDynamicModuleImportJob>,
-}
-
-impl WorkerDynamicModuleResolver {
-    fn queue_import(
-        &mut self,
-        context: v8::Global<v8::Context>,
-        resolver: v8::Global<v8::PromiseResolver>,
-        specifier: String,
-        base_url: Url,
-        fetch_initiator_url: Url,
-        attributes: ModuleAttributesKey,
-        phase: ModuleImportPhase,
-        audio_worklet_bootstrap: bool,
-    ) {
-        self.pending_imports
-            .push_back(WorkerDynamicModuleImportJob::new(
-                context,
-                resolver,
-                specifier,
-                base_url,
-                fetch_initiator_url,
-                attributes,
-                phase,
-                audio_worklet_bootstrap,
-            ));
-    }
-
-    fn root_import_in_flight(&self, key: &WorkerModuleKey) -> bool {
-        self.pending_imports.iter().any(|job| {
-            job.root_key.as_ref() == Some(key)
-                && !matches!(
-                    job.state,
-                    WorkerDynamicModuleImportJobState::JoinedRoot { .. }
-                )
-        })
-    }
-
-    fn take_joined_root_imports(
-        &mut self,
-        key: &WorkerModuleKey,
-        phase: Option<ModuleImportPhase>,
-    ) -> Vec<WorkerDynamicModuleImportJob> {
-        let mut joined = Vec::new();
-        let mut remaining = VecDeque::with_capacity(self.pending_imports.len());
-        while let Some(job) = self.pending_imports.pop_front() {
-            if matches!(
-                &job.state,
-                WorkerDynamicModuleImportJobState::JoinedRoot { key: joined_key }
-                    if joined_key == key
-            ) && phase.is_none_or(|phase| job.phase == phase)
-            {
-                joined.push(job);
-            } else {
-                remaining.push_back(job);
-            }
-        }
-        self.pending_imports = remaining;
-        joined
-    }
-}
-
-struct WorkerDynamicModuleImportJob {
-    context: v8::Global<v8::Context>,
-    resolver: v8::Global<v8::PromiseResolver>,
-    specifier: String,
-    // Referencing module URL used only for specifier resolution.
-    base_url: Url,
-    // Worker inside-settings URL used for fetch security checks.
-    fetch_initiator_url: Url,
-    attributes: ModuleAttributesKey,
-    phase: ModuleImportPhase,
-    audio_worklet_bootstrap: bool,
-    root_key: Option<WorkerModuleKey>,
-    resolved_entry: Option<usize>,
-    state: WorkerDynamicModuleImportJobState,
-}
-
-enum WorkerDynamicModuleImportJobState {
-    Graph,
-    JoinedRoot {
-        key: WorkerModuleKey,
-    },
-    Fetch(WorkerModuleGraphFetchBatch),
-    Evaluation {
-        evaluation_id: WorkerModuleEvaluationId,
-    },
-}
-
-impl WorkerDynamicModuleImportJob {
-    fn new(
-        context: v8::Global<v8::Context>,
-        resolver: v8::Global<v8::PromiseResolver>,
-        specifier: String,
-        base_url: Url,
-        fetch_initiator_url: Url,
-        attributes: ModuleAttributesKey,
-        phase: ModuleImportPhase,
-        audio_worklet_bootstrap: bool,
-    ) -> Self {
-        Self {
-            context,
-            resolver,
-            specifier,
-            base_url,
-            fetch_initiator_url,
-            attributes,
-            phase,
-            audio_worklet_bootstrap,
-            root_key: None,
-            resolved_entry: None,
-            state: WorkerDynamicModuleImportJobState::Graph,
-        }
-    }
-
-    fn browser_request_metadata(&self) -> BrowserRequestMetadata {
-        if self.audio_worklet_bootstrap {
-            BrowserRequestMetadata::AudioWorklet
-        } else {
-            BrowserRequestMetadata::Fetch
-        }
-    }
-}
-
-fn advance_worker_dynamic_module_import(
-    scope: &mut v8::PinScope<'_, '_>,
-    job: &mut WorkerDynamicModuleImportJob,
-) -> WorkerDynamicModuleImportResult<WorkerDynamicModuleImportAdvance> {
-    let context = scope.get_current_context();
-    let graph = context
-        .get_slot::<RefCell<WorkerModuleGraph>>()
-        .ok_or_else(|| "worker module graph is not available".to_owned())?;
-    let module_url = resolve_worker_module_specifier(&job.specifier, &job.base_url)?;
-    let module_key = worker_module_key_for_attributes(&module_url, &job.attributes)
-        .map_err(|message| format!("{message} for dynamic import `{}`", job.specifier))?;
-    if let Some(error) = graph.borrow().source_fetch_failure(&module_key) {
-        return Err(WorkerDynamicModuleImportError::type_error(format!(
-            "Failed to dynamically import module worker dependency `{module_url}`: {error}"
-        )));
-    }
-    let existing_root_entry = graph.borrow().entry_for_key(&module_key);
-    if job.phase == ModuleImportPhase::Source && existing_root_entry.is_some() {
-        // A compiled source is available even while another job is loading or
-        // evaluating its dependencies. This job does not own that root's waiters.
-        job.resolved_entry = existing_root_entry;
-        return Ok(WorkerDynamicModuleImportAdvance::Complete);
-    }
-    job.root_key = Some(module_key.clone());
-    if context
-        .get_slot::<RefCell<WorkerDynamicModuleResolver>>()
-        .is_some_and(|dynamic_imports| dynamic_imports.borrow().root_import_in_flight(&module_key))
-    {
-        job.state = WorkerDynamicModuleImportJobState::JoinedRoot { key: module_key };
-        return Ok(WorkerDynamicModuleImportAdvance::WaitingFetches);
-    }
-    let inherited_referrer_policy = graph.borrow().referrer_policy_for_url(&job.base_url);
-    let root_entry = match existing_root_entry {
-        Some(entry) => entry,
-        None => match load_worker_static_module_dependency(module_url, module_key.module_type)? {
-            WorkerModuleDependencyLoad::Source { url, source } => {
-                let key =
-                    worker_module_key_for_attributes(&url, &job.attributes).map_err(|message| {
-                        format!("{message} for dynamic import `{}`", job.specifier)
-                    })?;
-                ensure_worker_module_entry(
-                    scope,
-                    &graph,
-                    &source,
-                    key,
-                    url,
-                    inherited_referrer_policy.clone(),
-                )
-                .map_err(|error| error.0.summary)?
-            }
-            WorkerModuleDependencyLoad::NeedFetch(_) => {
-                let fetch_id = reserve_worker_module_graph_fetch_id(scope);
-                return Ok(WorkerDynamicModuleImportAdvance::NeedFetches(
-                    WorkerModuleGraphFetchBatch::single(WorkerModuleGraphFetchRequest::new(
-                        fetch_id,
-                        module_key,
-                        job.fetch_initiator_url.clone(),
-                        WorkerModuleGraphFetchCspSource::DynamicImportGraph,
-                        None,
-                        job.specifier.clone(),
-                        job.attributes.clone(),
-                        graph.borrow().credentials_mode(),
-                        inherited_referrer_policy,
-                        job.browser_request_metadata(),
-                    )),
-                ));
-            }
-        },
-    };
-    job.resolved_entry = Some(root_entry);
-    if job.phase == ModuleImportPhase::Source {
-        return Ok(WorkerDynamicModuleImportAdvance::Complete);
-    }
-    match continue_worker_module_graph(
-        scope,
-        &graph,
-        root_entry,
-        &job.fetch_initiator_url,
-        WorkerModuleGraphFetchCspSource::DynamicImportGraph,
-        job.browser_request_metadata(),
-    )
-    .map_err(|error| error.0.summary)?
-    {
-        WorkerModuleGraphBuild::Ready => {
-            finish_worker_dynamic_module_import_evaluation(scope, root_entry)
-        }
-        WorkerModuleGraphBuild::NeedFetches(requests) => {
-            Ok(WorkerDynamicModuleImportAdvance::NeedFetches(requests))
-        }
-    }
-}
-
-fn job_finish_fetch(
-    scope: &mut v8::PinScope<'_, '_>,
-    job: &mut WorkerDynamicModuleImportJob,
-    request: &WorkerModuleGraphFetchRequest,
-    completion: WorkerModuleGraphFetchCompletion,
-) -> WorkerDynamicModuleImportResult<()> {
-    let context = scope.get_current_context();
-    let graph = context
-        .get_slot::<RefCell<WorkerModuleGraph>>()
-        .ok_or_else(|| "worker module graph is not available".to_owned())?;
-    let fetched_source = match completion.result {
-        Ok(source) => source,
-        Err(message) => {
-            graph
-                .borrow_mut()
-                .mark_source_fetch_failed(&request.key, message.clone());
-            return Err(format!(
-                "Failed to dynamically import module worker dependency `{}`: {message}",
-                request.url()
-            )
-            .into());
-        }
-    };
-    let referrer_policy = fetched_source.effective_referrer_policy(request.referrer_policy());
-    let target_entry = match ensure_worker_module_entry(
-        scope,
-        &graph,
-        fetched_source.source(),
-        request.key.clone(),
-        fetched_source.final_url().clone(),
-        referrer_policy,
-    ) {
-        Ok(entry) => entry,
-        Err(error) => {
-            let message = error.0.summary.clone();
-            graph
-                .borrow_mut()
-                .mark_source_fetch_failed(&request.key, message.clone());
-            return Err(message.into());
-        }
-    };
-    if let Some(parent_entry) = request.parent_entry {
-        graph.borrow_mut().add_dependency(
-            parent_entry,
-            request.specifier.clone(),
-            request.attributes.clone(),
-            target_entry,
-        );
-    } else {
-        job.resolved_entry = Some(target_entry);
-        // Source imports only share the root fetch, not dependency loading or
-        // evaluation. Wake them before either of those steps can wait or fail.
-        if let Some(imports) = context.get_slot::<RefCell<WorkerDynamicModuleResolver>>() {
-            let mut imports = imports.borrow_mut();
-            let sources =
-                imports.take_joined_root_imports(&request.key, Some(ModuleImportPhase::Source));
-            for mut source in sources {
-                source.root_key = None;
-                source.state = WorkerDynamicModuleImportJobState::Graph;
-                imports.pending_imports.push_back(source);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn job_resume_fetch_with_pending_keys(
-    scope: &mut v8::PinScope<'_, '_>,
-    job: &mut WorkerDynamicModuleImportJob,
-    request: &WorkerModuleGraphFetchRequest,
-    completion: WorkerModuleGraphFetchCompletion,
-    pending_keys: HashSet<WorkerModuleKey>,
-) -> WorkerDynamicModuleImportResult<WorkerDynamicModuleImportAdvance> {
-    let has_pending_requests = !pending_keys.is_empty();
-    let context = scope.get_current_context();
-    let graph = context
-        .get_slot::<RefCell<WorkerModuleGraph>>()
-        .ok_or_else(|| "worker module graph is not available".to_owned())?;
-    job_finish_fetch(scope, job, request, completion)?;
-    let root_entry = job
-        .resolved_entry
-        .ok_or_else(|| "dynamic import root module is not compiled".to_owned())?;
-    if job.phase == ModuleImportPhase::Source {
-        return Ok(WorkerDynamicModuleImportAdvance::Complete);
-    }
-    match continue_worker_module_graph_with_pending_keys(
-        scope,
-        &graph,
-        root_entry,
-        &request.initiator_url,
-        request.csp_source(),
-        request.graph_browser_request_metadata(),
-        pending_keys,
-    )
-    .map_err(|error| error.0.summary)?
-    {
-        WorkerModuleGraphBuild::Ready => {
-            if has_pending_requests {
-                return Ok(WorkerDynamicModuleImportAdvance::WaitingFetches);
-            }
-            finish_worker_dynamic_module_import_evaluation(scope, root_entry)
-        }
-        WorkerModuleGraphBuild::NeedFetches(requests) => {
-            Ok(WorkerDynamicModuleImportAdvance::NeedFetches(requests))
-        }
-    }
 }
 
 fn finish_worker_dynamic_module_import_evaluation(
     scope: &mut v8::PinScope<'_, '_>,
     root_entry: usize,
-) -> WorkerDynamicModuleImportResult<WorkerDynamicModuleImportAdvance> {
+) -> WorkerDynamicModuleImportResult<WorkerModuleFinish> {
     let try_catch = pin!(v8::TryCatch::new(scope));
     let mut scope = try_catch.init();
     let scope = &mut scope;
     let context = scope.get_current_context();
     let graph = context
-        .get_slot::<RefCell<WorkerModuleGraph>>()
+        .get_slot::<RefCell<WorkerModuleMap>>()
         .ok_or_else(|| "worker module graph is not available".to_owned())?;
     let root_module_global = graph.borrow().module(root_entry).clone();
     let root_module = v8::Local::new(scope, &root_module_global);
@@ -1286,8 +1124,6 @@ fn finish_worker_dynamic_module_import_evaluation(
                 );
             }
         }
-    } else if root_module.get_status() == v8::ModuleStatus::Evaluated {
-        return Ok(WorkerDynamicModuleImportAdvance::Complete);
     } else if root_module.get_status() == v8::ModuleStatus::Errored {
         return Err(WorkerDynamicModuleImportError::evaluation_rejection_value(
             scope,
@@ -1314,7 +1150,7 @@ fn finish_worker_dynamic_module_import_evaluation(
     }
     if let Ok(promise) = v8::Local::<v8::Promise>::try_from(value) {
         match promise.state() {
-            v8::PromiseState::Fulfilled => Ok(WorkerDynamicModuleImportAdvance::Complete),
+            v8::PromiseState::Fulfilled => Ok(WorkerModuleFinish::Complete),
             v8::PromiseState::Rejected => {
                 let reason = promise.result(scope);
                 Err(WorkerDynamicModuleImportError::evaluation_rejection_value(
@@ -1326,49 +1162,23 @@ fn finish_worker_dynamic_module_import_evaluation(
             v8::PromiseState::Pending => {
                 let evaluation_id = reserve_worker_module_evaluation_id(scope)?;
                 let promise = v8::Global::new(scope, promise);
-                attach_worker_module_evaluation_reactions(scope, evaluation_id, promise)
-                    .map_err(|error| error.0.summary)?;
-                Ok(WorkerDynamicModuleImportAdvance::WaitingEvaluation { evaluation_id })
+                attach_worker_module_evaluation_reactions(scope, evaluation_id, promise)?;
+                Ok(WorkerModuleFinish::PendingEvaluation { evaluation_id })
             }
         }
     } else {
-        Ok(WorkerDynamicModuleImportAdvance::Complete)
+        Ok(WorkerModuleFinish::Complete)
     }
 }
 
 fn resolve_worker_dynamic_module_import(
     scope: &mut v8::PinScope<'_, '_>,
     job: WorkerDynamicModuleImportJob,
-) {
-    let resolved_entry = job.resolved_entry;
-    let phase = job.phase;
-    let joined_imports = take_worker_dynamic_module_imports_joined_to_root(scope, &job);
-    resolve_single_worker_dynamic_module_import(scope, job);
-    for mut joined_job in joined_imports {
-        joined_job.resolved_entry = resolved_entry;
-        if phase == ModuleImportPhase::Source && joined_job.phase == ModuleImportPhase::Evaluation {
-            // Sharing a source fetch does not link or evaluate the module. Resume
-            // evaluation jobs from the cached root instead of reading its namespace.
-            let context = v8::Local::new(scope, &joined_job.context);
-            let imports = context
-                .get_slot::<RefCell<WorkerDynamicModuleResolver>>()
-                .expect("dynamic import resolver should be installed");
-            joined_job.root_key = None;
-            joined_job.state = WorkerDynamicModuleImportJobState::Graph;
-            imports.borrow_mut().pending_imports.push_back(joined_job);
-            continue;
-        }
-        resolve_single_worker_dynamic_module_import(scope, joined_job);
-    }
-}
-
-fn resolve_single_worker_dynamic_module_import(
-    scope: &mut v8::PinScope<'_, '_>,
-    job: WorkerDynamicModuleImportJob,
+    entry: usize,
 ) {
     let context = v8::Local::new(scope, &job.context);
     let scope = &mut v8::ContextScope::new(scope, context);
-    let Some(graph) = context.get_slot::<RefCell<WorkerModuleGraph>>() else {
+    let Some(graph) = context.get_slot::<RefCell<WorkerModuleMap>>() else {
         reject_worker_dynamic_module_import(
             scope,
             job,
@@ -1376,18 +1186,10 @@ fn resolve_single_worker_dynamic_module_import(
         );
         return;
     };
-    let Some(entry) = job.resolved_entry else {
-        reject_worker_dynamic_module_import(
-            scope,
-            job,
-            WorkerDynamicModuleImportError::type_error("dynamic import module is not compiled"),
-        );
-        return;
-    };
     let resolver = v8::Local::new(scope, &job.resolver);
     let resolved_value = {
         let graph = graph.borrow();
-        let record = &graph.records[entry];
+        let record = graph.record(entry);
         match job.phase {
             ModuleImportPhase::Evaluation => {
                 let module = v8::Local::new(scope, &record.module);
@@ -1430,22 +1232,6 @@ fn resolve_single_worker_dynamic_module_import(
     crate::context_bootstrap::run_end_of_microtask_checkpoint_tasks(scope);
 }
 
-fn take_worker_dynamic_module_imports_joined_to_root(
-    scope: &mut v8::PinScope<'_, '_>,
-    job: &WorkerDynamicModuleImportJob,
-) -> Vec<WorkerDynamicModuleImportJob> {
-    let Some(root_key) = job.root_key.as_ref() else {
-        return Vec::new();
-    };
-    let context = v8::Local::new(scope, &job.context);
-    let Some(dynamic_imports) = context.get_slot::<RefCell<WorkerDynamicModuleResolver>>() else {
-        return Vec::new();
-    };
-    dynamic_imports
-        .borrow_mut()
-        .take_joined_root_imports(root_key, None)
-}
-
 fn reject_worker_dynamic_module_import(
     scope: &mut v8::PinScope<'_, '_>,
     job: WorkerDynamicModuleImportJob,
@@ -1472,168 +1258,77 @@ fn reject_worker_dynamic_module_import(
     crate::context_bootstrap::run_end_of_microtask_checkpoint_tasks(scope);
 }
 
-fn finish_failed_worker_dynamic_module_import(
-    scope: &mut v8::PinScope<'_, '_>,
-    job: WorkerDynamicModuleImportJob,
-    error: WorkerDynamicModuleImportError,
-) {
-    let resolved_entry = job.resolved_entry;
-    let joined_imports = take_worker_dynamic_module_imports_joined_to_root(scope, &job);
-    let joined_errors = joined_imports
-        .iter()
-        .map(|_| error.clone_for_scope(scope))
-        .collect::<Vec<_>>();
-    finish_failed_single_worker_dynamic_module_import(scope, job, error);
-    for (mut joined_job, joined_error) in joined_imports.into_iter().zip(joined_errors) {
-        joined_job.resolved_entry = resolved_entry;
-        finish_failed_single_worker_dynamic_module_import(scope, joined_job, joined_error);
-    }
+#[derive(Default)]
+struct WorkerDynamicModuleResolver {
+    next_import_id: u64,
+    pending_imports: VecDeque<WorkerDynamicModuleImportJob>,
+    evaluations: HashMap<WorkerModuleEvaluationId, WorkerDynamicModuleEvaluation>,
 }
 
-fn finish_failed_single_worker_dynamic_module_import(
-    scope: &mut v8::PinScope<'_, '_>,
-    job: WorkerDynamicModuleImportJob,
-    error: WorkerDynamicModuleImportError,
-) {
-    if job.audio_worklet_bootstrap && error.stage == WorkerDynamicModuleImportErrorStage::Evaluate {
-        resolve_worker_dynamic_module_import(scope, job);
-    } else {
-        reject_worker_dynamic_module_import(scope, job, error);
-    }
-}
-
-pub(super) struct WorkerModuleBootstrapJob {
-    runtime: WorkerModuleRuntime,
-    source: WorkerModuleSource,
-    root_url: Url,
-    static_import_initiator_url: Url,
-}
-
-impl WorkerModuleBootstrapJob {
-    fn script_url(&self) -> &str {
-        self.root_url.as_str()
-    }
-
-    fn advance(&mut self, scope: &mut v8::PinScope<'_, '_>) -> WorkerModuleAdvance {
-        let root_key = WorkerModuleKey::javascript_or_wasm(self.root_url.clone());
-        let root_referrer_policy = self
-            .runtime
-            .graph
-            .borrow()
-            .root_referrer_policy()
-            .map(str::to_owned);
-        let root_entry = match ensure_worker_module_entry(
-            scope,
-            &self.runtime.graph,
-            &self.source,
-            root_key,
-            self.root_url.clone(),
-            root_referrer_policy,
-        ) {
-            Ok(root_entry) => root_entry,
-            Err(error) => return WorkerModuleAdvance::Failed(error),
-        };
-        match continue_worker_module_graph(
-            scope,
-            &self.runtime.graph,
-            root_entry,
-            &self.static_import_initiator_url,
-            WorkerModuleGraphFetchCspSource::StaticModuleGraph,
-            BrowserRequestMetadata::Fetch,
-        ) {
-            Ok(WorkerModuleGraphBuild::Ready) => {
-                WorkerModuleAdvance::ReadyToInstantiate { root_entry }
-            }
-            Ok(WorkerModuleGraphBuild::NeedFetches(requests)) => {
-                WorkerModuleAdvance::NeedFetches(requests)
-            }
-            Err(error) => WorkerModuleAdvance::Failed(error),
-        }
-    }
-
-    fn finish_fetch(
+impl WorkerDynamicModuleResolver {
+    fn queue_import(
         &mut self,
-        scope: &mut v8::PinScope<'_, '_>,
-        request: &WorkerModuleGraphFetchRequest,
-        completion: WorkerModuleGraphFetchCompletion,
-    ) -> WorkerModuleBootstrapResult<()> {
-        let fetched_source = match completion.result {
-            Ok(source) => source,
-            Err(message) => {
-                return Err(Box::new(worker_bootstrap_error(
-                    scope,
-                    request.initiator_url.as_str(),
-                    &message,
-                    WorkerParentErrorEventKind::Event,
-                )));
-            }
-        };
-        let referrer_policy = fetched_source.effective_referrer_policy(request.referrer_policy());
-        let target_entry = ensure_worker_module_entry(
-            scope,
-            &self.runtime.graph,
-            fetched_source.source(),
-            request.key.clone(),
-            fetched_source.final_url().clone(),
-            referrer_policy,
-        )?;
-        self.runtime.graph.borrow_mut().add_dependency(
-            request
-                .parent_entry
-                .expect("bootstrap graph fetch must have a parent entry"),
-            request.specifier.clone(),
-            request.attributes.clone(),
-            target_entry,
-        );
-        Ok(())
+        context: v8::Global<v8::Context>,
+        resolver: v8::Global<v8::PromiseResolver>,
+        specifier: String,
+        base_url: Url,
+        fetch_initiator_url: Url,
+        attributes: ModuleAttributesKey,
+        phase: ModuleImportPhase,
+        audio_worklet_bootstrap: bool,
+    ) {
+        self.next_import_id = self
+            .next_import_id
+            .checked_add(1)
+            .expect("worker module tree id space exhausted");
+        self.pending_imports
+            .push_back(WorkerDynamicModuleImportJob {
+                tree_id: module_tree::ModuleTreeId(self.next_import_id),
+                context,
+                resolver,
+                specifier,
+                base_url,
+                fetch_initiator_url,
+                attributes,
+                phase,
+                audio_worklet_bootstrap,
+            });
     }
+}
 
-    fn resume_fetch_with_pending_keys(
-        &mut self,
-        scope: &mut v8::PinScope<'_, '_>,
-        request: &WorkerModuleGraphFetchRequest,
-        completion: WorkerModuleGraphFetchCompletion,
-        pending_keys: HashSet<WorkerModuleKey>,
-    ) -> WorkerModuleAdvance {
-        if let Err(error) = self.finish_fetch(scope, request, completion) {
-            return WorkerModuleAdvance::Failed(error);
-        }
-        let root_key = WorkerModuleKey::javascript_or_wasm(self.root_url.clone());
-        let root_entry = match self.runtime.graph.borrow().entry_for_key(&root_key) {
-            Some(entry) => entry,
-            None => {
-                return WorkerModuleAdvance::Failed(Box::new(worker_bootstrap_error(
-                    scope,
-                    self.root_url.as_str(),
-                    "Module worker root disappeared while resuming graph fetch",
-                    WorkerParentErrorEventKind::Event,
-                )));
-            }
-        };
-        match continue_worker_module_graph_with_pending_keys(
-            scope,
-            &self.runtime.graph,
-            root_entry,
-            &self.static_import_initiator_url,
-            WorkerModuleGraphFetchCspSource::StaticModuleGraph,
-            BrowserRequestMetadata::Fetch,
-            pending_keys,
-        ) {
-            Ok(WorkerModuleGraphBuild::Ready) => {
-                WorkerModuleAdvance::ReadyToInstantiate { root_entry }
-            }
-            Ok(WorkerModuleGraphBuild::NeedFetches(requests)) => {
-                WorkerModuleAdvance::NeedFetches(requests)
-            }
-            Err(error) => WorkerModuleAdvance::Failed(error),
+struct WorkerDynamicModuleImportJob {
+    tree_id: module_tree::ModuleTreeId,
+    context: v8::Global<v8::Context>,
+    resolver: v8::Global<v8::PromiseResolver>,
+    specifier: String,
+    base_url: Url,
+    fetch_initiator_url: Url,
+    attributes: ModuleAttributesKey,
+    phase: ModuleImportPhase,
+    audio_worklet_bootstrap: bool,
+}
+
+impl WorkerDynamicModuleImportJob {
+    fn browser_request_metadata(&self) -> BrowserRequestMetadata {
+        if self.audio_worklet_bootstrap {
+            BrowserRequestMetadata::AudioWorklet
+        } else {
+            BrowserRequestMetadata::Fetch
         }
     }
 }
 
-enum WorkerModuleAdvance {
-    ReadyToInstantiate { root_entry: usize },
-    NeedFetches(WorkerModuleGraphFetchBatch),
-    Failed(Box<WorkerBootstrapError>),
+struct WorkerDynamicModuleEvaluation {
+    job: WorkerDynamicModuleImportJob,
+    root_entry: usize,
+}
+
+#[derive(Clone)]
+struct WorkerModuleGraphFetchOptions {
+    initiator_url: Url,
+    csp_source: WorkerModuleGraphFetchCspSource,
+    referrer_policy: Option<String>,
+    browser_request_metadata: BrowserRequestMetadata,
 }
 
 #[derive(Clone)]
@@ -1642,67 +1337,9 @@ pub(super) struct WorkerModuleGraphFetchRequest {
     key: WorkerModuleKey,
     initiator_url: Url,
     csp_source: WorkerModuleGraphFetchCspSource,
-    parent_entry: Option<usize>,
-    specifier: String,
-    attributes: ModuleAttributesKey,
     credentials_mode: RequestCredentialsMode,
     referrer_policy: Option<String>,
     browser_request_metadata: BrowserRequestMetadata,
-}
-
-#[derive(Clone)]
-pub(super) struct WorkerModuleGraphFetchBatch {
-    requests: Vec<WorkerModuleGraphFetchRequest>,
-}
-
-impl WorkerModuleGraphFetchBatch {
-    fn new(requests: Vec<WorkerModuleGraphFetchRequest>) -> Self {
-        debug_assert!(
-            !requests.is_empty(),
-            "worker module graph fetch batch should not be empty"
-        );
-        Self { requests }
-    }
-
-    fn single(request: WorkerModuleGraphFetchRequest) -> Self {
-        Self::new(vec![request])
-    }
-
-    fn is_empty(&self) -> bool {
-        self.requests.is_empty()
-    }
-
-    pub(super) fn contains_fetch_id(&self, fetch_id: WorkerModuleGraphFetchId) -> bool {
-        self.requests
-            .iter()
-            .any(|request| request.fetch_id == fetch_id)
-    }
-
-    fn remove_by_fetch_id(
-        &mut self,
-        fetch_id: WorkerModuleGraphFetchId,
-    ) -> Option<WorkerModuleGraphFetchRequest> {
-        let index = self
-            .requests
-            .iter()
-            .position(|request| request.fetch_id == fetch_id)?;
-        Some(self.requests.remove(index))
-    }
-
-    fn extend(&mut self, other: WorkerModuleGraphFetchBatch) {
-        self.requests.extend(other.requests);
-    }
-
-    fn pending_keys(&self) -> HashSet<WorkerModuleKey> {
-        self.requests
-            .iter()
-            .map(|request| request.key.clone())
-            .collect()
-    }
-
-    pub(super) fn iter(&self) -> impl Iterator<Item = &WorkerModuleGraphFetchRequest> {
-        self.requests.iter()
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1717,9 +1354,6 @@ impl WorkerModuleGraphFetchRequest {
         key: WorkerModuleKey,
         initiator_url: Url,
         csp_source: WorkerModuleGraphFetchCspSource,
-        parent_entry: Option<usize>,
-        specifier: String,
-        attributes: ModuleAttributesKey,
         credentials_mode: RequestCredentialsMode,
         referrer_policy: Option<String>,
         browser_request_metadata: BrowserRequestMetadata,
@@ -1729,13 +1363,14 @@ impl WorkerModuleGraphFetchRequest {
             key,
             initiator_url,
             csp_source,
-            parent_entry,
-            specifier,
-            attributes,
             credentials_mode,
             referrer_policy,
             browser_request_metadata,
         }
+    }
+
+    pub(super) fn module_key(&self) -> WorkerModuleKey {
+        self.key.clone()
     }
 
     pub(super) fn fetch_id(&self) -> WorkerModuleGraphFetchId {
@@ -1769,10 +1404,6 @@ impl WorkerModuleGraphFetchRequest {
     pub(super) fn browser_request_metadata(&self) -> BrowserRequestMetadata {
         worker_module_browser_request_metadata(self.key.module_type, self.browser_request_metadata)
     }
-
-    fn graph_browser_request_metadata(&self) -> BrowserRequestMetadata {
-        self.browser_request_metadata
-    }
 }
 
 fn worker_module_browser_request_metadata(
@@ -1786,28 +1417,27 @@ fn worker_module_browser_request_metadata(
     }
 }
 
-struct WorkerModuleGraph {
+struct WorkerModuleMap {
     credentials_mode: RequestCredentialsMode,
     root_referrer_policy: Option<String>,
-    failed_source_fetches: HashMap<WorkerModuleKey, String>,
-    records: Vec<WorkerModuleRecord>,
-    entries_by_key: HashMap<WorkerModuleKey, usize>,
+    entries: HashMap<WorkerModuleKey, WorkerModuleMapEntry>,
+    scripts: Vec<WorkerModuleScript>,
+    next_fetch_id: WorkerModuleGraphFetchId,
+    pending_fetch_count: usize,
     module_to_entries: HashMap<i32, Vec<usize>>,
 }
 
 struct WorkerModuleRecord {
-    key: WorkerModuleKey,
-    source_url: Url,
     source: WorkerModuleSource,
+    json_value: Option<v8::Global<v8::Value>>,
     module: v8::Global<v8::Module>,
     requests: Vec<WorkerModuleRequest>,
     dependencies: Vec<WorkerModuleDependency>,
     wasm_module: Option<WasmModuleRecord>,
-    referrer_policy: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct WorkerModuleKey {
+pub(super) struct WorkerModuleKey {
     url: Url,
     module_type: WorkerModuleType,
     attributes: ModuleAttributesKey,
@@ -1897,117 +1527,35 @@ struct WorkerModuleDependency {
 }
 
 enum WorkerSyntheticModuleRecord {
-    Json(String),
+    Json(v8::Global<v8::Value>),
     Text(String),
     WebAssembly(WasmModuleRecord),
 }
 
-impl WorkerModuleGraph {
+impl WorkerModuleMap {
     fn new(credentials_mode: RequestCredentialsMode, root_referrer_policy: Option<String>) -> Self {
         Self {
             credentials_mode,
             root_referrer_policy,
-            failed_source_fetches: HashMap::new(),
-            records: Vec::new(),
-            entries_by_key: HashMap::new(),
+            entries: HashMap::new(),
+            scripts: Vec::new(),
+            next_fetch_id: 0,
+            pending_fetch_count: 0,
             module_to_entries: HashMap::new(),
         }
     }
 
-    fn credentials_mode(&self) -> RequestCredentialsMode {
-        self.credentials_mode
-    }
-
-    fn root_referrer_policy(&self) -> Option<&str> {
-        self.root_referrer_policy.as_deref()
-    }
-
-    fn referrer_policy(&self, entry: usize) -> Option<&str> {
-        self.records[entry].referrer_policy.as_deref()
-    }
-
     fn referrer_policy_for_url(&self, url: &Url) -> Option<String> {
-        self.records
+        self.scripts
             .iter()
-            .find(|record| record.key.url == *url || record.source_url == *url)
-            .and_then(|record| record.referrer_policy.clone())
+            .filter(|script| script.creation.is_ok())
+            .find(|script| script.key.url == *url || script.response_url == *url)
+            .and_then(|script| script.referrer_policy.clone())
             .or_else(|| self.root_referrer_policy.clone())
     }
 
-    fn entry_for_key(&self, key: &WorkerModuleKey) -> Option<usize> {
-        self.entries_by_key.get(key).copied()
-    }
-
-    fn source_fetch_failure(&self, key: &WorkerModuleKey) -> Option<String> {
-        self.failed_source_fetches.get(key).cloned()
-    }
-
-    fn mark_source_fetch_failed(&mut self, key: &WorkerModuleKey, message: String) {
-        self.failed_source_fetches.insert(key.clone(), message);
-    }
-
-    fn insert(
-        &mut self,
-        key: WorkerModuleKey,
-        source_url: Url,
-        source: WorkerModuleSource,
-        module: v8::Global<v8::Module>,
-        identity_hash: i32,
-        requests: Vec<WorkerModuleRequest>,
-        wasm_module: Option<WasmModuleRecord>,
-        referrer_policy: Option<String>,
-    ) -> usize {
-        let entry = self.records.len();
-        self.records.push(WorkerModuleRecord {
-            key: key.clone(),
-            source_url,
-            source,
-            module,
-            requests,
-            dependencies: Vec::new(),
-            wasm_module,
-            referrer_policy,
-        });
-        self.entries_by_key.insert(key, entry);
-        self.module_to_entries
-            .entry(identity_hash)
-            .or_default()
-            .push(entry);
-        entry
-    }
-
     fn module(&self, entry: usize) -> &v8::Global<v8::Module> {
-        &self.records[entry].module
-    }
-
-    fn has_top_level_await(&self, scope: &mut v8::PinScope<'_, '_>, root_entry: usize) -> bool {
-        let mut pending = vec![root_entry];
-        let mut seen = HashSet::new();
-        while let Some(entry) = pending.pop() {
-            if !seen.insert(entry) {
-                continue;
-            }
-            let module = v8::Local::new(scope, self.module(entry));
-            if module.has_top_level_await() {
-                return true;
-            }
-            for request in &self.records[entry].requests {
-                if request.phase == ModuleImportPhase::Evaluation
-                    && let Some(dependency) = self.resolve_static_dependency_entry(
-                        module,
-                        &request.specifier,
-                        &request.attributes,
-                    )
-                {
-                    pending.push(dependency);
-                }
-            }
-        }
-        false
-    }
-
-    fn requests(&self, entry: usize) -> Vec<WorkerModuleRequest> {
-        self.records[entry].requests.clone()
+        &self.record(entry).module
     }
 
     fn add_dependency(
@@ -2017,7 +1565,7 @@ impl WorkerModuleGraph {
         attributes: ModuleAttributesKey,
         target_entry: usize,
     ) {
-        self.records[entry]
+        self.record_mut(entry)
             .dependencies
             .push(WorkerModuleDependency {
                 specifier,
@@ -2026,17 +1574,13 @@ impl WorkerModuleGraph {
             });
     }
 
-    fn url(&self, entry: usize) -> &Url {
-        &self.records[entry].source_url
-    }
-
     fn dependency_entry(
         &self,
         entry: usize,
         specifier: &str,
         attributes: &ModuleAttributesKey,
     ) -> Option<usize> {
-        self.records[entry]
+        self.record(entry)
             .dependencies
             .iter()
             .find(|dependency| {
@@ -2047,7 +1591,7 @@ impl WorkerModuleGraph {
 
     fn module_url_for(&self, module: v8::Local<'_, v8::Module>) -> Option<Url> {
         let entry = self.entry_for_module(module)?;
-        Some(self.records[entry].source_url.clone())
+        Some(self.script(entry).response_url.clone())
     }
 
     fn wasm_instance_for_namespace<'s>(
@@ -2055,7 +1599,11 @@ impl WorkerModuleGraph {
         scope: &mut v8::PinScope<'s, '_>,
         namespace: v8::Local<'s, v8::Object>,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        for record in &self.records {
+        for record in self
+            .scripts
+            .iter()
+            .filter_map(|script| script.creation.as_ref().ok())
+        {
             let Some(wasm_record) = record.wasm_module.as_ref() else {
                 continue;
             };
@@ -2081,15 +1629,15 @@ impl WorkerModuleGraph {
         module: v8::Local<'_, v8::Module>,
     ) -> Option<WorkerSyntheticModuleRecord> {
         let entry = self.entry_for_module(module)?;
-        let record = &self.records[entry];
+        let record = self.record(entry);
         if let Some(wasm) = &record.wasm_module {
             return Some(WorkerSyntheticModuleRecord::WebAssembly(wasm.clone()));
         }
-        match record.key.module_type {
+        match self.script(entry).key.module_type {
             WorkerModuleType::Json => record
-                .source
-                .text_source()
-                .map(|source| WorkerSyntheticModuleRecord::Json(source.to_owned())),
+                .json_value
+                .clone()
+                .map(WorkerSyntheticModuleRecord::Json),
             WorkerModuleType::Text => record
                 .source
                 .text_source()
@@ -2116,7 +1664,7 @@ impl WorkerModuleGraph {
     ) -> Option<&WorkerModuleRecord> {
         let dependency_entry =
             self.resolve_static_dependency_entry(referrer, specifier, attributes)?;
-        Some(&self.records[dependency_entry])
+        Some(self.record(dependency_entry))
     }
 
     fn resolve_static_dependency(
@@ -2138,250 +1686,53 @@ impl WorkerModuleGraph {
             .get(&identity_hash)?
             .iter()
             .copied()
-            .find(|entry| module == self.records[*entry].module)
+            .find(|entry| module == self.record(*entry).module)
     }
 }
 
 type WorkerModuleBootstrapResult<T> = Result<T, Box<WorkerBootstrapError>>;
 
-enum WorkerModuleGraphBuild {
-    Ready,
-    NeedFetches(WorkerModuleGraphFetchBatch),
-}
-
-fn ensure_worker_module_entry(
+fn create_worker_module_script(
     scope: &mut v8::PinScope<'_, '_>,
-    graph: &Rc<RefCell<WorkerModuleGraph>>,
+    modules: &Rc<RefCell<WorkerModuleMap>>,
     source: &WorkerModuleSource,
     key: WorkerModuleKey,
-    source_url: Url,
+    response_url: Url,
     referrer_policy: Option<String>,
-) -> WorkerModuleBootstrapResult<usize> {
-    let existing_entry = graph.borrow().entry_for_key(&key);
-    if let Some(entry) = existing_entry {
-        return Ok(entry);
+) -> usize {
+    if let Some(entry) = modules.borrow().loaded_entry(&key) {
+        return entry;
     }
-    let (module, identity_hash, requests, wasm_module) =
-        compile_worker_module_record(scope, source, &key, &source_url)?;
-    Ok(graph.borrow_mut().insert(
+    let compiled = compile_worker_module_record(scope, source, &key, &response_url);
+    let (creation, identity_hash) = match compiled {
+        Ok((module, identity_hash, requests, wasm_module, json_value)) => (
+            Ok(WorkerModuleRecord {
+                source: source.clone(),
+                json_value,
+                module,
+                requests,
+                dependencies: Vec::new(),
+                wasm_module,
+            }),
+            Some(identity_hash),
+        ),
+        Err(error) => (Err(error), None),
+    };
+    let mut modules = modules.borrow_mut();
+    let entry = modules.insert_script(WorkerModuleScript {
         key,
-        source_url,
-        source.clone(),
-        module,
-        identity_hash,
-        requests,
-        wasm_module,
+        response_url,
         referrer_policy,
-    ))
-}
-
-fn continue_worker_module_graph(
-    scope: &mut v8::PinScope<'_, '_>,
-    graph: &Rc<RefCell<WorkerModuleGraph>>,
-    root_entry: usize,
-    fetch_initiator_url: &Url,
-    csp_source: WorkerModuleGraphFetchCspSource,
-    browser_request_metadata: BrowserRequestMetadata,
-) -> WorkerModuleBootstrapResult<WorkerModuleGraphBuild> {
-    continue_worker_module_graph_with_pending_keys(
-        scope,
-        graph,
-        root_entry,
-        fetch_initiator_url,
-        csp_source,
-        browser_request_metadata,
-        HashSet::new(),
-    )
-}
-
-fn continue_worker_module_graph_with_pending_keys(
-    scope: &mut v8::PinScope<'_, '_>,
-    graph: &Rc<RefCell<WorkerModuleGraph>>,
-    root_entry: usize,
-    fetch_initiator_url: &Url,
-    csp_source: WorkerModuleGraphFetchCspSource,
-    browser_request_metadata: BrowserRequestMetadata,
-    mut pending_keys: HashSet<WorkerModuleKey>,
-) -> WorkerModuleBootstrapResult<WorkerModuleGraphBuild> {
-    // The module map also contains source-only and unrelated dynamic imports.
-    // Expand only evaluation edges reachable from this job's root.
-    let mut pending_entries = vec![root_entry];
-    let mut visited = HashSet::new();
-    let mut pending_requests = Vec::new();
-    while let Some(entry) = pending_entries.pop() {
-        if !visited.insert(entry) {
-            continue;
-        }
-        let url = graph.borrow().url(entry).clone();
-        let requests = graph.borrow().requests(entry);
-        for request in requests {
-            if graph
-                .borrow()
-                .dependency_entry(entry, &request.specifier, &request.attributes)
-                .is_none()
-            {
-                match resolve_worker_module_dependency(
-                    scope,
-                    graph,
-                    entry,
-                    &url,
-                    fetch_initiator_url,
-                    csp_source,
-                    browser_request_metadata,
-                    &request,
-                    &mut pending_keys,
-                )? {
-                    WorkerModuleGraphBuild::Ready => {}
-                    WorkerModuleGraphBuild::NeedFetches(requests) => {
-                        pending_requests.extend(requests.requests);
-                    }
-                }
-            }
-            if request.phase == ModuleImportPhase::Evaluation
-                && let Some(dependency) =
-                    graph
-                        .borrow()
-                        .dependency_entry(entry, &request.specifier, &request.attributes)
-            {
-                pending_entries.push(dependency);
-            }
-        }
+        creation,
+    });
+    if let Some(identity_hash) = identity_hash {
+        modules
+            .module_to_entries
+            .entry(identity_hash)
+            .or_default()
+            .push(entry);
     }
-    if !pending_requests.is_empty() {
-        return Ok(WorkerModuleGraphBuild::NeedFetches(
-            WorkerModuleGraphFetchBatch::new(pending_requests),
-        ));
-    }
-    Ok(WorkerModuleGraphBuild::Ready)
-}
-
-fn resolve_worker_module_dependency(
-    scope: &mut v8::PinScope<'_, '_>,
-    graph: &Rc<RefCell<WorkerModuleGraph>>,
-    entry: usize,
-    url: &Url,
-    fetch_initiator_url: &Url,
-    csp_source: WorkerModuleGraphFetchCspSource,
-    browser_request_metadata: BrowserRequestMetadata,
-    request: &WorkerModuleRequest,
-    pending_keys: &mut HashSet<WorkerModuleKey>,
-) -> WorkerModuleBootstrapResult<WorkerModuleGraphBuild> {
-    let dependency_url =
-        resolve_worker_module_specifier(&request.specifier, url).map_err(|error| {
-            Box::new(worker_bootstrap_error(
-                scope,
-                url.as_str(),
-                &format!(
-                    "Failed to resolve module worker dependency `{}`: {error}",
-                    request.specifier
-                ),
-                WorkerParentErrorEventKind::Event,
-            ))
-        })?;
-    let dependency_key = worker_module_key_for_attributes(&dependency_url, &request.attributes)
-        .map_err(|message| {
-            Box::new(worker_bootstrap_error(
-                scope,
-                url.as_str(),
-                &format!("{message} for import `{}`", request.specifier),
-                WorkerParentErrorEventKind::Event,
-            ))
-        })?;
-    let (dependency_key, dependency_source) =
-        match load_worker_static_module_dependency(dependency_url, dependency_key.module_type)
-            .map_err(|message| {
-                Box::new(worker_bootstrap_error(
-                    scope,
-                    url.as_str(),
-                    &message,
-                    WorkerParentErrorEventKind::Event,
-                ))
-            })? {
-            WorkerModuleDependencyLoad::Source { url, source } => {
-                let dependency_key = worker_module_key_for_attributes(&url, &request.attributes)
-                    .map_err(|message| {
-                        Box::new(worker_bootstrap_error(
-                            scope,
-                            url.as_str(),
-                            &format!("{message} for import `{}`", request.specifier),
-                            WorkerParentErrorEventKind::Event,
-                        ))
-                    })?;
-                (dependency_key, source)
-            }
-            WorkerModuleDependencyLoad::NeedFetch(dependency_url) => {
-                let dependency_key =
-                    worker_module_key_for_attributes(&dependency_url, &request.attributes)
-                        .map_err(|message| {
-                            Box::new(worker_bootstrap_error(
-                                scope,
-                                url.as_str(),
-                                &format!("{message} for import `{}`", request.specifier),
-                                WorkerParentErrorEventKind::Event,
-                            ))
-                        })?;
-                let existing_entry = graph.borrow().entry_for_key(&dependency_key);
-                if let Some(target_entry) = existing_entry {
-                    graph.borrow_mut().add_dependency(
-                        entry,
-                        request.specifier.clone(),
-                        request.attributes.clone(),
-                        target_entry,
-                    );
-                    return Ok(WorkerModuleGraphBuild::Ready);
-                }
-                if !pending_keys.insert(dependency_key.clone()) {
-                    return Ok(WorkerModuleGraphBuild::Ready);
-                }
-                let fetch_id = reserve_worker_module_graph_fetch_id(scope);
-                let referrer_policy = graph.borrow().referrer_policy(entry).map(str::to_owned);
-                return Ok(WorkerModuleGraphBuild::NeedFetches(
-                    WorkerModuleGraphFetchBatch::single(WorkerModuleGraphFetchRequest::new(
-                        fetch_id,
-                        dependency_key,
-                        fetch_initiator_url.clone(),
-                        csp_source,
-                        Some(entry),
-                        request.specifier.clone(),
-                        request.attributes.clone(),
-                        graph.borrow().credentials_mode(),
-                        referrer_policy,
-                        browser_request_metadata,
-                    )),
-                ));
-            }
-        };
-    let referrer_policy = graph.borrow().referrer_policy(entry).map(str::to_owned);
-    let target_entry = ensure_worker_module_entry(
-        scope,
-        graph,
-        &dependency_source,
-        dependency_key.clone(),
-        dependency_key.url.clone(),
-        referrer_policy,
-    )?;
-    graph.borrow_mut().add_dependency(
-        entry,
-        request.specifier.clone(),
-        request.attributes.clone(),
-        target_entry,
-    );
-    Ok(WorkerModuleGraphBuild::Ready)
-}
-
-fn reserve_worker_module_graph_fetch_id(
-    scope: &mut v8::PinScope<'_, '_>,
-) -> WorkerModuleGraphFetchId {
-    let slot = scope
-        .get_current_context()
-        .get_slot::<WorkerModuleRuntimeFetchIdSlot>()
-        .expect("worker module runtime fetch id slot should be installed");
-    let mut next_fetch_id = slot.next_fetch_id.borrow_mut();
-    let fetch_id = *next_fetch_id;
-    *next_fetch_id = next_fetch_id
-        .checked_add(1)
-        .expect("worker module graph fetch id space exhausted");
-    fetch_id
+    entry
 }
 
 fn reserve_worker_module_evaluation_id(
@@ -2453,12 +1804,25 @@ fn compile_worker_module_record(
     i32,
     Vec<WorkerModuleRequest>,
     Option<WasmModuleRecord>,
+    Option<v8::Global<v8::Value>>,
 )> {
     if matches!(
         key.module_type,
         WorkerModuleType::Json | WorkerModuleType::Text
     ) {
-        return compile_worker_synthetic_module_record(scope, source_url);
+        let json_source = if key.module_type == WorkerModuleType::Json {
+            Some(source.text_source().ok_or_else(|| {
+                Box::new(worker_bootstrap_error(
+                    scope,
+                    source_url.as_str(),
+                    "JSON module worker source is not text",
+                    WorkerParentErrorEventKind::Event,
+                ))
+            })?)
+        } else {
+            None
+        };
+        return compile_worker_synthetic_module_record(scope, json_source, source_url);
     }
     if let Some(bytes) = source.binary_source() {
         return compile_worker_wasm_module_record(scope, bytes, source_url);
@@ -2495,20 +1859,40 @@ fn compile_worker_module_record(
         identity_hash,
         requests,
         None,
+        None,
     ))
 }
 
 fn compile_worker_synthetic_module_record(
     scope: &mut v8::PinScope<'_, '_>,
+    source: Option<&str>,
     source_url: &Url,
 ) -> WorkerModuleBootstrapResult<(
     v8::Global<v8::Module>,
     i32,
     Vec<WorkerModuleRequest>,
     Option<WasmModuleRecord>,
+    Option<v8::Global<v8::Value>>,
 )> {
     let try_catch = pin!(v8::TryCatch::new(scope));
-    let scope = try_catch.init();
+    let mut scope = try_catch.init();
+    let value = if let Some(source) = source {
+        let Some(value) =
+            crate::module_runtime::parse_json_module(&mut scope, source, source_url.as_str())
+        else {
+            let exception = scope.exception();
+            let message = scope.message();
+            let report = build_exception_report_without_stack(&mut scope, exception, message);
+            return Err(Box::new((
+                report,
+                exception.map(|value| v8::Global::new(&scope, value)),
+                WorkerParentErrorEventKind::Event,
+            )));
+        };
+        Some(v8::Global::new(&scope, value))
+    } else {
+        None
+    };
     let module_name = v8::String::new(&scope, source_url.as_str()).expect("v8 string allocation");
     let default_export = v8::String::new(&scope, "default").expect("v8 string allocation");
     let module = v8::Module::create_synthetic_module(
@@ -2523,6 +1907,7 @@ fn compile_worker_synthetic_module_record(
         identity_hash,
         Vec::new(),
         None,
+        value,
     ))
 }
 
@@ -2535,6 +1920,7 @@ fn compile_worker_wasm_module_record(
     i32,
     Vec<WorkerModuleRequest>,
     Option<WasmModuleRecord>,
+    Option<v8::Global<v8::Value>>,
 )> {
     let try_catch = pin!(v8::TryCatch::new(scope));
     let mut scope = try_catch.init();
@@ -2548,15 +1934,17 @@ fn compile_worker_wasm_module_record(
             ))
         })?
         .ok_or_else(|| {
-            let exception = v8_exception_message_or(
-                &scope,
-                scope.exception(),
-                "unknown wasm compile exception",
+            let exception = scope.exception();
+            let message = scope.message();
+            let mut report = build_exception_report_without_stack(&mut scope, exception, message);
+            report.summary = format!(
+                "v8 failed to compile WebAssembly module `{source_url}`: {}",
+                report.summary
             );
-            Box::new(worker_bootstrap_error(
-                &mut scope,
-                source_url.as_str(),
-                &format!("v8 failed to compile WebAssembly module `{source_url}`: {exception}"),
+            report.source.get_or_insert_with(|| source_url.to_string());
+            Box::new((
+                report,
+                exception.map(|value| v8::Global::new(&scope, value)),
                 WorkerParentErrorEventKind::Event,
             ))
         })?;
@@ -2597,6 +1985,7 @@ fn compile_worker_wasm_module_record(
         identity_hash,
         requests,
         Some(prepared.record),
+        None,
     ))
 }
 
@@ -2681,7 +2070,7 @@ fn load_worker_static_module_dependency(
                 source,
             })
         }
-        "http" | "https" => Ok(WorkerModuleDependencyLoad::NeedFetch(dependency_url)),
+        "http" | "https" => Ok(WorkerModuleDependencyLoad::Network),
         scheme => Err(format!(
             "Module worker dependency scheme `{scheme}` is not allowed"
         )),
@@ -2711,11 +2100,7 @@ enum WorkerModuleDependencyLoad {
         url: Url,
         source: WorkerModuleSource,
     },
-    NeedFetch(Url),
-}
-
-struct WorkerModuleRuntimeFetchIdSlot {
-    next_fetch_id: Rc<RefCell<WorkerModuleGraphFetchId>>,
+    Network,
 }
 
 struct WorkerModuleRuntimeEvaluationSlot {
@@ -2780,7 +2165,7 @@ fn worker_resolve_static_module_callback<'s>(
     referrer: v8::Local<'s, v8::Module>,
 ) -> Option<v8::Local<'s, v8::Module>> {
     v8::callback_scope!(unsafe scope, context);
-    let graph = context.get_slot::<RefCell<WorkerModuleGraph>>()?;
+    let graph = context.get_slot::<RefCell<WorkerModuleMap>>()?;
     let specifier = specifier.to_rust_string_lossy(scope);
     let attributes = worker_import_attributes_key(scope, import_attributes);
     let graph = graph.borrow();
@@ -2795,7 +2180,7 @@ fn worker_resolve_static_source_callback<'s>(
     referrer: v8::Local<'s, v8::Module>,
 ) -> Option<v8::Local<'s, v8::Object>> {
     v8::callback_scope!(unsafe scope, context);
-    let graph = context.get_slot::<RefCell<WorkerModuleGraph>>()?;
+    let graph = context.get_slot::<RefCell<WorkerModuleMap>>()?;
     let specifier = specifier.to_rust_string_lossy(scope);
     let attributes = worker_import_attributes_key(scope, import_attributes);
     let graph = graph.borrow();
@@ -2856,11 +2241,7 @@ fn worker_module_evaluation_rejected_callback<'s>(
     let Some(evaluation_id) = worker_module_evaluation_reaction_id(scope, args.data()) else {
         return;
     };
-    let reason = args
-        .get(0)
-        .to_string(scope)
-        .map(|value| value.to_rust_string_lossy(scope))
-        .unwrap_or_else(|| "unknown module worker top-level await rejection".to_owned());
+    let reason = v8::Global::new(scope, args.get(0));
     let context = scope.get_current_context();
     let Some(slot) = context.get_slot::<WorkerModuleRuntimeEvaluationSlot>() else {
         return;
@@ -2890,7 +2271,7 @@ pub(super) unsafe extern "C" fn worker_initialize_import_meta_object_callback(
 ) {
     v8::callback_scope!(unsafe scope, context);
     let module_url = context
-        .get_slot::<RefCell<WorkerModuleGraph>>()
+        .get_slot::<RefCell<WorkerModuleMap>>()
         .and_then(|graph| graph.borrow().module_url_for(module))
         .or_else(|| worker_current_script_url(scope));
     let Some(module_url) = module_url else { return };
@@ -2906,7 +2287,7 @@ pub(crate) fn worker_wasm_instance_for_namespace<'s>(
 ) -> Option<v8::Local<'s, v8::Object>> {
     let graph = scope
         .get_current_context()
-        .get_slot::<RefCell<WorkerModuleGraph>>()?;
+        .get_slot::<RefCell<WorkerModuleMap>>()?;
     graph.borrow().wasm_instance_for_namespace(scope, namespace)
 }
 
@@ -2957,15 +2338,16 @@ fn worker_synthetic_module_evaluation_steps<'s>(
 ) -> Option<v8::Local<'s, v8::Value>> {
     v8::callback_scope!(unsafe scope, context);
     let synthetic = context
-        .get_slot::<RefCell<WorkerModuleGraph>>()
+        .get_slot::<RefCell<WorkerModuleMap>>()
         .and_then(|graph| graph.borrow().synthetic_module_record_for(module))?;
     match synthetic {
         WorkerSyntheticModuleRecord::Text(source) => {
             let value = v8_string(scope, &source)?;
             set_worker_synthetic_default_export(scope, module, value.into())
         }
-        WorkerSyntheticModuleRecord::Json(source) => {
-            evaluate_worker_json_synthetic_module(scope, module, &source)
+        WorkerSyntheticModuleRecord::Json(value) => {
+            let value = v8::Local::new(scope, value);
+            set_worker_synthetic_default_export(scope, module, value)
         }
         WorkerSyntheticModuleRecord::WebAssembly(wasm_record) => {
             evaluate_wasm_synthetic_module(scope, module, &wasm_record, |scope, import| {
@@ -2973,18 +2355,6 @@ fn worker_synthetic_module_evaluation_steps<'s>(
             })
         }
     }
-}
-
-fn evaluate_worker_json_synthetic_module<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    module: v8::Local<'s, v8::Module>,
-    source: &str,
-) -> Option<v8::Local<'s, v8::Value>> {
-    let Some(json_source) = v8::String::new(scope, source) else {
-        return throw_worker_synthetic_module_error(scope, "failed to allocate JSON module source");
-    };
-    let value = v8::json::parse(scope, json_source)?;
-    set_worker_synthetic_default_export(scope, module, value)
 }
 
 fn set_worker_synthetic_default_export<'s>(
@@ -3012,7 +2382,7 @@ fn worker_wasm_import_value<'s>(
 ) -> Option<v8::Local<'s, v8::Value>> {
     let Some(graph) = scope
         .get_current_context()
-        .get_slot::<RefCell<WorkerModuleGraph>>()
+        .get_slot::<RefCell<WorkerModuleMap>>()
     else {
         return throw_wasm_link_error(scope, "worker wasm import graph is not available");
     };
@@ -3025,8 +2395,8 @@ fn worker_wasm_import_value<'s>(
             return throw_wasm_link_error(scope, "worker wasm import dependency is not available");
         };
         (
-            graph.records[entry].module.clone(),
-            graph.records[entry].wasm_module.clone(),
+            graph.record(entry).module.clone(),
+            graph.record(entry).wasm_module.clone(),
         )
     };
     let dependency = v8::Local::new(scope, &dependency_module);
@@ -3043,14 +2413,15 @@ fn worker_wasm_import_value<'s>(
 
 fn ensure_worker_dependency_module_namespace_ready<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    graph: &RefCell<WorkerModuleGraph>,
+    graph: &RefCell<WorkerModuleMap>,
     module: v8::Local<'s, v8::Module>,
 ) -> Option<()> {
     let mut dependency_modules_for =
         |_: &mut v8::PinScope<'s, '_>, dependency: v8::Local<'s, v8::Module>| {
             let graph = graph.borrow();
             let entry = graph.entry_for_module(dependency)?;
-            graph.records[entry]
+            graph
+                .record(entry)
                 .requests
                 .iter()
                 .filter(|request| request.phase == ModuleImportPhase::Evaluation)

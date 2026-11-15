@@ -132,18 +132,16 @@ impl ParserScriptSourceResultOwner<PendingParsingBlockingClassicScriptContext>
         action: ParserPendingClassicScriptSourceResultAction<'_>,
     ) -> Option<Self::SourceResultAction> {
         let notification = action.notification();
-        if matches!(
-            notification,
-            ParserPendingClassicScriptNotification::SourceReady
-        ) && let (Some(urls), Some(network_result)) =
+        if let (Some(urls), Some(network_result)) =
             (action.network_record_urls(), action.network_result())
         {
             self.page_vm
                 .vm_mut()
-                .record_script_subresource_network_result(
+                .record_parser_script_subresource_network_result(
                     urls.initiator_url().clone(),
                     urls.script_url().clone(),
                     network_result,
+                    action.network_request_handle(),
                 );
         }
         Some(notification)

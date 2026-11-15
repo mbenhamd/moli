@@ -16,40 +16,39 @@ use crate::automation::{
 use moli_core::network::SharedWebStorageStore;
 
 impl BrowserContext {
-    /// Policy changes address the running native Document, including the
-    /// interval before its Page handle is adopted. This does not grant that
-    /// unbound Document general protocol/query access.
+    /// Policy follows native commit admission, not the later projection of
+    /// its Document identity. The restricted update cannot query an unbound
+    /// Document or settle one of its requests.
     pub(crate) fn start_page_policy_update(
         &self,
         target_id: &str,
-        command: moli_core::RendererPageCommand,
+        update: moli_core::page::RendererPageRequestPolicyUpdate,
         loaded: impl FnOnce(&moli_core::page::Page) -> Result<moli_core::page::PendingPageCommand>,
     ) -> Result<Option<moli_core::page::PendingPageCommand>> {
         let target = self
             .page_target(target_id)
             .ok_or(crate::conn::NoDocumentLoaded)?;
         let slot = target.runtime_slot();
-        let Some((source, binding)) = slot.page_slot().prepared_document_output_binding() else {
+        let Some(source) = slot.page_slot().prepared_document_policy_page() else {
             return slot.loaded_page().map(loaded).transpose();
         };
-        let document = binding.renderer_document_identity();
-        let capability = if let Some(page) = slot.loaded_page()
-            && crate::conn::RendererPageResidenceIdentity::from_page(page) == source
-        {
-            page.document_command_target(document)?
-        } else {
-            self.page_navigation_engine(target_id)
-                .ok_or(crate::conn::NoDocumentLoaded)?
-                .document_command_target(source.owner_local_host_id(), document)?
-        };
-        capability.start(command).map(Some)
+        self.page_navigation_engine(target_id)
+            .ok_or(crate::conn::NoDocumentLoaded)?
+            .start_page_request_policy_update(
+                source.owner_local_host_id(),
+                source.page_id(),
+                update,
+            )
+            .map(Some)
     }
 
     pub(crate) fn take_page_target_for_close(&mut self, target_id: &str) -> Option<PageTargetHost> {
         let target = self.page_targets.remove(target_id)?;
-        self.renderer_runtime().close_auxiliary_window(target_id);
+        if let Some(window) = target.window_identity().auxiliary_window() {
+            window.close();
+        }
         self.forget_target_opener_references_for_target(target_id);
-        self.forget_target_window_names_for_target(target_id);
+        self.named_auxiliary_targets.remove(target_id);
         self.forget_target_popup_id_for_target(target_id);
         Some(target)
     }
@@ -94,6 +93,7 @@ impl BrowserContext {
             session_storage_namespace,
             None,
             window_id,
+            Default::default(),
         );
     }
 
@@ -108,12 +108,13 @@ impl BrowserContext {
         initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
         pending_auxiliary_page: Option<moli_core::page::RendererPendingAuxiliaryPage>,
         window_id: u32,
+        window_identity: moli_core::page::RendererPageWindowIdentity,
     ) {
         let session_storage_namespace = session_storage_store
             .map(TargetSessionStorageNamespace::from_store)
             .or_else(|| self.deep_cloned_session_storage_namespace_for_creator(creator.as_ref()));
         self.stage_background_target_with_session_storage_namespace(
-            target_id,
+            target_id.clone(),
             session_id,
             url,
             initial_empty_document_url,
@@ -122,7 +123,9 @@ impl BrowserContext {
             session_storage_namespace,
             pending_auxiliary_page,
             window_id,
+            window_identity,
         );
+        self.named_auxiliary_targets.insert(target_id);
     }
 
     fn deep_cloned_session_storage_namespace_for_creator(
@@ -146,9 +149,11 @@ impl BrowserContext {
         session_storage_namespace: Option<TargetSessionStorageNamespace>,
         pending_auxiliary_page: Option<moli_core::page::RendererPendingAuxiliaryPage>,
         window_id: u32,
+        window_identity: moli_core::page::RendererPageWindowIdentity,
     ) {
         let target_identity = background_target_identity_for_initial_url(&url, creator.as_ref());
-        let mut target = PageTargetHost::with_identity(target_id, session_id, target_identity);
+        let mut target =
+            PageTargetHost::with_identity(target_id, session_id, target_identity, window_identity);
         let target_id = target.target_id().to_owned();
         target.owner_state.begin_initial_empty_document(
             target_id,
@@ -193,17 +198,17 @@ impl BrowserContext {
 
     pub(crate) fn target_id_for_window_name(&self, target_name: &str) -> Option<&str> {
         let name = Self::reusable_window_open_target_name(target_name)?;
-        let runtime = self.renderer_runtime();
         self.page_targets
             .iter()
             // An unrelated CDP-created root is not made a named auxiliary
             // context merely by assigning its window.name.
             .filter(|target| self.named_auxiliary_targets.contains(target.target_id()))
             .find(|target| {
-                runtime
-                    .auxiliary_window(target.target_id())
+                target
+                    .window_identity()
+                    .auxiliary_window()
                     .is_none_or(|window| !window.is_closed())
-                    && runtime.browsing_context_name(target.target_id()).get() == name
+                    && target.window_identity().name().get() == name
             })
             .map(PageTargetHost::target_id)
     }
@@ -212,10 +217,9 @@ impl BrowserContext {
         &self,
         name: &moli_core::page::RendererBrowsingContextName,
     ) -> Option<&str> {
-        let runtime = self.renderer_runtime();
         self.page_targets
             .iter()
-            .find(|target| runtime.browsing_context_name(target.target_id()) == *name)
+            .find(|target| target.window_identity().name() == name)
             .map(PageTargetHost::target_id)
     }
 
@@ -225,23 +229,15 @@ impl BrowserContext {
             .any(|target| target.owner_state.has_attached_child_frame_id(frame_id))
     }
 
-    pub(crate) fn bind_target_browsing_context_name(
-        &mut self,
-        target_id: &str,
-        name: moli_core::page::RendererBrowsingContextName,
-    ) {
-        self.named_auxiliary_targets.insert(target_id.to_owned());
-        self.renderer_runtime()
-            .bind_browsing_context_name(target_id, name);
-    }
-
+    #[cfg(test)]
     pub(crate) fn remember_target_window_name(&mut self, target_name: &str, target_id: &str) {
-        self.named_auxiliary_targets.insert(target_id.to_owned());
+        let Some(target) = self.page_targets.get(target_id) else {
+            return;
+        };
         if let Some(name) = Self::reusable_window_open_target_name(target_name) {
-            self.renderer_runtime()
-                .browsing_context_name(target_id)
-                .set(name);
+            target.window_identity().name().set(name);
         }
+        self.named_auxiliary_targets.insert(target_id.to_owned());
     }
 
     pub(crate) fn remember_target_popup_id(&mut self, popup_id: Option<u64>, target_id: &str) {
@@ -259,12 +255,6 @@ impl BrowserContext {
         {
             self.dismiss_pending_popup_javascript_dialogs(replaced_popup_id);
         }
-    }
-
-    pub(crate) fn forget_target_window_names_for_target(&mut self, target_id: &str) {
-        self.named_auxiliary_targets.remove(target_id);
-        self.renderer_runtime()
-            .forget_browsing_context_name(target_id);
     }
 
     pub(crate) fn forget_target_popup_id_for_target(&mut self, target_id: &str) {

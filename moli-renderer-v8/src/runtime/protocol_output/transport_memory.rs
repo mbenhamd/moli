@@ -48,9 +48,6 @@ fn native_terminal_charge_bytes(terminal: &super::RendererNativeCommandTerminal)
                         .map_or(0, string_charge),
                 ),
             super::RendererNativeProtocolStateUpdate::WebMcpEnabled(_) => 0,
-            super::RendererNativeProtocolStateUpdate::RemoteObjects { object_group } => {
-                object_group.as_deref().map_or(0, string_charge)
-            }
             super::RendererNativeProtocolStateUpdate::DomRemoteObjectNode { object_id, node } => {
                 string_charge(object_id).saturating_add(json_charge(node))
             }
@@ -274,7 +271,8 @@ fn owner_action_transport_charge_bytes(action: &RendererOwnerAction) -> usize {
                 .saturating_add(string_charge(&event.loader_id))
                 .saturating_add(child_frame_document_network_charge(&event.snapshot))
         }
-        RendererOwnerAction::ChildFrameLoad { event, .. } => [
+        RendererOwnerAction::ChildFrameCommit { event, .. }
+        | RendererOwnerAction::ChildFrameLoad { event, .. } => [
             Some(event.frame_id.as_str()),
             event.parent_frame_id.as_deref(),
             event.loader_id.as_deref(),
@@ -285,13 +283,16 @@ fn owner_action_transport_charge_bytes(action: &RendererOwnerAction) -> usize {
         .flatten()
         .map(string_charge)
         .sum::<usize>()
-        .saturating_add(
-            event
-                .document_network
-                .as_ref()
-                .map(child_frame_document_network_charge)
-                .unwrap_or(0),
-        ),
+        .saturating_add(match action {
+            RendererOwnerAction::ChildFrameCommit {
+                document_network: Some(network),
+                ..
+            } => string_charge(&network.frame_id)
+                .saturating_add(network.parent_frame_id.as_deref().map_or(0, string_charge))
+                .saturating_add(string_charge(&network.loader_id))
+                .saturating_add(child_frame_document_network_charge(&network.snapshot)),
+            _ => 0,
+        }),
         RendererOwnerAction::SameDocumentNavigation(event) => {
             let navigation = event.navigation();
             string_charge(&navigation.url)
@@ -317,12 +318,20 @@ fn owner_action_transport_charge_bytes(action: &RendererOwnerAction) -> usize {
         RendererOwnerAction::SubresourceFetchPause {
             info,
             child_document,
+            redirect,
             ..
-        } => info.renderer_transport_charge_bytes().saturating_add(
-            child_document
-                .as_ref()
-                .map_or(0, |document| document.renderer_transport_charge_bytes()),
-        ),
+        } => info
+            .renderer_transport_charge_bytes()
+            .saturating_add(
+                child_document
+                    .as_ref()
+                    .map_or(0, |document| document.renderer_transport_charge_bytes()),
+            )
+            .saturating_add(redirect.as_ref().map_or(0, |redirect| {
+                string_charge(redirect.from_url.as_str())
+                    .saturating_add(string_charge(redirect.to_url.as_str()))
+                    .saturating_add(headers_charge(&redirect.headers))
+            })),
         RendererOwnerAction::SubresourceContinue { event, .. } => {
             event.renderer_transport_charge_bytes()
         }

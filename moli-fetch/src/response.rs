@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{Result, anyhow};
 use moli_cookie_jar::{StoredCookieQueryReport, StoredCookieSetReport};
 use url::Url;
@@ -68,6 +70,34 @@ pub struct ResponseHead {
 }
 
 impl ResponseHead {
+    /// Records one response-driven redirect. The caller supplies its source
+    /// and whether this hop has observable network metadata; request/response
+    /// ExtraInfo and the dispatched destination request are attached later by
+    /// their observation owners.
+    pub fn into_redirect(
+        self,
+        to_url: Url,
+        source: RedirectSource,
+        network_extra_info_available: bool,
+    ) -> RedirectInfo {
+        RedirectInfo {
+            source,
+            from_url: self.final_url,
+            to_url,
+            status: self.status,
+            headers: self.headers,
+            network_extra_info_available,
+            request_extra_info: None,
+            dispatched_request: None,
+            response_extra_info: None,
+            redirect_has_extra_info: network_extra_info_available,
+            request_cookie_report: self.request_cookie_report,
+            cookie_set_reports: self.cookie_set_reports,
+            from_cache: self.from_cache,
+            negotiated_http_version: self.negotiated_http_version,
+        }
+    }
+
     pub fn url_list(&self) -> crate::FetchUrlList<'_> {
         crate::FetchUrlList::new(&self.final_url, &self.redirect_chain)
     }
@@ -94,7 +124,12 @@ impl ResponseHead {
         mode: crate::RequestMode,
     ) -> crate::FetchResponseType {
         use crate::FetchResponseType;
-        if matches!(self.status, 301 | 302 | 303 | 307 | 308) {
+        if matches!(self.status, 301 | 302 | 303 | 307 | 308)
+            && self
+                .headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("location"))
+        {
             FetchResponseType::OpaqueRedirect
         } else if self.final_url.scheme() == "data" || !self.url_list().has_cross_origin_url(origin)
         {
@@ -774,6 +809,28 @@ pub struct NetworkRequestExtraInfo {
     pub cookie_report: StoredCookieQueryReport,
 }
 
+/// One effective request accepted by a fetch destination. Independent of HTTP
+/// ExtraInfo: cache and service-worker destinations also have request metadata.
+/// Redirect records share this snapshot and its immutable upload bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchedRequest {
+    pub method: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<bytes::Bytes>,
+    /// Serializer-provided protocol view, shared independently of upload bytes.
+    pub body_text: Option<Arc<str>>,
+}
+
+impl DispatchedRequest {
+    pub fn body_text(&self) -> Option<std::borrow::Cow<'_, str>> {
+        self.body.as_deref().map(|body| {
+            self.body_text
+                .as_deref()
+                .map_or_else(|| String::from_utf8_lossy(body), std::borrow::Cow::Borrowed)
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkResponseExtraInfo {
     pub request_extra_info: NetworkRequestExtraInfo,
@@ -807,6 +864,9 @@ pub struct RedirectInfo {
     /// though they still participate in the public redirect chain.
     pub network_extra_info_available: bool,
     pub request_extra_info: Option<NetworkRequestExtraInfo>,
+    /// The request to `to_url`, captured after redirect/interception changes.
+    /// None until a destination accepts this hop; HTTP observations are separate.
+    pub dispatched_request: Option<Arc<DispatchedRequest>>,
     pub response_extra_info: Option<NetworkResponseExtraInfo>,
     pub redirect_has_extra_info: bool,
     pub request_cookie_report: Option<StoredCookieQueryReport>,

@@ -1,3 +1,4 @@
+use crate::types::SubresourceInterceptionClasses;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -133,6 +134,7 @@ mod grid_item_paint_order;
 mod grid_resolved_track_values;
 mod hash_change_delivery;
 mod history_traversal;
+mod html_dump;
 mod image_load_event;
 mod image_root_coordinates;
 mod indexed_db;
@@ -663,6 +665,7 @@ fn test_page_vm_with_loader_dom_host_hooks_and_response_referrer_policy(
         local_executor,
         loader,
         &PageVmEnvConfig {
+            window_identity: Default::default(),
             web_storage: crate::RendererWebStorageHandles::ephemeral(),
             root_frame_id,
             main_document_commit: None,
@@ -685,8 +688,7 @@ fn test_page_vm_with_loader_dom_host_hooks_and_response_referrer_policy(
             blocked_url_patterns: Vec::new(),
             indexed_db_manager: None,
             storage_bucket_store: None,
-            fetch_subresource_interception_enabled: false,
-            fetch_subresource_interception_resource_type: None,
+            fetch_subresource_interception_classes: SubresourceInterceptionClasses::NONE,
             layout_configuration: moli_page_types::LayoutConfiguration {
                 policy: crate::real_layout_test_policy(),
                 scrollbars_hidden: false,
@@ -2084,7 +2086,36 @@ async fn drive_page_work_until_done_with_explicit_producer_admission(
     page_vm: &mut PageVm,
     done_expression: &str,
     context: &str,
+    admit_external_producer_work: impl FnMut(&PageVm),
+) -> anyhow::Result<()> {
+    drive_page_work_until_done_with_producer_wake::<()>(
+        page_vm,
+        done_expression,
+        context,
+        admit_external_producer_work,
+        None,
+    )
+    .await
+}
+
+async fn wait_for_test_producer_wake<W>(
+    receiver: &mut Option<tokio::sync::mpsc::UnboundedReceiver<W>>,
+) {
+    while let Some(wake) = receiver.as_mut() {
+        if wake.recv().await.is_some() {
+            return;
+        }
+        *receiver = None;
+    }
+    std::future::pending::<()>().await;
+}
+
+async fn drive_page_work_until_done_with_producer_wake<W>(
+    page_vm: &mut PageVm,
+    done_expression: &str,
+    context: &str,
     mut admit_external_producer_work: impl FnMut(&PageVm),
+    mut producer_wake: Option<tokio::sync::mpsc::UnboundedReceiver<W>>,
 ) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
@@ -2120,10 +2151,12 @@ async fn drive_page_work_until_done_with_explicit_producer_admission(
         if page_vm.vm_mut().eval(done_expression)? == "true" {
             return Ok(());
         }
-        let arrived = tokio::time::timeout(
-            Duration::from_secs(1),
-            page_vm.wait_for_page_work_arrival_without_timeout(false),
-        )
+        let arrived = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                _ = wait_for_test_producer_wake(&mut producer_wake) => true,
+                arrived = page_vm.wait_for_page_work_arrival_without_timeout(false) => arrived,
+            }
+        })
         .await
         .unwrap_or(false);
         if !arrived {
@@ -2191,6 +2224,35 @@ pub(super) async fn drive_websocket_until_done(
         done_expression,
         context,
         |_| {},
+    )
+    .await
+}
+
+/// Admit Service Worker completions on their owner wake, then select resident
+/// Page work. A direct PageVm fixture has no render-owner loop to receive this
+/// wake; waiting only for Page work otherwise delays each completion until the
+/// fallback timer, and can outlive the fixture server's accept deadline.
+pub(super) async fn drive_service_worker_until_done(
+    page_vm: &mut PageVm,
+    done_expression: &str,
+    context: &str,
+) -> anyhow::Result<()> {
+    let (sender, receiver) = crate::service_worker_runtime::service_worker_owner_wake_channel();
+    page_vm
+        .runtime_hooks
+        .browser_context_runtime
+        .add_service_worker_owner_wake_sender(sender);
+    drive_page_work_until_done_with_producer_wake(
+        page_vm,
+        done_expression,
+        context,
+        |page_vm| {
+            page_vm
+                .runtime_hooks
+                .browser_context_runtime
+                .drain_service_worker_service_lane();
+        },
+        Some(receiver),
     )
     .await
 }
