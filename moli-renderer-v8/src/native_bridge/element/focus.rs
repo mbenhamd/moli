@@ -605,6 +605,18 @@ fn update_focus_from_previous_with_previous_focus_within(
             let scope = &mut v8::ContextScope::new(scope, context);
             crate::context_bootstrap::focus_editing_host_selection(scope, next_handle);
         }
+        if selection == FocusSelection::Initialize
+            && unsafe { &*runtime_ptr }.active_element_handle() == Some(next_handle)
+            && is_text_field_or_textarea(unsafe { &*runtime_ptr }, next_handle)
+            && let Some(context) = crate::native_bridge::node_owner_document_relevant_context(
+                scope,
+                runtime_ptr,
+                next_handle,
+            )
+        {
+            let scope = &mut v8::ContextScope::new(scope, context);
+            crate::context_bootstrap::focus_text_control_selection(scope, next_handle);
+        }
         if let Some(event) = construct_focus_event(scope, "focus", previous_value, false) {
             let _ = dispatch_public_event(scope, runtime_ptr, next_handle, event);
         }
@@ -621,6 +633,31 @@ fn update_focus_from_previous_with_previous_focus_within(
     if let Some((_, next_window)) = window_focus_transition {
         dispatch_window_focus_event(scope, runtime_ptr, next_window, "focus");
     }
+}
+
+/// Blink's text fields (`HTMLInputElement::IsTextField`) and textarea own an
+/// inner editor that takes the frame selection on focus; other input types
+/// leave the document selection where it was.
+fn is_text_field_or_textarea(runtime: &PageScriptHost, handle: DomHandle) -> bool {
+    use crate::dom::forms::InputType;
+    runtime
+        .dom_host()
+        .node(handle)
+        .and_then(Node::as_element)
+        .is_some_and(|element| {
+            element.is_html_textarea()
+                || (element.is_html_input()
+                    && matches!(
+                        element.input_type(),
+                        InputType::Text
+                            | InputType::Search
+                            | InputType::Url
+                            | InputType::Tel
+                            | InputType::Email
+                            | InputType::Password
+                            | InputType::Number
+                    ))
+        })
 }
 
 fn window_focus_transition_for_handles(
