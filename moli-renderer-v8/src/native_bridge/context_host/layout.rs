@@ -658,11 +658,27 @@ impl PageScriptHost {
                     .try_borrow()
                     .ok()?
                     .previous_frame_viewport(*frame)?;
+                // The baseline only applies to the Document it was laid out for.
+                let document = *self.child_browsing_context_document_handles.get(frame)?;
+                if self.frame_viewport_documents.borrow().get(frame) != Some(&document) {
+                    return None;
+                }
                 ((previous.css_width, previous.css_height)
                     != (viewport.css_width, viewport.css_height))
-                    .then_some((*frame, previous))
+                    .then_some((*frame, document, previous))
             })
             .collect::<Vec<_>>();
+        {
+            let mut documents = self.frame_viewport_documents.borrow_mut();
+            documents.retain(|frame, _| self.child_browsing_context_is_live(*frame));
+            for (frame, viewport) in &frame_viewports {
+                if viewport.is_some()
+                    && let Some(document) = self.child_browsing_context_document_handles.get(frame)
+                {
+                    documents.insert(*frame, *document);
+                }
+            }
+        }
         let tree = pass.into_tree();
         let frame_viewports_changed = {
             // The pass's own style flush advances the style generations it
@@ -707,10 +723,10 @@ impl PageScriptHost {
         }
         if !frame_resizes.is_empty() {
             let mut pending = self.pending_frame_viewport_resizes.borrow_mut();
-            for (frame, previous) in frame_resizes {
+            for (frame, document, previous) in frame_resizes {
                 // Keep the first baseline until the resize steps consume it.
-                if !pending.iter().any(|(queued, _)| *queued == frame) {
-                    pending.push((frame, previous));
+                if !pending.iter().any(|(queued, _, _)| *queued == frame) {
+                    pending.push((frame, document, previous));
                 }
             }
         }

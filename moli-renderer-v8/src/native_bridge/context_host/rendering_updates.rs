@@ -197,7 +197,10 @@ impl PageScriptHost {
     /// ResizeObserver targets even though no script observed the change.
     pub(crate) fn queue_frame_viewport_resizes(&mut self) {
         let resizes = std::mem::take(self.pending_frame_viewport_resizes.get_mut());
-        for (frame, previous) in resizes {
+        for (frame, document, previous) in resizes {
+            if self.child_browsing_context_document_handles.get(&frame) != Some(&document) {
+                continue;
+            }
             let dispatch_scope = OwnerDispatchScope::Child(frame);
             if self
                 .current_registered_window_execution_context_identity(dispatch_scope)
@@ -406,7 +409,7 @@ impl PageScriptHost {
         if let OwnerDispatchScope::Child(frame) = target.dispatch_scope() {
             self.pending_frame_viewport_resizes
                 .get_mut()
-                .retain(|(pending, _)| *pending != frame);
+                .retain(|(pending, _, _)| *pending != frame);
         }
         let current_activity = self.document_activity();
         // Resize precedes media reporting. Every listener can replace its

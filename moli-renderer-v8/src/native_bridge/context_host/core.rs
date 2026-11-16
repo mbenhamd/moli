@@ -371,6 +371,7 @@ impl PageScriptHost {
             layout_snapshot_cache_publishes: Cell::new(0),
             style_viewport_generation: Cell::new(0),
             pending_frame_viewport_resizes: RefCell::new(Vec::new()),
+            frame_viewport_documents: RefCell::new(HashMap::new()),
             root_document_lifecycle: None,
             output_journal: None,
             native_interception_output: None,

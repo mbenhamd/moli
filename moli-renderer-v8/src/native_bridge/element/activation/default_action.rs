@@ -615,10 +615,10 @@ pub(crate) fn select_contenteditable_contents(
 }
 
 /// Home/End default action in a contenteditable host. Moli has no line-box
-/// caret model here, so a line is the focus's preserved-newline segment
-/// within its Text node, else the focus's nearest block container inside the
-/// host. The caret collapses to (or, with Shift, extends to) that line's first
-/// or last text position, as Chromium does for an unwrapped line.
+/// caret model here, so a line is the run of inline content around the caret
+/// inside its nearest block, bounded by `<br>`, block-level boxes and
+/// preserved newlines. The caret collapses to (or, with Shift, extends to)
+/// that line's first or last position, as Chromium does for an unwrapped line.
 pub(crate) fn move_contenteditable_caret_to_line_boundary(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
@@ -643,23 +643,24 @@ pub(crate) fn move_contenteditable_caret_to_line_boundary(
         return false;
     };
     let runtime = unsafe { &*runtime_ptr };
-    let focus = selection
+    let Some(focus) = selection
         .get(scope, v8str(scope, "focusNode").into())
         .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
         .and_then(|node| {
             crate::native_bridge::node_runtime_and_handle_from_object(scope, node).ok()
         })
         .map(|(_, focus)| focus)
-        .filter(|focus| node_is_inclusive_descendant(runtime, *focus, handle));
+        .filter(|focus| node_is_inclusive_descendant(runtime, *focus, handle))
+    else {
+        return false;
+    };
     let focus_offset = object_number_property(scope, selection, "focusOffset")
         .filter(|offset| offset.is_finite() && *offset >= 0.0)
         .map_or(0, |offset| offset as usize);
-    let (node, offset) = focus
-        .and_then(|focus| preserved_newline_line_boundary(runtime, focus, focus_offset, to_end))
-        .unwrap_or_else(|| {
-            let block = focus.map_or(handle, |focus| line_block_container(runtime, focus, handle));
-            block_text_boundary(runtime, block, to_end)
-        });
+    let Some((node, offset)) = caret_line_boundary(runtime, handle, focus, focus_offset, to_end)
+    else {
+        return false;
+    };
     let Some(node) = node_wrapper_from_handle(scope, node) else {
         return false;
     };
@@ -689,42 +690,188 @@ fn node_is_inclusive_descendant(
     false
 }
 
-/// The caret's line inside a Text node whose newlines render as breaks.
-fn preserved_newline_line_boundary(
+/// One piece of a block's inline content, in document order.
+#[derive(Clone, Copy, PartialEq)]
+enum LineItem {
+    Text(DomHandle),
+    /// A `<br>` or a block-level box: either ends the line.
+    Break,
+    /// An atomic inline box such as an image or inline-block.
+    Atom(DomHandle),
+    /// The caret when it sits between children of an element.
+    Caret,
+}
+
+/// The first or last position of the caret's line.
+fn caret_line_boundary(
     runtime: &PageScriptHost,
+    host: DomHandle,
     focus: DomHandle,
     focus_offset: usize,
     to_end: bool,
 ) -> Option<(DomHandle, usize)> {
     let dom = runtime.dom_host().dom();
-    let units = utf16_units(dom.node(focus)?.as_text()?.data());
-    let parent = dom.parent_node(focus)?;
-    let white_space = super::super::style_property_value(
-        runtime,
-        parent,
-        super::super::StyleMode::Computed,
-        "white-space-collapse",
-    );
-    if !matches!(
-        white_space.as_str(),
-        "preserve" | "preserve-breaks" | "break-spaces"
-    ) {
-        return None;
+    let root = line_block_container(runtime, focus, host);
+    let mut items = Vec::new();
+    let children = dom.child_nodes(root).unwrap_or_default();
+    for (index, child) in children.iter().enumerate() {
+        if focus == root && index == focus_offset {
+            items.push(LineItem::Caret);
+        }
+        flatten_line_items(runtime, *child, focus, focus_offset, &mut items);
     }
-    let focus_offset = focus_offset.min(units.len());
-    let newline = u16::from(b'\n');
-    let offset = if to_end {
-        units[focus_offset..]
-            .iter()
-            .position(|unit| *unit == newline)
-            .map(|index| focus_offset + index)?
-    } else {
-        units[..focus_offset]
-            .iter()
-            .rposition(|unit| *unit == newline)
-            .map(|index| index + 1)?
+    if focus == root && focus_offset >= children.len() {
+        items.push(LineItem::Caret);
+    }
+    let caret_text = dom
+        .node(focus)
+        .and_then(Node::as_text)
+        .map(|text| utf16_units(text.data()));
+    let (index, mut candidate) = match &caret_text {
+        Some(units) => {
+            let focus_offset = focus_offset.min(units.len());
+            if text_preserves_newlines(runtime, focus) {
+                let newline = u16::from(b'\n');
+                let within = if to_end {
+                    units[focus_offset..]
+                        .iter()
+                        .position(|unit| *unit == newline)
+                        .map(|index| focus_offset + index)
+                } else {
+                    units[..focus_offset]
+                        .iter()
+                        .rposition(|unit| *unit == newline)
+                        .map(|index| index + 1)
+                };
+                if let Some(offset) = within {
+                    return Some((focus, offset));
+                }
+            }
+            let index = items
+                .iter()
+                .position(|item| *item == LineItem::Text(focus))?;
+            (index, (focus, if to_end { units.len() } else { 0 }))
+        }
+        None => (
+            items.iter().position(|item| *item == LineItem::Caret)?,
+            (focus, focus_offset),
+        ),
     };
-    Some((focus, offset))
+    let mut visit = |item: LineItem| -> Option<Option<(DomHandle, usize)>> {
+        match item {
+            LineItem::Break => Some(Some(candidate)),
+            LineItem::Caret => None,
+            LineItem::Atom(atom) => {
+                let parent = dom.parent_node(atom)?;
+                let index = dom.child_nodes(parent)?.iter().position(|c| *c == atom)?;
+                candidate = (parent, if to_end { index + 1 } else { index });
+                None
+            }
+            LineItem::Text(text) => {
+                let units = utf16_units(dom.node(text)?.as_text()?.data());
+                if text_preserves_newlines(runtime, text) {
+                    let newline = u16::from(b'\n');
+                    let found = if to_end {
+                        units.iter().position(|unit| *unit == newline)
+                    } else {
+                        units
+                            .iter()
+                            .rposition(|unit| *unit == newline)
+                            .map(|i| i + 1)
+                    };
+                    if let Some(offset) = found {
+                        return Some(Some((text, offset)));
+                    }
+                }
+                candidate = (text, if to_end { units.len() } else { 0 });
+                None
+            }
+        }
+    };
+    let found = if to_end {
+        items[index + 1..].iter().find_map(|item| visit(*item))
+    } else {
+        items[..index].iter().rev().find_map(|item| visit(*item))
+    };
+    Some(found.flatten().unwrap_or(candidate))
+}
+
+/// Append `node`'s inline content to `items`, without entering block-level or
+/// atomic boxes, and mark the caret when it sits between element children.
+fn flatten_line_items(
+    runtime: &PageScriptHost,
+    node: DomHandle,
+    focus: DomHandle,
+    focus_offset: usize,
+    items: &mut Vec<LineItem>,
+) {
+    let dom = runtime.dom_host().dom();
+    let Some(entry) = dom.node(node) else {
+        return;
+    };
+    if entry.as_text().is_some() {
+        items.push(LineItem::Text(node));
+        return;
+    }
+    if entry.as_element().is_none() {
+        return;
+    }
+    if runtime.dom_host().is_html_element_named(node, "br") {
+        items.push(LineItem::Break);
+        return;
+    }
+    let display = super::super::style_property_value(
+        runtime,
+        node,
+        super::super::StyleMode::Computed,
+        "display",
+    );
+    match display.as_str() {
+        "none" => return,
+        "inline" | "contents" => {}
+        display if display.starts_with("inline") => {
+            items.push(LineItem::Atom(node));
+            return;
+        }
+        _ => {
+            items.push(LineItem::Break);
+            return;
+        }
+    }
+    let children = dom.child_nodes(node).unwrap_or_default();
+    if children.is_empty() && node != focus {
+        items.push(LineItem::Atom(node));
+        return;
+    }
+    for (index, child) in children.iter().enumerate() {
+        if node == focus && index == focus_offset {
+            items.push(LineItem::Caret);
+        }
+        flatten_line_items(runtime, *child, focus, focus_offset, items);
+    }
+    if node == focus && focus_offset >= children.len() {
+        items.push(LineItem::Caret);
+    }
+}
+
+/// Whether a Text node's newlines render as line breaks.
+fn text_preserves_newlines(runtime: &PageScriptHost, text: DomHandle) -> bool {
+    runtime
+        .dom_host()
+        .dom()
+        .parent_node(text)
+        .is_some_and(|parent| {
+            matches!(
+                super::super::style_property_value(
+                    runtime,
+                    parent,
+                    super::super::StyleMode::Computed,
+                    "white-space-collapse",
+                )
+                .as_str(),
+                "preserve" | "preserve-breaks" | "break-spaces"
+            )
+        })
 }
 
 /// The focus's nearest element inside the editing host that is not an
@@ -750,34 +897,6 @@ fn line_block_container(runtime: &PageScriptHost, focus: DomHandle, host: DomHan
         current = dom.parent_node(candidate);
     }
     host
-}
-
-/// The first or last text position in `block`, or its own boundary when it
-/// holds no text.
-fn block_text_boundary(
-    runtime: &PageScriptHost,
-    block: DomHandle,
-    to_end: bool,
-) -> (DomHandle, usize) {
-    let dom = runtime.dom_host().dom();
-    let mut stack = vec![block];
-    let mut found = None;
-    while let Some(node) = stack.pop() {
-        if let Some(text) = dom.node(node).and_then(Node::as_text) {
-            found = Some((node, if to_end { utf16_len(text.data()) } else { 0 }));
-            if !to_end {
-                break;
-            }
-            continue;
-        }
-        let children = dom.child_nodes(node).unwrap_or_default();
-        // Depth-first in document order; the last text found wins for End.
-        stack.extend(children.into_iter().rev());
-    }
-    found.unwrap_or_else(|| {
-        let children = dom.child_nodes(block).map_or(0, |children| children.len());
-        (block, if to_end { children } else { 0 })
-    })
 }
 
 fn perform_contenteditable_drop_default_action<'s>(
