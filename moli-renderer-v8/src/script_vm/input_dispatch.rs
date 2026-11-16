@@ -47,7 +47,7 @@ use crate::native_bridge::element::{
     perform_implicit_submission_from_control, perform_keyboard_scroll_default_action,
     perform_mouse_focus_default_action, perform_number_spin_keyboard_default_action,
     perform_range_keyboard_default_action, perform_scrollbar_scroll_default_action,
-    perform_text_input,
+    perform_text_input, perform_triple_click_selection_default_action,
     perform_wheel_scroll_default_action, replace_contenteditable_selection,
     replace_text_control_selection, select_contenteditable_contents,
     text_control_set_selection_range_internal,
@@ -1628,6 +1628,15 @@ impl ScriptVm {
                             runtime_ptr,
                             hit_handle.unwrap_or(handle),
                         );
+                        if click_count >= 3 && button == 0 {
+                            perform_triple_click_selection_default_action(
+                                scope,
+                                runtime_ptr,
+                                hit_handle.unwrap_or(handle),
+                                coordinates.client_x,
+                                coordinates.client_y,
+                            );
+                        }
                     }
                 }
             }
