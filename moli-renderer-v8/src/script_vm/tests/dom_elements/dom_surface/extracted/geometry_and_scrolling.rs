@@ -1758,3 +1758,24 @@ fn focusing_the_focused_element_neither_scrolls_nor_fires_events() {
         r#"[943,"","a"]"#
     );
 }
+
+// Chromium 156: [[211,65],[20,20]]. An absolutely positioned child of a grid
+// that is not its containing block is aligned as the sole item of the grid's
+// content box, by `justify-items`/`align-items` or its own self-alignment.
+#[test]
+fn abspos_grid_child_static_position_uses_grid_self_alignment() {
+    let mut vm = new_parsed_test_vm(
+        "https://grid-static-position.test/",
+        "<!doctype html><style>body{margin:0}</style><div style=position:relative><div style=display:grid;padding:20px;height:100px;align-items:center;justify-items:end;width:200px><span id=p style=position:absolute;width:10px;height:10px;margin:-1px></span><span id=q style=position:absolute;width:10px;height:10px;justify-self:start;align-self:start></span></div></div>",
+    );
+    assert_eq!(
+        vm.eval(
+            r#"JSON.stringify(['p', 'q'].map((id) => {
+  const rect = document.getElementById(id).getBoundingClientRect();
+  return [rect.x, rect.y];
+}))"#
+        )
+        .unwrap(),
+        "[[211,65],[20,20]]"
+    );
+}
