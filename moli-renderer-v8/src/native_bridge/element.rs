@@ -260,7 +260,7 @@ use details_dialog::{
     perform_summary_click_default_action,
 };
 pub(crate) use details_dialog::{
-    perform_dialog_escape_default_action_for_dispatched_event,
+    is_main_summary, perform_dialog_escape_default_action_for_dispatched_event,
     queue_details_toggle_event_for_attribute_change, queue_parser_details_toggle_event,
     queue_parser_details_toggle_events_in_subtree,
 };
@@ -424,13 +424,13 @@ pub use geometry::ClientRect;
 #[cfg(test)]
 pub(crate) use geometry::observable_scrollbar_hit_test;
 pub(crate) use geometry::{
-    InputHit, InputSurfaceHit, apply_scroll_observable_effects, input_surface_hit_test,
-    observable_caret_position, observable_deep_hit_test, observable_document_metrics,
-    observable_event_offset, observable_geometry_batch, observable_geometry_query,
-    observable_input_hit_test, observable_sources_with_fragments,
-    perform_scrollbar_scroll_default_action, perform_wheel_scroll_default_action,
-    published_geometry_batch, queue_scroll_observable_effects, scroll_node_into_view_at_center,
-    scroll_node_into_view_at_start,
+    InputHit, InputSurfaceHit, KeyboardScroll, apply_scroll_observable_effects,
+    input_surface_hit_test, observable_caret_position, observable_deep_hit_test,
+    observable_document_metrics, observable_event_offset, observable_geometry_batch,
+    observable_geometry_query, observable_input_hit_test, observable_sources_with_fragments,
+    perform_keyboard_scroll_default_action, perform_scrollbar_scroll_default_action,
+    perform_wheel_scroll_default_action, published_geometry_batch, queue_scroll_observable_effects,
+    scroll_node_into_view_at_center, scroll_node_into_view_at_start,
 };
 pub(super) use geometry::{
     node_client_height_getter_function, node_client_left_getter_function,

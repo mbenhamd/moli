@@ -218,6 +218,7 @@ pub(super) fn is_focusable(runtime: &PageScriptHost, handle: DomHandle) -> bool 
         element.local_name(),
         "body" | "input" | "button" | "select" | "textarea" | "a" | "iframe" | "frame"
     ) || element.has_attribute("tabindex")
+        || super::is_main_summary(runtime, handle)
         || contenteditable_editing_host(runtime, handle) == Some(handle)
         || element_is_scrollable(runtime, handle)
 }
@@ -1267,7 +1268,7 @@ fn is_interactive_sequential_focusable_descendant(
     let is_interactive_element = matches!(
         element.local_name(),
         "a" | "button" | "input" | "select" | "textarea"
-    );
+    ) || super::is_main_summary(runtime, handle);
     let has_non_negative_tab_index = element_attribute(runtime, handle, "tabindex")
         .and_then(|value| parse_tab_index_attribute(&value))
         .is_some_and(|value| value >= 0);
@@ -1291,6 +1292,7 @@ fn default_sequential_tab_index(runtime: &PageScriptHost, handle: DomHandle) -> 
     }
     match element.local_name() {
         "a" | "button" | "input" | "select" | "textarea" => 0,
+        "summary" if super::is_main_summary(runtime, handle) => 0,
         _ if element_is_scrollable(runtime, handle) => 0,
         _ => -1,
     }

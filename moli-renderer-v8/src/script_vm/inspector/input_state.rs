@@ -41,7 +41,11 @@ pub(in crate::script_vm) fn key_target_info(
             && matches!(
                 input_type,
                 InputType::Button | InputType::Submit | InputType::Reset
-            ));
+            ))
+        // The details' main summary activates from Enter and Space like a
+        // button (HTML summary activation behaviour; Blink's
+        // HTMLSummaryElement key handling only runs for the main summary).
+        || crate::native_bridge::element::is_main_summary(runtime, handle);
     let is_anchor_like = local_name == "a"
         && element
             .attribute("href")
