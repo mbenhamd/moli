@@ -39,8 +39,9 @@ pub(in crate::native_bridge) use rects::{
     node_get_bounding_client_rect_callback, node_get_client_rects_callback,
 };
 pub(crate) use scroll::{
-    apply_scroll_observable_effects, perform_scrollbar_scroll_default_action,
-    perform_wheel_scroll_default_action, queue_scroll_observable_effects,
+    KeyboardScroll, apply_scroll_observable_effects, perform_keyboard_scroll_default_action,
+    perform_scrollbar_scroll_default_action, perform_wheel_scroll_default_action,
+    queue_scroll_observable_effects,
 };
 pub(crate) use scroll_into_view::{
     scroll_node_into_view_at_center, scroll_node_into_view_at_start,

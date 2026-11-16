@@ -32,7 +32,7 @@ use crate::dom::{
     native::{Node, SelectedFile},
 };
 use crate::native_bridge::element::{
-    InputEventCoordinates, TextEditInputType, TextInputSource, TouchEventPoint,
+    InputEventCoordinates, KeyboardScroll, TextEditInputType, TextInputSource, TouchEventPoint,
     activate_handle_after_pointer_release, activate_handle_after_touch_release,
     activate_handle_via_keyboard, cache_input_files_from_selected_files,
     construct_drag_event_with_related_target, construct_keyboard_event,
@@ -44,8 +44,9 @@ use crate::native_bridge::element::{
     contenteditable_editing_host, dispatch_public_event, input_surface_hit_test,
     is_disabled_form_control, observable_input_hit_test, perform_auxiliary_link_default_action,
     perform_drop_default_action, perform_implicit_submission_from_control,
-    perform_mouse_focus_default_action, perform_scrollbar_scroll_default_action,
-    perform_text_input, perform_wheel_scroll_default_action, replace_contenteditable_selection,
+    perform_keyboard_scroll_default_action, perform_mouse_focus_default_action,
+    perform_scrollbar_scroll_default_action, perform_text_input,
+    perform_wheel_scroll_default_action, replace_contenteditable_selection,
     replace_text_control_selection, select_contenteditable_contents,
     text_control_set_selection_range_internal,
     text_control_set_selection_range_with_direction_internal, text_control_value, update_focus,
@@ -3027,6 +3028,18 @@ impl ScriptVm {
                     caret,
                 );
                 return Ok(input_dispatch_outcome(true));
+            }
+
+            // An uncancelled scrolling key that no control consumed scrolls
+            // the focused element's nearest scroller, like Blink's
+            // KeyboardEventManager::DefaultKeyboardEventHandler.
+            let control_consumes_key = alt || ctrl || meta || target.is_text_control;
+            if !control_consumes_key
+                && !target.is_select
+                && contenteditable_editing_host(unsafe { &*runtime_ptr }, editing_handle).is_none()
+                && let Some(scroll) = KeyboardScroll::for_key(&key_lower)
+            {
+                perform_keyboard_scroll_default_action(scope, runtime_ptr, handle, scroll)?;
             }
 
             Ok(input_dispatch_outcome(true))
