@@ -3,7 +3,10 @@ use crate::context_bootstrap::{
     readonly_data_transfer_for_input, selection_value_for_window,
 };
 use crate::dom::{
-    forms::{ButtonTypeState, InputType, RangeKeyboardStep, range_value_after_keyboard_step},
+    forms::{
+        ButtonTypeState, InputStepDirection, InputStepOutcome, InputStepState, InputType,
+        RangeKeyboardStep, range_value_after_keyboard_step, step_input_value,
+    },
     native::{Element, Node, SelectedFile},
 };
 use crate::util::{
@@ -1817,6 +1820,58 @@ pub(crate) fn perform_range_keyboard_default_action(
         return true;
     };
     if unsafe { &mut *runtime_ptr }.set_input_value_from_user_edit(handle, &next_value) {
+        dispatch_input_and_change_events(scope, runtime_ptr, handle);
+    }
+    true
+}
+
+/// Default action for an uncancelled ArrowUp or ArrowDown keydown at a
+/// number field: its spin button steps the value once, then `input` and
+/// `change` fire when it changed (Blink
+/// `TextFieldInputType::HandleKeydownEventForSpinButton`, which calls
+/// `StepUpFromLayoutObject`). Returns whether the field consumed the key.
+pub(crate) fn perform_number_spin_keyboard_default_action(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    handle: DomHandle,
+    key_lower: &str,
+) -> bool {
+    let direction = match key_lower {
+        "arrowup" | "up" => InputStepDirection::Up,
+        "arrowdown" | "down" => InputStepDirection::Down,
+        _ => return false,
+    };
+    let runtime = unsafe { &*runtime_ptr };
+    let Some(element) = runtime
+        .dom_host()
+        .node(handle)
+        .and_then(Node::as_element)
+        .filter(|element| element.is_html_input() && element.input_type() == InputType::Number)
+    else {
+        return false;
+    };
+    if is_disabled_form_control(runtime, handle) || element.attribute("readonly").is_some() {
+        return false;
+    }
+    let value = element.input_value();
+    let outcome = step_input_value(
+        InputStepState {
+            input_type: InputType::Number,
+            value: &value,
+            min: element.attribute("min"),
+            max: element.attribute("max"),
+            step: element.attribute("step"),
+            value_attribute: element.attribute("value"),
+        },
+        direction,
+        1.0,
+    );
+    let Ok(InputStepOutcome::Set(next_value)) = outcome else {
+        return true;
+    };
+    if next_value != value
+        && unsafe { &mut *runtime_ptr }.set_input_value_from_user_edit(handle, &next_value)
+    {
         dispatch_input_and_change_events(scope, runtime_ptr, handle);
     }
     true
