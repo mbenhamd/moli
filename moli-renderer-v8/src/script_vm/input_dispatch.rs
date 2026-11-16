@@ -2781,6 +2781,13 @@ impl ScriptVm {
                 return Ok(input_dispatch_outcome(true));
             }
 
+            // A range control consumes its slider keys before the text-control
+            // caret keys below, which would otherwise claim the arrows, Home
+            // and End for an `<input type=range>`.
+            if perform_range_keyboard_default_action(scope, runtime_ptr, handle, &key_lower) {
+                return Ok(input_dispatch_outcome(true));
+            }
+
             if target.is_radio
                 && matches!(
                     key_lower.as_str(),
@@ -3027,10 +3034,6 @@ impl ScriptVm {
                     caret,
                     caret,
                 );
-                return Ok(input_dispatch_outcome(true));
-            }
-
-            if perform_range_keyboard_default_action(scope, runtime_ptr, handle, &key_lower) {
                 return Ok(input_dispatch_outcome(true));
             }
 
