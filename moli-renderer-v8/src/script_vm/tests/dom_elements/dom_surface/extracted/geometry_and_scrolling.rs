@@ -1779,3 +1779,24 @@ fn abspos_grid_child_static_position_uses_grid_self_alignment() {
         "[[211,65],[20,20]]"
     );
 }
+
+// Chromium 156: [[0.296875,0.6875,30.390625,30.390625],
+// [10.546875,31.078125,30.390625,30.390625]]. Fixed lengths are LayoutUnits
+// truncated to 1/64 px, so a 30.4px square keeps one size at any offset.
+#[test]
+fn fixed_lengths_truncate_to_layout_units_independent_of_position() {
+    let mut vm = new_parsed_test_vm(
+        "https://layout-unit-lengths.test/",
+        "<!doctype html><style>body{margin:0}i{display:block;width:30.4px;height:30.4px}</style><div style=padding-left:0.3px;padding-top:0.7px><i id=a></i></div><div style=padding-left:10.55px><i id=b></i></div>",
+    );
+    assert_eq!(
+        vm.eval(
+            r#"JSON.stringify(['a', 'b'].map((id) => {
+  const rect = document.getElementById(id).getBoundingClientRect();
+  return [rect.x, rect.y, rect.width, rect.height];
+}))"#
+        )
+        .unwrap(),
+        "[[0.296875,0.6875,30.390625,30.390625],[10.546875,31.078125,30.390625,30.390625]]"
+    );
+}
