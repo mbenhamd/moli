@@ -309,7 +309,7 @@ fn tab_key_does_not_enter_inert_hidden_or_closed_details_frames() {
             <div inert><iframe id="inert"></iframe></div>
             <iframe id="hidden" style="visibility:hidden"></iframe>
             <div style="visibility:hidden"><iframe id="hidden-parent"></iframe></div>
-            <details><summary>s</summary><iframe id="closed-details"></iframe></details>
+            <details><summary id="summary">s</summary><iframe id="closed-details"></iframe></details>
             <button id="post">post</button>
         </body></html>"#,
     );
@@ -340,12 +340,82 @@ fn tab_key_does_not_enter_inert_hidden_or_closed_details_frames() {
         .expect("focused element should evaluate")
     };
     let mut path = vec![focused(&mut vm)];
-    for shift in [false, true] {
+    for shift in [false, false, true, true] {
         press_tab(&mut vm, shift);
         path.push(focused(&mut vm));
     }
 
-    assert_eq!(path.join("|"), "pre|post|pre");
+    // Chromium 156 stops on the closed details' main summary, not its frame.
+    assert_eq!(path.join("|"), "pre|summary|post|summary|pre");
+}
+
+fn press_activation_key(vm: &mut StandaloneScriptVmHarness, key: &str) {
+    let (code, text) = if key == "Enter" {
+        ("Enter", "\r")
+    } else {
+        ("Space", " ")
+    };
+    vm.dispatch_key_event("keydown", key, code, text, 0, false, true)
+        .expect("activation keydown should dispatch");
+    vm.dispatch_key_event("keyup", key, code, "", 0, false, false)
+        .expect("activation keyup should dispatch");
+}
+
+#[test]
+fn main_summary_takes_tab_focus_and_toggles_details_from_enter_and_space() {
+    let mut vm = new_rendered_test_vm(
+        "https://summary-keyboard.test/",
+        r#"<html><body>
+            <button id="pre">pre</button>
+            <details id="details"><summary id="main">main</summary><p>body</p></details>
+            <button id="post">post</button>
+        </body></html>"#,
+    );
+    vm.eval("document.getElementById('pre').focus()")
+        .expect("pre should focus");
+    let mut path = vec![focused_path(&mut vm)];
+    for shift in [false, false, true] {
+        press_tab(&mut vm, shift);
+        path.push(focused_path(&mut vm));
+    }
+    assert_eq!(path.join("|"), "pre|main|post|main");
+
+    let state = |vm: &mut StandaloneScriptVmHarness| {
+        vm.eval("`${document.getElementById('details').open}:${document.activeElement.id}`")
+            .expect("details state should evaluate")
+    };
+    let mut states = Vec::new();
+    for key in ["Enter", " ", "Enter"] {
+        press_activation_key(&mut vm, key);
+        states.push(state(&mut vm));
+    }
+    // Chromium 156: each Enter or Space toggles and focus stays on the summary.
+    assert_eq!(states.join("|"), "true:main|false:main|true:main");
+}
+
+#[test]
+fn only_the_main_summary_of_a_details_is_focusable() {
+    let mut vm = new_rendered_test_vm(
+        "https://summary-focusable.test/",
+        r#"<html><body>
+            <button id="pre">pre</button>
+            <details open><summary id="main">main</summary><summary id="second">second</summary></details>
+            <summary id="loose">loose</summary>
+        </body></html>"#,
+    );
+    let result = vm
+        .eval(
+            r#"(() => ["main", "second", "loose"].map(id => {
+  document.getElementById("pre").focus();
+  const summary = document.getElementById(id);
+  summary.focus();
+  return `${id}:${document.activeElement.id}:${summary.tabIndex}`;
+}).join(","))()"#,
+        )
+        .expect("summary focus probe should evaluate");
+
+    // Chromium 156 focuses only the first summary child of a details.
+    assert_eq!(result, "main:main:0,second:pre:-1,loose:pre:-1");
 }
 
 #[test]
@@ -554,4 +624,53 @@ fn contenteditable_home_and_end_move_the_caret_to_the_line_boundary() {
     vm.eval("getSelection().collapse(w.firstChild, 4); 'ok'")
         .unwrap();
     assert_eq!(press(&mut vm, "Home", 0), "ab\ncd,3,3");
+}
+
+fn keyboard_scroll_vm() -> StandaloneScriptVmHarness {
+    new_rendered_test_vm(
+        "https://keyboard-scroll.test/",
+        r#"<html><body style="margin:0">
+            <div id="scroller" tabindex="0" style="overflow:auto;width:200px;height:100px">
+              <div style="height:1000px;width:150px"></div>
+            </div>
+            <div style="height:3000px"></div>
+        </body></html>"#,
+    )
+}
+
+fn press_scroll_key(vm: &mut StandaloneScriptVmHarness, key: &str) -> String {
+    vm.dispatch_key_event("keydown", key, key, "", 0, false, false)
+        .expect("scroll keydown should dispatch");
+    vm.dispatch_key_event("keyup", key, key, "", 0, false, false)
+        .expect("scroll keyup should dispatch");
+    vm.eval("`${document.getElementById('scroller').scrollTop}:${scrollY}`")
+        .expect("scroll offsets should evaluate")
+}
+
+#[test]
+fn scrolling_keys_scroll_the_focused_scroller_by_line_page_and_document_steps() {
+    let mut vm = keyboard_scroll_vm();
+    vm.eval("document.getElementById('scroller').focus()")
+        .expect("scroller should focus");
+    let offsets = ["PageDown", "ArrowDown", "End", "ArrowDown", "Home"]
+        .map(|key| press_scroll_key(&mut vm, key));
+
+    // Chromium 156: a 40px line, floor(87.5%) of the 100px scrollport per
+    // page, and a focused scroller at its end does not scroll the viewport.
+    assert_eq!(offsets.join("|"), "87:0|127:0|900:0|900:0|0:0");
+}
+
+#[test]
+fn canceled_scrolling_keydown_does_not_scroll() {
+    let mut vm = keyboard_scroll_vm();
+    vm.eval(
+        r#"(() => {
+  const scroller = document.getElementById('scroller');
+  scroller.addEventListener('keydown', event => event.preventDefault());
+  scroller.focus();
+})()"#,
+    )
+    .expect("canceling scroller should focus");
+
+    assert_eq!(press_scroll_key(&mut vm, "PageDown"), "0:0");
 }

@@ -70,7 +70,9 @@ impl ReadinessPlan {
                 )
                 .await
             }
-            RenderedDomWaitUntil::NetworkIdle | RenderedDomWaitUntil::DomStable => {
+            RenderedDomWaitUntil::NetworkIdle
+            | RenderedDomWaitUntil::DomStable
+            | RenderedDomWaitUntil::Idle => {
                 browser
                     .fetch_request_document_allow_http_error_with_wait_until_deadline(
                         request,
@@ -115,6 +117,7 @@ fn rendered_wait_until(wait_until: FetchWaitUntil) -> RenderedDomWaitUntil {
         FetchWaitUntil::Load => RenderedDomWaitUntil::Load,
         FetchWaitUntil::NetworkIdle => RenderedDomWaitUntil::NetworkIdle,
         FetchWaitUntil::DomStable => RenderedDomWaitUntil::DomStable,
+        FetchWaitUntil::Idle => RenderedDomWaitUntil::Idle,
         FetchWaitUntil::Done => RenderedDomWaitUntil::Done,
     }
 }

@@ -127,7 +127,8 @@ impl FetchResourceTypeFilter {
     /// whose Fetch.enable interception path is not implemented yet.
     pub const fn interception_classes(self) -> SubresourceInterceptionClasses {
         match self {
-            Self::Stylesheet | Self::TextTrack => SubresourceInterceptionClasses::NONE,
+            Self::Stylesheet => SubresourceInterceptionClasses::STYLESHEET,
+            Self::TextTrack => SubresourceInterceptionClasses::NONE,
             Self::Media => SubresourceInterceptionClasses::MEDIA,
             Self::Font => SubresourceInterceptionClasses::FONT,
             // Top-level navigations pause in the protocol; child frame
@@ -1432,6 +1433,17 @@ pub struct PendingSubresourceFetchRequest {
 }
 
 impl PendingSubresourceFetchRequest {
+    pub(crate) fn bind_response_body(
+        &mut self,
+        body: moli_core::network::ResourceInterceptionBody,
+    ) {
+        if let PendingSubresourceFetchResidence::Document { command_target, .. } =
+            &mut self.residence
+        {
+            *command_target = command_target.clone().with_response_body(body);
+        }
+    }
+
     pub(crate) fn bind_native_network_pause(
         &mut self,
         pause: moli_core::network::ResourceInterceptionPause,
@@ -2082,22 +2094,17 @@ mod tests {
             fetch_subresource_interception_config_for_patterns(false, &[]),
             SubresourceInterceptionClasses::NONE
         );
-        // Explicit Stylesheet and TextTrack filters are not supported by
-        // Fetch.enable, even though the renderer can represent their classes.
-        for filter in [
-            FetchResourceTypeFilter::Stylesheet,
-            FetchResourceTypeFilter::TextTrack,
-        ] {
-            let patterns = vec![FetchInterceptionPattern {
-                url_pattern: "*".to_owned(),
-                resource_type_filter: Some(filter),
-                request_stage: FetchRequestStage::Request,
-            }];
-            assert_eq!(
-                fetch_subresource_interception_config_for_patterns(true, &patterns),
-                SubresourceInterceptionClasses::NONE,
-                "{filter:?}"
-            );
-        }
+        // TextTrack still has no native interception consumer.
+        let filter = FetchResourceTypeFilter::TextTrack;
+        let patterns = vec![FetchInterceptionPattern {
+            url_pattern: "*".to_owned(),
+            resource_type_filter: Some(filter),
+            request_stage: FetchRequestStage::Request,
+        }];
+        assert_eq!(
+            fetch_subresource_interception_config_for_patterns(true, &patterns),
+            SubresourceInterceptionClasses::NONE,
+            "{filter:?}"
+        );
     }
 }

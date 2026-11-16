@@ -370,9 +370,9 @@ pub use self::page_surface::{
     RendererDomNodeCreationStackTrace, RendererDomNodeReference,
     RendererDomNodeStackTraceResolution, RendererDomSearchRegistration,
     RendererDomSearchResultNode, RendererDomSearchResultsResolution,
-    RendererDomSnapshotCaptureOptions, RendererDomSnapshotCapturePayload, RendererDragData,
-    RendererDragDataItem, RendererDraggedDirectory, RendererDraggedFile, RendererGeometryQuad,
-    RendererHtmlSerializeOptions, RendererInputDispatchOutcome,
+    RendererDomSnapshotCaptureOptions, RendererDomSnapshotCapturePayload, RendererDownloadBody,
+    RendererDragData, RendererDragDataItem, RendererDraggedDirectory, RendererDraggedFile,
+    RendererGeometryQuad, RendererHtmlSerializeOptions, RendererInputDispatchOutcome,
     RendererInspectorProtocolConfiguration, RendererInspectorProtocolConfigurationCommand,
     RendererInspectorSessionRestoreSnapshot, RendererInterceptedDrag, RendererJavaScriptDialogId,
     RendererJavaScriptDialogSource, RendererLayoutMetrics, RendererMainDocumentCommit,
@@ -778,15 +778,15 @@ impl PageVmFollowedNavigationMetadata {
     }
 }
 
-pub(super) enum PageVmNetworkIdleWaitAdvance {
+pub(super) enum PageVmIdleWaitAdvance {
     Completed,
     TriggeredNavigation,
     Progressed {
-        state: PageVmNetworkIdleWaitState,
+        state: PageVmIdleWaitState,
     },
     Waiting {
         sleep_for: std::time::Duration,
-        state: PageVmNetworkIdleWaitState,
+        state: PageVmIdleWaitState,
     },
 }
 
@@ -797,10 +797,45 @@ pub(super) enum PageVmSubresourceResponseWaitAdvance {
     Waiting { sleep_for: std::time::Duration },
 }
 
-#[derive(Default)]
-pub(super) struct PageVmNetworkIdleWaitState {
-    quiet_since: Option<Instant>,
-    observed_activity_epoch: Option<u64>,
+#[derive(Clone, Copy)]
+pub(super) enum PageVmIdleWaitState {
+    Network {
+        quiet_since: Option<Instant>,
+        observed_activity_epoch: Option<u64>,
+    },
+    EventLoop,
+}
+
+impl Default for PageVmIdleWaitState {
+    fn default() -> Self {
+        Self::Network {
+            quiet_since: None,
+            observed_activity_epoch: None,
+        }
+    }
+}
+
+impl PageVmIdleWaitState {
+    fn new(mode: crate::RendererPageIdleWaitMode) -> Self {
+        match mode {
+            crate::RendererPageIdleWaitMode::Network => Self::default(),
+            crate::RendererPageIdleWaitMode::EventLoop => Self::EventLoop,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Network { .. } => "networkidle",
+            Self::EventLoop => "idle",
+        }
+    }
+
+    fn reset(self) -> Self {
+        match self {
+            Self::Network { .. } => Self::default(),
+            Self::EventLoop => Self::EventLoop,
+        }
+    }
 }
 
 #[derive(Default)]

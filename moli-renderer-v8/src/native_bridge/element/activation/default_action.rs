@@ -2173,6 +2173,32 @@ fn anchor_click_default_action(
     let special_target = target_name
         .as_deref()
         .and_then(SpecialBrowsingContextTarget::parse);
+    // A fragment link in a same-runtime child Document navigates that
+    // Document to the fragment through its own Location, as at top level,
+    // instead of loading the frame again.
+    if (target_name.is_none() || special_target == Some(SpecialBrowsingContextTarget::Current))
+        && let Ok(url) = url::Url::parse(&resolved)
+        && let Some(owner_document) = runtime
+            .dom_host()
+            .node(handle)
+            .and_then(Node::owner_document)
+        && owner_document != runtime.document_handle()
+        && same_document_fragment_target(&runtime.document_url_for_handle(owner_document), &url)
+        && let Some(owner_window) = navigation_owner_window_for_handle(scope, runtime_ptr, handle)
+        && let Some(location) = owner_window
+            .get(scope, v8str(scope, "location").into())
+            .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+    {
+        let source_element = node_wrapper_from_handle(scope, handle);
+        navigate_location_object_with_source_element(
+            scope,
+            location,
+            LocationNavigationKind::Assign,
+            Some(resolved),
+            source_element,
+        );
+        return None;
+    }
     if (target_name.is_none() || special_target == Some(SpecialBrowsingContextTarget::Current))
         && navigate_hyperlink_source_browsing_context(scope, runtime_ptr, handle, &resolved)
     {
@@ -2257,6 +2283,16 @@ fn anchor_download_activation(
     user_initiated: bool,
     suggested_filename: Option<String>,
 ) -> Option<RendererPendingDownloadActivation> {
+    let runtime = unsafe { &*runtime_ptr };
+    if !runtime.document_allows_downloads_for_handle(handle) {
+        return None;
+    }
+    let frame_id = runtime
+        .dom_host()
+        .owner_document_handle(handle)
+        .and_then(|document| runtime.child_browsing_context_host_for_document_handle(document))
+        .and_then(|child| runtime.frame_owner_frame_id_for_child_handle(child))
+        .map(|frame| frame.0);
     let source_element = node_wrapper_from_handle(scope, handle);
     let download_request = suggested_filename.as_deref().unwrap_or("");
     let proceed =
@@ -2270,10 +2306,36 @@ fn anchor_download_activation(
                 Some(download_request),
             )
         });
-    proceed.then_some(RendererPendingDownloadActivation {
+    if !proceed {
+        return None;
+    }
+    // Retain the authorized backing at activation, before script can revoke
+    // the URL. Reading it belongs to the asynchronous download task.
+    let response = url::Url::parse(&resolved)
+        .ok()
+        .filter(|url| url.scheme() == "blob")
+        .and_then(|_| {
+            crate::blob::object_url_download_data(unsafe { &mut *runtime_ptr }, handle, &resolved)
+        })
+        .map(
+            |(data, mime_type)| crate::runtime::RendererPendingDownloadResponse {
+                final_url: resolved.clone(),
+                status: 200,
+                headers: vec![
+                    ("Content-Type".to_owned(), mime_type.into_bytes()),
+                    (
+                        "Content-Length".to_owned(),
+                        data.len().to_string().into_bytes(),
+                    ),
+                ],
+                body: crate::runtime::RendererDownloadBody::Blob(data),
+            },
+        );
+    Some(RendererPendingDownloadActivation {
+        frame_id,
         url: resolved,
         suggested_filename,
-        response: None,
+        response,
     })
 }
 

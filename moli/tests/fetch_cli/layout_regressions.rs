@@ -36,6 +36,30 @@ fn run_layout(html: &str, expression: &str, fonts: bool) -> Result<Value> {
 }
 
 #[test]
+fn extreme_svg_arc_layout_terminates_without_a_screenshot() -> Result<()> {
+    // Publishing layout used to expand this one arc into millions of cubics,
+    // then drain them with quadratic buffer shifts. The external process limit
+    // also bounds the test if the CLI's readiness timeout cannot interrupt it.
+    for doctype in ["<!doctype html>", ""] {
+        let control = run_layout(
+            &format!("{doctype}<svg width=300 height=300></svg>"),
+            "document.body.offsetHeight",
+            false,
+        )?;
+        let value = run_layout(
+            &format!(
+                "{doctype}<svg width=300 height=300><path d=\"M0 0 A 743 -417 0 1 1 7 1e38\"/></svg>"
+            ),
+            "({bodyHeight:document.body.offsetHeight,svgHeight:document.querySelector('svg').getBoundingClientRect().height})",
+            false,
+        )?;
+        assert_eq!(value["bodyHeight"], control, "{doctype}");
+        assert_eq!(value["svgHeight"], 300);
+    }
+    Ok(())
+}
+
+#[test]
 fn fractional_grid_track_limits_terminate_with_a_finite_item_width() -> Result<()> {
     // This formerly loops in track growth even after the CLI's own timeout.
     // The subprocess deadline also bounds this regression if the loop returns.
@@ -51,6 +75,30 @@ fn fractional_grid_track_limits_terminate_with_a_finite_item_width() -> Result<(
     )?;
     let width = value.as_f64().context("item width must be a number")?;
     assert!((width - 202.44017).abs() < 0.05, "{width}");
+    Ok(())
+}
+
+#[test]
+fn overflowing_svg_filter_region_keeps_layout_process_alive() -> Result<()> {
+    // MOL-599: finite filter attributes overflowed during object-bbox mapping,
+    // aborting the process inside tiny-skia even without a screenshot request.
+    let expression = "JSON.stringify([document.body.offsetHeight, document.querySelector('svg').getBoundingClientRect().width, document.querySelector('svg').getBoundingClientRect().height])";
+    let control = run_layout(
+        r#"<!doctype html><svg width="300" height="300"></svg>"#,
+        expression,
+        false,
+    )?;
+    let value = run_layout(
+        r##"<!doctype html><svg width="300" height="300"><defs><filter id="f" x="-736" width="784"><feGaussianBlur stdDeviation="1"/></filter></defs><rect width="1e38" height="100" filter="url(#f)"/></svg>"##,
+        expression,
+        false,
+    )?;
+    assert_eq!(
+        value, control,
+        "filter overflow must preserve the SVG viewport"
+    );
+    assert_eq!(value[1], 300);
+    assert_eq!(value[2], 300);
     Ok(())
 }
 

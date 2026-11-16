@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http';
+import { checkFulfilledRedirectRouting } from './playwright-cdp-smoke-redirect-routing.mjs';
+import { checkBlobDownloadDelivery } from './playwright-cdp-smoke-blob-downloads.mjs';
 import { createRequire } from 'node:module';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -288,6 +290,11 @@ function startFixtureServer() {
         'text/html; charset=utf-8',
         `<!doctype html><main>${req.headers['x-smoke-nav-route'] || 'missing-nav-route-header'}</main>`,
       );
+      return;
+    }
+
+    if (url.pathname === '/route-redirect-destination') {
+      send(404, 'text/plain; charset=utf-8', 'redirect destination backend');
       return;
     }
 
@@ -1008,6 +1015,9 @@ async function runSmoke({ chromium, endpoint, fixture }) {
     assertEqual(fetched, 'fulfilled body', 'route fulfilled fetch body');
     record(results, 'route_fulfill_fetch');
 
+    await checkFulfilledRedirectRouting(page, fixture);
+    record(results, 'route_fulfill_redirect_uses_playwright_first_hop_routing');
+
     const xhrFulfilled = await page.evaluate(async () => {
       return await new Promise(resolve => {
         const xhr = new XMLHttpRequest();
@@ -1529,6 +1539,10 @@ async function runSmoke({ chromium, endpoint, fixture }) {
     const downloadPath = await download.path();
     assertEqual(readFileSync(downloadPath, 'utf8'), 'download contents', 'download artifact contents');
     record(results, 'download_event_and_artifact');
+
+    for (const name of await checkBlobDownloadDelivery(browser, page, tempDir, fixture)) {
+      record(results, name);
+    }
 
     await page.goto(`${fixture}/download-page`, { waitUntil: 'load', timeout: 10_000 });
     const [slowDownload] = await Promise.all([

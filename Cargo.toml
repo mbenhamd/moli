@@ -43,7 +43,7 @@ members = [
     "moli-dom",
     "moli-parser",
     "moli-paint",
-    "moli-page-types",
+    "moli-types/moli-page-types",
     "moli-parkable-image",
     "moli-process-signal",
     "moli-renderer-v8",
@@ -85,7 +85,7 @@ members = [
     "moli-cookie-jar",
     "moli-websocket",
     "moli-fetch",
-    "moli-fetch-types",
+    "moli-types/moli-fetch-types",
     "moli-file-api",
     "moli-geometry",
     "moli-header-field",
@@ -128,9 +128,9 @@ stylo_atoms = { git = "https://github.com/mbenhamd/stylo", rev = "ed8e815e4c3bee
 stylo_dom = { git = "https://github.com/mbenhamd/stylo", rev = "ed8e815e4c3bee2a6f1bb849f2bee0b2a5dfdcad" }
 stylo_static_prefs = { git = "https://github.com/mbenhamd/stylo", rev = "ed8e815e4c3bee2a6f1bb849f2bee0b2a5dfdcad" }
 stylo_traits = { git = "https://github.com/mbenhamd/stylo", rev = "ed8e815e4c3bee2a6f1bb849f2bee0b2a5dfdcad" }
-svgtypes = { git = "https://github.com/lexmount/svgtypes", branch = "moli" }
+svgtypes = { git = "https://github.com/lexmount/svgtypes", rev = "520374d714d69f8e2dc93c81a9d6be559ecde3ff" }
 # Preserve original SVG selector inputs and collect unclipped source geometry.
-usvg = { git = "https://github.com/lexmount/resvg", rev = "614aaf4d21ca03a4773f1e4d07c6a404407589a2" }
+usvg = { git = "https://github.com/lexmount/resvg", rev = "a137793a5749c27862b724eef60c4734526b14a0" }
 taffy = { git = "https://github.com/mbenhamd/taffy", rev = "5976d56ad9a78b3a256cdfbe19aa445f5d8bb340" }
 
 [patch."https://github.com/DioxusLabs/taffy"]

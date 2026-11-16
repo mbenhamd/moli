@@ -2,6 +2,8 @@ mod document_node_factory_realms;
 mod insert_adjacent_element_conversion;
 use super::*;
 
+mod media_attribute_namespaces;
+
 mod abort_controller_receivers;
 mod abort_signal_events;
 mod abort_signal_statics;
@@ -39,6 +41,7 @@ mod idle_callbacks;
 mod idle_detection;
 mod images;
 mod input_event_init;
+mod joint_history_child_pushes;
 mod legacy_event_init;
 mod media;
 mod media_devices;
@@ -65,6 +68,7 @@ mod pointing_event_init;
 mod popup_hyperlinks;
 mod promise_rejection;
 mod request_init;
+mod retained_simple_targets;
 mod rtc_dictionary_init;
 mod rtc_error;
 mod rtc_peer_dictionary;
@@ -125,3 +129,5 @@ mod web_transport_error_values;
 mod xpath_result_bindings;
 
 mod native_input_realms;
+
+mod attr_node_native_dispatch;
