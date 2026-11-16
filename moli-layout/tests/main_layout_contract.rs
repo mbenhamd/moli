@@ -870,6 +870,80 @@ fn grid_container_justify_items_center_shrink_wraps_an_auto_sized_item() {
 }
 
 #[test]
+fn column_flex_item_grid_keeps_its_scroll_container_row_at_max_content() {
+    // Chromium 156: in a 200px column flex container, a 300px spacer shrinks
+    // to 184px while the grid keeps the 16px row of its overflow:hidden item;
+    // the grid's automatic minimum block size is its max-content height.
+    let source = FixtureSource {
+        nodes: vec![
+            FixtureNode::div("column", vec![1, 2]),
+            FixtureNode::div("spacer", Vec::new()),
+            FixtureNode::div("grid", vec![3]),
+            FixtureNode::div("scroller", vec![4]),
+            FixtureNode::div("content", Vec::new()),
+        ],
+    };
+    let mut styles = FixtureStyles::default();
+    styles.0.insert(
+        0,
+        resolved(
+            LayoutDisplay::Flex,
+            Style {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Column,
+                size: Size {
+                    width: length(100.0),
+                    height: length(200.0),
+                },
+                ..Style::default()
+            },
+            PaintColor::TRANSPARENT,
+        ),
+    );
+    styles
+        .0
+        .insert(1, fixed_box(LayoutDisplay::Block, 100.0, 300.0, BLUE));
+    styles.0.insert(
+        2,
+        resolved(
+            LayoutDisplay::Grid,
+            Style {
+                display: Display::Grid,
+                ..Style::default()
+            },
+            PaintColor::TRANSPARENT,
+        ),
+    );
+    styles.0.insert(
+        3,
+        resolved(
+            LayoutDisplay::Block,
+            Style {
+                overflow: taffy::Point {
+                    x: taffy::Overflow::Hidden,
+                    y: taffy::Overflow::Hidden,
+                },
+                ..Style::default()
+            },
+            GREEN,
+        ),
+    );
+    styles
+        .0
+        .insert(4, fixed_box(LayoutDisplay::Block, 20.0, 16.0, RED));
+
+    let snapshot = render(&source, &mut styles, PaintViewport::new(100, 200, 1.0));
+    assert_rect(
+        solid_rect(&snapshot, BLUE),
+        PaintRect::new(0.0, 0.0, 100.0, 184.0),
+    );
+    assert_rect(
+        solid_rect(&snapshot, GREEN),
+        PaintRect::new(0.0, 184.0, 100.0, 16.0),
+    );
+}
+
+#[test]
 fn centered_grid_item_with_percent_height_and_auto_block_margin_keeps_intrinsic_inline_size() {
     let source = FixtureSource {
         nodes: vec![

@@ -484,7 +484,13 @@ where
         let is_flattened = world.boxes[id.index()].inline_flattened;
         let is_positioned = world.boxes[id.index()].style.is_absolute_positioned()
             || world.boxes[id.index()].style.is_fixed_positioned();
-        let positioned_containing_block = if world.boxes[id.index()].style.is_fixed_positioned() {
+        // A top-layer box (modal dialog, open popover) is laid out against
+        // the viewport or initial containing block regardless of its
+        // ancestors' transforms, filters or containment (CSS Position 4
+        // §3.1), as in Blink.
+        let positioned_containing_block = if world.boxes[id.index()].style.is_in_top_layer() {
+            None
+        } else if world.boxes[id.index()].style.is_fixed_positioned() {
             nearest_fixed_containing_block(world, Some(original_parent))
         } else if world.boxes[id.index()].style.is_absolute_positioned() {
             nearest_positioned_ancestor(world, Some(original_parent))
@@ -2165,6 +2171,16 @@ where
             return self.compute_inline_formatting_context(id, inputs, block_context);
         }
 
+        let inputs = if display.is_grid_container()
+            || matches!(
+                kind,
+                LayoutBoxKind::PrincipalGrid | LayoutBoxKind::PrincipalInlineGrid
+            ) {
+            grid_block_min_content_as_max_content(inputs)
+        } else {
+            inputs
+        };
+
         if self.measure_baselines
             && inputs.run_mode == RunMode::ComputeSize
             && !matches!(
@@ -3215,6 +3231,26 @@ where
             padding,
             margin,
         };
+    }
+}
+
+/// Measures a grid container under a block-axis min-content constraint as
+/// under a max-content one: its min-content block size is its max-content
+/// block size (css-sizing-3 §5.1), and Blink lays the grid out with
+/// indefinite available block space. Under a min-content constraint Taffy
+/// maximizes tracks into zero free space (css-grid-2 §12.6), so an auto row
+/// whose item is a scroll container keeps that item's zero automatic minimum
+/// and a column flex item's automatic minimum size collapses the row.
+fn grid_block_min_content_as_max_content(inputs: LayoutInput) -> LayoutInput {
+    if !matches!(inputs.available_space.height, AvailableSpace::MinContent) {
+        return inputs;
+    }
+    LayoutInput {
+        available_space: Size {
+            height: AvailableSpace::MaxContent,
+            ..inputs.available_space
+        },
+        ..inputs
     }
 }
 

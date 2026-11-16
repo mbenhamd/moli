@@ -515,6 +515,10 @@ pub struct ResolvedLayoutStyle {
     paint_containment: bool,
     will_change_containment: bool,
     will_change_position: bool,
+    /// The element is in the top layer (`-servo-top-layer: top`: a modal
+    /// dialog or an open popover). Its containing block is the viewport or
+    /// the initial containing block, never an ancestor box.
+    top_layer: bool,
     will_change_stacking_context: bool,
     size_containment: LogicalSizeContainment,
     query_container_axes: LogicalSizeContainment,
@@ -589,6 +593,7 @@ impl std::fmt::Debug for ResolvedLayoutStyle {
             .field("will_change_containment", &self.will_change_containment)
             .field("size_containment", &self.size_containment)
             .field("will_change_position", &self.will_change_position)
+            .field("top_layer", &self.top_layer)
             .field(
                 "will_change_stacking_context",
                 &self.will_change_stacking_context,
@@ -778,6 +783,10 @@ impl ResolvedLayoutStyle {
         let will_change = computed.clone_will_change().bits;
         let will_change_containment = will_change.contains(WillChangeBits::CONTAIN);
         let will_change_position = will_change.contains(WillChangeBits::POSITION);
+        let top_layer = matches!(
+            computed.get_box().clone__servo_top_layer(),
+            style::properties::longhands::_servo_top_layer::computed_value::T::Top
+        );
         // Stylo's FIXPOS_CB_NON_SVG bit is set only for `will-change: filter`
         // and `will-change: backdrop-filter`. It is the same pre-effect hint
         // included by Blink's HasNonInitialFilter* queries.
@@ -915,6 +924,7 @@ impl ResolvedLayoutStyle {
             paint_containment,
             will_change_containment,
             will_change_position,
+            top_layer,
             will_change_stacking_context,
             size_containment,
             query_container_axes,
@@ -999,6 +1009,7 @@ impl ResolvedLayoutStyle {
             paint_containment: false,
             will_change_containment: false,
             will_change_position: false,
+            top_layer: false,
             will_change_stacking_context: false,
             size_containment: LogicalSizeContainment {
                 inline: false,
@@ -1547,6 +1558,10 @@ impl ResolvedLayoutStyle {
         self.position.is_fixed()
     }
 
+    pub(crate) const fn is_in_top_layer(&self) -> bool {
+        self.top_layer
+    }
+
     pub(crate) const fn order(&self) -> i32 {
         self.order
     }
@@ -1569,7 +1584,10 @@ impl ResolvedLayoutStyle {
         is_flex_or_grid_item: bool,
         containment_eligible: bool,
     ) -> bool {
+        // Every top-layer element establishes a stacking context (CSS
+        // Position 4 §3.1); paint emits it as a root stacking context child.
         if is_root
+            || self.top_layer
             || self.opacity < 1.0
             || self.blend_mode != PaintBlendMode::Normal
             || self.establishes_transform_containing_block
@@ -1712,6 +1730,7 @@ impl ResolvedLayoutStyle {
         placeholder.size_containment = LogicalSizeContainment::default();
         placeholder.query_container_axes = LogicalSizeContainment::default();
         placeholder.will_change_position = false;
+        placeholder.top_layer = false;
         placeholder.will_change_stacking_context = false;
         placeholder.visible = false;
         placeholder.pointer_events = false;
@@ -2236,6 +2255,7 @@ impl ResolvedLayoutStyle {
             paint_containment: false,
             will_change_containment: false,
             will_change_position: false,
+            top_layer: false,
             will_change_stacking_context: false,
             size_containment: LogicalSizeContainment::default(),
             query_container_axes: LogicalSizeContainment::default(),
@@ -2309,6 +2329,7 @@ impl ResolvedLayoutStyle {
             paint_containment: false,
             will_change_containment: false,
             will_change_position: false,
+            top_layer: false,
             will_change_stacking_context: false,
             size_containment: LogicalSizeContainment::default(),
             query_container_axes: LogicalSizeContainment::default(),

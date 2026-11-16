@@ -130,34 +130,121 @@ fn is_ascii_whitespace_char(ch: char) -> bool {
 }
 
 fn sanitize_range_value(value: &str, context: InputValueSanitizationContext<'_>) -> String {
-    let minimum = context
-        .min
-        .and_then(parse_valid_range_number)
-        .unwrap_or(0.0);
-    let maximum = context
-        .max
-        .and_then(parse_valid_range_number)
-        .unwrap_or(100.0)
-        .max(minimum);
-    let step_base = context
-        .min
-        .and_then(parse_valid_range_number)
-        .or_else(|| context.value_attribute.and_then(parse_valid_range_number))
-        .unwrap_or(0.0);
-    let step = match context.step {
-        Some(step) if step.eq_ignore_ascii_case("any") => None,
-        Some(step) => Some(
-            parse_valid_range_number(step)
-                .filter(|step| *step > 0.0)
-                .unwrap_or(1.0),
-        ),
-        None => Some(1.0),
-    };
+    let limits = RangeLimits::new(context);
+    serialize_range_number(limits.sanitized_number(value))
+}
 
-    let clamp = |value| clamp_range_value(value, minimum, maximum, step_base, step);
-    let default_value = clamp(minimum / 2.0 + maximum / 2.0);
-    let value = parse_valid_range_number(value).unwrap_or(default_value);
-    serialize_range_number(clamp(value))
+/// A keyboard step on a range control's slider.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RangeKeyboardStep {
+    StepUp,
+    StepDown,
+    PageUp,
+    PageDown,
+    Minimum,
+    Maximum,
+}
+
+impl RangeKeyboardStep {
+    /// Maps a lowercased `KeyboardEvent.key` (including the legacy arrow
+    /// names) for a horizontal left-to-right slider.
+    pub fn from_key(key_lower: &str) -> Option<Self> {
+        match key_lower {
+            "arrowup" | "up" | "arrowright" | "right" => Some(Self::StepUp),
+            "arrowdown" | "down" | "arrowleft" | "left" => Some(Self::StepDown),
+            "pageup" => Some(Self::PageUp),
+            "pagedown" => Some(Self::PageDown),
+            "home" => Some(Self::Minimum),
+            "end" => Some(Self::Maximum),
+            _ => None,
+        }
+    }
+}
+
+/// The value a range control takes after a keyboard step, or `None` when the
+/// step leaves it unchanged. As in Blink's `RangeInputType`, arrows move one
+/// allowed step (a hundredth of the range for `step="any"`), Page keys move
+/// the larger of a tenth of the range and one step, Home and End jump to the
+/// limits, and the result is clamped and aligned like a sanitized value.
+pub fn range_value_after_keyboard_step(
+    value: &str,
+    min: Option<&str>,
+    max: Option<&str>,
+    step: Option<&str>,
+    value_attribute: Option<&str>,
+    keyboard_step: RangeKeyboardStep,
+) -> Option<String> {
+    let limits = RangeLimits::new(InputValueSanitizationContext {
+        min,
+        max,
+        step,
+        value_attribute,
+        ..Default::default()
+    });
+    let current = limits.sanitized_number(value);
+    let span = limits.maximum - limits.minimum;
+    let unit = limits.step.unwrap_or(span / 100.0);
+    let page = (span / 10.0).max(unit);
+    let target = match keyboard_step {
+        RangeKeyboardStep::StepUp => current + unit,
+        RangeKeyboardStep::StepDown => current - unit,
+        RangeKeyboardStep::PageUp => current + page,
+        RangeKeyboardStep::PageDown => current - page,
+        RangeKeyboardStep::Minimum => limits.minimum,
+        RangeKeyboardStep::Maximum => limits.maximum,
+    };
+    let next = limits.clamp(target);
+    (next != current).then(|| serialize_range_number(next))
+}
+
+struct RangeLimits {
+    minimum: f64,
+    maximum: f64,
+    step_base: f64,
+    step: Option<f64>,
+}
+
+impl RangeLimits {
+    fn new(context: InputValueSanitizationContext<'_>) -> Self {
+        let minimum = context
+            .min
+            .and_then(parse_valid_range_number)
+            .unwrap_or(0.0);
+        let maximum = context
+            .max
+            .and_then(parse_valid_range_number)
+            .unwrap_or(100.0)
+            .max(minimum);
+        let step_base = context
+            .min
+            .and_then(parse_valid_range_number)
+            .or_else(|| context.value_attribute.and_then(parse_valid_range_number))
+            .unwrap_or(0.0);
+        let step = match context.step {
+            Some(step) if step.eq_ignore_ascii_case("any") => None,
+            Some(step) => Some(
+                parse_valid_range_number(step)
+                    .filter(|step| *step > 0.0)
+                    .unwrap_or(1.0),
+            ),
+            None => Some(1.0),
+        };
+        Self {
+            minimum,
+            maximum,
+            step_base,
+            step,
+        }
+    }
+
+    fn clamp(&self, value: f64) -> f64 {
+        clamp_range_value(value, self.minimum, self.maximum, self.step_base, self.step)
+    }
+
+    fn sanitized_number(&self, value: &str) -> f64 {
+        let default_value = self.clamp(self.minimum / 2.0 + self.maximum / 2.0);
+        parse_valid_range_number(value).map_or(default_value, |value| self.clamp(value))
+    }
 }
 
 fn parse_valid_range_number(value: &str) -> Option<f64> {
@@ -309,8 +396,9 @@ pub fn url_value_type_mismatch(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        InputValueSanitizationContext, sanitize_input_value_for_type,
-        sanitize_input_value_for_type_with_context, sanitize_input_value_for_type_with_multiple,
+        InputValueSanitizationContext, RangeKeyboardStep, range_value_after_keyboard_step,
+        sanitize_input_value_for_type, sanitize_input_value_for_type_with_context,
+        sanitize_input_value_for_type_with_multiple,
     };
     use moli_html_input_type::InputType;
 
@@ -413,6 +501,31 @@ mod tests {
             "100"
         );
         assert_eq!(sanitize_input_value_for_type(InputType::Range, "-5"), "0");
+    }
+
+    #[test]
+    fn range_keyboard_steps_match_chromium_slider_keys() {
+        // Chromium 156, <input type=range min=0 max=360 value=180>:
+        // ArrowRight 181, Home 0, End 360, PageDown from 360 is 324.
+        let step = |value, key| {
+            range_value_after_keyboard_step(
+                value,
+                Some("0"),
+                Some("360"),
+                Some("1"),
+                None,
+                RangeKeyboardStep::from_key(key).expect("slider key"),
+            )
+        };
+        assert_eq!(step("180", "arrowright").as_deref(), Some("181"));
+        assert_eq!(step("180", "arrowleft").as_deref(), Some("179"));
+        assert_eq!(step("180", "home").as_deref(), Some("0"));
+        assert_eq!(step("180", "end").as_deref(), Some("360"));
+        assert_eq!(step("360", "pagedown").as_deref(), Some("324"));
+        // At a limit the value is unchanged, so no input or change fires.
+        assert_eq!(step("360", "arrowup"), None);
+        assert_eq!(step("0", "home"), None);
+        assert_eq!(RangeKeyboardStep::from_key("enter"), None);
     }
 
     #[test]

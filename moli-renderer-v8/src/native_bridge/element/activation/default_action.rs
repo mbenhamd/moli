@@ -3,7 +3,7 @@ use crate::context_bootstrap::{
     readonly_data_transfer_for_input, selection_value_for_window,
 };
 use crate::dom::{
-    forms::{ButtonTypeState, InputType},
+    forms::{ButtonTypeState, InputType, RangeKeyboardStep, range_value_after_keyboard_step},
     native::{Element, Node, SelectedFile},
 };
 use crate::util::{
@@ -1779,6 +1779,47 @@ pub(crate) fn finish_legacy_activation_for_dispatched_click(
             }
         }
     }
+}
+
+/// Default action for an uncancelled keydown at a range control: arrows,
+/// Page keys, Home and End move the slider, then `input` and `change` fire
+/// when the value changed (Blink `RangeInputType::HandleKeydownEvent`).
+/// Returns whether the control consumed the key, so it does not also scroll.
+pub(crate) fn perform_range_keyboard_default_action(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    handle: DomHandle,
+    key_lower: &str,
+) -> bool {
+    let runtime = unsafe { &*runtime_ptr };
+    let Some(element) = runtime
+        .dom_host()
+        .node(handle)
+        .and_then(Node::as_element)
+        .filter(|element| element.is_html_input() && element.input_type() == InputType::Range)
+    else {
+        return false;
+    };
+    let Some(keyboard_step) = RangeKeyboardStep::from_key(key_lower) else {
+        return false;
+    };
+    if is_disabled_form_control(runtime, handle) {
+        return false;
+    }
+    let Some(next_value) = range_value_after_keyboard_step(
+        &element.input_value(),
+        element.attribute("min"),
+        element.attribute("max"),
+        element.attribute("step"),
+        element.attribute("value"),
+        keyboard_step,
+    ) else {
+        return true;
+    };
+    if unsafe { &mut *runtime_ptr }.set_input_value_from_user_edit(handle, &next_value) {
+        dispatch_input_and_change_events(scope, runtime_ptr, handle);
+    }
+    true
 }
 
 fn dispatch_input_and_change_events(
