@@ -2600,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "moli"
-version = "1.1.24"
+version = "1.1.25"
 dependencies = [
  "anyhow",
  "axum",
@@ -2965,6 +2965,7 @@ name = "moli-fetch-types"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "strum",
  "url",
 ]
 
@@ -3236,7 +3237,7 @@ dependencies = [
  "html5ever 0.40.1",
  "markup5ever 0.40.0",
  "moli-dom",
- "moli-fetch",
+ "moli-fetch-types",
  "moli-page-types",
  "moli-script",
  "moli-stylesheet-blocking",
@@ -3274,6 +3275,7 @@ dependencies = [
  "moli-css-parse",
  "moli-encoding",
  "moli-fetch",
+ "moli-file-api",
  "moli-header-field",
  "moli-image",
  "moli-indexeddb",
@@ -5762,7 +5764,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "svgtypes"
 version = "0.16.1"
-source = "git+https://github.com/lexmount/svgtypes?branch=moli#e96c74ca675d56b65de71b4ce2b2d87f927bf79c"
+source = "git+https://github.com/lexmount/svgtypes?rev=520374d714d69f8e2dc93c81a9d6be559ecde3ff#520374d714d69f8e2dc93c81a9d6be559ecde3ff"
 dependencies = [
  "color",
  "kurbo",
@@ -6407,7 +6409,7 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 [[package]]
 name = "usvg"
 version = "0.48.1"
-source = "git+https://github.com/lexmount/resvg?rev=614aaf4d21ca03a4773f1e4d07c6a404407589a2#614aaf4d21ca03a4773f1e4d07c6a404407589a2"
+source = "git+https://github.com/lexmount/resvg?rev=a137793a5749c27862b724eef60c4734526b14a0#a137793a5749c27862b724eef60c4734526b14a0"
 dependencies = [
  "base64 0.23.1",
  "data-url",

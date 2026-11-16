@@ -37,6 +37,13 @@ fn image_is_small_for_priority_boost(element: &crate::dom::native::Element) -> b
 // the host document state accessors, current-script/parser visibility
 // bookkeeping, and pending resource-load delivery that feed DCL/load decisions.
 impl DocumentRuntime {
+    pub(crate) fn bind_stylesheet_interception_context(
+        &mut self,
+        context: Option<crate::network::interception_output::ResourceInterceptionContext>,
+    ) {
+        self.stylesheet_lifecycle.interception_context = context;
+    }
+
     pub(crate) fn retire_v8_execution_state_for_context_teardown(&mut self) {
         self.timeouts = HostTimeoutScheduler::default();
         self.events = HostEventTargetRegistry::default();
@@ -150,6 +157,7 @@ impl DocumentRuntime {
             authority,
             self.stylesheet_service_worker_fetch_context(),
         )
+        .with_interception(self.stylesheet_lifecycle.interception_context.clone(), None)
     }
 
     pub(super) fn stylesheet_fetcher_for_owner(
@@ -157,8 +165,20 @@ impl DocumentRuntime {
         owner: DomHandle,
         host_ptr: *mut PageScriptHost,
     ) -> crate::stylesheet_blocking::RendererStylesheetFetcher {
+        let request_initiator_type = if self
+            .dom_host
+            .node(owner)
+            .and_then(Node::as_element)
+            .is_some_and(|element| element.link_created_by_parser())
+        {
+            crate::types::SubresourceRequestInitiatorType::Parser
+        } else {
+            crate::types::SubresourceRequestInitiatorType::Script
+        };
         if host_ptr.is_null() {
-            return self.stylesheet_fetcher();
+            return self
+                .stylesheet_fetcher()
+                .with_request_initiator_type(request_initiator_type);
         }
         let host = unsafe { &*host_ptr };
         let scope = host
@@ -169,7 +189,7 @@ impl DocumentRuntime {
             .expect("stylesheet owner must retain its Document authority");
         let client_id = host.service_worker_client_id_for_subresource_owner(scope);
         crate::stylesheet_blocking::RendererStylesheetFetcher::new(
-            loader,
+            loader.clone(),
             Some(
                 crate::stylesheet_blocking::ServiceWorkerStylesheetFetchContext {
                     browser_context_runtime: host.browser_context_runtime(),
@@ -177,6 +197,12 @@ impl DocumentRuntime {
                 },
             ),
         )
+        .with_interception(
+            self.stylesheet_lifecycle.interception_context.clone(),
+            host.subresource_request_environment(&loader, scope)
+                .and_then(|environment| environment.frame_id),
+        )
+        .with_request_initiator_type(request_initiator_type)
     }
 
     pub(super) fn speculative_stylesheet_fetcher(
@@ -193,6 +219,7 @@ impl DocumentRuntime {
             request_resource_type,
             link_preload,
         )
+        .with_interception(self.stylesheet_lifecycle.interception_context.clone(), None)
     }
 
     fn stylesheet_service_worker_fetch_context(

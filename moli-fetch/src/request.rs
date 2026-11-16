@@ -9,7 +9,8 @@ use moli_url::{WebOrigin, same_origin};
 use url::Url;
 
 use crate::{
-    FetchConfig, FetchUrlList, RedirectInfo, network_fetch_result::NetworkObservationRecorder,
+    FetchConfig, FetchPriorityHint, FetchUrlList, RedirectInfo,
+    network_fetch_result::NetworkObservationRecorder,
 };
 
 /// Plain HTTP exchanges and browser Fetch requests have different security
@@ -52,6 +53,12 @@ pub struct Request {
     /// Wire bytes, with the source encoding resolved before header merging.
     pub request_headers: crate::RequestHeaders,
     redirect_headers: Option<crate::RequestHeaders>,
+    /// DevTools may explicitly authorize a redirected hop, without authorizing
+    /// a later destination reached by the transport itself.
+    interception_authorization_url: Option<Url>,
+    /// Body header values removed by method rewriting. Replaying these values
+    /// does not restore an upload; a new value remains an explicit override.
+    removed_redirect_headers: crate::RequestHeaders,
     additional_cookies: Option<String>,
     cookie_header_policy: CookieHeaderPolicy,
     cache_mode: RequestCacheMode,
@@ -160,10 +167,15 @@ pub struct RequestOverrides {
 
 impl RequestOverrides {
     pub fn apply(self, request: &mut Request) {
+        let follows_redirect = request.redirect_count() != 0 && self.url.is_none();
         if let Some(url) = self.url {
             request.url = url;
+            request.removed_redirect_headers = Default::default();
         }
         if let Some(method) = self.method {
+            if !method.eq_ignore_ascii_case(&request.method) {
+                request.removed_redirect_headers = Default::default();
+            }
             request.method = method;
             request.cookie_context.set_request_method(&request.method);
         }
@@ -172,6 +184,9 @@ impl RequestOverrides {
             .clone()
             .recompute_site_context_for_request(&request.url);
         if let Some(body) = self.body {
+            if body.as_ref().is_some_and(|bytes| !bytes.is_empty()) {
+                request.removed_redirect_headers = Default::default();
+            }
             let text = body
                 .as_ref()
                 .map(|bytes| std::sync::Arc::from(String::from_utf8_lossy(bytes).as_ref()));
@@ -180,19 +195,47 @@ impl RequestOverrides {
         if let Some(headers) = self.headers {
             match headers {
                 RequestHeaderOverride::CurrentRequest {
-                    headers,
+                    mut headers,
                     redirect_headers,
                 } => {
+                    request
+                        .removed_redirect_headers
+                        .retain(|(old_name, old_value)| {
+                            headers.iter().any(|(name, value)| {
+                                name.eq_ignore_ascii_case(old_name) && value == old_value
+                            })
+                        });
+                    headers.retain(|(name, value)| {
+                        !request
+                            .removed_redirect_headers
+                            .iter()
+                            .any(|(old_name, old_value)| {
+                                name.eq_ignore_ascii_case(old_name) && value == old_value
+                            })
+                    });
+                    // Chromium's redirect continuation keeps Origin under the
+                    // browser CORS algorithm, including tainted-origin changes.
+                    if follows_redirect && request.request_origin().is_some() {
+                        headers.retain(|(name, _)| !name.eq_ignore_ascii_case("origin"));
+                    }
+                    request.interception_authorization_url = headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                        .then(|| request.url.clone());
                     request.set_redirect_headers(Some(
                         redirect_headers.unwrap_or_else(|| request.request_headers.clone()),
                     ));
                     request.request_headers = headers;
                 }
                 RequestHeaderOverride::RedirectChain(headers) => {
+                    request.removed_redirect_headers = Default::default();
+                    request.interception_authorization_url = None;
                     request.set_redirect_headers(None);
                     request.request_headers = headers;
                 }
             }
+        } else {
+            request.removed_redirect_headers = Default::default();
         }
     }
 }
@@ -306,44 +349,6 @@ impl RequestCacheMode {
 
     pub fn allows_stale_http_cache_response(self) -> bool {
         matches!(self, Self::ForceCache | Self::OnlyIfCached)
-    }
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    Hash,
-    strum::AsRefStr,
-    strum::EnumString,
-    strum::IntoStaticStr,
-)]
-#[strum(serialize_all = "kebab-case")]
-pub enum FetchPriorityHint {
-    Low,
-    #[default]
-    Auto,
-    High,
-}
-
-impl FetchPriorityHint {
-    pub fn from_attribute(value: Option<&str>) -> Option<Self> {
-        // HTML `fetchpriority` attributes are ASCII case-insensitive, while
-        // RequestInit.priority uses the strum-derived, case-sensitive WebIDL
-        // enum parser below.
-        let value = value?.trim();
-        if value.eq_ignore_ascii_case("low") {
-            Some(Self::Low)
-        } else if value.eq_ignore_ascii_case("auto") {
-            Some(Self::Auto)
-        } else if value.eq_ignore_ascii_case("high") {
-            Some(Self::High)
-        } else {
-            None
-        }
     }
 }
 
@@ -648,6 +653,8 @@ impl Request {
             body_text: None,
             request_headers: crate::RequestHeaders::default(),
             redirect_headers: None,
+            interception_authorization_url: None,
+            removed_redirect_headers: Default::default(),
             additional_cookies: None,
             cookie_header_policy: CookieHeaderPolicy::default(),
             cache_mode: RequestCacheMode::Default,
@@ -685,6 +692,8 @@ impl Request {
             body_text: None,
             request_headers: crate::RequestHeaders::default(),
             redirect_headers: None,
+            interception_authorization_url: None,
+            removed_redirect_headers: Default::default(),
             additional_cookies: None,
             cookie_header_policy: CookieHeaderPolicy::default(),
             cache_mode: RequestCacheMode::Default,
@@ -755,6 +764,8 @@ impl Request {
             body_text: None,
             request_headers: request_headers.into(),
             redirect_headers: None,
+            interception_authorization_url: None,
+            removed_redirect_headers: Default::default(),
             additional_cookies: None,
             cookie_header_policy: CookieHeaderPolicy::default(),
             cache_mode: RequestCacheMode::Default,
@@ -953,7 +964,9 @@ impl Request {
     /// browser-selected Accept, Origin and Referer, as Chromium reports them.
     ///
     /// Clients depend on these: Playwright's `route.fulfill` adds the CORS
-    /// response headers only when the paused request carries `Origin`.
+    /// response headers only when the paused request carries `Origin`. The
+    /// generated fields are visible to interception, but are not promoted into
+    /// the author header list retained across redirects.
     pub fn interception_request_headers(&self) -> crate::RequestHeaders {
         let mut headers = self.request_headers.clone();
         let present = |headers: &crate::RequestHeaders, name: &str| {
@@ -970,7 +983,7 @@ impl Request {
             ));
         }
         if !present(&headers, "origin")
-            && let Some(origin) = crate::blocking::request_origin_header_value(self, &self.url)
+            && let Some(origin) = self.origin_header_value(&self.url)
         {
             headers.push(("Origin".to_owned(), origin.into_bytes()));
         }
@@ -1173,6 +1186,27 @@ impl Request {
         self
     }
 
+    pub(crate) fn origin_header_value(&self, request_url: &Url) -> Option<String> {
+        self.request_origin()?;
+        if !matches!(request_url.scheme(), "http" | "https") {
+            return None;
+        }
+        let safe_method =
+            self.method.eq_ignore_ascii_case("GET") || self.method.eq_ignore_ascii_case("HEAD");
+        if safe_method
+            && (self.request_mode != RequestMode::Cors || !self.has_cross_origin_url(request_url))
+        {
+            return None;
+        }
+        Some(self.serialized_origin())
+    }
+
+    pub(crate) fn allows_interception_authorization_for_url(&self, url: &Url) -> bool {
+        self.interception_authorization_url
+            .as_ref()
+            .is_some_and(|source| same_origin(source, url))
+    }
+
     pub fn request_origin(&self) -> Option<&WebOrigin> {
         match &self.context {
             RequestContext::Http => None,
@@ -1189,10 +1223,27 @@ impl Request {
 
     /// Restore request-scoped interception headers before applying redirect rules.
     pub fn apply_redirect_status(&mut self, status: u16) {
+        self.interception_authorization_url = None;
+        let rewrites_method = redirect_status_rewrites_to_get(status, &self.method);
+        if rewrites_method {
+            self.removed_redirect_headers = self.request_headers.clone();
+            self.removed_redirect_headers
+                .retain(|(name, _)| is_request_body_header_name(name));
+            if !self
+                .removed_redirect_headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            {
+                // Content-Length can be synthesized only at transport dispatch.
+                let length = self.body.as_ref().map_or(0, bytes::Bytes::len);
+                self.removed_redirect_headers
+                    .push(("Content-Length".to_owned(), length.to_string().into_bytes()));
+            }
+        }
         if let Some(headers) = self.redirect_headers.take() {
             self.request_headers = headers;
         }
-        if redirect_status_rewrites_to_get(status, &self.method) {
+        if rewrites_method {
             self.method = "GET".to_owned();
             self.body = None;
             self.body_text = None;

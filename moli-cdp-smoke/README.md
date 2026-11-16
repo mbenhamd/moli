@@ -50,6 +50,18 @@ XHR retains its original raw-byte capture for Network consumers while the
 Window/Worker JS boundary materializes a response. Memory-allocation identity,
 disk extent lifetime, non-UTF-8 bytes and release are checked by Rust regressions.
 
+The default `fetch-headers` group compares fetch, asynchronous XHR and synchronous
+XHR using real redirect and echo endpoints. It checks replayed upload headers,
+no-op method/body edits, fresh Content-Type values, generated Origin visibility,
+and Authorization scoped to one redirect origin. Explicit URL overrides restart
+header application even when the URL is unchanged, matching Chromium; the GET
+still has no upload body or stale Content-Length. Each request must retain its
+Network identity and emit exactly one terminal event.
+CI runs this group against the pinned Chrome for Testing 156.0.8078.73 oracle,
+also used by `dom-input`. For local Chromium runs, select it with
+`--chromium-bin-for-group fetch-headers=/path/to/chrome`. Chromium 145 differs
+when an intervening override lets a later hop explicitly reintroduce Origin.
+
 The default `fetch-media` group drives real audio, video and text-track element
 loads. Eleven scenarios cover single Media filters, mixed Image/Media/Font
 patterns, continue/fulfill/fail/disable and response-stage body reading. Valid
@@ -176,6 +188,14 @@ readers. A watchdog independently prints
 Python thread stacks before the worker deadline, including when the event loop
 is blocked. The deadline and failure status do not change.
 
+Managed Chromium startup discovers its endpoint from the listening log or the
+fresh profile's `DevToolsActivePort` file. Both sources require a responding
+`/json/version` and matching browser identity before attachment. Discovery keeps
+its ten-second deadline. Incomplete port-file publication is awaited; malformed
+complete files fail. Chromium logging is explicitly sent to stderr. Startup
+failures retain process status, thread wait channels, descendants, and the port
+file in `browserLaunches[].startupFailure`, before cleanup removes the profile.
+
 CPU traces are saved in full before validation, for both successful and failed
 workloads. Profile IDs are scoped by process; an expected hot function must be
 on an actually sampled stack, not merely declared in the profile's node table.
@@ -237,10 +257,24 @@ or identical scenario counts:
 | Locale/timezone across contexts | Shared process defaults and exclusive claims | Independent renderer defaults and claims |
 | Fetch body streams | Buffered seeking and explicit rejection of continuation after body take | Sequential reads; EOF may require a separate empty read |
 | Fetch.disable with paused subresources | Terminates pending Font and Image loads | Resumes pending Font and Image loads |
-| WebSocket events and URL blocking | Extra generic request events, payload lengths, and WebSocket URL blocking | Dedicated WebSocket events and payload data; URL blocking excludes WebSockets |
+| WebSocket events and URL blocking | Dedicated WebSocket events with payload lengths and WebSocket URL blocking | Dedicated WebSocket events and payload data; URL blocking excludes WebSockets |
 | Hosted file URLs | Capability error before navigation/interception | File navigation and interception; missing file returns `ERR_FILE_NOT_FOUND` |
 | Other capability boundaries | Stack timing privacy, unsupported CPU throttling, PI rename extension | Observed stack timing, successful throttling, rejected PI rename |
 | Response/manifest/idle details | Plaintext TextTrack bodies, document-relative data manifest URLs, same-site idle persistence | Base64 TextTrack bodies, data manifest URL fallbacks, cross-document idle reset |
+
+The `core` and `network` WebSocket event-family checks were recalibrated on
+2026-11-15 against the locked Playwright Chromium 145.0.7632.6. Both engines
+publish WebSockets through `Network.webSocket*`, without ordinary HTTP
+request/response/loading events. Moli retains its URL-blocking policy: a blocked
+socket emits created, handshake-request, frame-error and closed events with
+`net::ERR_BLOCKED_BY_CLIENT`. Chromium allows the same handshake and reports 101.
+The minimal local probe repeated allowed and blocked sockets three times per
+engine. Run the complete affected scenarios with:
+
+```bash
+MOLI_BIN=/path/to/moli uv run --project moli-cdp-smoke --no-sync moli-cdp-smoke --browser moli --group core --group network --repeat 2 --jobs 2
+uv run --project moli-cdp-smoke --no-sync moli-cdp-smoke --browser chromium --group core --group network --repeat 2 --jobs 2
+```
 
 The `dom-input` text-editing checks were calibrated on 2026-09-12 against
 Debian `/usr/bin/chromium` 145.0.7632.116 under xvfb and run unchanged against
@@ -702,6 +736,19 @@ headed Debian Chromium 145.0.7632.116 through CDP. It checks the full trusted
 typing, cancellation at keypress, the distinct `rawKeyDown` and `char` paths,
 and the absence of keyboard events for `Input.insertText`.
 
+The `text-input` legacy `TextEvent` contract was recalibrated on 2026-11-14
+against Playwright's Chromium 145.0.7632.6 and Chrome for Testing 156.0.8078.73.
+Both crash when `Input.insertText` synchronously removes its iframe from a
+`textInput` listener, including a listener that cancels the event. That path
+cannot supply a shared native event/result expectation. The shared matrix
+instead verifies keyboard frame removal during `textInput`, IME frame removal
+during `beforeinput`, and IME node removal during `textInput` inside a frame.
+It requires the exact native event, an empty value, and no post-invalidation
+`input`; removal during `beforeinput` must produce only that native event.
+Moli's stronger uncanceled IME frame-removal protection during `textInput`
+remains in `cdp_text_input_revalidates_targets_after_legacy_listeners` in
+`moli-protocol/src/domains/input/tests/text_input_events.rs`.
+
 The modifier regression for [#2864](https://github.com/lexmount/moli/issues/2864)
 was calibrated against headless Chrome 156.0.8078.73, including the reported
 Playwright 1.65 client. It covers input, textarea, and contenteditable controls:
@@ -732,6 +779,13 @@ SVG capability detection, sharing the renderer fixture for prototype, identity,
 and restricted-float conversion contracts. It was calibrated on 2026-09-07
 against Debian `/usr/bin/chromium` 145.0.7632.116 and runs independently of
 IndexedDB startup coverage.
+
+Its inline-SVG viewport cases also share a renderer fixture and compare both
+geometry and pixels. Negative intrinsic lengths must not trigger a 300x150
+fallback; author CSS, including percentages and min/max sizes, and a valid
+viewBox still control the used viewport. Negative percentage attributes retain
+their separate fallback.
+These cases were calibrated against Chromium 145.0.7632.6 on 2026-11-15.
 
 The default `target-lifecycle` process group locks down Moli's resource lifetime,
 not a Chromium-specific FD count. In one server it closes 800 default-context
