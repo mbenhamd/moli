@@ -2819,24 +2819,17 @@ impl ScriptVm {
                     .map(|index| (index + delta) % radios.len())
                     .unwrap_or(0);
                 let next_handle = radios[next_index];
-                let already_checked = runtime
-                    .dom_host()
-                    .node(next_handle)
-                    .and_then(Node::as_element)
-                    .is_some_and(|element| element.checked());
-                if !already_checked {
-                    let _ = runtime.set_checked_state(scope, runtime_ptr, next_handle, true);
-                    if let Some(event) = construct_simple_event(scope, "input", true, false, false)
-                    {
-                        let _ = dispatch_public_event(scope, runtime_ptr, next_handle, event);
-                    }
-                    if let Some(event) = construct_simple_event(scope, "change", true, false, false)
-                    {
-                        let _ = dispatch_public_event(scope, runtime_ptr, next_handle, event);
-                    }
-                }
+                // Blink `RadioInputType::HandleKeydownEvent`: focus moves to
+                // the next radio first, then a simulated (trusted) click
+                // checks it, so its click, input and change events fire
+                // after focus, as frameworks that listen for click expect.
                 update_focus(scope, runtime_ptr, Some(next_handle));
-                return Ok(input_dispatch_outcome(true));
+                return Ok(activate_handle_via_keyboard(
+                    scope,
+                    runtime_ptr,
+                    next_handle,
+                    modifiers,
+                ));
             }
 
             if target.is_select

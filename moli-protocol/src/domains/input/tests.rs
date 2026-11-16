@@ -3936,7 +3936,7 @@ async fn dispatch_key_event_arrowdown_advances_radio_group() {
                   ['keydown'].forEach((type) => {
                     one.addEventListener(type, () => window.__radioArrowEvents.push(type + ':one'));
                   });
-                  ['input', 'change'].forEach((type) => {
+                  ['focus', 'click', 'input', 'change'].forEach((type) => {
                     two.addEventListener(type, () => window.__radioArrowEvents.push(type + ':two'));
                   });
                 </script>
@@ -3967,7 +3967,47 @@ async fn dispatch_key_event_arrowdown_advances_radio_group() {
     );
     assert_eq!(
         evaluate_string(&mut ctx, "JSON.stringify(window.__radioArrowEvents)").await,
-        r#"["keydown:one","input:two","change:two"]"#
+        // Chromium 156: focus moves first, then a simulated click checks
+        // the radio and fires input and change.
+        r#"["keydown:one","focus:two","click:two","input:two","change:two"]"#
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dispatch_key_event_arrowdown_cycles_the_radio_group_in_its_own_tree() {
+    let mut ctx = TestContext::new();
+    with_loaded_document(
+        &mut ctx,
+        r#"<html><body>
+                <input id='outer' type='radio' name='group'>
+                <div id='host'></div>
+                <script>
+                  const root = document.getElementById('host').attachShadow({ mode: 'open' });
+                  root.innerHTML = "<input id='one' type='radio' name='group' checked>"
+                    + "<input id='two' type='radio' name='group'>";
+                  root.getElementById('one').focus();
+                </script>
+               </body></html>"#,
+    )
+    .await;
+
+    ctx.process_async(json!({
+        "id": 38,
+        "method": "Input.dispatchKeyEvent",
+        "params": { "type": "keyDown", "key": "ArrowDown", "code": "ArrowDown" }
+    }))
+    .await;
+    ctx.expect_result(38, json!({}), None);
+
+    // Chromium 156: the group is the shadow tree's radios, not the document's.
+    assert_eq!(
+        evaluate_string(
+            &mut ctx,
+            "const r = host.shadowRoot; JSON.stringify([r.activeElement && r.activeElement.id, \
+             r.getElementById('two').checked, outer.checked])"
+        )
+        .await,
+        r#"["two",true,false]"#
     );
 }
 
