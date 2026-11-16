@@ -735,6 +735,40 @@ async fn request_animation_frame_callbacks_share_one_timestamp_per_batch() {
 }
 
 #[tokio::test]
+async fn request_animation_frame_starts_an_idle_frame_without_waiting_an_interval() {
+    // Chromium 156: a frame requested after more than one frame interval of
+    // idleness begins at once (0-4 ms), while the next frame keeps the cadence.
+    let mut vm = new_storage_test_vm("https://example.com/");
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    vm.eval(
+        r#"
+        globalThis.__frameDelays = [];
+        const requested = performance.now();
+        requestAnimationFrame(timestamp => {
+            __frameDelays.push(timestamp - requested);
+            requestAnimationFrame(next => __frameDelays.push(next - timestamp));
+        });
+        "scheduled";
+        "#,
+    )
+    .expect("animation frame setup");
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("animation frame callbacks");
+    let delays = vm
+        .eval("JSON.stringify(__frameDelays)")
+        .expect("animation frame delays");
+    assert_eq!(
+        vm.eval(
+            "JSON.stringify([__frameDelays.length, __frameDelays[0] < 8, __frameDelays[1] >= 16])"
+        )
+        .expect("animation frame delay checks"),
+        "[2,true,true]",
+        "frame delays {delays}"
+    );
+}
+
+#[tokio::test]
 async fn request_animation_frame_reports_exceptions_to_the_callback_realm() {
     let mut vm = new_storage_test_vm("https://example.com/");
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");

@@ -301,6 +301,41 @@ fn tab_key_skips_visibility_hidden_and_display_none_controls() {
 }
 
 #[test]
+fn programmatic_focus_requires_a_rendered_visible_box() {
+    // Chromium 156: focus() leaves activeElement unchanged for each of these
+    // unrendered or invisible controls, and focuses one once it is shown.
+    let mut vm = new_parsed_test_vm(
+        "https://focus-unrendered-controls.test/",
+        r#"<html><body>
+            <div id="rail" style="display:none"><button id="none">none</button></div>
+            <button id="hidden" style="visibility:hidden">hidden</button>
+            <details><summary>s</summary><button id="details">details</button></details>
+            <div style="display:block;content-visibility:hidden"><button id="locked">locked</button></div>
+        </body></html>"#,
+    );
+    let result = vm
+        .eval(
+            r#"(() => {
+                const tried = ['none', 'hidden', 'details', 'locked'].map((id) => {
+                    const control = document.getElementById(id);
+                    control.focus();
+                    return id + '=' + (document.activeElement === control);
+                });
+                document.getElementById('rail').style.display = 'block';
+                const none = document.getElementById('none');
+                none.focus();
+                tried.push('shown=' + (document.activeElement === none));
+                return tried.join(',');
+            })()"#,
+        )
+        .unwrap();
+    assert_eq!(
+        result,
+        "none=false,hidden=false,details=false,locked=false,shown=true"
+    );
+}
+
+#[test]
 fn tab_key_does_not_enter_inert_hidden_or_closed_details_frames() {
     let mut vm = new_parsed_test_vm(
         "https://tab-unfocusable-frames.test/",
