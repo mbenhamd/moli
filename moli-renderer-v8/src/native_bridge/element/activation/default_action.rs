@@ -614,6 +614,291 @@ pub(crate) fn select_contenteditable_contents(
     call_object_method(scope, selection, "addRange", &[range.into()]).is_some()
 }
 
+/// Home/End default action in a contenteditable host. Moli has no line-box
+/// caret model here, so a line is the run of inline content around the caret
+/// inside its nearest block, bounded by `<br>`, block-level boxes and
+/// preserved newlines. The caret collapses to (or, with Shift, extends to)
+/// that line's first or last position, as Chromium does for an unwrapped line.
+pub(crate) fn move_contenteditable_caret_to_line_boundary(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    handle: DomHandle,
+    to_end: bool,
+    extend: bool,
+) -> bool {
+    if let Some(context) =
+        crate::native_bridge::node_owner_document_relevant_context(scope, runtime_ptr, handle)
+        && context != scope.get_current_context()
+    {
+        let scope = &mut v8::ContextScope::new(scope, context);
+        return move_contenteditable_caret_to_line_boundary(
+            scope,
+            runtime_ptr,
+            handle,
+            to_end,
+            extend,
+        );
+    }
+    let Some(selection) = window_selection(scope) else {
+        return false;
+    };
+    let runtime = unsafe { &*runtime_ptr };
+    let Some(focus) = selection
+        .get(scope, v8str(scope, "focusNode").into())
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+        .and_then(|node| {
+            crate::native_bridge::node_runtime_and_handle_from_object(scope, node).ok()
+        })
+        .map(|(_, focus)| focus)
+        .filter(|focus| node_is_inclusive_descendant(runtime, *focus, handle))
+    else {
+        return false;
+    };
+    let focus_offset = object_number_property(scope, selection, "focusOffset")
+        .filter(|offset| offset.is_finite() && *offset >= 0.0)
+        .map_or(0, |offset| offset as usize);
+    let Some((node, offset)) = caret_line_boundary(runtime, handle, focus, focus_offset, to_end)
+    else {
+        return false;
+    };
+    let Some(node) = node_wrapper_from_handle(scope, node) else {
+        return false;
+    };
+    let offset = u32::try_from(offset).unwrap_or(u32::MAX);
+    if extend {
+        let offset = v8::Integer::new_from_unsigned(scope, offset);
+        return call_object_method(scope, selection, "extend", &[node.into(), offset.into()])
+            .is_some();
+    }
+    collapse_selection_to(scope, selection, node, offset);
+    true
+}
+
+fn node_is_inclusive_descendant(
+    runtime: &PageScriptHost,
+    node: DomHandle,
+    ancestor: DomHandle,
+) -> bool {
+    let dom = runtime.dom_host().dom();
+    let mut current = Some(node);
+    while let Some(candidate) = current {
+        if candidate == ancestor {
+            return true;
+        }
+        current = dom.parent_node(candidate);
+    }
+    false
+}
+
+/// One piece of a block's inline content, in document order.
+#[derive(Clone, Copy, PartialEq)]
+enum LineItem {
+    Text(DomHandle),
+    /// A `<br>` or a block-level box: either ends the line.
+    Break,
+    /// An atomic inline box such as an image or inline-block.
+    Atom(DomHandle),
+    /// The caret when it sits between children of an element.
+    Caret,
+}
+
+/// The first or last position of the caret's line.
+fn caret_line_boundary(
+    runtime: &PageScriptHost,
+    host: DomHandle,
+    focus: DomHandle,
+    focus_offset: usize,
+    to_end: bool,
+) -> Option<(DomHandle, usize)> {
+    let dom = runtime.dom_host().dom();
+    let root = line_block_container(runtime, focus, host);
+    let mut items = Vec::new();
+    let children = dom.child_nodes(root).unwrap_or_default();
+    for (index, child) in children.iter().enumerate() {
+        if focus == root && index == focus_offset {
+            items.push(LineItem::Caret);
+        }
+        flatten_line_items(runtime, *child, focus, focus_offset, &mut items);
+    }
+    if focus == root && focus_offset >= children.len() {
+        items.push(LineItem::Caret);
+    }
+    let caret_text = dom
+        .node(focus)
+        .and_then(Node::as_text)
+        .map(|text| utf16_units(text.data()));
+    let (index, mut candidate) = match &caret_text {
+        Some(units) => {
+            let focus_offset = focus_offset.min(units.len());
+            if text_preserves_newlines(runtime, focus) {
+                let newline = u16::from(b'\n');
+                let within = if to_end {
+                    units[focus_offset..]
+                        .iter()
+                        .position(|unit| *unit == newline)
+                        .map(|index| focus_offset + index)
+                } else {
+                    units[..focus_offset]
+                        .iter()
+                        .rposition(|unit| *unit == newline)
+                        .map(|index| index + 1)
+                };
+                if let Some(offset) = within {
+                    return Some((focus, offset));
+                }
+            }
+            let index = items
+                .iter()
+                .position(|item| *item == LineItem::Text(focus))?;
+            (index, (focus, if to_end { units.len() } else { 0 }))
+        }
+        None => (
+            items.iter().position(|item| *item == LineItem::Caret)?,
+            (focus, focus_offset),
+        ),
+    };
+    let mut visit = |item: LineItem| -> Option<Option<(DomHandle, usize)>> {
+        match item {
+            LineItem::Break => Some(Some(candidate)),
+            LineItem::Caret => None,
+            LineItem::Atom(atom) => {
+                let parent = dom.parent_node(atom)?;
+                let index = dom.child_nodes(parent)?.iter().position(|c| *c == atom)?;
+                candidate = (parent, if to_end { index + 1 } else { index });
+                None
+            }
+            LineItem::Text(text) => {
+                let units = utf16_units(dom.node(text)?.as_text()?.data());
+                if text_preserves_newlines(runtime, text) {
+                    let newline = u16::from(b'\n');
+                    let found = if to_end {
+                        units.iter().position(|unit| *unit == newline)
+                    } else {
+                        units
+                            .iter()
+                            .rposition(|unit| *unit == newline)
+                            .map(|i| i + 1)
+                    };
+                    if let Some(offset) = found {
+                        return Some(Some((text, offset)));
+                    }
+                }
+                candidate = (text, if to_end { units.len() } else { 0 });
+                None
+            }
+        }
+    };
+    let found = if to_end {
+        items[index + 1..].iter().find_map(|item| visit(*item))
+    } else {
+        items[..index].iter().rev().find_map(|item| visit(*item))
+    };
+    Some(found.flatten().unwrap_or(candidate))
+}
+
+/// Append `node`'s inline content to `items`, without entering block-level or
+/// atomic boxes, and mark the caret when it sits between element children.
+fn flatten_line_items(
+    runtime: &PageScriptHost,
+    node: DomHandle,
+    focus: DomHandle,
+    focus_offset: usize,
+    items: &mut Vec<LineItem>,
+) {
+    let dom = runtime.dom_host().dom();
+    let Some(entry) = dom.node(node) else {
+        return;
+    };
+    if entry.as_text().is_some() {
+        items.push(LineItem::Text(node));
+        return;
+    }
+    if entry.as_element().is_none() {
+        return;
+    }
+    if runtime.dom_host().is_html_element_named(node, "br") {
+        items.push(LineItem::Break);
+        return;
+    }
+    let display = super::super::style_property_value(
+        runtime,
+        node,
+        super::super::StyleMode::Computed,
+        "display",
+    );
+    match display.as_str() {
+        "none" => return,
+        "inline" | "contents" => {}
+        display if display.starts_with("inline") => {
+            items.push(LineItem::Atom(node));
+            return;
+        }
+        _ => {
+            items.push(LineItem::Break);
+            return;
+        }
+    }
+    let children = dom.child_nodes(node).unwrap_or_default();
+    if children.is_empty() && node != focus {
+        items.push(LineItem::Atom(node));
+        return;
+    }
+    for (index, child) in children.iter().enumerate() {
+        if node == focus && index == focus_offset {
+            items.push(LineItem::Caret);
+        }
+        flatten_line_items(runtime, *child, focus, focus_offset, items);
+    }
+    if node == focus && focus_offset >= children.len() {
+        items.push(LineItem::Caret);
+    }
+}
+
+/// Whether a Text node's newlines render as line breaks.
+fn text_preserves_newlines(runtime: &PageScriptHost, text: DomHandle) -> bool {
+    runtime
+        .dom_host()
+        .dom()
+        .parent_node(text)
+        .is_some_and(|parent| {
+            matches!(
+                super::super::style_property_value(
+                    runtime,
+                    parent,
+                    super::super::StyleMode::Computed,
+                    "white-space-collapse",
+                )
+                .as_str(),
+                "preserve" | "preserve-breaks" | "break-spaces"
+            )
+        })
+}
+
+/// The focus's nearest element inside the editing host that is not an
+/// inline box, whose contents therefore form their own lines.
+fn line_block_container(runtime: &PageScriptHost, focus: DomHandle, host: DomHandle) -> DomHandle {
+    let dom = runtime.dom_host().dom();
+    let mut current = Some(focus);
+    while let Some(candidate) = current {
+        if candidate == host {
+            break;
+        }
+        if dom.node(candidate).and_then(Node::as_element).is_some() {
+            let display = super::super::style_property_value(
+                runtime,
+                candidate,
+                super::super::StyleMode::Computed,
+                "display",
+            );
+            if display != "inline" && display != "contents" {
+                return candidate;
+            }
+        }
+        current = dom.parent_node(candidate);
+    }
+    host
+}
+
 fn perform_contenteditable_drop_default_action<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     runtime_ptr: *mut PageScriptHost,

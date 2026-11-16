@@ -646,6 +646,39 @@ impl PageScriptHost {
                 Some((frame, viewport))
             })
             .collect::<Vec<_>>();
+        // A parent layout that resizes an already laid-out frame resizes that
+        // child Document's viewport; its resize steps run at the next
+        // rendering update, as when the top-level viewport changes.
+        let frame_resizes = frame_viewports
+            .iter()
+            .filter_map(|(frame, viewport)| {
+                let viewport = (*viewport)?;
+                let previous = self
+                    .document_layout_state
+                    .try_borrow()
+                    .ok()?
+                    .previous_frame_viewport(*frame)?;
+                // The baseline only applies to the Document it was laid out for.
+                let document = *self.child_browsing_context_document_handles.get(frame)?;
+                if self.frame_viewport_documents.borrow().get(frame) != Some(&document) {
+                    return None;
+                }
+                ((previous.css_width, previous.css_height)
+                    != (viewport.css_width, viewport.css_height))
+                    .then_some((*frame, document, previous))
+            })
+            .collect::<Vec<_>>();
+        {
+            let mut documents = self.frame_viewport_documents.borrow_mut();
+            documents.retain(|frame, _| self.child_browsing_context_is_live(*frame));
+            for (frame, viewport) in &frame_viewports {
+                if viewport.is_some()
+                    && let Some(document) = self.child_browsing_context_document_handles.get(frame)
+                {
+                    documents.insert(*frame, *document);
+                }
+            }
+        }
         let tree = pass.into_tree();
         let frame_viewports_changed = {
             // The pass's own style flush advances the style generations it
@@ -687,6 +720,15 @@ impl PageScriptHost {
         if frame_viewports_changed {
             self.style_viewport_generation
                 .set(self.style_viewport_generation.get().saturating_add(1));
+        }
+        if !frame_resizes.is_empty() {
+            let mut pending = self.pending_frame_viewport_resizes.borrow_mut();
+            for (frame, document, previous) in frame_resizes {
+                // Keep the first baseline until the resize steps consume it.
+                if !pending.iter().any(|(queued, _, _)| *queued == frame) {
+                    pending.push((frame, document, previous));
+                }
+            }
         }
         self.last_layout_pass_metrics.set(Some(metrics));
         self.layout_snapshot_cache_publishes

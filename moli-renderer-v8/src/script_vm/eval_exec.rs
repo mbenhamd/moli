@@ -1307,6 +1307,9 @@ impl ScriptVm {
         self.queue_declarative_web_mcp();
         self.settle_retired_history_traversals();
         self.drain_pending_style_invalidations_for_turn_exit(boundary);
+        self._context_host
+            .borrow_mut()
+            .queue_frame_viewport_resizes();
         let runtime_continuation_is_ready =
             self.runtime_script_work_should_signal_immediate_progress();
         if runtime_continuation_is_ready {

@@ -586,6 +586,147 @@ fn key_events_reach_focused_frame_document_body_and_frame_document_has_focus() {
     );
 }
 
+#[test]
+fn contenteditable_home_and_end_move_the_caret_to_the_line_boundary() {
+    // Chromium 156: End/Home reach the edges of the caret's paragraph, Shift
+    // extends from the anchor, and a preserved newline ends the line.
+    let mut vm = new_storage_html_test_vm("https://contenteditable-home-end.test/");
+    vm.eval(
+        r#"
+        document.body.innerHTML = '<div id=e contenteditable><p id=p1>first line</p><p>second</p></div>'
+            + '<div id=w contenteditable style="white-space:pre-wrap">ab\ncd</div>';
+        globalThis.e = document.getElementById('e');
+        globalThis.p1 = document.getElementById('p1');
+        globalThis.w = document.getElementById('w');
+        globalThis.state = () => {
+            const s = getSelection();
+            return [s.anchorNode.data, s.anchorOffset, s.focusOffset].join(',');
+        };
+        e.focus();
+        getSelection().collapse(p1.firstChild, 3);
+        'ready'
+    "#,
+    )
+    .unwrap();
+    let press = |vm: &mut StandaloneScriptVmHarness, key: &str, modifiers: u8| {
+        vm.dispatch_key_event("keydown", key, key, "", modifiers, false, false)
+            .unwrap();
+        vm.eval("state()").unwrap()
+    };
+    assert_eq!(press(&mut vm, "End", 0), "first line,10,10");
+    assert_eq!(press(&mut vm, "Home", 0), "first line,0,0");
+    vm.eval("getSelection().collapse(p1.firstChild, 3); 'ok'")
+        .unwrap();
+    assert_eq!(press(&mut vm, "End", 8), "first line,3,10");
+    vm.eval("w.focus(); getSelection().collapse(w.firstChild, 0); 'ok'")
+        .unwrap();
+    assert_eq!(press(&mut vm, "End", 0), "ab\ncd,2,2");
+    vm.eval("getSelection().collapse(w.firstChild, 4); 'ok'")
+        .unwrap();
+    assert_eq!(press(&mut vm, "Home", 0), "ab\ncd,3,3");
+    // A line also ends at `<br>`, at a block-level sibling or child, and at
+    // a preserved newline in a neighboring Text node; an empty `<p><br></p>`
+    // keeps the caret before its `<br>`.
+    vm.eval(
+        r#"
+        globalThis.line = (html, focus, offset) => {
+            document.body.innerHTML = html;
+            const h = document.getElementById('h');
+            h.focus();
+            getSelection().collapse(eval(focus), offset);
+            return 'ready';
+        };
+        globalThis.caret = () => {
+            const s = getSelection();
+            const d = n => n.nodeType === 3 ? n.data : n.nodeName;
+            return d(s.anchorNode) + ',' + s.anchorOffset + '>' + d(s.focusNode) + ',' + s.focusOffset;
+        };
+        'ok'
+    "#,
+    )
+    .unwrap();
+    for (html, focus, offset, key, modifiers, expected) in [
+        (
+            "<div id=h contenteditable>abc<div>def</div></div>",
+            "h.firstChild",
+            1,
+            "End",
+            0,
+            "abc,3>abc,3",
+        ),
+        (
+            "<div id=h contenteditable>abc<div>def</div>ghi</div>",
+            "h.lastChild",
+            2,
+            "Home",
+            0,
+            "ghi,0>ghi,0",
+        ),
+        (
+            "<div id=h contenteditable>abc<br>def</div>",
+            "h.lastChild",
+            2,
+            "Home",
+            0,
+            "def,0>def,0",
+        ),
+        (
+            "<div id=h contenteditable>abc<br>def</div>",
+            "h.firstChild",
+            1,
+            "End",
+            8,
+            "abc,1>abc,3",
+        ),
+        (
+            "<div id=h contenteditable><ul><li>item<ul><li>sub</li></ul></li></ul></div>",
+            "h.querySelector('li').firstChild",
+            1,
+            "End",
+            0,
+            "item,4>item,4",
+        ),
+        (
+            "<div id=h contenteditable>ab<b>cd</b>ef<br>gh</div>",
+            "h.childNodes[2]",
+            1,
+            "Home",
+            0,
+            "ab,0>ab,0",
+        ),
+        (
+            "<div id=h contenteditable><p id=q><br></p></div>",
+            "q",
+            0,
+            "End",
+            0,
+            "P,0>P,0",
+        ),
+        (
+            "<div id=h contenteditable style='white-space:pre-wrap'>ab\ncd<span>ef</span></div>",
+            "h.lastChild.firstChild",
+            1,
+            "Home",
+            0,
+            "ab\ncd,3>ab\ncd,3",
+        ),
+        (
+            "<div id=h contenteditable style='white-space:pre-wrap'>x<span>y\nz</span></div>",
+            "h.firstChild",
+            0,
+            "End",
+            0,
+            "y\nz,1>y\nz,1",
+        ),
+    ] {
+        vm.eval(&format!("line({html:?}, {focus:?}, {offset})"))
+            .unwrap();
+        vm.dispatch_key_event("keydown", key, key, "", modifiers, false, false)
+            .unwrap();
+        assert_eq!(vm.eval("caret()").unwrap(), expected, "{key} in {html}");
+    }
+}
+
 fn keyboard_scroll_vm() -> StandaloneScriptVmHarness {
     new_rendered_test_vm(
         "https://keyboard-scroll.test/",

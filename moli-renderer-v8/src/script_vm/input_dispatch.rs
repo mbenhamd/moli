@@ -42,11 +42,12 @@ use crate::native_bridge::element::{
     construct_pointer_event_with_related_target_and_modifiers, construct_simple_event,
     construct_touch_event_with_points, construct_wheel_event_for_target,
     contenteditable_editing_host, dispatch_public_event, input_surface_hit_test,
-    is_disabled_form_control, observable_input_hit_test, perform_auxiliary_link_default_action,
-    perform_drop_default_action, perform_implicit_submission_from_control,
-    perform_keyboard_scroll_default_action, perform_mouse_focus_default_action,
-    perform_range_keyboard_default_action, perform_scrollbar_scroll_default_action,
-    perform_text_input, perform_wheel_scroll_default_action, replace_contenteditable_selection,
+    is_disabled_form_control, move_contenteditable_caret_to_line_boundary,
+    observable_input_hit_test, perform_auxiliary_link_default_action, perform_drop_default_action,
+    perform_implicit_submission_from_control, perform_keyboard_scroll_default_action,
+    perform_mouse_focus_default_action, perform_range_keyboard_default_action,
+    perform_scrollbar_scroll_default_action, perform_text_input,
+    perform_wheel_scroll_default_action, replace_contenteditable_selection,
     replace_text_control_selection, select_contenteditable_contents,
     text_control_set_selection_range_internal,
     text_control_set_selection_range_with_direction_internal, text_control_value, update_focus,
@@ -2944,6 +2945,21 @@ impl ScriptVm {
                         TextEditInputType::DeleteContentForward
                     },
                 )));
+            }
+
+            if !(target.is_text_control || ctrl || meta || alt)
+                && matches!(key_lower.as_str(), "home" | "end")
+                && let Some(editing_host) = contenteditable_editing_host(runtime, editing_handle)
+            {
+                return Ok(input_dispatch_outcome(
+                    move_contenteditable_caret_to_line_boundary(
+                        scope,
+                        runtime_ptr,
+                        editing_host,
+                        key_lower == "end",
+                        shift,
+                    ),
+                ));
             }
 
             if target.is_text_control

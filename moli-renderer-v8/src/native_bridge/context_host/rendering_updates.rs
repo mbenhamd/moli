@@ -191,6 +191,63 @@ impl PageScriptHost {
         }
     }
 
+    /// Queue the resize steps for each child Document whose frame a parent
+    /// layout resized. The baseline is the viewport that Document last laid
+    /// out against, so the update fires `resize` and re-gathers
+    /// ResizeObserver targets even though no script observed the change.
+    pub(crate) fn queue_frame_viewport_resizes(&mut self) {
+        let resizes = std::mem::take(self.pending_frame_viewport_resizes.get_mut());
+        for (frame, document, previous) in resizes {
+            if self.child_browsing_context_document_handles.get(&frame) != Some(&document) {
+                continue;
+            }
+            let dispatch_scope = OwnerDispatchScope::Child(frame);
+            if self
+                .current_registered_window_execution_context_identity(dispatch_scope)
+                .is_none()
+            {
+                continue;
+            }
+            let Some(target) =
+                self.current_window_document_task_target_for_dispatch_scope(dispatch_scope)
+            else {
+                continue;
+            };
+            // A pending change already holds an earlier baseline.
+            if self
+                .rendering_updates
+                .find_slot_index(
+                    target,
+                    RendererPageRenderingUpdateTaskKind::EnvironmentChange,
+                    |_| true,
+                )
+                .is_some()
+            {
+                continue;
+            }
+            let current = super::super::element::iframe_handle_viewport(self, frame)
+                .unwrap_or_else(|| self.style_viewport());
+            let previous_viewport = crate::style_engine::StyleViewport::new(
+                Some(f64::from(previous.css_width)),
+                Some(f64::from(previous.css_height)),
+            )
+            .with_screen_size(current.screen_width, current.screen_height)
+            .with_device_pixel_ratio(current.device_pixel_ratio);
+            self.queue_rendering_update(
+                target,
+                RendererPageRenderingUpdateTaskKind::EnvironmentChange,
+                PendingRenderingUpdatePayload::EnvironmentChange(PendingEnvironmentChange {
+                    previous_viewport,
+                    previous_activity: self.document_activity(),
+                    previous_orientation: self
+                        .viewport_surface()
+                        .unwrap_or_default()
+                        .screen_orientation,
+                }),
+            );
+        }
+    }
+
     fn queue_rendering_update(
         &mut self,
         target: WindowDocumentTaskTarget,
@@ -347,6 +404,13 @@ impl PageScriptHost {
         let global = context_scope.get_current_context().global(context_scope);
         let current_viewport =
             crate::context_bootstrap::current_window_style_viewport(context_scope, self);
+        // This change reports the frame's current viewport, so a frame resize
+        // recorded by the layout that measured it is already consumed.
+        if let OwnerDispatchScope::Child(frame) = target.dispatch_scope() {
+            self.pending_frame_viewport_resizes
+                .get_mut()
+                .retain(|(pending, _, _)| *pending != frame);
+        }
         let current_activity = self.document_activity();
         // Resize precedes media reporting. Every listener can replace its
         // Document, so abandon the remaining events as soon as the owner retires.
@@ -383,6 +447,7 @@ impl PageScriptHost {
                         )
                         .is_ok();
                 }
+                cleanup_after_rendering_step_callbacks(context_scope);
 
                 if !self.window_document_owner_is_current_for_dispatch_scope(
                     target.owner(),
@@ -394,6 +459,13 @@ impl PageScriptHost {
                     context_scope,
                     global,
                 );
+                cleanup_after_rendering_step_callbacks(context_scope);
+                if !self.window_document_owner_is_current_for_dispatch_scope(
+                    target.owner(),
+                    target.dispatch_scope(),
+                ) {
+                    return dispatched;
+                }
             }
 
             if !self.window_document_owner_is_current_for_dispatch_scope(
@@ -404,11 +476,20 @@ impl PageScriptHost {
             }
             dispatched |=
                 crate::context_bootstrap::dispatch_media_query_list_change_events(context_scope);
+            cleanup_after_rendering_step_callbacks(context_scope);
             if !self.window_document_owner_is_current_for_dispatch_scope(
                 target.owner(),
                 target.dispatch_scope(),
             ) {
                 return dispatched;
+            }
+            if resized {
+                // A viewport change re-lays out the Document without any DOM
+                // mutation, so observed boxes must be re-gathered too. HTML
+                // "update the rendering" runs this after the resize steps and
+                // the media query reports; unchanged boxes deliver nothing
+                // because the check compares reported sizes.
+                crate::context_bootstrap::queue_resize_observer_checks(context_scope);
             }
 
             if change.previous_orientation
@@ -606,5 +687,15 @@ impl PageScriptHost {
             );
         }
         true
+    }
+}
+
+/// HTML "clean up after running a callback" performs a microtask checkpoint
+/// once no script is left on the stack, so promise reactions queued by resize
+/// listeners settle before media query change listeners run. Nested callers
+/// keep their microtasks for the outer script's own checkpoint.
+fn cleanup_after_rendering_step_callbacks(scope: &mut v8::PinScope<'_, '_>) {
+    if crate::custom_elements::can_perform_custom_element_microtask_checkpoint(scope) {
+        crate::script_vm::perform_microtask_checkpoint_and_report_pending_promise_rejections(scope);
     }
 }
