@@ -795,6 +795,7 @@ pub(crate) fn perform_tab_focus_default_action_for_dispatched_event(
             active.and_then(|active| negative_shadow_scope_tab_target(runtime, active, reverse))
         })
         .unwrap_or_else(|| order[if reverse { order.len() - 1 } else { 0 }]);
+    runtime.dom_host().note_keyboard_focus_change();
     update_focus(scope, runtime_ptr, Some(next_handle));
 }
 
@@ -1485,10 +1486,18 @@ pub(crate) fn perform_mouse_focus_default_action(
             (should_focus, parent)
         };
         if should_focus {
+            let runtime = unsafe { &*runtime_ptr };
+            if !runtime.dom_host().element_matches_focus(handle) {
+                runtime.dom_host().note_pointer_focus_change(Some(handle));
+            }
             focus_element(scope, runtime_ptr, handle);
             return;
         }
         candidate = parent;
+    }
+    let runtime = unsafe { &*runtime_ptr };
+    if runtime.active_element_handle().is_some() {
+        runtime.dom_host().note_pointer_focus_change(None);
     }
     update_focus(scope, runtime_ptr, None);
 }

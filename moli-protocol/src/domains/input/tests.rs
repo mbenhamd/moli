@@ -4012,6 +4012,50 @@ async fn dispatch_key_event_arrowdown_cycles_the_radio_group_in_its_own_tree() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pointer_focus_hides_focus_visible_until_a_key_goes_down() {
+    let mut ctx = TestContext::new();
+    with_loaded_document(
+        &mut ctx,
+        r#"<html><body style='margin:0'>
+                <button id='opener' style='position:absolute;left:0;top:0;width:80px;height:80px'
+                  onclick="document.getElementById('close').focus()">open</button>
+                <button id='close' style='position:absolute;left:100px;top:0'>close</button>
+                <input id='field' style='position:absolute;left:200px;top:0'>
+               </body></html>"#,
+    )
+    .await;
+    ctx.capture_fixture_layout(None).await;
+    let visible =
+        "[document.activeElement.id, document.activeElement.matches(':focus-visible')].join('=')";
+    // Chromium 156: script focus with no earlier user input shows the ring.
+    assert!(evaluate_bool(&mut ctx, "(document.getElementById('close').focus(), document.getElementById('close').matches(':focus-visible'))").await);
+
+    for (id, kind) in [(1, "mousePressed"), (2, "mouseReleased")] {
+        ctx.process_async(json!({
+            "id": id,
+            "method": "Input.dispatchMouseEvent",
+            "params": { "type": kind, "x": INPUT_HIT_X, "y": INPUT_HIT_Y, "button": "left", "buttons": 1, "clickCount": 1 }
+        }))
+        .await;
+        ctx.expect_result(id, json!({}), None);
+    }
+    // The click handler's script focus after a pointer press keeps the ring
+    // hidden; a text field always shows it.
+    assert_eq!(evaluate_string(&mut ctx, visible).await, "close=false");
+    assert!(evaluate_bool(&mut ctx, "(document.getElementById('field').focus(), document.getElementById('field').matches(':focus-visible'))").await);
+    assert!(!evaluate_bool(&mut ctx, "(document.getElementById('close').focus(), document.getElementById('close').matches(':focus-visible'))").await);
+
+    ctx.process_async(json!({
+        "id": 3,
+        "method": "Input.dispatchKeyEvent",
+        "params": { "type": "rawKeyDown", "key": "Shift", "code": "ShiftLeft", "modifiers": 8 }
+    }))
+    .await;
+    ctx.expect_result(3, json!({}), None);
+    assert_eq!(evaluate_string(&mut ctx, visible).await, "close=true");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn dispatch_key_event_arrowup_wraps_radio_group_backward() {
     let mut ctx = TestContext::new();
     with_loaded_document(

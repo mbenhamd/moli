@@ -2628,6 +2628,14 @@ impl ScriptVm {
         let canceled_raw_keydown = Cell::new(false);
 
         let result = self.with_default_context_scope(|scope, runtime_ptr| {
+            if event_name == "keydown" {
+                // Blink KeyboardEventManager: a key press shows the focus
+                // ring of an element that a pointer press focused.
+                let runtime = unsafe { &mut *runtime_ptr };
+                if let Some(focused) = runtime.dom_host().note_keyboard_event() {
+                    runtime.note_focus_style_activity(None, Some(focused));
+                }
+            }
             let Some(event) = construct_keyboard_event(
                 scope,
                 event_name,
