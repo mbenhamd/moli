@@ -9,10 +9,10 @@ pub(crate) use input_type::{
     InputValueSanitizationContext, sanitize_input_value_for_type_with_context,
 };
 pub use input_type::{
-    email_value_type_mismatch, form_control_type_supports_intrinsic_validation,
+    RangeKeyboardStep, email_value_type_mismatch, form_control_type_supports_intrinsic_validation,
     input_type_has_value_sanitization, input_type_value_mismatch, is_valid_email_address,
-    sanitize_input_value_for_type, sanitize_input_value_for_type_with_multiple,
-    url_value_type_mismatch,
+    range_value_after_keyboard_step, sanitize_input_value_for_type,
+    sanitize_input_value_for_type_with_multiple, url_value_type_mismatch,
 };
 pub use moli_html_input_temporal::{
     MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, MS_PER_SECOND, MS_PER_WEEK, WEEK_INPUT_STEP_BASE,

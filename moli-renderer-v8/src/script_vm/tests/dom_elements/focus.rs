@@ -634,3 +634,40 @@ fn canceled_scrolling_keydown_does_not_scroll() {
 
     assert_eq!(press_scroll_key(&mut vm, "PageDown"), "0:0");
 }
+
+#[test]
+fn range_keys_step_the_focused_slider_instead_of_scrolling() {
+    let mut vm = new_rendered_test_vm(
+        "https://range-keyboard.test/",
+        r#"<html><body style="margin:0">
+            <input id="range" type="range" min="0" max="360" value="180">
+            <div style="height:3000px"></div>
+        </body></html>"#,
+    );
+    vm.eval(
+        r#"(() => {
+  window.log = [];
+  const range = document.getElementById('range');
+  for (const type of ['input', 'change']) {
+    range.addEventListener(type, () => log.push(`${type}:${range.value}`));
+  }
+  range.focus();
+})()"#,
+    )
+    .expect("range should focus");
+    for key in ["ArrowRight", "End", "ArrowDown", "PageDown"] {
+        vm.dispatch_key_event("keydown", key, key, "", 0, false, false)
+            .expect("range keydown should dispatch");
+        vm.dispatch_key_event("keyup", key, key, "", 0, false, false)
+            .expect("range keyup should dispatch");
+    }
+
+    // Chromium 156: one step per arrow, End jumps to max, PageDown moves a
+    // tenth of the range, each change fires input then change, and the page
+    // does not scroll.
+    assert_eq!(
+        vm.eval("`${log.join('|')} ${scrollY}`")
+            .expect("range log should evaluate"),
+        "input:181|change:181|input:360|change:360|input:359|change:359|input:323|change:323 0"
+    );
+}

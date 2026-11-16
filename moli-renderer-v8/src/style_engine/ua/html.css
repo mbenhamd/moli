@@ -560,6 +560,11 @@ dialog:modal {
   visibility: visible;
 }
 
+/* An open popover is in the top layer (Blink: `:popover-open { overlay: auto }`). */
+[popover]:popover-open {
+  -servo-top-layer: top;
+}
+
 u, ins {
   text-decoration: underline;
 }

@@ -366,7 +366,39 @@ fn emit_context<N>(
     }
     emit_entries(world, outlines, sequence, inline, events);
     events.push(PaintOrderEvent::BoxOutline(root));
+    if root == world.root {
+        // The top layer paints above the whole document, outside every
+        // ancestor stacking context (CSS Position 4 §3.1).
+        for id in top_layer_boxes(world, sequence) {
+            emit_context(world, id, sequence, inline, events);
+        }
+    }
     events.push(PaintOrderEvent::PopStackingContext(root));
+}
+
+/// Rendered top-layer boxes in tree order. Blink paints them in top-layer
+/// insertion order; tree order matches it for an opened popover nested in
+/// an opened modal dialog.
+fn top_layer_boxes<N>(world: &LayoutWorld<N>, sequence: &[usize]) -> Vec<LayoutBoxId>
+where
+    N: Copy + Debug + Eq + Hash,
+{
+    let mut boxes = (0..world.boxes.len())
+        .map(LayoutBoxId::from_index)
+        .filter(|&id| id != world.root && world.boxes[id.index()].style.is_in_top_layer())
+        .filter(|&id| {
+            let mut ancestor = world.boxes[id.index()].parent;
+            while let Some(parent) = ancestor {
+                if world.boxes[parent.index()].skips_contents() {
+                    return false;
+                }
+                ancestor = world.boxes[parent.index()].parent;
+            }
+            true
+        })
+        .collect::<Vec<_>>();
+    boxes.sort_by_key(|id| sequence[id.index()]);
+    boxes
 }
 
 fn collect_subtree<N>(
@@ -380,6 +412,10 @@ fn collect_subtree<N>(
     N: Copy + Debug + Eq + Hash,
 {
     let layout_box = &world.boxes[id.index()];
+    if layout_box.style.is_in_top_layer() {
+        // Painted by the root context after the document.
+        return;
+    }
     let flex_or_grid_item = is_flex_or_grid_item(world, id);
     if layout_box.creates_stacking_context(false, flex_or_grid_item) {
         let context = ChildContext {
