@@ -111,15 +111,12 @@ pub(in crate::script_vm) fn radio_group_members(
         .radio_group_members(handle)
         .into_iter()
         .filter(|candidate| {
-            runtime
-                .dom_host()
-                .node(*candidate)
-                .is_some_and(|node| {
-                    node.is_connected()
-                        && node
-                            .as_element()
-                            .is_some_and(|element| !element.has_attribute("disabled"))
-                })
+            runtime.dom_host().node(*candidate).is_some_and(|node| {
+                node.is_connected()
+                    && node
+                        .as_element()
+                        .is_some_and(|element| !element.has_attribute("disabled"))
+            })
         })
         .collect()
 }
