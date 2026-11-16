@@ -614,6 +614,172 @@ pub(crate) fn select_contenteditable_contents(
     call_object_method(scope, selection, "addRange", &[range.into()]).is_some()
 }
 
+/// Home/End default action in a contenteditable host. Moli has no line-box
+/// caret model here, so a line is the focus's preserved-newline segment
+/// within its Text node, else the focus's nearest block container inside the
+/// host. The caret collapses to (or, with Shift, extends to) that line's first
+/// or last text position, as Chromium does for an unwrapped line.
+pub(crate) fn move_contenteditable_caret_to_line_boundary(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    handle: DomHandle,
+    to_end: bool,
+    extend: bool,
+) -> bool {
+    if let Some(context) =
+        crate::native_bridge::node_owner_document_relevant_context(scope, runtime_ptr, handle)
+        && context != scope.get_current_context()
+    {
+        let scope = &mut v8::ContextScope::new(scope, context);
+        return move_contenteditable_caret_to_line_boundary(
+            scope,
+            runtime_ptr,
+            handle,
+            to_end,
+            extend,
+        );
+    }
+    let Some(selection) = window_selection(scope) else {
+        return false;
+    };
+    let runtime = unsafe { &*runtime_ptr };
+    let focus = selection
+        .get(scope, v8str(scope, "focusNode").into())
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+        .and_then(|node| {
+            crate::native_bridge::node_runtime_and_handle_from_object(scope, node).ok()
+        })
+        .map(|(_, focus)| focus)
+        .filter(|focus| node_is_inclusive_descendant(runtime, *focus, handle));
+    let focus_offset = object_number_property(scope, selection, "focusOffset")
+        .filter(|offset| offset.is_finite() && *offset >= 0.0)
+        .map_or(0, |offset| offset as usize);
+    let (node, offset) = focus
+        .and_then(|focus| preserved_newline_line_boundary(runtime, focus, focus_offset, to_end))
+        .unwrap_or_else(|| {
+            let block = focus.map_or(handle, |focus| line_block_container(runtime, focus, handle));
+            block_text_boundary(runtime, block, to_end)
+        });
+    let Some(node) = node_wrapper_from_handle(scope, node) else {
+        return false;
+    };
+    let offset = u32::try_from(offset).unwrap_or(u32::MAX);
+    if extend {
+        let offset = v8::Integer::new_from_unsigned(scope, offset);
+        return call_object_method(scope, selection, "extend", &[node.into(), offset.into()])
+            .is_some();
+    }
+    collapse_selection_to(scope, selection, node, offset);
+    true
+}
+
+fn node_is_inclusive_descendant(
+    runtime: &PageScriptHost,
+    node: DomHandle,
+    ancestor: DomHandle,
+) -> bool {
+    let dom = runtime.dom_host().dom();
+    let mut current = Some(node);
+    while let Some(candidate) = current {
+        if candidate == ancestor {
+            return true;
+        }
+        current = dom.parent_node(candidate);
+    }
+    false
+}
+
+/// The caret's line inside a Text node whose newlines render as breaks.
+fn preserved_newline_line_boundary(
+    runtime: &PageScriptHost,
+    focus: DomHandle,
+    focus_offset: usize,
+    to_end: bool,
+) -> Option<(DomHandle, usize)> {
+    let dom = runtime.dom_host().dom();
+    let units = utf16_units(dom.node(focus)?.as_text()?.data());
+    let parent = dom.parent_node(focus)?;
+    let white_space = super::super::style_property_value(
+        runtime,
+        parent,
+        super::super::StyleMode::Computed,
+        "white-space-collapse",
+    );
+    if !matches!(
+        white_space.as_str(),
+        "preserve" | "preserve-breaks" | "break-spaces"
+    ) {
+        return None;
+    }
+    let focus_offset = focus_offset.min(units.len());
+    let newline = u16::from(b'\n');
+    let offset = if to_end {
+        units[focus_offset..]
+            .iter()
+            .position(|unit| *unit == newline)
+            .map(|index| focus_offset + index)?
+    } else {
+        units[..focus_offset]
+            .iter()
+            .rposition(|unit| *unit == newline)
+            .map(|index| index + 1)?
+    };
+    Some((focus, offset))
+}
+
+/// The focus's nearest element inside the editing host that is not an
+/// inline box, whose contents therefore form their own lines.
+fn line_block_container(runtime: &PageScriptHost, focus: DomHandle, host: DomHandle) -> DomHandle {
+    let dom = runtime.dom_host().dom();
+    let mut current = Some(focus);
+    while let Some(candidate) = current {
+        if candidate == host {
+            break;
+        }
+        if dom.node(candidate).and_then(Node::as_element).is_some() {
+            let display = super::super::style_property_value(
+                runtime,
+                candidate,
+                super::super::StyleMode::Computed,
+                "display",
+            );
+            if display != "inline" && display != "contents" {
+                return candidate;
+            }
+        }
+        current = dom.parent_node(candidate);
+    }
+    host
+}
+
+/// The first or last text position in `block`, or its own boundary when it
+/// holds no text.
+fn block_text_boundary(
+    runtime: &PageScriptHost,
+    block: DomHandle,
+    to_end: bool,
+) -> (DomHandle, usize) {
+    let dom = runtime.dom_host().dom();
+    let mut stack = vec![block];
+    let mut found = None;
+    while let Some(node) = stack.pop() {
+        if let Some(text) = dom.node(node).and_then(Node::as_text) {
+            found = Some((node, if to_end { utf16_len(text.data()) } else { 0 }));
+            if !to_end {
+                break;
+            }
+            continue;
+        }
+        let children = dom.child_nodes(node).unwrap_or_default();
+        // Depth-first in document order; the last text found wins for End.
+        stack.extend(children.into_iter().rev());
+    }
+    found.unwrap_or_else(|| {
+        let children = dom.child_nodes(block).map_or(0, |children| children.len());
+        (block, if to_end { children } else { 0 })
+    })
+}
+
 fn perform_contenteditable_drop_default_action<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     runtime_ptr: *mut PageScriptHost,

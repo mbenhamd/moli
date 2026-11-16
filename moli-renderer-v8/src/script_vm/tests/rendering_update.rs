@@ -1,4 +1,7 @@
-use super::{ChildFrameSemanticTurnKind, new_storage_page_task_executor_test_vm};
+use super::{
+    ChildFrameSemanticTurnKind, advance_page_task_executor_until_eval_equals,
+    new_storage_page_task_executor_test_vm,
+};
 use crate::network::ResourceRequestClient;
 
 #[tokio::test(flavor = "current_thread")]
@@ -491,6 +494,155 @@ async fn environment_updates_defer_and_coalesce_resize_and_media_notifications()
         !vm.run_one_rendering_update_executor_turn(&loader)
             .await
             .unwrap()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn environment_resize_regathers_resize_observations_without_dom_mutation() {
+    // Chromium 156 reports `b:340` then `b:500` for a flex item that follows
+    // the viewport width, and nothing more for the fixed-width sibling.
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).unwrap();
+    let mut vm =
+        new_storage_page_task_executor_test_vm("https://environment-resize-observer.test/");
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.set_viewport_surface_for_bootstrap(Some(emulation_viewport(640)));
+    vm.eval(
+        r#"
+        document.body.innerHTML = '<div id=row style="display:flex"><div id=a style="width:300px;flex-shrink:0"></div><div id=b style="flex:1"></div></div>';
+        document.body.style.margin = '0';
+        globalThis.sizes = [];
+        const observer = new ResizeObserver(entries =>
+            entries.forEach(entry => sizes.push(entry.target.id + ':' + entry.contentRect.width)));
+        observer.observe(document.getElementById('a'));
+        observer.observe(document.getElementById('b'));
+        'ready'
+    "#,
+    )
+    .unwrap();
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "sizes.join('|')",
+        "a:300|b:340",
+        "initial observation",
+    )
+    .await;
+    vm.set_viewport_surface(Some(emulation_viewport(800)))
+        .unwrap();
+    assert!(
+        vm.run_one_rendering_update_executor_turn(&loader)
+            .await
+            .unwrap()
+    );
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "sizes.join('|')",
+        "a:300|b:340|b:500",
+        "viewport resize observation",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn environment_resize_settles_listener_microtasks_before_media_query_changes() {
+    // Chromium 156 logs `resize|resize-microtask|mq|mq-microtask`: each
+    // rendering step's callbacks run their microtask checkpoint before the
+    // next step's listeners observe the page.
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).unwrap();
+    let mut vm =
+        new_storage_page_task_executor_test_vm("https://environment-resize-microtasks.test/");
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.set_viewport_surface_for_bootstrap(Some(emulation_viewport(800)));
+    vm.eval(
+        r#"
+        globalThis.steps = [];
+        addEventListener('resize', () => {
+            steps.push('resize');
+            queueMicrotask(() => steps.push('resize-microtask'));
+        });
+        matchMedia('(max-width: 767.98px)').addEventListener('change', () => {
+            steps.push('mq');
+            queueMicrotask(() => steps.push('mq-microtask'));
+        });
+        'ready'
+    "#,
+    )
+    .unwrap();
+    vm.set_viewport_surface(Some(emulation_viewport(700)))
+        .unwrap();
+    assert!(
+        vm.run_one_rendering_update_executor_turn(&loader)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        vm.eval("steps.join('|')").unwrap(),
+        "resize|resize-microtask|mq|mq-microtask"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn parent_layout_resizing_a_frame_runs_the_child_resize_steps() {
+    // Chromium 156 fires `resize` in a child Document, and re-delivers its
+    // ResizeObserver entries, when only the parent's CSS resizes the iframe.
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).unwrap();
+    let mut vm = new_storage_page_task_executor_test_vm("https://frame-resize-steps.test/");
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.set_viewport_surface_for_bootstrap(Some(emulation_viewport(800)));
+    vm.eval(r#"
+        const root = document.documentElement || document.appendChild(document.createElement('html'));
+        const body = document.body || root.appendChild(document.createElement('body'));
+        globalThis.frame = document.createElement('iframe');
+        frame.style.cssText = 'border:0;width:300px;height:200px';
+        body.appendChild(frame); void frame.contentWindow;
+        'ready'
+    "#).unwrap();
+    assert!(
+        vm.run_one_child_frame_task_executor_turn(
+            ChildFrameSemanticTurnKind::RealmMaterialization,
+            &loader
+        )
+        .await
+        .unwrap()
+    );
+    let child_id = vm
+        .live_child_default_runtime_realm_inventory()
+        .into_iter()
+        .next()
+        .unwrap()
+        .context_id;
+    assert_eq!(
+        vm.eval_in_child_default_context(
+            child_id,
+            r#"
+            globalThis.events = [];
+            addEventListener('resize', () => events.push('resize:' + innerWidth));
+            String(innerWidth)
+        "#
+        )
+        .unwrap(),
+        "300"
+    );
+    vm.publish_layout_for_test().unwrap();
+    // The parent's next layout resizes the frame; the child's resize steps
+    // wait for its next rendering update.
+    vm.eval("frame.style.width = '500px'; 'restyled'").unwrap();
+    vm.publish_layout_for_test().unwrap();
+    assert_eq!(
+        vm.eval_in_child_default_context(child_id, "innerWidth + '|' + events.join('|')")
+            .unwrap(),
+        "500|"
+    );
+    assert!(
+        vm.run_one_rendering_update_executor_turn(&loader)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        vm.eval_in_child_default_context(child_id, "events.join('|')")
+            .unwrap(),
+        "resize:500"
     );
 }
 

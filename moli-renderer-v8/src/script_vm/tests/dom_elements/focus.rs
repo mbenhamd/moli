@@ -515,3 +515,43 @@ fn key_events_reach_focused_frame_document_body_and_frame_document_has_focus() {
          child:keydown:body|child:keyup:body / true"
     );
 }
+
+#[test]
+fn contenteditable_home_and_end_move_the_caret_to_the_line_boundary() {
+    // Chromium 156: End/Home reach the edges of the caret's paragraph, Shift
+    // extends from the anchor, and a preserved newline ends the line.
+    let mut vm = new_storage_html_test_vm("https://contenteditable-home-end.test/");
+    vm.eval(
+        r#"
+        document.body.innerHTML = '<div id=e contenteditable><p id=p1>first line</p><p>second</p></div>'
+            + '<div id=w contenteditable style="white-space:pre-wrap">ab\ncd</div>';
+        globalThis.e = document.getElementById('e');
+        globalThis.p1 = document.getElementById('p1');
+        globalThis.w = document.getElementById('w');
+        globalThis.state = () => {
+            const s = getSelection();
+            return [s.anchorNode.data, s.anchorOffset, s.focusOffset].join(',');
+        };
+        e.focus();
+        getSelection().collapse(p1.firstChild, 3);
+        'ready'
+    "#,
+    )
+    .unwrap();
+    let press = |vm: &mut StandaloneScriptVmHarness, key: &str, modifiers: u8| {
+        vm.dispatch_key_event("keydown", key, key, "", modifiers, false, false)
+            .unwrap();
+        vm.eval("state()").unwrap()
+    };
+    assert_eq!(press(&mut vm, "End", 0), "first line,10,10");
+    assert_eq!(press(&mut vm, "Home", 0), "first line,0,0");
+    vm.eval("getSelection().collapse(p1.firstChild, 3); 'ok'")
+        .unwrap();
+    assert_eq!(press(&mut vm, "End", 8), "first line,3,10");
+    vm.eval("w.focus(); getSelection().collapse(w.firstChild, 0); 'ok'")
+        .unwrap();
+    assert_eq!(press(&mut vm, "End", 0), "ab\ncd,2,2");
+    vm.eval("getSelection().collapse(w.firstChild, 4); 'ok'")
+        .unwrap();
+    assert_eq!(press(&mut vm, "Home", 0), "ab\ncd,3,3");
+}

@@ -865,6 +865,11 @@ pub(crate) struct PageScriptHost {
     layout_snapshot_cache_misses: Cell<u64>,
     layout_snapshot_cache_publishes: Cell<u64>,
     style_viewport_generation: Cell<u64>,
+    /// Child frames whose used viewport a published parent layout resized,
+    /// each with the viewport its Document last laid out against. Drained
+    /// into EnvironmentChange rendering updates at the runtime turn exit,
+    /// where the rendering-update ledger is mutable.
+    pending_frame_viewport_resizes: RefCell<Vec<(DomHandle, moli_layout::LayoutViewport)>>,
     root_document_lifecycle: Option<RendererDocumentLifecycleJournalHandle>,
     output_journal: Option<crate::runtime::RendererTurnOutputJournal>,
     native_interception_output: Option<(

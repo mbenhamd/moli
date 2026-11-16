@@ -56,6 +56,10 @@ pub(super) struct DocumentLayoutState {
     /// separate from the single latest-tree slot because a later fresh layout
     /// may replace that slot while the frame view remains live.
     frame_viewports: HashMap<DomHandle, LayoutViewport>,
+    /// Viewport each frame last laid out against before an iframe attribute
+    /// change invalidated it. The next parent layout compares against it, so
+    /// a CSS-only resize still runs the child Document's resize steps.
+    invalidated_frame_viewports: HashMap<DomHandle, LayoutViewport>,
     /// Authored-size fallback used before parent layout publishes an exact
     /// iframe content viewport. The dependency key makes clean style reads
     /// cheap without turning this into independently valid layout state.
@@ -254,6 +258,13 @@ impl DocumentLayoutState {
         self.frame_viewports.get(&frame).copied()
     }
 
+    /// The viewport the frame's Document last laid out against, published or
+    /// invalidated since.
+    pub(super) fn previous_frame_viewport(&self, frame: DomHandle) -> Option<LayoutViewport> {
+        self.frame_viewport(frame)
+            .or_else(|| self.invalidated_frame_viewports.get(&frame).copied())
+    }
+
     pub(super) fn inferred_frame_style_viewport(
         &mut self,
         frame: DomHandle,
@@ -295,13 +306,17 @@ impl DocumentLayoutState {
         for (frame, viewport) in updates {
             match viewport {
                 Some(viewport) => {
+                    self.invalidated_frame_viewports.remove(&frame);
                     if self.frame_viewports.get(&frame) != Some(&viewport) {
                         self.frame_viewports.insert(frame, viewport);
                         changed = true;
                     }
                 }
                 None => {
-                    changed |= self.frame_viewports.remove(&frame).is_some();
+                    if let Some(previous) = self.frame_viewports.remove(&frame) {
+                        self.invalidated_frame_viewports.insert(frame, previous);
+                        changed = true;
+                    }
                 }
             }
         }
@@ -313,6 +328,8 @@ impl DocumentLayoutState {
         mut is_live: impl FnMut(DomHandle) -> bool,
     ) {
         self.frame_viewports.retain(|frame, _| is_live(*frame));
+        self.invalidated_frame_viewports
+            .retain(|frame, _| is_live(*frame));
         self.inferred_frame_style_viewports
             .retain(|frame, _| is_live(*frame));
     }
