@@ -1700,3 +1700,31 @@ fn single_line_text_control_value_overflows_horizontally_without_wrapping() {
         "a textarea keeps wrapping inside its width"
     );
 }
+
+// Chromium 156: an RTL block lays LTR-only text out in an RTL paragraph, so
+// `text-align: start` puts it at the right edge and its overflow extends to
+// the left (text [275.90625,300], scrollWidth 96 for the clipped line);
+// `unicode-bidi: plaintext` alone takes the first strong character ([0,24.09]).
+#[test]
+fn rtl_block_sets_the_paragraph_direction_of_ltr_text() {
+    let mut vm = new_parsed_test_vm(
+        "https://rtl-paragraph.test/",
+        "<!doctype html><meta charset=utf-8><style>body{margin:0}div{font:20px/30px monospace;width:300px}</style><div id=a dir=rtl>ab</div><div id=b dir=rtl style=unicode-bidi:plaintext>ab</div><div id=c dir=rtl style=width:40px;overflow:hidden;white-space:nowrap>abcdefgh</div>",
+    );
+    let geometry = vm
+        .eval(
+            r#"JSON.stringify(['a', 'b', 'c'].map((id) => {
+  const element = document.getElementById(id), range = document.createRange();
+  range.selectNodeContents(element);
+  const text = range.getBoundingClientRect();
+  return [text.left, text.right, element.scrollWidth];
+}))"#,
+        )
+        .unwrap();
+    let geometry = serde_json::from_str::<[[f64; 3]; 3]>(&geometry).unwrap();
+    assert!((geometry[0][1] - 300.0).abs() < 0.02, "{geometry:?}");
+    assert!(geometry[0][0] > 270.0, "{geometry:?}");
+    assert!(geometry[1][0].abs() < 0.02, "{geometry:?}");
+    assert!((geometry[2][1] - 40.0).abs() < 0.02, "{geometry:?}");
+    assert_eq!(geometry[2][2], 96.0, "{geometry:?}");
+}
