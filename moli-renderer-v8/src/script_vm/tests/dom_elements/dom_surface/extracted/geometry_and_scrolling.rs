@@ -1759,6 +1759,34 @@ fn focusing_the_focused_element_neither_scrolls_nor_fires_events() {
     );
 }
 
+// Chromium 156: [80,240,-30]. The document scroller's `scroll-padding-top`
+// and the target's `scroll-margin-top` both offset a start alignment; an
+// element scroller's end padding and the target's end margin shift an end
+// alignment.
+#[test]
+fn scroll_into_view_honors_scroll_margin_and_scroll_padding() {
+    let mut vm = new_parsed_test_vm(
+        "https://scroll-margin-padding.test/",
+        "<!doctype html><style>html{scroll-padding-top:30px}body{margin:0}#a{scroll-margin-top:50px}#b{scroll-margin-bottom:20px}#s{height:100px;overflow:auto;scroll-padding-block-end:10px}</style><div style=height:2000px></div><div id=a>a</div><div id=s><div style=height:300px></div><div id=b style=height:10px></div><div style=height:300px></div></div><div style=height:2000px></div>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+  const a = document.getElementById('a'), b = document.getElementById('b');
+  const s = document.getElementById('s');
+  a.scrollIntoView({ block: 'start' });
+  const top = a.getBoundingClientRect().top;
+  b.scrollIntoView({ block: 'end' });
+  return JSON.stringify([top, s.scrollTop,
+    b.getBoundingClientRect().bottom - s.getBoundingClientRect().bottom]);
+})()"#
+        )
+        .expect("scroll into view"),
+        "[80,240,-30]"
+    );
+}
+
 // Chromium 156: [[211,65],[20,20]]. An absolutely positioned child of a grid
 // that is not its containing block is aligned as the sole item of the grid's
 // content box, by `justify-items`/`align-items` or its own self-alignment.

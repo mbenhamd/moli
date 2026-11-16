@@ -5,6 +5,7 @@ use crate::{
     scroll_options::ScrollLogicalPosition as ScrollIntoViewAlignment,
 };
 
+use super::super::styles::ComputedStyleRead;
 use super::provider::{read_box_model, read_scroll_into_view_geometry};
 use super::scroll::{
     apply_observable_window_scroll, resolve_scroll_target, set_node_scroll_position,
@@ -116,6 +117,23 @@ fn scroll_node_into_view_with_params(
     let Some(mut geometry) = read_scroll_into_view_geometry(runtime, target)? else {
         return Ok(None);
     };
+    if relative_rect.is_none()
+        && let Some(outsets) = scroll_margin_outsets(runtime, target)
+        && let Some(bounds) = quads_bounding_rect(&geometry.target_rects)
+    {
+        // Blink's `AbsoluteBoundingBoxRectForScrollIntoView` expands the
+        // target's bounding box by its physical `scroll-margin` outsets
+        // (CSS Scroll Snap 1 §4.1) before any container aligns it.
+        geometry.target_rects =
+            vec![
+                moli_layout::LayoutTransform2D::IDENTITY.map_rect(moli_layout::LayoutRect::new(
+                    bounds.x - outsets[3],
+                    bounds.y - outsets[0],
+                    (bounds.width + outsets[1] + outsets[3]).max(0.0),
+                    (bounds.height + outsets[0] + outsets[2]).max(0.0),
+                )),
+            ];
+    }
     if let Some(relative) = relative_rect {
         let Some(bounds) = quads_bounding_rect(&geometry.target_rects) else {
             return Ok(None);
@@ -189,23 +207,37 @@ fn perform_bubbling_scroll_into_view(
     let mut changed = false;
     for container in geometry.scroll_containers {
         let metrics = &container.metrics;
-        let Some(target_bounds) = target_bounds_in_scroll_content(&geometry.target_rects, metrics)
+        let Some(mut target_bounds) =
+            target_bounds_in_scroll_content(&geometry.target_rects, metrics)
         else {
             continue;
         };
+        // CSS Scroll Snap 1 §4.2: alignment targets the scrollport reduced by
+        // the container's `scroll-padding`. Shifting the target by the start
+        // padding and shrinking the extent maps every alignment mode onto
+        // that optimal viewing region, as Blink's snapport rect does.
+        let padding = scroll_padding_insets(
+            unsafe { &*runtime_ptr },
+            container.source,
+            metrics.client_size,
+        );
+        target_bounds.x -= padding[3];
+        target_bounds.y -= padding[0];
+        let client_width = (metrics.client_size.width - padding[1] - padding[3]).max(0.0);
+        let client_height = (metrics.client_size.height - padding[0] - padding[2]).max(0.0);
         let desired_x = if params.center_if_fully_hidden {
             scroll_axis_to_expose(
                 f64::from(target_bounds.x),
                 f64::from(target_bounds.right()),
                 f64::from(metrics.scroll_offset.x),
-                f64::from(metrics.client_size.width),
+                f64::from(client_width),
             )
         } else {
             aligned_scroll_position(
                 f64::from(target_bounds.x),
                 f64::from(target_bounds.right()),
                 f64::from(metrics.scroll_offset.x),
-                f64::from(metrics.client_size.width),
+                f64::from(client_width),
                 params.horizontal,
             )
         };
@@ -214,14 +246,14 @@ fn perform_bubbling_scroll_into_view(
                 f64::from(target_bounds.y),
                 f64::from(target_bounds.bottom()),
                 f64::from(metrics.scroll_offset.y),
-                f64::from(metrics.client_size.height),
+                f64::from(client_height),
             )
         } else {
             aligned_scroll_position(
                 f64::from(target_bounds.y),
                 f64::from(target_bounds.bottom()),
                 f64::from(metrics.scroll_offset.y),
-                f64::from(metrics.client_size.height),
+                f64::from(client_height),
                 params.vertical,
             )
         };
@@ -352,6 +384,51 @@ fn convert_quads_to_parent_frame(
             })
             .collect(),
     )
+}
+
+/// Physical `scroll-margin` outsets as `[top, right, bottom, left]`, or
+/// `None` when every side is zero.
+fn scroll_margin_outsets(runtime: &PageScriptHost, target: DomHandle) -> Option<[f32; 4]> {
+    let values = ComputedStyleRead::new(runtime, target).computed_values()?;
+    let margin = values.get_margin();
+    let outsets = [
+        margin.scroll_margin_top.px(),
+        margin.scroll_margin_right.px(),
+        margin.scroll_margin_bottom.px(),
+        margin.scroll_margin_left.px(),
+    ];
+    outsets
+        .iter()
+        .any(|side| side.is_finite() && *side != 0.0)
+        .then(|| outsets.map(|side| if side.is_finite() { side } else { 0.0 }))
+}
+
+/// Physical `scroll-padding` insets of a scroll container as
+/// `[top, right, bottom, left]`; `auto` and percentages resolve against the
+/// scrollport as CSS Scroll Snap 1 specifies.
+fn scroll_padding_insets(
+    runtime: &PageScriptHost,
+    container: DomHandle,
+    scrollport: moli_layout::LayoutSize,
+) -> [f32; 4] {
+    use style::values::computed::{Length, NonNegativeLengthPercentageOrAuto};
+    let Some(values) = ComputedStyleRead::new(runtime, container).computed_values() else {
+        return [0.0; 4];
+    };
+    let padding = values.get_padding();
+    let resolve = |value: &NonNegativeLengthPercentageOrAuto, basis: f32| match value {
+        NonNegativeLengthPercentageOrAuto::LengthPercentage(value) => {
+            let px = value.0.resolve(Length::new(basis)).px();
+            if px.is_finite() { px.max(0.0) } else { 0.0 }
+        }
+        NonNegativeLengthPercentageOrAuto::Auto => 0.0,
+    };
+    [
+        resolve(&padding.scroll_padding_top, scrollport.height),
+        resolve(&padding.scroll_padding_right, scrollport.width),
+        resolve(&padding.scroll_padding_bottom, scrollport.height),
+        resolve(&padding.scroll_padding_left, scrollport.width),
+    ]
 }
 
 fn quads_bounding_rect(quads: &[moli_layout::LayoutQuad]) -> Option<moli_layout::LayoutRect> {
