@@ -1197,20 +1197,21 @@ fn is_sequentially_focusable(
     if active == Some(handle) {
         return true;
     }
-    if !is_rendered_for_sequential_focus(runtime, handle) {
+    if !is_rendered_for_focus(runtime, handle) {
         return false;
     }
     !element_is_scrollable(runtime, handle) || !has_sequential_focusable_descendant(runtime, handle)
 }
 
-/// Blink only treats an element as keyboard focusable while it has a layout
-/// box and its computed `visibility` is `visible`. Sequential navigation
-/// therefore skips `display:none` subtrees (including ones hidden through a
-/// frame owner, closed `<details>`, or `content-visibility:hidden`) and
-/// `visibility:hidden` controls. The currently focused element is admitted
-/// by the caller even when it stopped rendering, so navigation still starts
-/// from its tree position.
-fn is_rendered_for_sequential_focus(runtime: &PageScriptHost, handle: DomHandle) -> bool {
+/// Blink only treats an element as focusable while it has a layout box and
+/// its computed `visibility` is `visible` (`Element::IsFocusableStyle`). Both
+/// programmatic focus and sequential navigation therefore skip `display:none`
+/// subtrees (including ones hidden through a frame owner, closed `<details>`,
+/// or `content-visibility:hidden`) and `visibility:hidden` controls. For
+/// sequential navigation the currently focused element is admitted by the
+/// caller even when it stopped rendering, so navigation still starts from its
+/// tree position.
+fn is_rendered_for_focus(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     let state = ElementRenderedState::read(runtime, handle);
     state.box_state() != ElementBoxState::NoBox
         && state
@@ -1224,7 +1225,7 @@ fn is_rendered_for_sequential_focus(runtime: &PageScriptHost, handle: DomHandle)
 /// `<details>` around it, or `inert`, because those stop at the child
 /// Document boundary.
 fn frame_owner_admits_sequential_focus(runtime: &PageScriptHost, owner: DomHandle) -> bool {
-    is_rendered_for_sequential_focus(runtime, owner) && !is_inert_in_flat_tree(runtime, owner)
+    is_rendered_for_focus(runtime, owner) && !is_inert_in_flat_tree(runtime, owner)
 }
 
 fn is_inert_in_flat_tree(runtime: &PageScriptHost, handle: DomHandle) -> bool {
@@ -1274,7 +1275,7 @@ fn is_interactive_sequential_focusable_descendant(
         .is_some_and(|value| value >= 0);
     (is_interactive_element || has_non_negative_tab_index)
         && sequential_tab_index_without_scroll_descendant_check(runtime, handle).is_some()
-        && is_rendered_for_sequential_focus(runtime, handle)
+        && is_rendered_for_focus(runtime, handle)
 }
 
 fn explicit_negative_tab_index(runtime: &PageScriptHost, handle: DomHandle) -> bool {
@@ -1520,7 +1521,8 @@ fn focus_element_with_options(
         delegated_focus_target(runtime, handle)
     } else {
         is_focusable(runtime, handle).then_some(handle)
-    };
+    }
+    .filter(|target| is_rendered_for_focus(runtime, *target));
     if let Some(target) = target {
         // Focusing the element that already has focus does nothing: no
         // events and no scroll into view (HTML "focusing steps", step 4).
@@ -1554,7 +1556,9 @@ pub(crate) fn focus_live_element_for_inspector(
             runtime.dom_host().shadow_root_delegates_focus(root) == Some(true)
                 && delegated_focus_target(runtime, handle).is_some()
         });
-    if !is_focusable(runtime, handle) && !delegates_focus {
+    if (!is_focusable(runtime, handle) || !is_rendered_for_focus(runtime, handle))
+        && !delegates_focus
+    {
         return RendererDomFocusOutcome::ElementNotFocusable;
     }
 

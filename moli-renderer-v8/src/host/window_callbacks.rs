@@ -124,7 +124,8 @@ impl ScheduledWindowWebIdlCallback {
                 v8::Local::new(scope, &self.target_receiver).into()
             }
             WindowWebIdlCallbackTaskKind::AnimationFrame { timestamp } => {
-                crate::window_host::finish_animation_frame_callback_batch(scope, timestamp);
+                let window = v8::Local::new(scope, &self.target_receiver);
+                crate::window_host::finish_animation_frame_callback_batch(scope, window, timestamp);
                 arguments.push(v8::Number::new(scope, timestamp).into());
                 v8::undefined(scope).into()
             }

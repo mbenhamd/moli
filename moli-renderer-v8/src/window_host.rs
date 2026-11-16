@@ -57,6 +57,7 @@ const WINDOW_SCROLL_X_SLOT: &str = "__moliWindowScrollX";
 const WINDOW_SCROLL_Y_SLOT: &str = "__moliWindowScrollY";
 const WINDOW_PENDING_ANIMATION_FRAME_TIMESTAMP_SLOT: &str =
     "__moliWindowPendingAnimationFrameTimestamp";
+const WINDOW_LAST_ANIMATION_FRAME_TIMESTAMP_SLOT: &str = "__moliWindowLastAnimationFrameTimestamp";
 const IDLE_CALLBACK_BUDGET_MS: f64 = 50.0;
 const IDLE_DEADLINE_DID_TIMEOUT_SLOT: &str = "__moliIdleDeadlineDidTimeout";
 const IDLE_DEADLINE_MS_SLOT: &str = "__moliIdleDeadlineMs";
@@ -777,12 +778,19 @@ pub(super) fn window_request_animation_frame_callback<'s>(
 
     let global = scope.get_current_context().global(scope);
     let now = current_animation_frame_time_ms(scope);
+    let frame_interval = f64::from(WINDOW_REQUEST_ANIMATION_FRAME_DELAY_MS);
+    // Chromium begins a frame as soon as one is requested when none ran in the
+    // last frame interval, and otherwise keeps the frame cadence. Requests made
+    // before that frame starts share its timestamp.
     let target_timestamp =
         get_private_value(scope, global, WINDOW_PENDING_ANIMATION_FRAME_TIMESTAMP_SLOT)
             .and_then(|value| value.number_value(scope))
-            .filter(|timestamp| *timestamp > now)
+            .filter(|timestamp| *timestamp + frame_interval > now)
             .unwrap_or_else(|| {
-                let timestamp = now + WINDOW_REQUEST_ANIMATION_FRAME_DELAY_MS as f64;
+                let timestamp =
+                    get_private_value(scope, global, WINDOW_LAST_ANIMATION_FRAME_TIMESTAMP_SLOT)
+                        .and_then(|value| value.number_value(scope))
+                        .map_or(now, |last| now.max(last + frame_interval));
                 set_private_value(
                     scope,
                     global,
@@ -1971,11 +1979,18 @@ fn parse_timer_delay_ms<'s>(
     webidl::timer_milliseconds_arg(scope, args, 1, prefix)
 }
 
+/// Marks the animation frame at `timestamp` as started for the Window that
+/// requested it. The frame bookkeeping lives on that Window's global, which
+/// is not necessarily the current context while the timer task runs.
 pub(crate) fn finish_animation_frame_callback_batch(
     scope: &mut v8::PinScope<'_, '_>,
+    window: v8::Local<'_, v8::Object>,
     timestamp: f64,
 ) {
-    let global = scope.get_current_context().global(scope);
+    let Some(context) = window.get_creation_context(scope) else {
+        return;
+    };
+    let global = context.global(scope);
     let pending_timestamp =
         get_private_value(scope, global, WINDOW_PENDING_ANIMATION_FRAME_TIMESTAMP_SLOT)
             .and_then(|value| value.number_value(scope));
@@ -1985,6 +2000,17 @@ pub(crate) fn finish_animation_frame_callback_batch(
             global,
             WINDOW_PENDING_ANIMATION_FRAME_TIMESTAMP_SLOT,
             v8::undefined(scope).into(),
+        );
+    }
+    let last_timestamp =
+        get_private_value(scope, global, WINDOW_LAST_ANIMATION_FRAME_TIMESTAMP_SLOT)
+            .and_then(|value| value.number_value(scope));
+    if last_timestamp.is_none_or(|last| last < timestamp) {
+        set_private_value(
+            scope,
+            global,
+            WINDOW_LAST_ANIMATION_FRAME_TIMESTAMP_SLOT,
+            v8::Number::new(scope, timestamp).into(),
         );
     }
 }
