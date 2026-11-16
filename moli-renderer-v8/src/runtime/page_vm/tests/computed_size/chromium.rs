@@ -108,6 +108,41 @@ overflow:auto;direction:{direction};display:{display}}}
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn chromium_absolute_overflow_ignores_margins_and_untransformed_position() {
+    // Live Chromium 156 with classic scrollbars: an absolutely positioned box
+    // adds only its transformed border box; its margins and pre-transform
+    // position do not.
+    run_page_vm_async_test(async move {
+        for (child, expected) in [
+            ("left:150px;top:0;width:40px;height:50px;margin-right:30px", [200, 100]),
+            ("left:0;top:60px;width:40px;height:30px;margin-bottom:30px", [200, 100]),
+            ("left:200px;top:0;width:100px;height:50px;transform:translateX(-200px)", [200, 100]),
+            (
+                "left:50%;top:50%;width:60px;height:180px;transform:translate(-50%,-50%) rotate(90deg)",
+                [200, 100],
+            ),
+            ("left:150px;top:0;width:100px;height:50px", [250, 85]),
+        ] {
+            let mut page = page_with_size_fixture(&format!(
+                r#"<style>
+#scroller{{position:relative;width:200px;height:100px;overflow:auto}}
+#child{{position:absolute;{child}}}
+</style><div id=scroller><div id=child></div></div>"#,
+            ))?;
+            publish_size_layout(&mut page)?;
+            assert_eq!(
+                read_without_layout(&mut page, "[scroller.scrollWidth,scroller.scrollHeight]")?,
+                json!(expected),
+                "{child}"
+            );
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("absolute boxes must add only their transformed border boxes to overflow");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn chromium_reversed_flex_flow_keeps_physical_scroll_origins() {
     run_page_vm_async_test(async move {
         // Native-scrollbar geometry recorded by the live Chromium differential.
