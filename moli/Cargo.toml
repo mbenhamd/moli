@@ -1,6 +1,6 @@
 [package]
 name = "moli"
-version = "1.1.24"
+version = "1.1.25"
 edition = "2024"
 license.workspace = true
 
@@ -36,6 +36,9 @@ tokio = { version = "1.51.0", features = ["macros", "net", "rt-multi-thread", "s
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["fmt"] }
 url = "2.5.7"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Keep the existing jemalloc fallback only where rusty_v8 does not publish a
 # pointer-compressed PartitionAlloc archive. Windows keeps its system allocator.

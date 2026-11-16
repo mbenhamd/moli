@@ -34,21 +34,23 @@ impl ControlledXhrContext {
     pub(crate) fn load(
         self,
         request: moli_fetch::Request,
-        info: PendingSubresourceFetchInfo,
+        mut info: PendingSubresourceFetchInfo,
         load: ResourceLoadLease,
         cancel: moli_fetch::FetchCancelHandle,
         preflight_headers: Vec<(String, String)>,
-    ) -> super::ControlledXhrLoad {
-        super::ControlledXhrLoad {
+    ) -> super::ControlledResourceLoad {
+        info.request_headers = request.interception_request_headers();
+        super::ControlledResourceLoad {
             request,
             info,
             load,
             cancel,
             source_document: self.interception.source_document,
             output: self.interception.output,
-            connect_policy: self.connect_policy,
+            connect_policy: Some(self.connect_policy),
             preflight_headers,
             initial_decision: None,
+            request_initiator_type: crate::types::SubresourceRequestInitiatorType::Script,
         }
     }
 }

@@ -197,9 +197,18 @@ pub struct StylesheetFetchTerminal {
     physical: StylesheetPhysicalOutcome,
     usability: StylesheetUsability,
     origin_clean: Option<bool>,
+    network_observed: bool,
 }
 
 impl StylesheetFetchTerminal {
+    pub fn with_observed_network(mut self) -> Self {
+        self.network_observed = true;
+        self
+    }
+    pub fn network_was_observed(&self) -> bool {
+        self.network_observed
+    }
+
     pub fn response(
         response: NavigationResponse,
         usability: StylesheetUsability,
@@ -209,6 +218,7 @@ impl StylesheetFetchTerminal {
             physical: StylesheetPhysicalOutcome::Response(Arc::new(response)),
             usability,
             origin_clean: Some(origin_clean),
+            network_observed: false,
         }
     }
 
@@ -236,6 +246,7 @@ impl StylesheetFetchTerminal {
             physical: StylesheetPhysicalOutcome::NetworkError(Arc::clone(&reason)),
             usability: StylesheetUsability::Failed { reason },
             origin_clean: None,
+            network_observed: false,
         }
     }
 
@@ -288,6 +299,12 @@ pub trait StylesheetFetcher: Clone + Send + 'static {
     /// Distinguishes environment-specific responses when a store serves several Documents.
     fn resource_cache_scope(&self) -> u64 {
         0
+    }
+
+    /// Controls reuse of a completed resource by a new stylesheet consumer.
+    /// In-flight sharing and adoption of an unused preload are independent.
+    fn reuse_completed_stylesheets(&self) -> bool {
+        true
     }
 
     fn spawn_stylesheet_task(&self, task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>);

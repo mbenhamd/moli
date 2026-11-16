@@ -1610,6 +1610,7 @@ mod network;
 mod postmessage;
 mod stream_clone_failures;
 
+mod canvas_transfer_to_image_bitmap;
 mod canvas_transform_snapshots;
 mod geometry_point_transform;
 
@@ -1621,7 +1622,10 @@ mod xhr_failure;
 mod payment_events;
 
 mod performance_handler_order;
+mod trusted_type_policy_interface;
 
 mod performance_user_timing;
 
 mod abort_controller_receivers;
+
+mod synthetic_exceptions;

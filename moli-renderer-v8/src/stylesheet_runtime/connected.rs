@@ -572,11 +572,11 @@ impl DocumentRuntime {
             owner = ?binding.owner(),
             element = ?binding.element(),
             load_delay_token = ?binding.load_delay_token(),
-            settled,
+            ?settled,
             reason,
             "settled main connected style load before event posting"
         );
-        settled
+        settled.settled()
     }
 
     fn settle_connected_style_load_admission(
@@ -1103,6 +1103,7 @@ impl DocumentRuntime {
                         .as_ref()
                         .is_ok_and(|response| response.load_event_successful),
                     network_results: vec![ConnectedLoadNetworkResult {
+                        network_observed: false,
                         stylesheet_fetch: None,
                         blocking_operation: None,
                         source_operation: None,

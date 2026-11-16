@@ -130,14 +130,10 @@ fn label_handles_for_control(
     control_handle: DomHandle,
 ) -> Vec<DomHandle> {
     if runtime.dom_host().is_connected(control_handle) {
-        // A control in a child browsing context shares this host with the top
-        // document, so its labels must come from its own node document.
-        return runtime
-            .dom_host()
-            .owner_document_handle(control_handle)
-            .map_or_else(Vec::new, |document| {
-                shadow_including_label_handles(runtime, document)
-            });
+        let Some(document) = runtime.dom_host().owner_document_handle(control_handle) else {
+            return Vec::new();
+        };
+        return shadow_including_label_handles(runtime, document);
     }
 
     let root = runtime

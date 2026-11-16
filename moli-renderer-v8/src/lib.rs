@@ -277,10 +277,10 @@ pub use runtime::{
     RendererDomNodeCreationStackTrace, RendererDomNodeReference,
     RendererDomNodeStackTraceResolution, RendererDomSearchRegistration,
     RendererDomSearchResultNode, RendererDomSearchResultsResolution,
-    RendererDomSnapshotCaptureOptions, RendererDomSnapshotCapturePayload, RendererDragData,
-    RendererDragDataItem, RendererDraggedDirectory, RendererDraggedFile, RendererFrameToken,
-    RendererGeometryQuad, RendererHtmlSerializeOptions, RendererInputDispatchOutcome,
-    RendererInspectorCommandEnvelope, RendererInspectorCommandRoute,
+    RendererDomSnapshotCaptureOptions, RendererDomSnapshotCapturePayload, RendererDownloadBody,
+    RendererDragData, RendererDragDataItem, RendererDraggedDirectory, RendererDraggedFile,
+    RendererFrameToken, RendererGeometryQuad, RendererHtmlSerializeOptions,
+    RendererInputDispatchOutcome, RendererInspectorCommandEnvelope, RendererInspectorCommandRoute,
     RendererInspectorIngressTicket, RendererInspectorProtocolConfiguration,
     RendererInspectorProtocolConfigurationCommand, RendererInspectorSessionRestoreSnapshot,
     RendererInterceptedDrag, RendererJavaScriptDialogCompletion, RendererJavaScriptDialogId,
@@ -364,6 +364,13 @@ pub use web_storage_handles::RendererWebStorageHandles;
 pub enum PageVmInitStage {
     DomContentLoaded,
     Load,
+}
+
+/// Host observations of a live Page, independent of its browser lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RendererPageIdleWaitMode {
+    Network,
+    EventLoop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
