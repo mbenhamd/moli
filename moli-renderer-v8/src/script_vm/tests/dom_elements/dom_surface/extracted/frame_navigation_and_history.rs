@@ -3635,3 +3635,81 @@ fn main_window_indexed_child_deletion_is_live_and_not_cached() {
         r#"{"absentDeletesSucceeded":true,"presentAfterAbsent":false,"presentDeletesFailed":true,"absentAfterPresent":true}"#
     );
 }
+
+async fn click_child_frame_link(href: &str, expected_requests: usize) -> (String, Vec<String>) {
+    let server = StaticHttpServer::spawn(expected_requests).await;
+    let loader = static_http_loader([]);
+    let parent = server.base_url().join("parent").unwrap();
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(parent.as_str(), &loader);
+    vm.exec(
+        r#"
+globalThis.loads = 0;
+const frame = document.createElement('iframe');
+frame.onload = () => ++loads;
+frame.src = '/child?x=1';
+document.body.append(frame);
+const child = frame.contentWindow;
+"#,
+        None,
+    )
+    .unwrap();
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(loads)",
+        "1",
+        "the child should load",
+    )
+    .await;
+    vm.exec(
+        &format!(
+            r#"
+const originalDocument = child.document;
+globalThis.hashChanges = 0;
+child.addEventListener('hashchange', () => ++hashChanges);
+const link = child.document.createElement('a');
+link.href = {href:?};
+child.document.body.append(link);
+link.click();
+"#
+        ),
+        None,
+    )
+    .unwrap();
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(hashChanges + loads)",
+        "2",
+        "the link activation should settle",
+    )
+    .await;
+    let result = vm
+        .eval(
+            r#"JSON.stringify({sameDocument: child.document === originalDocument,
+loads, hashChanges, path: child.location.pathname + child.location.search + child.location.hash})"#,
+        )
+        .unwrap();
+    (result, server.finish_targets().await)
+}
+
+#[tokio::test]
+async fn child_frame_fragment_link_navigates_within_the_document() {
+    // Chromium 156 keeps the frame's Document and fires hashchange.
+    let (result, targets) = click_child_frame_link("#ref-1", 1).await;
+    assert_eq!(
+        result,
+        r##"{"sameDocument":true,"loads":1,"hashChanges":1,"path":"/child?x=1#ref-1"}"##
+    );
+    assert_eq!(targets, vec!["/child?x=1"]);
+}
+
+#[tokio::test]
+async fn child_frame_link_to_another_path_still_loads_a_new_document() {
+    let (result, targets) = click_child_frame_link("/other#ref-1", 2).await;
+    assert_eq!(
+        result,
+        r##"{"sameDocument":false,"loads":2,"hashChanges":0,"path":"/other#ref-1"}"##
+    );
+    assert_eq!(targets, vec!["/child?x=1", "/other"]);
+}

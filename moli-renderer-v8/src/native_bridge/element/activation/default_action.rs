@@ -2007,6 +2007,32 @@ fn anchor_click_default_action(
     let special_target = target_name
         .as_deref()
         .and_then(SpecialBrowsingContextTarget::parse);
+    // A fragment link in a same-runtime child Document navigates that
+    // Document to the fragment through its own Location, as at top level,
+    // instead of loading the frame again.
+    if (target_name.is_none() || special_target == Some(SpecialBrowsingContextTarget::Current))
+        && let Ok(url) = url::Url::parse(&resolved)
+        && let Some(owner_document) = runtime
+            .dom_host()
+            .node(handle)
+            .and_then(Node::owner_document)
+        && owner_document != runtime.document_handle()
+        && same_document_fragment_target(&runtime.document_url_for_handle(owner_document), &url)
+        && let Some(owner_window) = navigation_owner_window_for_handle(scope, runtime_ptr, handle)
+        && let Some(location) = owner_window
+            .get(scope, v8str(scope, "location").into())
+            .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+    {
+        let source_element = node_wrapper_from_handle(scope, handle);
+        navigate_location_object_with_source_element(
+            scope,
+            location,
+            LocationNavigationKind::Assign,
+            Some(resolved),
+            source_element,
+        );
+        return None;
+    }
     if (target_name.is_none() || special_target == Some(SpecialBrowsingContextTarget::Current))
         && navigate_hyperlink_source_browsing_context(scope, runtime_ptr, handle, &resolved)
     {

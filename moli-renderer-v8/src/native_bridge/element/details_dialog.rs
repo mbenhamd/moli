@@ -205,6 +205,13 @@ fn main_summary_details_handle(runtime: &PageScriptHost, summary: DomHandle) -> 
     (main_summary_child(runtime, details) == Some(summary)).then_some(details)
 }
 
+/// HTML "summary for its parent details": the first `summary` child of a
+/// `details` element. Only that summary is focusable by default and runs the
+/// keyboard and click activation behaviour that toggles its `details`.
+pub(crate) fn is_main_summary(runtime: &PageScriptHost, handle: DomHandle) -> bool {
+    main_summary_details_handle(runtime, handle).is_some()
+}
+
 pub(super) fn perform_summary_click_default_action(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
