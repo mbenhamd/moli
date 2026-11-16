@@ -45,8 +45,8 @@ use crate::native_bridge::element::{
     is_disabled_form_control, observable_input_hit_test, perform_auxiliary_link_default_action,
     perform_drop_default_action, perform_implicit_submission_from_control,
     perform_keyboard_scroll_default_action, perform_mouse_focus_default_action,
-    perform_scrollbar_scroll_default_action, perform_text_input,
-    perform_wheel_scroll_default_action, replace_contenteditable_selection,
+    perform_range_keyboard_default_action, perform_scrollbar_scroll_default_action,
+    perform_text_input, perform_wheel_scroll_default_action, replace_contenteditable_selection,
     replace_text_control_selection, select_contenteditable_contents,
     text_control_set_selection_range_internal,
     text_control_set_selection_range_with_direction_internal, text_control_value, update_focus,
@@ -3027,6 +3027,10 @@ impl ScriptVm {
                     caret,
                     caret,
                 );
+                return Ok(input_dispatch_outcome(true));
+            }
+
+            if perform_range_keyboard_default_action(scope, runtime_ptr, handle, &key_lower) {
                 return Ok(input_dispatch_outcome(true));
             }
 

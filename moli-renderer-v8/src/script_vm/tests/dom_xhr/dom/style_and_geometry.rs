@@ -27,6 +27,41 @@ fn document_point_queries_use_real_paint_order_geometry() {
 }
 
 #[test]
+fn open_popover_lays_out_and_hit_tests_in_the_top_layer() {
+    // Chromium 156: an open popover ignores its transformed, clipping
+    // ancestor as containing block and paints above a z-index:5 sibling.
+    let mut vm = new_rendered_test_vm(
+        "https://popover-top-layer.test/",
+        r#"<!doctype html><html><body style="margin:0">
+            <div style="margin:40px 0 0 30px;width:60px;height:20px;overflow:hidden;transform:translateX(2px)">
+              <div id="pop" popover="manual" style="position:fixed;inset:auto;left:100px;top:200px;width:50px;height:30px;margin:0;padding:0;border:0"></div>
+            </div>
+            <div id="cover" style="position:relative;z-index:5;width:400px;height:400px"></div>
+        </body></html>"#,
+    );
+
+    vm.eval("document.getElementById('pop').showPopover()")
+        .expect("popover should open");
+    publish_layout_for_test(&mut vm);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const rect = document.getElementById('pop').getBoundingClientRect();
+  return JSON.stringify({
+    rect: [rect.x, rect.y, rect.width, rect.height],
+    hit: document.elementFromPoint(120, 210)?.id ?? null
+  });
+})()
+"#,
+        )
+        .expect("popover top-layer probe should evaluate");
+
+    assert_eq!(result, r#"{"rect":[100,200,50,30],"hit":"pop"}"#);
+}
+
+#[test]
 fn style_source_sync_consumes_prepared_sources_and_preserves_cssom() {
     let mut vm = new_parsed_test_vm(
         "https://style-source-lifecycle.test/",
