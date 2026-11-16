@@ -119,7 +119,7 @@ jobs:
 
   nextest:
     name: Nextest
-    runs-on: [self-hosted, moli-ci]
+    runs-on: [self-hosted, moli-nextest]
     container:
       image: rust:1.96.1-bookworm
       # Docker seeds new named volumes from the pinned image. Keep toolchains
@@ -145,6 +145,17 @@ jobs:
         uses: taiki-e/install-action@13608cbb45b01feb47ef444ab1a42dc41ad56f1a # v2.79.11
         with:
           tool: nextest@0.9.132
+
+      - name: Configure Nextest parallelism
+        shell: bash
+        run: |
+          cpu_count=$(nproc)
+          test_threads=$((cpu_count / 2))
+          if (( test_threads < 1 )); then
+            test_threads=1
+          fi
+          echo "NEXTEST_TEST_THREADS=$test_threads" >> "$GITHUB_ENV"
+          echo "Nextest test threads: $test_threads ($cpu_count available CPUs)"
 
       - name: Run full workspace tests
         run: cargo nextest run --workspace --profile ci
@@ -176,6 +187,14 @@ jobs:
         uses: taiki-e/install-action@13608cbb45b01feb47ef444ab1a42dc41ad56f1a # v2.79.11
         with:
           tool: nextest@0.9.132
+
+      - name: Configure Nextest parallelism
+        shell: pwsh
+        run: |
+          $cpuCount = [Environment]::ProcessorCount
+          $testThreads = [Math]::Max(1, [int][Math]::Floor($cpuCount / 2))
+          "NEXTEST_TEST_THREADS=$testThreads" >> $env:GITHUB_ENV
+          Write-Host "Nextest test threads: $testThreads ($cpuCount available CPUs)"
 
       - name: Cache Windows persistence dependencies
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -533,20 +552,32 @@ jobs:
         run: |
           uv sync --project moli-cdp-smoke --locked
           npm ci --prefix moli-cdp-smoke
-      - name: Install current input oracle
+      - name: Install current Chromium oracle
         env:
           CHROMIUM_ORACLE_VERSION: "156.0.8078.73"
         run: |
           moli-cdp-smoke/node_modules/.bin/browsers install "chrome@$CHROMIUM_ORACLE_VERSION" --path "$RUNNER_TEMP/chromium-oracle"
           chromium_bin="$RUNNER_TEMP/chromium-oracle/chrome/linux-$CHROMIUM_ORACLE_VERSION/chrome-linux64/chrome"
           test -x "$chromium_bin"
-          echo "CHROMIUM_DOM_INPUT_BIN=$chromium_bin" >> "$GITHUB_ENV"
+          echo "CHROMIUM_CURRENT_ORACLE_BIN=$chromium_bin" >> "$GITHUB_ENV"
           "$chromium_bin" --version
       - name: Run full CDP smoke on Chromium
+        shell: bash
         run: |
+          set -euo pipefail
+          # PR workflows can be newer than the exact HEAD checked out above.
+          available_groups=$(uv run --project moli-cdp-smoke --no-sync python -c \
+            'from moli_cdp_smoke.runner import group_listing; print(" ".join(group["name"] for group in group_listing()))')
+          chromium_overrides=()
+          for group in dom-input fetch-headers; do
+            if [[ " $available_groups " == *" $group "* ]]; then
+              chromium_overrides+=(--chromium-bin-for-group "$group=$CHROMIUM_CURRENT_ORACLE_BIN")
+            fi
+          done
           uv run --project moli-cdp-smoke --no-sync moli-cdp-smoke \
             --browser chromium --strict-full-suite --repeat 2 --retries 3 --jobs 4 \
-            --chromium-bin-for-group "dom-input=$CHROMIUM_DOM_INPUT_BIN" --output-dir target/smoke/cdp-chromium-ci
+            "${chromium_overrides[@]}" \
+            --output-dir target/smoke/cdp-chromium-ci
       - name: Upload Chromium diagnostics
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

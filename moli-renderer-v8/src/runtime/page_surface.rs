@@ -63,7 +63,37 @@ pub struct RendererPendingDownloadResponse {
     pub final_url: String,
     pub status: u16,
     pub headers: Vec<(String, Vec<u8>)>,
-    pub body: Vec<u8>,
+    pub body: RendererDownloadBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RendererDownloadBody {
+    Buffered(Vec<u8>),
+    Network(crate::network::ResourceInterceptionBody),
+    /// Retained immutable backing; the download task reads bounded chunks.
+    Blob(moli_file_api::BlobData),
+}
+
+impl From<Vec<u8>> for RendererDownloadBody {
+    fn from(body: Vec<u8>) -> Self {
+        Self::Buffered(body)
+    }
+}
+
+impl RendererDownloadBody {
+    pub(crate) fn transport_charge_bytes(&self) -> usize {
+        match self {
+            Self::Buffered(body) => body.capacity(),
+            // These handles retain external backing, not inline message bytes.
+            Self::Network(_) | Self::Blob(_) => 0,
+        }
+    }
+
+    pub fn cancel(&self) {
+        if let Self::Network(body) = self {
+            body.cancel();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +192,8 @@ impl RendererSyntheticResponseBody {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RendererPendingDownloadActivation {
+    /// The initiating child frame; absent for a top-level activation.
+    pub frame_id: Option<String>,
     pub url: String,
     pub suggested_filename: Option<String>,
     pub response: Option<RendererPendingDownloadResponse>,
@@ -5044,6 +5076,7 @@ pub enum RendererPageCommand {
         code: String,
         text: String,
         modifiers: u8,
+        location: u32,
         auto_repeat: bool,
         should_insert_text: bool,
     },

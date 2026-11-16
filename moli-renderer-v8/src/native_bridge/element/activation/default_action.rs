@@ -2117,6 +2117,16 @@ fn anchor_download_activation(
     user_initiated: bool,
     suggested_filename: Option<String>,
 ) -> Option<RendererPendingDownloadActivation> {
+    let runtime = unsafe { &*runtime_ptr };
+    if !runtime.document_allows_downloads_for_handle(handle) {
+        return None;
+    }
+    let frame_id = runtime
+        .dom_host()
+        .owner_document_handle(handle)
+        .and_then(|document| runtime.child_browsing_context_host_for_document_handle(document))
+        .and_then(|child| runtime.frame_owner_frame_id_for_child_handle(child))
+        .map(|frame| frame.0);
     let source_element = node_wrapper_from_handle(scope, handle);
     let download_request = suggested_filename.as_deref().unwrap_or("");
     let proceed =
@@ -2130,10 +2140,36 @@ fn anchor_download_activation(
                 Some(download_request),
             )
         });
-    proceed.then_some(RendererPendingDownloadActivation {
+    if !proceed {
+        return None;
+    }
+    // Retain the authorized backing at activation, before script can revoke
+    // the URL. Reading it belongs to the asynchronous download task.
+    let response = url::Url::parse(&resolved)
+        .ok()
+        .filter(|url| url.scheme() == "blob")
+        .and_then(|_| {
+            crate::blob::object_url_download_data(unsafe { &mut *runtime_ptr }, handle, &resolved)
+        })
+        .map(
+            |(data, mime_type)| crate::runtime::RendererPendingDownloadResponse {
+                final_url: resolved.clone(),
+                status: 200,
+                headers: vec![
+                    ("Content-Type".to_owned(), mime_type.into_bytes()),
+                    (
+                        "Content-Length".to_owned(),
+                        data.len().to_string().into_bytes(),
+                    ),
+                ],
+                body: crate::runtime::RendererDownloadBody::Blob(data),
+            },
+        );
+    Some(RendererPendingDownloadActivation {
+        frame_id,
         url: resolved,
         suggested_filename,
-        response: None,
+        response,
     })
 }
 

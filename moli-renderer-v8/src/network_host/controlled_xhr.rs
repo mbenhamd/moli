@@ -1,4 +1,4 @@
-//! One native loading/decision path for intercepted asynchronous and synchronous XHR.
+//! Shared native interception transport for XHR and stylesheet resources.
 
 mod context;
 mod result;
@@ -24,20 +24,21 @@ use crate::{
     runtime::{RendererDocumentLifecycleIdentity, RendererOwnerAction},
     types::{
         PendingSubresourceAuthInfo, PendingSubresourceContinueEvent, PendingSubresourceFetchInfo,
-        PendingSubresourceResponseInfo, SubresourceResponseBody,
+        PendingSubresourceResponseInfo, SubresourceRequestInitiatorType, SubresourceResponseBody,
     },
 };
 
-pub(crate) struct ControlledXhrLoad {
+pub(crate) struct ControlledResourceLoad {
     request: Request,
     info: PendingSubresourceFetchInfo,
     load: ResourceLoadLease,
     cancel: FetchCancelHandle,
     source_document: RendererDocumentLifecycleIdentity,
     output: InterceptionOutput,
-    connect_policy: DocumentConnectPolicySnapshot,
+    connect_policy: Option<DocumentConnectPolicySnapshot>,
     preflight_headers: Vec<(String, String)>,
     initial_decision: Option<oneshot::Receiver<ResourceInterceptionDecision>>,
+    request_initiator_type: SubresourceRequestInitiatorType,
 }
 
 use super::loaded_response::LoadedResponse;
@@ -79,7 +80,29 @@ impl LoadedResponse {
     }
 }
 
-impl ControlledXhrLoad {
+impl ControlledResourceLoad {
+    pub(crate) fn for_stylesheet(
+        interception: crate::network::interception_output::ResourceInterceptionContext,
+        request: Request,
+        info: PendingSubresourceFetchInfo,
+        load: ResourceLoadLease,
+        cancel: FetchCancelHandle,
+        request_initiator_type: SubresourceRequestInitiatorType,
+    ) -> Self {
+        Self {
+            request,
+            info,
+            load,
+            cancel,
+            source_document: interception.source_document,
+            output: interception.output,
+            connect_policy: None,
+            preflight_headers: Vec::new(),
+            initial_decision: None,
+            request_initiator_type,
+        }
+    }
+
     /// The Page can publish request admission in the initiating turn. Network
     /// execution then awaits the same native port, preserving async XHR's
     /// existing request-notification boundary without running a Page task.
@@ -124,7 +147,10 @@ impl ControlledXhrLoad {
             }
             Err(error) => (Err(error), None),
         };
-        let completed = XhrLoadResult::new(self.info.clone(), result, network_headers);
+        let mut completed = XhrLoadResult::new(self.info.clone(), result, network_headers);
+        completed.network_record = completed
+            .network_record
+            .with_request_initiator_type(self.request_initiator_type);
         if completed.info.network_request_handle.is_some() {
             // Redirects already crossed their own native request-pause boundary.
             // Diagnostics retain the full chain; protocol sees only the terminal.
@@ -144,6 +170,7 @@ impl ControlledXhrLoad {
         let _ = self
             .output
             .publish(RendererOwnerAction::SubresourceContinue {
+                response_body: None,
                 source_document: self.source_document,
                 event: Box::new(PendingSubresourceContinueEvent::Completed {
                     internal_id: self.info.internal_id,
@@ -167,7 +194,12 @@ impl ControlledXhrLoad {
         let redirect = (phase == InterceptionPhase::Request)
             .then(|| self.request.redirect_chain().last().cloned())
             .flatten();
-        (pause.with_request_redirect(redirect), rx)
+        (
+            pause
+                .with_request_redirect(redirect)
+                .with_request_initiator_type(self.request_initiator_type),
+            rx,
+        )
     }
 
     async fn decision(
@@ -184,7 +216,7 @@ impl ControlledXhrLoad {
     fn sync_info(&mut self) {
         self.info.url = self.request.url.clone();
         self.info.method = self.request.method.clone();
-        self.info.request_headers = self.request.request_headers.clone();
+        self.info.request_headers = self.request.interception_request_headers();
         self.info.request_body_bytes = self.request.body.clone();
         self.info.request_body = self
             .request
@@ -193,23 +225,39 @@ impl ControlledXhrLoad {
             .map(|body| String::from_utf8_lossy(body).into_owned());
     }
 
+    fn apply_request_overrides(&mut self, overrides: moli_fetch::RequestOverrides) {
+        let headers_changed = overrides.headers.is_some();
+        overrides.apply(&mut self.request);
+        if headers_changed {
+            self.preflight_headers = self.request.request_headers.to_byte_strings();
+        }
+        self.sync_info();
+    }
+
     fn check_request(&self) -> Result<(), String> {
         let redirect_status = if self.request.redirect_count() == 0 {
             crate::content_security_policy::ContentSecurityPolicyRedirectStatus::NoRedirect
         } else {
             crate::content_security_policy::ContentSecurityPolicyRedirectStatus::FollowedRedirect
         };
-        if let Some(violation) = self.connect_policy.enforce_violation(
-            &self.info.document_url,
-            &self.request.url,
-            redirect_status,
-        ) {
+        if let Some(policy) = &self.connect_policy
+            && let Some(violation) = policy.enforce_violation(
+                &self.info.document_url,
+                &self.request.url,
+                redirect_status,
+            )
+        {
             return Err(
                 crate::document_runtime::document_content_security_policy_error_message(
                     &violation,
                     "XMLHttpRequest",
                 ),
             );
+        }
+        if self.connect_policy.is_none() {
+            self.request
+                .admit_request_url(&self.request.url)
+                .map_err(|error| error.to_string())?;
         }
         moli_url_policy::ensure_http_network_transport_url(&self.request.url)
             .map_err(|error| error.to_string())
@@ -288,47 +336,14 @@ impl ControlledXhrLoad {
                         intercept_response: response,
                         handle_auth_requests: auth,
                     } => {
-                        if let Some(url) = url {
-                            self.request.url = url;
-                        }
-                        if let Some(method) = method {
-                            self.request.method = method.clone();
-                            self.request.cookie_context.set_request_method(&method);
-                        }
-                        self.request.cookie_context = self
-                            .request
-                            .cookie_context
-                            .clone()
-                            .recompute_site_context_for_request(&self.request.url);
-                        if let Some(body) = body {
-                            let text = body.as_ref().map(|bytes| {
-                                std::sync::Arc::from(String::from_utf8_lossy(bytes).as_ref())
-                            });
-                            self.request.set_body(body, text);
-                        }
-                        if let Some(headers) = headers {
-                            match headers {
-                                moli_fetch::RequestHeaderOverride::CurrentRequest {
-                                    headers,
-                                    redirect_headers,
-                                } => {
-                                    self.request.set_redirect_headers(Some(
-                                        redirect_headers.unwrap_or_else(|| {
-                                            self.request.request_headers.clone()
-                                        }),
-                                    ));
-                                    self.request.request_headers = headers;
-                                }
-                                moli_fetch::RequestHeaderOverride::RedirectChain(headers) => {
-                                    self.request.set_redirect_headers(None);
-                                    self.request.request_headers = headers;
-                                }
-                            }
-                            self.preflight_headers = self.request.request_headers.to_byte_strings();
-                        }
+                        self.apply_request_overrides(moli_fetch::RequestOverrides {
+                            url,
+                            method,
+                            body,
+                            headers,
+                        });
                         intercept_response = response;
                         handle_auth_requests = auth;
-                        self.sync_info();
                     }
                     D::Fail(error) => return Err(error),
                     D::Fulfill {
@@ -338,13 +353,7 @@ impl ControlledXhrLoad {
                         body,
                     } => {
                         if let Some(overrides) = request_overrides {
-                            let headers_changed = overrides.headers.is_some();
-                            overrides.apply(&mut self.request);
-                            if headers_changed {
-                                self.preflight_headers =
-                                    self.request.request_headers.to_byte_strings();
-                            }
-                            self.sync_info();
+                            self.apply_request_overrides(*overrides);
                         }
                         synthetic = Some(self.synthetic_response(status, headers, body));
                         intercept_response = false;
@@ -387,6 +396,7 @@ impl ControlledXhrLoad {
                 if !self
                     .output
                     .publish(RendererOwnerAction::SubresourceContinue {
+                        response_body: None,
                         source_document: self.source_document,
                         event: Box::new(PendingSubresourceContinueEvent::AuthRequired(
                             PendingSubresourceAuthInfo {
@@ -433,6 +443,7 @@ impl ControlledXhrLoad {
                 if !self
                     .output
                     .publish(RendererOwnerAction::SubresourceContinue {
+                        response_body: None,
                         source_document: self.source_document,
                         event: Box::new(PendingSubresourceContinueEvent::ResponsePaused(
                             PendingSubresourceResponseInfo {
@@ -495,13 +506,15 @@ impl ControlledXhrLoad {
                 response.head.redirected = !response.head.redirect_chain.is_empty();
                 // Client-provided responses have the same CORS obligations as
                 // transport responses. Validate before any success is published.
-                super::validate_cors_response_chain(
-                    self.request
-                        .request_origin()
-                        .expect("XHR has a requesting origin"),
-                    &response.head,
-                    self.request.credentials_mode,
-                )?;
+                if self.request.request_mode == moli_fetch::RequestMode::Cors {
+                    super::validate_cors_response_chain(
+                        self.request
+                            .request_origin()
+                            .expect("XHR has a requesting origin"),
+                        &response.head,
+                        self.request.credentials_mode,
+                    )?;
+                }
                 if !is_synthetic {
                     self.cancel.adopt_response_progress(&hop_cancel);
                 }
@@ -523,6 +536,7 @@ impl ControlledXhrLoad {
             // its next one. The stable native network handle keeps Network ID.
             self.output
                 .publish(RendererOwnerAction::SubresourceContinue {
+                    response_body: None,
                     source_document: self.source_document,
                     event: Box::new(PendingSubresourceContinueEvent::Completed {
                         internal_id: self.info.internal_id,

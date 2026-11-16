@@ -723,7 +723,9 @@ impl PageScriptHost {
             disposition,
             None,
         );
-        self.push_pending_subresource_fetch_info(info.clone());
+        let mut visible_info = info.clone();
+        visible_info.request_headers = request.interception_request_headers();
+        self.push_pending_subresource_fetch_info(visible_info);
         self.pending_subresource_fetches.insert(
             info.internal_id,
             PendingSubresourceFetchState {
@@ -1868,7 +1870,15 @@ impl PageScriptHost {
                 internal_id: pending.info.internal_id,
             },
         );
-        self.push_subresource_fetch_pause(pending.info.clone(), None, Some(redirect.into()));
+        let mut visible_info = pending.info.clone();
+        if let Some(request) = pending
+            .continuation
+            .window_fetch()
+            .and_then(|fetch| fetch.intercepted_request.as_deref())
+        {
+            visible_info.request_headers = request.interception_request_headers();
+        }
+        self.push_subresource_fetch_pause(visible_info, None, Some(redirect.into()));
         self.restore_pending_subresource_fetch(pending);
     }
 
@@ -3110,9 +3120,22 @@ impl PageScriptHost {
         &mut self,
         event: PendingSubresourceContinueEvent,
     ) {
+        let response_body = match &event {
+            PendingSubresourceContinueEvent::ResponsePaused(info) => self
+                .pending_subresource_responses
+                .get(&info.internal_id)
+                .and_then(|pending| match &pending.pending.continuation {
+                    PendingSubresourceContinuation::ChildDocument(fetch) => {
+                        fetch.response_body().cloned()
+                    }
+                    _ => None,
+                }),
+            _ => None,
+        };
         if let Some(source_document) = self.root_document_lifecycle_identity()
             && self.append_live_turn_owner_action(
                 crate::runtime::RendererOwnerAction::SubresourceContinue {
+                    response_body,
                     network_pause: None,
                     source_document,
                     event: Box::new(event.clone()),

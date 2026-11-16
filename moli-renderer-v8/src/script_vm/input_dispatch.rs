@@ -2568,6 +2568,7 @@ impl ScriptVm {
         self.finish_input_command_checkpoint(result)
     }
 
+    #[cfg(test)]
     pub(crate) fn dispatch_key_event(
         &mut self,
         event_name: &str,
@@ -2577,6 +2578,29 @@ impl ScriptVm {
         modifiers: u8,
         auto_repeat: bool,
         should_insert_text: bool,
+    ) -> Result<RendererInputDispatchOutcome> {
+        self.dispatch_key_event_with_location(
+            event_name,
+            key,
+            code,
+            text,
+            modifiers,
+            auto_repeat,
+            should_insert_text,
+            0,
+        )
+    }
+
+    pub(crate) fn dispatch_key_event_with_location(
+        &mut self,
+        event_name: &str,
+        key: &str,
+        code: &str,
+        text: &str,
+        modifiers: u8,
+        auto_repeat: bool,
+        should_insert_text: bool,
+        location: u32,
     ) -> Result<RendererInputDispatchOutcome> {
         if event_name == "keypress" && self.suppress_next_keypress_after_canceled_raw_keydown {
             self.suppress_next_keypress_after_canceled_raw_keydown = false;
@@ -2613,6 +2637,7 @@ impl ScriptVm {
                 meta,
                 shift,
                 auto_repeat,
+                location,
             ) else {
                 return Ok(input_dispatch_outcome(false));
             };
@@ -2645,6 +2670,7 @@ impl ScriptVm {
                         meta,
                         shift,
                         auto_repeat,
+                        location,
                     ) else {
                         return Ok(input_dispatch_outcome(false));
                     };

@@ -2102,6 +2102,7 @@ fn test_trusted_key_dispatch_callback(
         meta,
         shift,
         false,
+        0,
     ) else {
         rv.set(v8::Boolean::new(scope, false).into());
         return;
@@ -2204,6 +2205,7 @@ mod dom_token_list_native_receivers;
 mod canvas_arguments;
 mod canvas_fill_rect;
 mod canvas_paths;
+mod canvas_transfer_to_image_bitmap;
 mod canvas_transform_snapshots;
 
 mod canvas_factory_realms;
@@ -2455,3 +2457,7 @@ mod sqlite_web_storage;
 
 mod dynamic_inline_scripts;
 mod native_request_url_provenance;
+
+mod svg_legacy_rectangle_contracts;
+
+mod indexed_db_prototype_handlers;

@@ -612,7 +612,7 @@ fn html_directionality_source(host: &DomHost, handle: NodeId) -> HtmlDirectional
     let mut current = Some(handle);
     while let Some(handle) = current {
         if let Some(element) = host.node(handle).and_then(Node::as_element) {
-            let dir = element.attribute("dir");
+            let dir = element.attribute_ns("", "dir");
             if let Some(direction) = dir.and_then(normalized_direction) {
                 return HtmlDirectionalitySource::Fixed {
                     direction,
@@ -707,7 +707,7 @@ fn descendant_is_directionally_isolated_for_auto(element: &Element) -> bool {
     {
         return true;
     }
-    element.attribute("dir").is_some_and(|value| {
+    element.attribute_ns("", "dir").is_some_and(|value| {
         normalized_direction(value).is_some() || value.eq_ignore_ascii_case("auto")
     })
 }

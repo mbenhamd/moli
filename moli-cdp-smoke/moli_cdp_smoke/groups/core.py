@@ -8,7 +8,6 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from ..diagnostics import new_cdp_session
 from . import SmokeState
 from ..assertions import SmokeError, assert_equal, wait_until
-from ..config import is_moli_browser
 from ..helpers import capture_layout, attach_cdp_event_collector
 
 
@@ -194,8 +193,6 @@ async def run_core_group(state: SmokeState) -> None:
             live_loader_id,
             f"ChatGPT-like live channel subresource loaderId for {suffix}",
         )
-    # WebSocket handshakes use their own Network.webSocket* family on both
-    # browsers (upstream fed98c8e1d), never an HTTP requestWillBeSent.
     socket_url = fixture.replace("http:", "ws:", 1) + "/ws-chatgpt-live?conversation_id=smoke-live"
     created = next((e for e in state.websocket_events if e["method"] == "Network.webSocketCreated"
                     and e["params"].get("url") == socket_url), None)
@@ -206,7 +203,14 @@ async def run_core_group(state: SmokeState) -> None:
                                 and e["params"].get("requestId") == socket_id
                                 and e["params"].get("response", {}).get("status") == 101
                                 for e in state.websocket_events), "live channel WebSocket handshake")
-    state.record("chatgpt_like_live_channel_dom")
+    assert_equal(
+        any(event["params"].get("requestId") == socket_id
+            or event["params"].get("request", {}).get("url") == socket_url
+            for event in state.subresource_events),
+        False,
+        "live channel WebSocket uses its own Network event family",
+    )
+    state.record("chatgpt_like_live_channel_dom", {"webSocketRequestId": socket_id})
 
     await page.goto(f"{fixture}/chatgpt-client-id-map-page", wait_until="load", timeout=10_000)
     await page.wait_for_function(

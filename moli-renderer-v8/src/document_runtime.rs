@@ -356,6 +356,7 @@ struct StylesheetLifecycleState {
     task_sender: crate::page_task_queue::RendererPageStylesheetTaskSender,
     task_producer: Option<crate::page_task_queue::RendererPageStylesheetTaskProducer>,
     service_worker_connected_link_context: Option<ServiceWorkerConnectedLinkContext>,
+    interception_context: Option<crate::network::interception_output::ResourceInterceptionContext>,
     #[cfg(test)]
     task_test_residence: Option<crate::page_task_queue::RendererPageStylesheetTaskTestResidence>,
 }
@@ -377,6 +378,7 @@ impl StylesheetLifecycleState {
             task_sender,
             task_producer: None,
             service_worker_connected_link_context: None,
+            interception_context: None,
             #[cfg(test)]
             task_test_residence: None,
         }
@@ -448,6 +450,7 @@ pub(crate) struct ConnectedLoadNetworkResult {
     pub(crate) resource_type: SubresourceResourceType,
     pub(crate) start_unix_millis: Option<f64>,
     pub(crate) origin_clean: bool,
+    pub(crate) network_observed: bool,
     pub(crate) result: std::result::Result<crate::protocol_types::NavigationResponse, String>,
 }
 
@@ -660,6 +663,7 @@ pub(crate) struct DocumentSandboxPolicy {
     pub(crate) forces_opaque_origin: bool,
     pub(crate) allows_scripts: bool,
     pub(crate) allows_modals: bool,
+    pub(crate) allows_downloads: bool,
     pub(crate) allows_top_navigation: bool,
     pub(crate) allows_popups_to_escape: bool,
     pub(crate) sandboxes_document_domain: bool,
@@ -671,6 +675,7 @@ impl Default for DocumentSandboxPolicy {
             forces_opaque_origin: false,
             allows_scripts: true,
             allows_modals: true,
+            allows_downloads: true,
             allows_top_navigation: true,
             allows_popups_to_escape: false,
             sandboxes_document_domain: false,
@@ -695,6 +700,8 @@ impl DocumentSandboxPolicy {
                 crate::content_security_policy::content_security_policy_sandbox_allows_modals(
                     policies,
                 ),
+            allows_downloads:
+                crate::content_security_policy::content_security_policy_sandbox_allows_downloads(policies),
             allows_top_navigation:
                 crate::content_security_policy::content_security_policy_sandbox_allows_top_navigation(
                     policies,
@@ -711,6 +718,7 @@ impl DocumentSandboxPolicy {
     }
 
     pub(crate) fn with_response_content_security_policy(mut self, response: Self) -> Self {
+        self.allows_downloads &= response.allows_downloads;
         if response.sandboxes_document_domain {
             self.forces_opaque_origin |= response.forces_opaque_origin;
             self.allows_scripts &= response.allows_scripts;
@@ -2683,6 +2691,7 @@ mod tests {
             .stylesheet_lifecycle
             .ready_connected_load_network_results
             .push_back(ConnectedLoadNetworkResult {
+                network_observed: false,
                 stylesheet_fetch: None,
                 blocking_operation: None,
                 source_operation: None,
@@ -2730,6 +2739,7 @@ mod tests {
             .stylesheet_lifecycle
             .ready_connected_load_network_results
             .push_back(ConnectedLoadNetworkResult {
+                network_observed: false,
                 stylesheet_fetch: Some(active_load.fetch().clone()),
                 blocking_operation: None,
                 source_operation: None,
@@ -2782,6 +2792,7 @@ mod tests {
             .stylesheet_lifecycle
             .ready_connected_load_network_results
             .push_back(ConnectedLoadNetworkResult {
+                network_observed: false,
                 stylesheet_fetch: Some(detached_load.fetch().clone()),
                 blocking_operation: None,
                 source_operation: None,
@@ -2834,6 +2845,7 @@ mod tests {
             .stylesheet_lifecycle
             .ready_connected_load_network_results
             .push_back(ConnectedLoadNetworkResult {
+                network_observed: false,
                 stylesheet_fetch: Some(detached_load.fetch().clone()),
                 blocking_operation: None,
                 source_operation: None,
@@ -3440,6 +3452,7 @@ mod tests {
             operation,
             successful: false,
             network_results: vec![ConnectedLoadNetworkResult {
+                network_observed: false,
                 stylesheet_fetch: None,
                 blocking_operation: None,
                 source_operation: None,
@@ -3534,6 +3547,7 @@ mod tests {
                 operation: first_a,
                 successful: true,
                 network_results: vec![ConnectedLoadNetworkResult {
+                    network_observed: false,
                     stylesheet_fetch: None,
                     blocking_operation: None,
                     source_operation: None,
@@ -3606,6 +3620,7 @@ mod tests {
             operation,
             successful: true,
             network_results: vec![ConnectedLoadNetworkResult {
+                network_observed: false,
                 stylesheet_fetch: None,
                 blocking_operation: None,
                 source_operation: None,
@@ -3666,6 +3681,7 @@ mod tests {
             operation: first_a,
             successful: true,
             network_results: vec![ConnectedLoadNetworkResult {
+                network_observed: false,
                 stylesheet_fetch: None,
                 blocking_operation: None,
                 source_operation: None,
@@ -3802,6 +3818,7 @@ mod tests {
             .stylesheet_lifecycle
             .ready_connected_load_network_results
             .push_back(ConnectedLoadNetworkResult {
+                network_observed: false,
                 stylesheet_fetch: None,
                 blocking_operation: None,
                 source_operation: None,
