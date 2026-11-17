@@ -370,22 +370,122 @@ impl Canvas2dPathState {
     }
 
     /// The path described by SVG path data (the `Path2D(DOMString)`
-    /// constructor). Unparseable data yields an empty path.
+    /// constructor). As SVG 2 error handling requires, the segments before
+    /// the first error are kept. Arcs go through [`Self::append_arc`], whose
+    /// tolerance grows with the radius, so huge radii stay bounded work.
     pub(super) fn from_svg_path_data(data: &str) -> Self {
+        use svgtypes::PathSegment;
+
         let mut state = Self::default();
-        let Ok(path) = kurbo::BezPath::from_svg(data) else {
-            return state;
-        };
-        for element in path.elements() {
-            match *element {
-                kurbo::PathEl::MoveTo(p) => state.move_to(p.x, p.y),
-                kurbo::PathEl::LineTo(p) => state.line_to(p.x, p.y),
-                kurbo::PathEl::QuadTo(a, p) => state.quadratic_curve_to(a.x, a.y, p.x, p.y),
-                kurbo::PathEl::CurveTo(a, b, p) => {
-                    state.bezier_curve_to(a.x, a.y, b.x, b.y, p.x, p.y);
+        let mut current = (0.0, 0.0);
+        let mut start = (0.0, 0.0);
+        // The control point the next smooth curve reflects, when the
+        // previous segment was the matching curve kind.
+        let mut cubic_control = None;
+        let mut quadratic_control = None;
+        for segment in svgtypes::PathParser::from(data) {
+            let Ok(segment) = segment else {
+                break;
+            };
+            let absolute = |abs: bool, x: f64, y: f64| {
+                if abs {
+                    (x, y)
+                } else {
+                    (current.0 + x, current.1 + y)
                 }
-                kurbo::PathEl::ClosePath => state.close_path(),
+            };
+            let reflect = |control: Option<(f64, f64)>| {
+                control.map_or(current, |(x, y)| (2.0 * current.0 - x, 2.0 * current.1 - y))
+            };
+            let (mut next_cubic, mut next_quadratic) = (None, None);
+            match segment {
+                PathSegment::MoveTo { abs, x, y } => {
+                    current = absolute(abs, x, y);
+                    start = current;
+                    state.move_to(current.0, current.1);
+                }
+                PathSegment::LineTo { abs, x, y } => {
+                    current = absolute(abs, x, y);
+                    state.line_to(current.0, current.1);
+                }
+                PathSegment::HorizontalLineTo { abs, x } => {
+                    current.0 = if abs { x } else { current.0 + x };
+                    state.line_to(current.0, current.1);
+                }
+                PathSegment::VerticalLineTo { abs, y } => {
+                    current.1 = if abs { y } else { current.1 + y };
+                    state.line_to(current.0, current.1);
+                }
+                PathSegment::CurveTo {
+                    abs,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    x,
+                    y,
+                } => {
+                    let c1 = absolute(abs, x1, y1);
+                    let c2 = absolute(abs, x2, y2);
+                    current = absolute(abs, x, y);
+                    state.bezier_curve_to(c1.0, c1.1, c2.0, c2.1, current.0, current.1);
+                    next_cubic = Some(c2);
+                }
+                PathSegment::SmoothCurveTo { abs, x2, y2, x, y } => {
+                    let c1 = reflect(cubic_control);
+                    let c2 = absolute(abs, x2, y2);
+                    current = absolute(abs, x, y);
+                    state.bezier_curve_to(c1.0, c1.1, c2.0, c2.1, current.0, current.1);
+                    next_cubic = Some(c2);
+                }
+                PathSegment::Quadratic { abs, x1, y1, x, y } => {
+                    let c = absolute(abs, x1, y1);
+                    current = absolute(abs, x, y);
+                    state.quadratic_curve_to(c.0, c.1, current.0, current.1);
+                    next_quadratic = Some(c);
+                }
+                PathSegment::SmoothQuadratic { abs, x, y } => {
+                    let c = reflect(quadratic_control);
+                    current = absolute(abs, x, y);
+                    state.quadratic_curve_to(c.0, c.1, current.0, current.1);
+                    next_quadratic = Some(c);
+                }
+                PathSegment::EllipticalArc {
+                    abs,
+                    rx,
+                    ry,
+                    x_axis_rotation,
+                    large_arc,
+                    sweep,
+                    x,
+                    y,
+                } => {
+                    let from = current;
+                    current = absolute(abs, x, y);
+                    // Identical endpoints omit the arc; zero radii make it a
+                    // straight line (SVG 2 "Out-of-range elliptical arc
+                    // parameters"). from_svg_arc covers both by returning None.
+                    let arc = kurbo::Arc::from_svg_arc(&kurbo::SvgArc {
+                        from: kurbo::Point::new(from.0, from.1),
+                        to: kurbo::Point::new(current.0, current.1),
+                        radii: kurbo::Vec2::new(rx, ry),
+                        x_rotation: x_axis_rotation.to_radians(),
+                        large_arc,
+                        sweep,
+                    });
+                    match arc {
+                        Some(arc) => state.append_arc(arc),
+                        None if from != current => state.line_to(current.0, current.1),
+                        None => {}
+                    }
+                }
+                PathSegment::ClosePath { .. } => {
+                    state.close_path();
+                    current = start;
+                }
             }
+            cubic_control = next_cubic;
+            quadratic_control = next_quadratic;
         }
         state
     }
@@ -543,6 +643,17 @@ mod tests {
                 == (11.0, 22.0, 13.0, 24.0, 11.0, 22.0, 15.0, 26.0)
         ));
         assert_eq!(target.current, (15.0, 26.0));
+    }
+
+    #[test]
+    fn svg_path_data_arcs_are_bounded_and_errors_keep_the_prefix() {
+        // kurbo's own SVG parser flattens this arc at an absolute tolerance
+        // into ~1e10 cubics; the radius-relative tolerance keeps it small.
+        let huge = Canvas2dPathState::from_svg_path_data("M0 0 A1e60 1e60 0 1 1 1e50 0");
+        assert!((2..=64).contains(&huge.elements.len()));
+        let partial = Canvas2dPathState::from_svg_path_data("M10 10 L50 10 L50 50 Z X 1 2");
+        assert_eq!(partial.elements.len(), 4);
+        assert!(matches!(partial.elements[3], PaintPathElement::Close));
     }
 
     #[test]
