@@ -703,12 +703,7 @@ pub(crate) fn perform_triple_click_selection_default_action(
         );
     }
     let runtime = unsafe { &*runtime_ptr };
-    if runtime
-        .dom_host()
-        .node(hit)
-        .and_then(Node::as_element)
-        .is_some_and(Element::is_text_control)
-    {
+    if !triple_click_can_start_selection(runtime, hit) {
         return false;
     }
     let global = scope.get_current_context().global(scope);
@@ -772,6 +767,44 @@ pub(crate) fn perform_triple_click_selection_default_action(
         ],
     )
     .is_some()
+}
+
+/// Blink `Node::CanStartSelection` for the pressed node: text controls keep
+/// their own selection, other form controls (a `<button>`, a checkbox) keep
+/// the existing selection, and `user-select: none` content starts none.
+/// The nearest editing host or explicit `user-select` decides, as in
+/// Chromium 156.
+fn triple_click_can_start_selection(runtime: &PageScriptHost, hit: DomHandle) -> bool {
+    let mut current = Some(hit);
+    while let Some(handle) = current {
+        let node = runtime.dom_host().node(handle);
+        if let Some(element) = node.and_then(Node::as_element) {
+            if element.is_text_control()
+                || element.is_html_input()
+                || element.is_html_element("button")
+                || element.is_html_select()
+            {
+                return false;
+            }
+            if contenteditable_editing_host(runtime, handle) == Some(handle) {
+                return true;
+            }
+            match crate::native_bridge::element::style_property_value(
+                runtime,
+                handle,
+                crate::native_bridge::element::StyleMode::Computed,
+                "user-select",
+            )
+            .trim()
+            {
+                "none" => return false,
+                "text" | "all" => return true,
+                _ => {}
+            }
+        }
+        current = node.and_then(Node::parent_node);
+    }
+    true
 }
 
 fn node_is_inclusive_descendant(
