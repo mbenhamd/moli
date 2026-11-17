@@ -247,17 +247,27 @@ pub(crate) fn focus_editing_host_selection(
 /// Focusing a text control moves the frame selection into the control's inner
 /// editor; Blink reports that from the light tree as a caret before the
 /// control (its parent and child index), so an earlier selection elsewhere in
-/// the document no longer remains live. Blink attributes that change to the
-/// control (its own `selectionchange`, which bubbles), so no separate
-/// document-targeted `selectionchange` is queued here.
+/// the document no longer remains live. A control inside a shadow tree is
+/// reported at its outermost shadow host, as Chromium 156 does, so the
+/// document selection never exposes shadow nodes. Blink attributes that
+/// change to the control (its own `selectionchange`, which bubbles), so no
+/// separate document-targeted `selectionchange` is queued here.
 pub(crate) fn focus_text_control_selection(
     scope: &mut v8::PinScope<'_, '_>,
-    target: crate::document_runtime::DomHandle,
+    control: crate::document_runtime::DomHandle,
 ) {
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
         return;
     };
     let host = unsafe { &*host_ptr };
+    let mut target = control;
+    while let Some(shadow_host) = host
+        .dom_host()
+        .root_node_handle(target)
+        .and_then(|root| host.dom_host().shadow_root_host(root))
+    {
+        target = shadow_host;
+    }
     let Some(parent) = host.dom_host().parent_node(target) else {
         return;
     };
