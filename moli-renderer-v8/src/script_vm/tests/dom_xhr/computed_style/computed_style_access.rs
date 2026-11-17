@@ -1524,7 +1524,7 @@ fn computed_line_height_resolves_numbers_and_percentages() {
 
 #[test]
 fn computed_horizontal_auto_margins_resolve_to_pixels() {
-    let mut vm = new_storage_test_vm("https://computed-auto-margin.test/");
+    let mut vm = new_storage_html_test_vm("https://computed-auto-margin.test/");
 
     let result = vm
         .eval(

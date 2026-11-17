@@ -3874,20 +3874,54 @@ pub(super) fn svg_graphics_get_bbox_callback<'s>(
     rv.set(build_dom_rect_like(scope, bbox.x, bbox.y, bbox.width, bbox.height).into());
 }
 
+/// The CTM `compute` derives for an SVG element. An element outside a
+/// rendered viewport (unrendered or detached) keeps the user-space walk, so
+/// it reports the identity unless its own transforms say otherwise.
+fn svg_graphics_ctm<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    receiver: v8::Local<'s, v8::Object>,
+    compute: fn(
+        &crate::native_bridge::PageScriptHost,
+        crate::document_runtime::DomHandle,
+        Option<crate::document_runtime::DomHandle>,
+        Option<super::screen::SvgRootViewport>,
+    ) -> SvgMatrixComponents,
+    rv: &mut v8::ReturnValue<'_, v8::Value>,
+) {
+    let target = moli_webapi_declare::web_api_object_target(scope, receiver)
+        .expect("SVGGraphicsElement receiver was validated");
+    let matrix =
+        crate::native_bridge::node_runtime_and_handle_from_object_or_detached(scope, target)
+            .ok()
+            .map_or_else(SvgMatrixComponents::identity, |(runtime_ptr, handle)| {
+                let runtime = unsafe { &*runtime_ptr };
+                let (root, viewport) =
+                    crate::native_bridge::element::svg_viewport_root_geometry(runtime, handle)
+                        .map_or((None, None), |(root, viewport)| (Some(root), viewport));
+                compute(runtime, handle, root, viewport)
+            });
+    rv.set(build_svg_matrix(scope, matrix).into());
+}
+
 pub(super) fn svg_graphics_get_ctm_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    _args: v8::FunctionCallbackArguments<'s>,
+    args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    rv.set(v8::null(scope).into());
+    svg_graphics_ctm(
+        scope,
+        args.this(),
+        super::screen::svg_nearest_viewport_ctm,
+        &mut rv,
+    );
 }
 
 pub(super) fn svg_graphics_get_screen_ctm_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    _args: v8::FunctionCallbackArguments<'s>,
+    args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    rv.set(v8::null(scope).into());
+    svg_graphics_ctm(scope, args.this(), super::screen::svg_screen_ctm, &mut rv);
 }
 
 pub(super) fn svg_geometry_is_point_in_fill_callback<'s>(

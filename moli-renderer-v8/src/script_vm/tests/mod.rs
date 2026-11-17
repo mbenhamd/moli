@@ -2207,6 +2207,7 @@ mod canvas_fill_rect;
 mod canvas_paths;
 mod canvas_transfer_to_image_bitmap;
 mod canvas_transform_snapshots;
+mod chromium_web_api_parity;
 
 mod canvas_factory_realms;
 

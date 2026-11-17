@@ -33,8 +33,8 @@ use super::canvas::{
     canvas_gradient_add_color_stop_callback, install_canvas_rect_bindings,
     install_canvas_template_bindings, install_canvas_transform_bindings,
     offscreen_canvas_convert_to_blob_callback, offscreen_canvas_get_context_callback,
-    offscreen_canvas_transfer_to_image_bitmap_callback, webgl_boolean_callback,
-    webgl_check_framebuffer_status_callback, webgl_create_buffer_callback,
+    offscreen_canvas_transfer_to_image_bitmap_callback, path2d_add_path_callback,
+    webgl_boolean_callback, webgl_check_framebuffer_status_callback, webgl_create_buffer_callback,
     webgl_create_framebuffer_callback, webgl_create_program_callback,
     webgl_create_renderbuffer_callback, webgl_create_shader_callback,
     webgl_get_attrib_location_callback, webgl_get_context_attributes_callback,
@@ -386,6 +386,48 @@ struct CanvasRenderingContext2dTemplateDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::Path2D, enumerable, receiver)]
+struct Path2dTemplateMethodsDeclaration {
+    #[webapi(method = "addPath", length = 1, callback = path2d_add_path_callback)]
+    add_path: (),
+
+    #[webapi(method = "closePath", length = 0, callback = canvas_context_close_path_callback)]
+    close_path: (),
+
+    #[webapi(method = "moveTo", length = 2, callback = canvas_context_move_to_callback)]
+    move_to: (),
+
+    #[webapi(method = "lineTo", length = 2, callback = canvas_context_line_to_callback)]
+    line_to: (),
+
+    #[webapi(
+        method = "quadraticCurveTo",
+        length = 4,
+        callback = canvas_context_quadratic_curve_to_callback
+    )]
+    quadratic_curve_to: (),
+
+    #[webapi(
+        method = "bezierCurveTo",
+        length = 6,
+        callback = canvas_context_bezier_curve_to_callback
+    )]
+    bezier_curve_to: (),
+
+    #[webapi(method = "arcTo", length = 5, callback = canvas_context_arc_to_callback)]
+    arc_to: (),
+
+    #[webapi(method = "rect", length = 4, callback = canvas_context_rect_callback)]
+    rect: (),
+
+    #[webapi(method = "arc", length = 5, callback = canvas_context_arc_callback)]
+    arc: (),
+
+    #[webapi(method = "ellipse", length = 7, callback = canvas_context_ellipse_callback)]
+    ellipse: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
 #[webapi(interface = web_api_interfaces::CanvasGradient, enumerable)]
 struct CanvasGradientTemplateMethodsDeclaration {
     #[webapi(
@@ -658,6 +700,10 @@ pub(super) fn install_media_file_template_bindings<'s>(
             BlobTemplateMethodsDeclaration::initialize_prototype_template(scope, proto);
         }
         "ImageData" => {}
+        "Path2D" => {
+            let proto = template.prototype_template(scope);
+            Path2dTemplateMethodsDeclaration::initialize_prototype_template(scope, proto);
+        }
         "CanvasGradient" => {
             let proto = template.prototype_template(scope);
             CanvasGradientTemplateMethodsDeclaration::initialize_prototype_template(scope, proto);

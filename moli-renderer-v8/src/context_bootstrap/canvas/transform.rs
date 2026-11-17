@@ -114,10 +114,20 @@ pub(super) fn set_transform_arguments<'s>(
     if args.length() > 1 {
         return transform_arguments(scope, args, PREFIX);
     }
+    matrix_2d_init_argument(scope, args.get(0), PREFIX, 1)
+}
+
+/// Validates a `DOMMatrix2DInit` argument into `[a, b, c, d, e, f]`.
+pub(super) fn matrix_2d_init_argument<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+    prefix: &'static str,
+    position: usize,
+) -> Option<[f64; 6]> {
     let init = match webidl::parse_dictionary::<TransformInit>(
         scope,
-        args.get(0),
-        webidl::Context::argument(PREFIX, 1),
+        value,
+        webidl::Context::argument(prefix, position),
     ) {
         Ok(init) => init.unwrap_or_default(),
         Err(error) => {
