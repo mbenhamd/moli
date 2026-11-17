@@ -166,24 +166,84 @@ fn svg_ctm_below_root(
     matrix
 }
 
-fn svg_root_content_transform(
+/// `getScreenCTM()`: from `handle`'s user space to client coordinates,
+/// given the client border box of its outermost `<svg>` (`root`, which may
+/// be `handle` itself).
+pub(crate) fn svg_screen_ctm(
+    runtime: &PageScriptHost,
+    handle: DomHandle,
+    root: DomHandle,
+    root_border_box: [f64; 4],
+) -> SvgMatrixComponents {
+    svg_root_content_transform(runtime, root, root_border_box)
+        .multiply(svg_ctm_below_root(runtime, handle, root))
+}
+
+/// `getCTM()`: from `handle`'s user space to the user space of its nearest
+/// viewport element, including that viewport's own `x`/`y` and viewBox
+/// mapping (SVG 2 §8.4, the "nearest viewport" CTM scope). `root` is the
+/// outermost `<svg>`, whose viewport is sized by its client border box.
+pub(crate) fn svg_nearest_viewport_ctm(
+    runtime: &PageScriptHost,
+    handle: DomHandle,
+    root: DomHandle,
+    root_border_box: [f64; 4],
+) -> SvgMatrixComponents {
+    let mut matrix = SvgMatrixComponents::identity();
+    let mut current = Some(handle);
+    while let Some(candidate) = current {
+        let is_svg = runtime
+            .dom_host()
+            .node(candidate)
+            .and_then(|node| node.local_name())
+            == Some("svg");
+        let local = if candidate == root {
+            let [_, _, width, height] = svg_root_content_box(runtime, root, root_border_box);
+            svg_view_box_transform(runtime, root, width, height)
+        } else if is_svg {
+            svg_nested_viewport_transform(runtime, candidate)
+        } else {
+            svg_transform_for_handle(runtime, candidate)
+        };
+        matrix = local.multiply(matrix);
+        if candidate == root || (candidate != handle && is_svg) {
+            break;
+        }
+        current = runtime
+            .dom_host()
+            .node(candidate)
+            .and_then(|node| node.parent_node_id());
+    }
+    matrix
+}
+
+/// Client content box `[x, y, width, height]` of the outermost `<svg>`.
+fn svg_root_content_box(
     runtime: &PageScriptHost,
     root: DomHandle,
     [x, y, width, height]: [f64; 4],
-) -> SvgMatrixComponents {
+) -> [f64; 4] {
     let edge = |property: &str| svg_computed_pixel_value(runtime, root, property).unwrap_or(0.0);
     let left = edge("border-left-width") + edge("padding-left");
     let top = edge("border-top-width") + edge("padding-top");
     let right = edge("border-right-width") + edge("padding-right");
     let bottom = edge("border-bottom-width") + edge("padding-bottom");
-    let content_width = (width - left - right).max(0.0);
-    let content_height = (height - top - bottom).max(0.0);
-    SvgMatrixComponents::translate(x + left, y + top).multiply(svg_view_box_transform(
-        runtime,
-        root,
-        content_width,
-        content_height,
-    ))
+    [
+        x + left,
+        y + top,
+        (width - left - right).max(0.0),
+        (height - top - bottom).max(0.0),
+    ]
+}
+
+fn svg_root_content_transform(
+    runtime: &PageScriptHost,
+    root: DomHandle,
+    root_border_box: [f64; 4],
+) -> SvgMatrixComponents {
+    let [x, y, width, height] = svg_root_content_box(runtime, root, root_border_box);
+    SvgMatrixComponents::translate(x, y)
+        .multiply(svg_view_box_transform(runtime, root, width, height))
 }
 
 /// The `x`/`y` offset and viewBox mapping a nested `<svg>` establishes.

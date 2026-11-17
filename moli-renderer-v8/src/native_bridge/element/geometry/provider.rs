@@ -127,6 +127,34 @@ fn read_svg_content_client_rects(
     ))
 }
 
+/// The outermost `<svg>` hosting `source` (itself when `source` is one) and
+/// that `<svg>`'s client border box, for CTM queries. `None` when `source` is
+/// not SVG content of a rendered outermost `<svg>`.
+pub(crate) fn svg_viewport_root_client_box(
+    runtime: &PageScriptHost,
+    source: DomHandle,
+) -> Result<Option<(DomHandle, [f64; 4])>, LayoutError> {
+    use crate::context_bootstrap::svg_runtime::screen;
+    let root = if screen::is_outermost_svg(runtime, source) {
+        source
+    } else {
+        let Some(root) = screen::svg_layout_viewport_root(runtime, source) else {
+            return Ok(None);
+        };
+        root
+    };
+    let Some(root_box) = read_css_box_client_rects(runtime, root)?
+        .into_iter()
+        .reduce(union_client_rect)
+    else {
+        return Ok(None);
+    };
+    Ok(Some((
+        root,
+        [root_box.left, root_box.top, root_box.width, root_box.height],
+    )))
+}
+
 pub(crate) fn read_client_rects(
     runtime: &PageScriptHost,
     source: DomHandle,

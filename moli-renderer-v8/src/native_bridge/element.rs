@@ -2123,4 +2123,4 @@ pub(in crate::native_bridge::element) fn resolved_reflected_element_attribute_ha
         .and_then(|candidate| runtime.dom_host().resolve_reference_target_chain(candidate))
 }
 
-pub(crate) use geometry::read_client_rects;
+pub(crate) use geometry::{read_client_rects, svg_viewport_root_client_box};
