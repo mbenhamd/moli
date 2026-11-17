@@ -361,14 +361,15 @@ pub(super) use forms::{
     input_type_getter_function, input_type_setter_function, input_value_as_date_getter_function,
     input_value_as_date_setter_function, input_value_as_number_getter_function,
     input_value_as_number_setter_function, input_value_getter_function,
-    input_value_setter_function, input_width_getter_function, input_width_setter_function,
-    label_activation_control_handle, label_control_getter_function, label_control_handle,
-    label_form_getter_function, label_html_for_getter_function, label_html_for_setter_function,
-    label_receives_programmatic_focus, legend_form_getter_function, meter_high_getter_function,
-    meter_high_setter_function, meter_low_getter_function, meter_low_setter_function,
-    meter_max_getter_function, meter_max_setter_function, meter_min_getter_function,
-    meter_min_setter_function, meter_optimum_getter_function, meter_optimum_setter_function,
-    meter_value_getter_function, meter_value_setter_function,
+    input_value_setter_function, input_webkitdirectory_getter_function,
+    input_webkitdirectory_setter_function, input_width_getter_function,
+    input_width_setter_function, label_activation_control_handle, label_control_getter_function,
+    label_control_handle, label_form_getter_function, label_html_for_getter_function,
+    label_html_for_setter_function, label_receives_programmatic_focus, legend_form_getter_function,
+    meter_high_getter_function, meter_high_setter_function, meter_low_getter_function,
+    meter_low_setter_function, meter_max_getter_function, meter_max_setter_function,
+    meter_min_getter_function, meter_min_setter_function, meter_optimum_getter_function,
+    meter_optimum_setter_function, meter_value_getter_function, meter_value_setter_function,
     option_default_selected_getter_function, option_default_selected_setter_function,
     option_disabled_getter_function, option_disabled_setter_function, option_form_getter_function,
     option_index_getter_function, option_label_getter_function, option_label_setter_function,
@@ -2124,4 +2125,4 @@ pub(in crate::native_bridge::element) fn resolved_reflected_element_attribute_ha
         .and_then(|candidate| runtime.dom_host().resolve_reference_target_chain(candidate))
 }
 
-pub(crate) use geometry::read_client_rects;
+pub(crate) use geometry::{read_client_rects, svg_viewport_root_geometry};

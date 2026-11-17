@@ -541,6 +541,31 @@ pub(in crate::native_bridge) fn input_multiple_setter_function<'s>(
     rv.set_undefined();
 }
 
+/// `webkitdirectory` (File and Directory Entries API): a reflected boolean
+/// that makes a file input choose a directory.
+pub(in crate::native_bridge) fn input_webkitdirectory_getter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    input_boolean_attribute_getter(scope, args.this(), "webkitdirectory", "webkitdirectory", rv);
+}
+
+pub(in crate::native_bridge) fn input_webkitdirectory_setter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    set_input_boolean_attribute_on_receiver(
+        scope,
+        args.this(),
+        "webkitdirectory",
+        args.get(0),
+        "webkitdirectory",
+    );
+    rv.set_undefined();
+}
+
 pub(in crate::native_bridge) fn input_form_no_validate_getter_function<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
