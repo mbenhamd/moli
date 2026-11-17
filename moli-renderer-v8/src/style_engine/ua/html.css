@@ -156,9 +156,18 @@ caption {
   display: table-caption;
 }
 
-li,
+li {
+  display: list-item;
+}
+
 details > summary:first-of-type {
   display: list-item;
+  counter-increment: list-item 0;
+  list-style: disclosure-closed inside;
+}
+
+details[open] > summary:first-of-type {
+  list-style-type: disclosure-open;
 }
 
 ul, menu, dir {

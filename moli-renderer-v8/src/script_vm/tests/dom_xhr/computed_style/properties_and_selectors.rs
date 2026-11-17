@@ -1997,3 +1997,65 @@ fn child_frame_target_selector_invalidation_uses_child_document_world() {
         "child target invalidation should keep style work in the child document world"
     );
 }
+
+// Expectations recorded from Chromium 156 (Playwright 1.64.1), 2026-11-17.
+#[test]
+fn details_first_summary_uses_disclosure_marker_that_follows_open_state() {
+    let mut vm = new_storage_test_vm("https://computed-style-summary-disclosure.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  if (!document.documentElement) {
+    document.appendChild(document.createElement('html'));
+  }
+  if (!document.body) {
+    document.documentElement.appendChild(document.createElement('body'));
+  }
+  document.body.innerHTML = '<details id="d"><summary id="a">A</summary></details>';
+  const read = () => {
+    const style = getComputedStyle(document.getElementById('a'));
+    return [style.display, style.listStyleType, style.listStylePosition].join(' ');
+  };
+  const closed = read();
+  document.getElementById('d').open = true;
+  return `${closed}|${read()}`;
+})()
+"#,
+        )
+        .expect("summary disclosure styles should evaluate");
+
+    assert_eq!(
+        result,
+        "list-item disclosure-closed inside|list-item disclosure-open inside"
+    );
+}
+
+#[test]
+fn summary_outside_first_details_slot_keeps_block_disc_defaults() {
+    let mut vm = new_storage_test_vm("https://computed-style-summary-non-first.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  if (!document.documentElement) {
+    document.appendChild(document.createElement('html'));
+  }
+  if (!document.body) {
+    document.documentElement.appendChild(document.createElement('body'));
+  }
+  document.body.innerHTML =
+    '<details open><summary>A</summary><summary id="b">B</summary></details><summary id="c">C</summary>';
+  return ['b', 'c'].map((id) => {
+    const style = getComputedStyle(document.getElementById(id));
+    return [style.display, style.listStyleType, style.listStylePosition].join(' ');
+  }).join('|');
+})()
+"#,
+        )
+        .expect("non-first summary styles should evaluate");
+
+    assert_eq!(result, "block disc outside|block disc outside");
+}
