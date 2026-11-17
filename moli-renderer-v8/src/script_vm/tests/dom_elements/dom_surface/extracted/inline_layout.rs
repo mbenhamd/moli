@@ -1803,3 +1803,29 @@ JSON.stringify(ids.map((id) => {
         }
     }
 }
+
+/// Chromium 156 generates no marker box for `::marker { content: '' }`: the
+/// closed and open summary text starts at the body edge (x=8), and an inside
+/// or outside list item's text starts at the list padding edge (x=48), as with
+/// `content: none`. A non-empty string marker still offsets the text.
+#[test]
+fn empty_string_marker_content_generates_no_marker_box() {
+    let mut vm = new_parsed_test_vm(
+        "https://empty-marker-content.test/",
+        "<!doctype html><meta charset=utf-8><style>body{margin:8px;font:16px/20px sans-serif}.e::marker{content:''}.p::marker{content:'+ '}</style><details><summary id=sc class=e>Closed</summary></details><details open><summary id=so class=e>Open</summary></details><ul style=list-style-position:inside><li id=li class=e>Item</li></ul><ul><li id=lo class=e>Out</li></ul><details><summary id=sp class=p>Plus</summary></details>",
+    );
+    let geometry = vm
+        .eval(
+            r#"JSON.stringify(['sc', 'so', 'li', 'lo', 'sp'].map((id) => {
+  const range = document.createRange();
+  range.selectNodeContents(document.getElementById(id));
+  return range.getBoundingClientRect().left;
+}))"#,
+        )
+        .unwrap();
+    let left = serde_json::from_str::<[f64; 5]>(&geometry).unwrap();
+    for (index, expected) in [8.0, 8.0, 48.0, 48.0].into_iter().enumerate() {
+        assert!((left[index] - expected).abs() < 0.02, "{left:?}");
+    }
+    assert!(left[4] > 16.0, "{left:?}");
+}
