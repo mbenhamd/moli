@@ -331,8 +331,63 @@ impl Canvas2dPathState {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.elements.is_empty()
+    }
+
+    /// Appends `other`'s subpaths mapped through `matrix` (`Path2D.addPath`,
+    /// and drawing a `Path2D` under the context's current transform). The
+    /// current point becomes the last point of the appended path.
+    pub(super) fn add_path(&mut self, other: &Canvas2dPathState, matrix: kurbo::Affine) {
+        if other.elements.is_empty() {
+            return;
+        }
+        let map = |p: LayoutPoint| {
+            let p = matrix * kurbo::Point::new(f64::from(p.x), f64::from(p.y));
+            point(p.x, p.y)
+        };
+        for element in &other.elements {
+            let mapped = match *element {
+                PaintPathElement::MoveTo(p) => PaintPathElement::MoveTo(map(p)),
+                PaintPathElement::LineTo(p) => PaintPathElement::LineTo(map(p)),
+                PaintPathElement::QuadTo(a, p) => PaintPathElement::QuadTo(map(a), map(p)),
+                PaintPathElement::CubicTo(a, b, p) => {
+                    PaintPathElement::CubicTo(map(a), map(b), map(p))
+                }
+                PaintPathElement::Close => PaintPathElement::Close,
+            };
+            self.elements.push(mapped);
+        }
+        let mapped = |(x, y): (f64, f64)| {
+            let p = matrix * kurbo::Point::new(x, y);
+            (p.x, p.y)
+        };
+        self.current = mapped(other.current);
+        self.current_subpath_start = mapped(other.current_subpath_start);
+        self.has_subpath = other.has_subpath;
+        self.just_closed = other.just_closed;
+    }
+
+    /// The path described by SVG path data (the `Path2D(DOMString)`
+    /// constructor). Unparseable data yields an empty path.
+    pub(super) fn from_svg_path_data(data: &str) -> Self {
+        let mut state = Self::default();
+        let Ok(path) = kurbo::BezPath::from_svg(data) else {
+            return state;
+        };
+        for element in path.elements() {
+            match *element {
+                kurbo::PathEl::MoveTo(p) => state.move_to(p.x, p.y),
+                kurbo::PathEl::LineTo(p) => state.line_to(p.x, p.y),
+                kurbo::PathEl::QuadTo(a, p) => state.quadratic_curve_to(a.x, a.y, p.x, p.y),
+                kurbo::PathEl::CurveTo(a, b, p) => {
+                    state.bezier_curve_to(a.x, a.y, b.x, b.y, p.x, p.y);
+                }
+                kurbo::PathEl::ClosePath => state.close_path(),
+            }
+        }
+        state
     }
 }
 
@@ -468,6 +523,26 @@ mod tests {
         assert!((tangent.x - 5.0).abs() < 1e-5 && tangent.y.abs() < 1e-5);
         assert!((state.current.0 - 10.0).abs() < 1e-5);
         assert!((state.current.1 - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn added_paths_are_mapped_and_move_the_current_point() {
+        let mut source = Canvas2dPathState::from_svg_path_data("M1 2 L3 4 Z");
+        source.line_to(5.0, 6.0);
+        let mut target = Canvas2dPathState::default();
+        target.add_path(&source, kurbo::Affine::translate((10.0, 20.0)));
+        assert!(matches!(
+            target.elements[..],
+            [
+                PaintPathElement::MoveTo(a),
+                PaintPathElement::LineTo(b),
+                PaintPathElement::Close,
+                PaintPathElement::MoveTo(c),
+                PaintPathElement::LineTo(d),
+            ] if (a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y)
+                == (11.0, 22.0, 13.0, 24.0, 11.0, 22.0, 15.0, 26.0)
+        ));
+        assert_eq!(target.current, (15.0, 26.0));
     }
 
     #[test]
