@@ -2814,7 +2814,10 @@ impl ScriptVm {
                 return Ok(input_dispatch_outcome(true));
             }
 
+            // Blink `RadioInputType::HandleKeydownEvent` leaves arrows with
+            // Alt, Ctrl or Meta to other handlers.
             if target.is_radio
+                && !(alt || ctrl || meta)
                 && matches!(
                     key_lower.as_str(),
                     "arrowdown"
