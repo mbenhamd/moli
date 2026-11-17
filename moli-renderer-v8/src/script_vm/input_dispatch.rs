@@ -45,8 +45,9 @@ use crate::native_bridge::element::{
     is_disabled_form_control, move_contenteditable_caret_to_line_boundary,
     observable_input_hit_test, perform_auxiliary_link_default_action, perform_drop_default_action,
     perform_implicit_submission_from_control, perform_keyboard_scroll_default_action,
-    perform_mouse_focus_default_action, perform_range_keyboard_default_action,
-    perform_scrollbar_scroll_default_action, perform_text_input,
+    perform_mouse_focus_default_action, perform_number_spin_keyboard_default_action,
+    perform_range_keyboard_default_action, perform_scrollbar_scroll_default_action,
+    perform_text_input, perform_triple_click_selection_default_action,
     perform_wheel_scroll_default_action, replace_contenteditable_selection,
     replace_text_control_selection, select_contenteditable_contents,
     text_control_set_selection_range_internal,
@@ -1627,6 +1628,15 @@ impl ScriptVm {
                             runtime_ptr,
                             hit_handle.unwrap_or(handle),
                         );
+                        if click_count >= 3 && button == 0 {
+                            perform_triple_click_selection_default_action(
+                                scope,
+                                runtime_ptr,
+                                hit_handle.unwrap_or(handle),
+                                coordinates.client_x,
+                                coordinates.client_y,
+                            );
+                        }
                     }
                 }
             }
@@ -2628,6 +2638,14 @@ impl ScriptVm {
         let canceled_raw_keydown = Cell::new(false);
 
         let result = self.with_default_context_scope(|scope, runtime_ptr| {
+            if event_name == "keydown" {
+                // Blink KeyboardEventManager: a key press shows the focus
+                // ring of an element that a pointer press focused.
+                let runtime = unsafe { &mut *runtime_ptr };
+                if let Some(focused) = runtime.dom_host().note_keyboard_event() {
+                    runtime.note_focus_style_activity(None, Some(focused));
+                }
+            }
             let Some(event) = construct_keyboard_event(
                 scope,
                 event_name,
@@ -2785,11 +2803,21 @@ impl ScriptVm {
             // A range control consumes its slider keys before the text-control
             // caret keys below, which would otherwise claim the arrows, Home
             // and End for an `<input type=range>`.
-            if perform_range_keyboard_default_action(scope, runtime_ptr, handle, &key_lower) {
+            if perform_range_keyboard_default_action(scope, runtime_ptr, handle, &key_lower)
+                || perform_number_spin_keyboard_default_action(
+                    scope,
+                    runtime_ptr,
+                    handle,
+                    &key_lower,
+                )
+            {
                 return Ok(input_dispatch_outcome(true));
             }
 
+            // Blink `RadioInputType::HandleKeydownEvent` leaves arrows with
+            // Alt, Ctrl or Meta to other handlers.
             if target.is_radio
+                && !(alt || ctrl || meta)
                 && matches!(
                     key_lower.as_str(),
                     "arrowdown"
@@ -2819,24 +2847,17 @@ impl ScriptVm {
                     .map(|index| (index + delta) % radios.len())
                     .unwrap_or(0);
                 let next_handle = radios[next_index];
-                let already_checked = runtime
-                    .dom_host()
-                    .node(next_handle)
-                    .and_then(Node::as_element)
-                    .is_some_and(|element| element.checked());
-                if !already_checked {
-                    let _ = runtime.set_checked_state(scope, runtime_ptr, next_handle, true);
-                    if let Some(event) = construct_simple_event(scope, "input", true, false, false)
-                    {
-                        let _ = dispatch_public_event(scope, runtime_ptr, next_handle, event);
-                    }
-                    if let Some(event) = construct_simple_event(scope, "change", true, false, false)
-                    {
-                        let _ = dispatch_public_event(scope, runtime_ptr, next_handle, event);
-                    }
-                }
+                // Blink `RadioInputType::HandleKeydownEvent`: focus moves to
+                // the next radio first, then a simulated (trusted) click
+                // checks it, so its click, input and change events fire
+                // after focus, as frameworks that listen for click expect.
                 update_focus(scope, runtime_ptr, Some(next_handle));
-                return Ok(input_dispatch_outcome(true));
+                return Ok(activate_handle_via_keyboard(
+                    scope,
+                    runtime_ptr,
+                    next_handle,
+                    modifiers,
+                ));
             }
 
             if target.is_select

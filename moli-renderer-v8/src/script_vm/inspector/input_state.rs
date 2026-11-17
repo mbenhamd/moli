@@ -98,40 +98,25 @@ pub(in crate::script_vm) fn is_space_key(key: &str) -> bool {
     matches!(key, " " | "space" | "spacebar")
 }
 
+/// The radio button group (same tree, name and form owner) that arrow keys
+/// cycle through, minus disabled members. The group is scoped to the radio's
+/// own tree, so a radio inside a child frame's document or a shadow root finds
+/// its siblings there rather than in the top-level document.
 pub(in crate::script_vm) fn radio_group_members(
     runtime: &PageScriptHost,
     handle: DomHandle,
 ) -> Vec<DomHandle> {
-    let Some(element) = runtime.dom_host().node(handle).and_then(Node::as_element) else {
-        return Vec::new();
-    };
-    let Some(root) = runtime.dom_host().document_element_handle() else {
-        return Vec::new();
-    };
-    let name = element.attribute("name").unwrap_or_default();
-    if name.is_empty() {
-        return Vec::new();
-    }
-
     runtime
         .dom_host()
-        .elements_by_tag_name(root, "input", true)
+        .radio_group_members(handle)
         .into_iter()
         .filter(|candidate| {
-            runtime
-                .dom_host()
-                .node(*candidate)
-                .and_then(Node::as_element)
-                .is_some_and(|candidate_element| {
-                    candidate_element.is_html_input()
-                        && candidate_element.input_type() == InputType::Radio
-                        && candidate_element.attribute("name") == Some(name)
-                        && !candidate_element.has_attribute("disabled")
-                        && runtime
-                            .dom_host()
-                            .node(*candidate)
-                            .is_some_and(Node::is_connected)
-                })
+            runtime.dom_host().node(*candidate).is_some_and(|node| {
+                node.is_connected()
+                    && node
+                        .as_element()
+                        .is_some_and(|element| !element.has_attribute("disabled"))
+            })
         })
         .collect()
 }

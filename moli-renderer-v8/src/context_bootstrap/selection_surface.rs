@@ -1,8 +1,8 @@
 use super::range_algorithms::range_selection_string_contents;
 use super::selection::{
-    new_selection_runtime_object, selection_anchor_node, selection_bind_owner_document,
-    selection_dispatch_change, selection_focus_node, selection_owner_document, selection_range,
-    selection_store,
+    new_selection_runtime_object, selection_anchor_node, selection_anchor_offset,
+    selection_bind_owner_document, selection_dispatch_change, selection_focus_node,
+    selection_focus_offset, selection_owner_document, selection_range, selection_store,
 };
 use super::selection_callbacks::{
     selection_add_range_callback, selection_attribute_getter_callback, selection_collapse_callback,
@@ -241,6 +241,65 @@ pub(crate) fn focus_editing_host_selection(
     {
         selection_store(scope, selection, range, node, offset, node, offset, "none");
         selection_dispatch_change(scope);
+    }
+}
+
+/// Focusing a text control moves the frame selection into the control's inner
+/// editor; Blink reports that from the light tree as a caret before the
+/// control (its parent and child index), so an earlier selection elsewhere in
+/// the document no longer remains live. A control inside a shadow tree is
+/// reported at its outermost shadow host, as Chromium 156 does, so the
+/// document selection never exposes shadow nodes. Blink attributes that
+/// change to the control (its own `selectionchange`, which bubbles), so no
+/// separate document-targeted `selectionchange` is queued here.
+pub(crate) fn focus_text_control_selection(
+    scope: &mut v8::PinScope<'_, '_>,
+    control: crate::document_runtime::DomHandle,
+) {
+    let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
+        return;
+    };
+    let host = unsafe { &*host_ptr };
+    let mut target = control;
+    while let Some(shadow_host) = host
+        .dom_host()
+        .root_node_handle(target)
+        .and_then(|root| host.dom_host().shadow_root_host(root))
+    {
+        target = shadow_host;
+    }
+    let Some(parent) = host.dom_host().parent_node(target) else {
+        return;
+    };
+    let Some(index) = host
+        .dom_host()
+        .child_index(parent, target)
+        .and_then(|index| u32::try_from(index).ok())
+    else {
+        return;
+    };
+    let window = scope.get_current_context().global(scope);
+    let Some(selection) = selection_value_for_window(scope, window) else {
+        return;
+    };
+    let same_node = |scope: &mut v8::PinScope<'_, '_>, node: Option<v8::Local<'_, v8::Object>>| {
+        node.and_then(|node| crate::native_bridge::callback_value_dom_handle(scope, node.into()))
+            == Some(parent)
+    };
+    let anchor = selection_anchor_node(scope, selection);
+    let focus = selection_focus_node(scope, selection);
+    if same_node(scope, anchor)
+        && same_node(scope, focus)
+        && selection_anchor_offset(scope, selection) == index
+        && selection_focus_offset(scope, selection) == index
+    {
+        return;
+    }
+    if let Some(node) = crate::util::node_wrapper_from_handle(scope, parent)
+        && let Some(document) = selection_owner_document(scope, selection)
+        && let Some(range) = super::range::new_range_for_document(scope, document)
+    {
+        selection_store(scope, selection, range, node, index, node, index, "none");
     }
 }
 
