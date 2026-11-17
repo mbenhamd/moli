@@ -357,10 +357,15 @@ impl OverflowProjection {
         let mut contribution = local_to_parent
             .map_rect(visual_overflow.union(geometry.border_box))
             .bounding_rect();
-        if !world.boxes[child.index()].style.is_out_of_flow() {
+        let absolutely_positioned = matches!(
+            world.boxes[child.index()].style.position(),
+            crate::LayoutPosition::Absolute | crate::LayoutPosition::Fixed
+        );
+        if !absolutely_positioned {
             // Chromium 156 adds an absolutely positioned box's transformed
             // border box and its own overflow only: neither its margins nor
             // its untransformed position extend the containing scroller.
+            // Floats keep their margin box, like in-flow boxes.
             contribution = contribution.union(
                 margin_to_parent
                     .map_rect(geometry.margin_box)
