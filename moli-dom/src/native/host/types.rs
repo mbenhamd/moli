@@ -186,6 +186,12 @@ pub struct DomHost {
     pub(super) child_browsing_context_host_candidates: RefCell<Vec<DomHandle>>,
     pub(super) shadow_disabled_custom_element_definitions: RefCell<HashSet<String>>,
     pub(super) active_element: Cell<Option<DomHandle>>,
+    /// Blink `Document::LastFocusType() == kMouse`: the last focus move that
+    /// came from user input was a pointer press. Script focus keeps it.
+    pub(super) last_focus_from_pointer: Cell<bool>,
+    /// Blink `Document::HadKeyboardEvent()`: a key went down since the last
+    /// pointer press moved focus.
+    pub(super) had_keyboard_event: Cell<bool>,
     pub(super) hovered_elements: RefCell<IndexSet<DomHandle>>,
     pub(super) mutation_observer_records_enabled: Cell<bool>,
     pub(super) devtools_mutation_records_enabled: Cell<bool>,

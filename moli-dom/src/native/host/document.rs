@@ -73,6 +73,8 @@ impl DomHost {
             child_browsing_context_host_candidates: RefCell::new(Vec::new()),
             shadow_disabled_custom_element_definitions: RefCell::new(HashSet::new()),
             active_element: Cell::new(None),
+            last_focus_from_pointer: Cell::new(false),
+            had_keyboard_event: Cell::new(false),
             hovered_elements: RefCell::new(IndexSet::new()),
             mutation_observer_records_enabled: Cell::new(false),
             devtools_mutation_records_enabled: Cell::new(false),
@@ -668,6 +670,89 @@ impl DomHost {
             current = host;
         }
         false
+    }
+
+    /// `:focus-visible`, with Blink's heuristic
+    /// (`SelectorChecker::MatchesFocusVisiblePseudoClass`): the focused
+    /// element matches unless a pointer press last moved focus and no key
+    /// went down since, and a control that takes typed input always matches.
+    pub fn element_matches_focus_visible(&self, handle: DomHandle) -> bool {
+        if self.active_element_handle() != Some(handle) {
+            return false;
+        }
+        !self.last_focus_from_pointer.get()
+            || self.had_keyboard_event.get()
+            || self.focus_always_visible(handle)
+    }
+
+    /// Blink `Element::MayTriggerVirtualKeyboard`: text-entry inputs,
+    /// textareas, selects and editable content.
+    fn focus_always_visible(&self, handle: DomHandle) -> bool {
+        let Some(element) = self.node(handle).and_then(Node::as_element) else {
+            return false;
+        };
+        if element.is_html_input() {
+            return element.is_text_control()
+                && !matches!(
+                    element.input_type(),
+                    crate::forms::InputType::Range
+                        | crate::forms::InputType::Color
+                        | crate::forms::InputType::File
+                );
+        }
+        if element.is_html_textarea() || element.is_html_select() {
+            return true;
+        }
+        let mut current = Some(handle);
+        while let Some(candidate) = current {
+            if let Some(value) = self
+                .node(candidate)
+                .and_then(Node::as_element)
+                .and_then(|element| element.attribute("contenteditable"))
+            {
+                match value.trim().to_ascii_lowercase().as_str() {
+                    "" | "true" | "plaintext-only" => return true,
+                    "false" => return false,
+                    _ => {}
+                }
+            }
+            current = self.node(candidate).and_then(Node::parent_node);
+        }
+        false
+    }
+
+    /// A pointer press moved focus to `focused`, or cleared it (`None`, or
+    /// the document's body when the press hit nothing focusable).
+    ///
+    /// Only a press that focused an element records a pointer focus, which
+    /// keeps later script focus without a focus ring until a key goes down.
+    /// A press that only clears focus keeps the last focus type, as in
+    /// Chromium 156: script focus after it shows the ring unless an earlier
+    /// press focused an element. Either press forgets earlier key presses.
+    pub fn note_pointer_focus_change(&self, focused: Option<DomHandle>) {
+        let focused_element = focused.is_some_and(|handle| {
+            self.owner_document_handle(handle)
+                .and_then(|document| self.document_body_handle_for_document(document))
+                != Some(handle)
+        });
+        if focused_element {
+            self.last_focus_from_pointer.set(true);
+        }
+        self.had_keyboard_event.set(false);
+    }
+
+    /// Sequential (keyboard) navigation moved focus.
+    pub fn note_keyboard_focus_change(&self) {
+        self.last_focus_from_pointer.set(false);
+    }
+
+    /// A key went down. Returns the focused element whose `:focus-visible`
+    /// state this turns on, if any.
+    pub fn note_keyboard_event(&self) -> Option<DomHandle> {
+        if self.had_keyboard_event.replace(true) || !self.last_focus_from_pointer.get() {
+            return None;
+        }
+        self.active_element_handle()
     }
 
     pub fn element_matches_focus_within(&self, handle: DomHandle) -> bool {
