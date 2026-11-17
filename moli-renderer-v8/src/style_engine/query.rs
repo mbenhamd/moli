@@ -83,11 +83,39 @@ fn retained_stylo_base_queries_for_character_data_mutations(
             host, parent, None,
         ));
     }
-    (!queries.is_empty()).then(|| {
-        RetainedBaseQueryPlan::structural_boundary_cleanup_roots_for_all_queries(
-            queries, base_roots,
-        )
-    })
+    let direction = auto_directionality_queries(
+        host,
+        effects.iter().filter_map(|effect| match effect {
+            StyleMutationEffect::CharacterData { node } => host.parent_node(*node),
+            _ => None,
+        }),
+    );
+    if queries.is_empty() && direction.is_empty() {
+        return None;
+    }
+    let mut plan = RetainedBaseQueryPlan::structural_boundary_cleanup_roots_for_all_queries(
+        queries, base_roots,
+    );
+    plan.merge_from(RetainedBaseQueryPlan::exact(direction));
+    Some(plan)
+}
+
+/// `dir=auto` and `<bdi>` resolve `direction` through `:dir()`, which reads
+/// their text, so a text or child-list change below one changes the owner's
+/// `LTR`/`RTL` state even though no attribute on it changed.
+fn auto_directionality_queries(
+    host: &DomHost,
+    starts: impl Iterator<Item = DomHandle>,
+) -> IndexSet<RetainedStyleInvalidationQuery> {
+    starts
+        .filter_map(|start| moli_selector::html_auto_directionality_owner(host, start))
+        .map(|owner| {
+            RetainedStyleInvalidationQuery::state(
+                owner,
+                StyloElementState::LTR | StyloElementState::RTL,
+            )
+        })
+        .collect()
 }
 
 fn retained_stylo_base_queries_for_slot_assignment_mutations(
@@ -220,7 +248,15 @@ fn retained_stylo_invalidation_queries_for_child_list_mutations(
         }
     }
     let child_list = mutation_snapshot.child_list_invalidation_queries(host)?;
-    Some(RetainedBaseQueryPlan::child_list_structural_boundary_cleanup_roots(child_list))
+    let mut plan = RetainedBaseQueryPlan::child_list_structural_boundary_cleanup_roots(child_list);
+    plan.merge_from(RetainedBaseQueryPlan::exact(auto_directionality_queries(
+        host,
+        effects.iter().filter_map(|effect| match effect {
+            StyleMutationEffect::ChildList { parent, .. } => Some(*parent),
+            _ => None,
+        }),
+    )));
+    Some(plan)
 }
 
 pub(super) fn retained_stylo_invalidation_queries_for_focus_change(
