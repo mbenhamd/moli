@@ -247,7 +247,9 @@ pub(crate) fn focus_editing_host_selection(
 /// Focusing a text control moves the frame selection into the control's inner
 /// editor; Blink reports that from the light tree as a caret before the
 /// control (its parent and child index), so an earlier selection elsewhere in
-/// the document no longer remains live.
+/// the document no longer remains live. Blink attributes that change to the
+/// control (its own `selectionchange`, which bubbles), so no separate
+/// document-targeted `selectionchange` is queued here.
 pub(crate) fn focus_text_control_selection(
     scope: &mut v8::PinScope<'_, '_>,
     target: crate::document_runtime::DomHandle,
@@ -288,7 +290,6 @@ pub(crate) fn focus_text_control_selection(
         && let Some(range) = super::range::new_range_for_document(scope, document)
     {
         selection_store(scope, selection, range, node, index, node, index, "none");
-        selection_dispatch_change(scope);
     }
 }
 
