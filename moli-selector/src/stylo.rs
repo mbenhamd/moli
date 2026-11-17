@@ -78,7 +78,9 @@ pub use invalidation::{
 };
 pub use presentation::is_svg_presentation_attribute_name;
 use query::{QueryDocument, QueryElement, QueryNode};
-pub(crate) use query::{html_directionality, html_directionality_lacks_stylo_hint};
+pub(crate) use query::{
+    html_auto_directionality_owner, html_directionality, html_directionality_lacks_stylo_hint,
+};
 #[cfg(test)]
 pub(crate) use selector_parse::validate_supports_selector_list;
 pub(crate) use selector_parse::{

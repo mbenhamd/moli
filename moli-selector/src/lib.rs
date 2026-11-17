@@ -282,6 +282,10 @@ pub fn html_directionality_lacks_stylo_hint(host: &DomHost, handle: NodeId) -> b
     stylo::html_directionality_lacks_stylo_hint(host, handle)
 }
 
+pub fn html_auto_directionality_owner(host: &DomHost, start: NodeId) -> Option<NodeId> {
+    stylo::html_auto_directionality_owner(host, start)
+}
+
 pub fn validate_supports_selector_condition_argument(selector: &str) -> Result<(), SelectorError> {
     stylo::validate_supports_selector_condition_argument(selector)
 }

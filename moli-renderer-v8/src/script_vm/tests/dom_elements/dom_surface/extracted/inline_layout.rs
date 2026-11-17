@@ -1762,3 +1762,44 @@ fn dir_auto_and_bdi_resolve_the_paragraph_direction_from_content() {
         }
     }
 }
+
+/// Chromium 156 re-resolves `dir=auto` after its text changes: `t` and `u`
+/// (text in a child span) become RTL, `v` becomes LTR and the empty `w` turns
+/// RTL when Hebrew is appended. Author `direction` on `x` still wins.
+#[test]
+fn dir_auto_direction_follows_text_mutations() {
+    let mut vm = new_parsed_test_vm(
+        "https://dir-auto-mutation.test/",
+        "<!doctype html><meta charset=utf-8><style>body{margin:0}div{font:20px/30px monospace;width:300px}.l{direction:ltr}</style><div id=t dir=auto>ab</div><div id=u dir=auto><span id=s>ab</span></div><div id=v dir=auto>שלום</div><div id=w dir=auto></div><div id=x class=l dir=auto>שלום</div>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    let geometry = vm
+        .eval(
+            r#"const ids = ['t', 'u', 'v', 'w', 'x'], node = (id) => document.getElementById(id);
+ids.forEach((id) => node(id).offsetWidth);
+node('t').firstChild.data = 'שלום';
+node('s').firstChild.data = 'שלום';
+node('v').firstChild.data = 'hello';
+node('w').append('שלום');
+JSON.stringify(ids.map((id) => {
+  const element = node(id), range = document.createRange();
+  range.selectNodeContents(element);
+  const text = range.getBoundingClientRect();
+  return [text.left, text.right, getComputedStyle(element).direction];
+}))"#,
+        )
+        .unwrap();
+    let geometry = serde_json::from_str::<[(f64, f64, String); 5]>(&geometry).unwrap();
+    for (index, direction) in ["rtl", "rtl", "ltr", "rtl", "ltr"].into_iter().enumerate() {
+        let (left, right, computed) = &geometry[index];
+        assert_eq!(computed, direction, "{geometry:?}");
+        if direction == "rtl" {
+            assert!(
+                (right - 300.0).abs() < 0.02 && *left > 150.0,
+                "{geometry:?}"
+            );
+        } else {
+            assert!(left.abs() < 0.02 && *right < 150.0, "{geometry:?}");
+        }
+    }
+}

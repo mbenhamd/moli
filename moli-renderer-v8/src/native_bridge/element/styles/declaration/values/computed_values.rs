@@ -847,8 +847,8 @@ pub(super) fn computed_direction_with_resolution(
     if direction.eq_ignore_ascii_case("rtl") {
         return "rtl".to_owned();
     }
-    // Stylo owns the cascade for explicit `dir`, so author `direction` wins.
-    // `dir=auto`, `<bdi>` and non-HTML `dir` have no hint; the DOM walk owns them.
+    // Stylo owns the cascade for HTML `dir`, `dir=auto` and `<bdi>`, so author
+    // `direction` wins. Only non-HTML `dir` has no hint; the DOM walk owns it.
     if direction.eq_ignore_ascii_case("ltr")
         && !html_directionality_lacks_stylo_hint(runtime.dom_host(), handle)
     {
