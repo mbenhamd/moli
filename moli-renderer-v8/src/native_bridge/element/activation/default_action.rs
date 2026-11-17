@@ -3,7 +3,10 @@ use crate::context_bootstrap::{
     readonly_data_transfer_for_input, selection_value_for_window,
 };
 use crate::dom::{
-    forms::{ButtonTypeState, InputType, RangeKeyboardStep, range_value_after_keyboard_step},
+    forms::{
+        ButtonTypeState, InputStepDirection, InputStepOutcome, InputStepState, InputType,
+        RangeKeyboardStep, range_value_after_keyboard_step, step_input_value,
+    },
     native::{Element, Node, SelectedFile},
 };
 use crate::util::{
@@ -671,6 +674,136 @@ pub(crate) fn move_contenteditable_caret_to_line_boundary(
             .is_some();
     }
     collapse_selection_to(scope, selection, node, offset);
+    true
+}
+
+/// Default action of an uncancelled third press of a multi-click (Blink
+/// `SelectionController::HandleTripleClick`): the paragraph under the
+/// pointer becomes the selection. A paragraph is the run of inline content
+/// bounded by `<br>`, block-level boxes and preserved newlines, as for the
+/// Home/End line model above. Text controls keep their own selection.
+pub(crate) fn perform_triple_click_selection_default_action(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    hit: DomHandle,
+    client_x: f64,
+    client_y: f64,
+) -> bool {
+    if let Some(context) =
+        crate::native_bridge::node_owner_document_relevant_context(scope, runtime_ptr, hit)
+        && context != scope.get_current_context()
+    {
+        let scope = &mut v8::ContextScope::new(scope, context);
+        return perform_triple_click_selection_default_action(
+            scope,
+            runtime_ptr,
+            hit,
+            client_x,
+            client_y,
+        );
+    }
+    let runtime = unsafe { &*runtime_ptr };
+    if !triple_click_can_start_selection(runtime, hit) {
+        return false;
+    }
+    let global = scope.get_current_context().global(scope);
+    let Some(document) = object_property_as_object(scope, global, "document") else {
+        return false;
+    };
+    let x = v8::Number::new(scope, client_x);
+    let y = v8::Number::new(scope, client_y);
+    let Some(position) = call_object_method(
+        scope,
+        document,
+        "caretPositionFromPoint",
+        &[x.into(), y.into()],
+    )
+    .and_then(|position| v8::Local::<v8::Object>::try_from(position).ok()) else {
+        return false;
+    };
+    let Some((node, offset)) = object_property_as_object(scope, position, "offsetNode")
+        .and_then(|node| {
+            crate::native_bridge::node_runtime_and_handle_from_object(scope, node).ok()
+        })
+        .map(|(_, node)| node)
+        .zip(
+            object_number_property(scope, position, "offset")
+                .filter(|offset| offset.is_finite() && *offset >= 0.0)
+                .map(|offset| offset as usize),
+        )
+    else {
+        return false;
+    };
+    let host = contenteditable_editing_host(runtime, node)
+        .or_else(|| runtime.dom_host().owner_document_handle(node))
+        .unwrap_or(node);
+    let Some((start, start_offset)) = caret_line_boundary(runtime, host, node, offset, false)
+    else {
+        return false;
+    };
+    let Some((end, end_offset)) = caret_line_boundary(runtime, host, node, offset, true) else {
+        return false;
+    };
+    let (Some(start), Some(end), Some(selection)) = (
+        node_wrapper_from_handle(scope, start),
+        node_wrapper_from_handle(scope, end),
+        window_selection(scope),
+    ) else {
+        return false;
+    };
+    let start_offset =
+        v8::Integer::new_from_unsigned(scope, u32::try_from(start_offset).unwrap_or(u32::MAX));
+    let end_offset =
+        v8::Integer::new_from_unsigned(scope, u32::try_from(end_offset).unwrap_or(u32::MAX));
+    call_object_method(
+        scope,
+        selection,
+        "setBaseAndExtent",
+        &[
+            start.into(),
+            start_offset.into(),
+            end.into(),
+            end_offset.into(),
+        ],
+    )
+    .is_some()
+}
+
+/// Blink `Node::CanStartSelection` for the pressed node: text controls keep
+/// their own selection, other form controls (a `<button>`, a checkbox) keep
+/// the existing selection, and `user-select: none` content starts none.
+/// The nearest editing host or explicit `user-select` decides, as in
+/// Chromium 156.
+fn triple_click_can_start_selection(runtime: &PageScriptHost, hit: DomHandle) -> bool {
+    let mut current = Some(hit);
+    while let Some(handle) = current {
+        let node = runtime.dom_host().node(handle);
+        if let Some(element) = node.and_then(Node::as_element) {
+            if element.is_text_control()
+                || element.is_html_input()
+                || element.is_html_element("button")
+                || element.is_html_select()
+            {
+                return false;
+            }
+            if contenteditable_editing_host(runtime, handle) == Some(handle) {
+                return true;
+            }
+            match crate::native_bridge::element::style_property_value(
+                runtime,
+                handle,
+                crate::native_bridge::element::StyleMode::Computed,
+                "user-select",
+            )
+            .trim()
+            {
+                "none" => return false,
+                "text" | "all" => return true,
+                _ => {}
+            }
+        }
+        current = node.and_then(Node::parent_node);
+    }
     true
 }
 
@@ -1817,6 +1950,63 @@ pub(crate) fn perform_range_keyboard_default_action(
         return true;
     };
     if unsafe { &mut *runtime_ptr }.set_input_value_from_user_edit(handle, &next_value) {
+        dispatch_input_and_change_events(scope, runtime_ptr, handle);
+    }
+    true
+}
+
+/// Default action for an uncancelled ArrowUp or ArrowDown keydown at a
+/// number field: its spin button steps the value once, then `input` and
+/// `change` fire when it changed (Blink
+/// `TextFieldInputType::HandleKeydownEventForSpinButton`, which calls
+/// `StepUpFromLayoutObject`). Returns whether the field consumed the key.
+pub(crate) fn perform_number_spin_keyboard_default_action(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    handle: DomHandle,
+    key_lower: &str,
+) -> bool {
+    let direction = match key_lower {
+        "arrowup" | "up" => InputStepDirection::Up,
+        "arrowdown" | "down" => InputStepDirection::Down,
+        _ => return false,
+    };
+    let runtime = unsafe { &*runtime_ptr };
+    let Some(element) = runtime
+        .dom_host()
+        .node(handle)
+        .and_then(Node::as_element)
+        .filter(|element| element.is_html_input() && element.input_type() == InputType::Number)
+    else {
+        return false;
+    };
+    if is_disabled_form_control(runtime, handle) || element.attribute("readonly").is_some() {
+        return false;
+    }
+    let value = element.input_value();
+    let outcome = step_input_value(
+        InputStepState {
+            input_type: InputType::Number,
+            value: &value,
+            min: element.attribute("min"),
+            max: element.attribute("max"),
+            // Blink `StepUpFromLayoutObject` builds its step range with
+            // `kAnyIsDefaultStep`: the spin button steps a `step=any` field
+            // by the default step, where `stepUp()` would throw.
+            step: element
+                .attribute("step")
+                .filter(|step| !step.trim().eq_ignore_ascii_case("any")),
+            value_attribute: element.attribute("value"),
+        },
+        direction,
+        1.0,
+    );
+    let Ok(InputStepOutcome::Set(next_value)) = outcome else {
+        return true;
+    };
+    if next_value != value
+        && unsafe { &mut *runtime_ptr }.set_input_value_from_user_edit(handle, &next_value)
+    {
         dispatch_input_and_change_events(scope, runtime_ptr, handle);
     }
     true

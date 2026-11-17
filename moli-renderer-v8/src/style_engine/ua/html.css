@@ -33,10 +33,25 @@ html {
   color: CanvasText;
 }
 
-/* Direction attributes establish an inline bidi context. Direction itself
- * enters through presentation hints, so author CSS can override either value. */
-[dir=ltr i], [dir=rtl i] {
+/* Direction attributes establish an inline bidi context. Explicit `dir=ltr`
+ * and `dir=rtl` enter through presentation hints; `dir=auto`, `<bdi>` and
+ * `type=tel` resolve through `:dir()` (HTML §15.3.4), so author CSS can
+ * override either value and descendants inherit the resolved direction.
+ * Like Blink, an invalid `dir` value leaves the inherited direction alone. */
+[dir=auto i]:dir(ltr), bdi:dir(ltr), input[type=tel i]:dir(ltr) {
+  direction: ltr;
+}
+
+[dir=auto i]:dir(rtl), bdi:dir(rtl) {
+  direction: rtl;
+}
+
+[dir=ltr i], [dir=rtl i], [dir=auto i], bdi, output {
   unicode-bidi: isolate;
+}
+
+textarea[dir=auto i], pre[dir=auto i] {
+  unicode-bidi: plaintext;
 }
 
 html, body, address, article, aside, blockquote, center, dd, dir, div, dl, dt,

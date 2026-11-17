@@ -1758,3 +1758,73 @@ fn focusing_the_focused_element_neither_scrolls_nor_fires_events() {
         r#"[943,"","a"]"#
     );
 }
+
+// Chromium 156: [80,240,-30]. The document scroller's `scroll-padding-top`
+// and the target's `scroll-margin-top` both offset a start alignment; an
+// element scroller's end padding and the target's end margin shift an end
+// alignment.
+#[test]
+fn scroll_into_view_honors_scroll_margin_and_scroll_padding() {
+    let mut vm = new_parsed_test_vm(
+        "https://scroll-margin-padding.test/",
+        "<!doctype html><style>html{scroll-padding-top:30px}body{margin:0}#a{scroll-margin-top:50px}#b{scroll-margin-bottom:20px}#s{height:100px;overflow:auto;scroll-padding-block-end:10px}</style><div style=height:2000px></div><div id=a>a</div><div id=s><div style=height:300px></div><div id=b style=height:10px></div><div style=height:300px></div></div><div style=height:2000px></div>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+  const a = document.getElementById('a'), b = document.getElementById('b');
+  const s = document.getElementById('s');
+  a.scrollIntoView({ block: 'start' });
+  const top = a.getBoundingClientRect().top;
+  b.scrollIntoView({ block: 'end' });
+  return JSON.stringify([top, s.scrollTop,
+    b.getBoundingClientRect().bottom - s.getBoundingClientRect().bottom]);
+})()"#
+        )
+        .expect("scroll into view"),
+        "[80,240,-30]"
+    );
+}
+
+// Chromium 156: [[211,65],[20,20]]. An absolutely positioned child of a grid
+// that is not its containing block is aligned as the sole item of the grid's
+// content box, by `justify-items`/`align-items` or its own self-alignment.
+#[test]
+fn abspos_grid_child_static_position_uses_grid_self_alignment() {
+    let mut vm = new_parsed_test_vm(
+        "https://grid-static-position.test/",
+        "<!doctype html><style>body{margin:0}</style><div style=position:relative><div style=display:grid;padding:20px;height:100px;align-items:center;justify-items:end;width:200px><span id=p style=position:absolute;width:10px;height:10px;margin:-1px></span><span id=q style=position:absolute;width:10px;height:10px;justify-self:start;align-self:start></span></div></div>",
+    );
+    assert_eq!(
+        vm.eval(
+            r#"JSON.stringify(['p', 'q'].map((id) => {
+  const rect = document.getElementById(id).getBoundingClientRect();
+  return [rect.x, rect.y];
+}))"#
+        )
+        .unwrap(),
+        "[[211,65],[20,20]]"
+    );
+}
+
+// Chromium 156: [[0.296875,0.6875,30.390625,30.390625],
+// [10.546875,31.078125,30.390625,30.390625]]. Fixed lengths are LayoutUnits
+// truncated to 1/64 px, so a 30.4px square keeps one size at any offset.
+#[test]
+fn fixed_lengths_truncate_to_layout_units_independent_of_position() {
+    let mut vm = new_parsed_test_vm(
+        "https://layout-unit-lengths.test/",
+        "<!doctype html><style>body{margin:0}i{display:block;width:30.4px;height:30.4px}</style><div style=padding-left:0.3px;padding-top:0.7px><i id=a></i></div><div style=padding-left:10.55px><i id=b></i></div>",
+    );
+    assert_eq!(
+        vm.eval(
+            r#"JSON.stringify(['a', 'b'].map((id) => {
+  const rect = document.getElementById(id).getBoundingClientRect();
+  return [rect.x, rect.y, rect.width, rect.height];
+}))"#
+        )
+        .unwrap(),
+        "[[0.296875,0.6875,30.390625,30.390625],[10.546875,31.078125,30.390625,30.390625]]"
+    );
+}

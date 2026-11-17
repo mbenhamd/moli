@@ -74,7 +74,10 @@ impl<'a> QueryElement<'a> {
             state |= ElementState::DEFAULT;
         }
         if self.host.element_matches_focus(self.handle) {
-            state |= ElementState::FOCUS | ElementState::FOCUSRING;
+            state |= ElementState::FOCUS;
+        }
+        if self.host.element_matches_focus_visible(self.handle) {
+            state |= ElementState::FOCUSRING;
         }
         if self.host.element_matches_focus_within(self.handle) {
             state |= ElementState::FOCUS_WITHIN;
@@ -650,13 +653,43 @@ pub(crate) fn html_directionality(host: &DomHost, handle: NodeId) -> CssDirectio
 }
 
 /// Whether the directionality of `handle` comes from a source the cascade
-/// cannot see: `dir=auto`, `<bdi>` content, or `dir` on a non-HTML element.
+/// cannot see: `dir` on a non-HTML element, including `dir=auto`. HTML
+/// `dir=auto` and `<bdi>` resolve through the UA sheet's `:dir()` rules.
 pub(crate) fn html_directionality_lacks_stylo_hint(host: &DomHost, handle: NodeId) -> bool {
     match html_directionality_source(host, handle) {
         HtmlDirectionalitySource::Fixed { has_stylo_hint, .. } => !has_stylo_hint,
-        HtmlDirectionalitySource::Content(_) => true,
+        HtmlDirectionalitySource::Content(root) => host
+            .node(root)
+            .and_then(Node::as_element)
+            .is_none_or(|element| element.namespace() != "http://www.w3.org/1999/xhtml"),
         HtmlDirectionalitySource::Default => false,
     }
+}
+
+/// The nearest `dir=auto` element or `<bdi>` whose auto direction reads the
+/// text under `start`, so a text or child-list change there must restyle it.
+/// A descendant with its own `dir`, or a `script`, `style` or non-auto
+/// `textarea`, is skipped by that walk and therefore ends the search.
+pub(crate) fn html_auto_directionality_owner(host: &DomHost, start: NodeId) -> Option<NodeId> {
+    let mut current = Some(start);
+    while let Some(handle) = current {
+        if let Some(element) = host.node(handle).and_then(Node::as_element) {
+            let dir = element.attribute_ns("", "dir");
+            if dir.and_then(normalized_direction).is_some() {
+                return None;
+            }
+            if dir.is_some_and(|value| value.eq_ignore_ascii_case("auto"))
+                || element.is_html_element("bdi")
+            {
+                return Some(handle);
+            }
+            if descendant_is_directionally_isolated_for_auto(element) {
+                return None;
+            }
+        }
+        current = host.node(handle).and_then(Node::parent_node);
+    }
+    None
 }
 
 fn auto_direction_for_element(host: &DomHost, root: NodeId) -> Option<CssDirection> {

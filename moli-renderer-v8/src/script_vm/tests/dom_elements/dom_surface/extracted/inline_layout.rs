@@ -1700,3 +1700,106 @@ fn single_line_text_control_value_overflows_horizontally_without_wrapping() {
         "a textarea keeps wrapping inside its width"
     );
 }
+
+// Chromium 156: an RTL block lays LTR-only text out in an RTL paragraph, so
+// `text-align: start` puts it at the right edge and its overflow extends to
+// the left (text [275.90625,300], scrollWidth 96 for the clipped line);
+// `unicode-bidi: plaintext` alone takes the first strong character ([0,24.09]).
+#[test]
+fn rtl_block_sets_the_paragraph_direction_of_ltr_text() {
+    let mut vm = new_parsed_test_vm(
+        "https://rtl-paragraph.test/",
+        "<!doctype html><meta charset=utf-8><style>body{margin:0}div{font:20px/30px monospace;width:300px}</style><div id=a dir=rtl>ab</div><div id=b dir=rtl style=unicode-bidi:plaintext>ab</div><div id=c dir=rtl style=width:40px;overflow:hidden;white-space:nowrap>abcdefgh</div>",
+    );
+    let geometry = vm
+        .eval(
+            r#"JSON.stringify(['a', 'b', 'c'].map((id) => {
+  const element = document.getElementById(id), range = document.createRange();
+  range.selectNodeContents(element);
+  const text = range.getBoundingClientRect();
+  return [text.left, text.right, element.scrollWidth];
+}))"#,
+        )
+        .unwrap();
+    let geometry = serde_json::from_str::<[[f64; 3]; 3]>(&geometry).unwrap();
+    assert!((geometry[0][1] - 300.0).abs() < 0.02, "{geometry:?}");
+    assert!(geometry[0][0] > 270.0, "{geometry:?}");
+    assert!(geometry[1][0].abs() < 0.02, "{geometry:?}");
+    assert!((geometry[2][1] - 40.0).abs() < 0.02, "{geometry:?}");
+    assert_eq!(geometry[2][2], 96.0, "{geometry:?}");
+}
+
+/// Chromium 156 resolves `dir=auto` and `<bdi>` from their text and lets the
+/// result inherit: `a` and `d` are RTL from Hebrew, `b` and `c` are LTR inside
+/// an RTL parent. Lines are [left, right] of the text plus computed direction.
+#[test]
+fn dir_auto_and_bdi_resolve_the_paragraph_direction_from_content() {
+    let mut vm = new_parsed_test_vm(
+        "https://dir-auto-paragraph.test/",
+        "<!doctype html><meta charset=utf-8><style>body{margin:0}div,p,bdi{font:20px/30px monospace;width:300px;margin:0}</style><div id=a dir=auto>שלום ab</div><div dir=rtl><div id=b dir=auto>ab</div><bdi id=c style=display:block>ab</bdi></div><div dir=auto><p id=d>שלום ab</p></div>",
+    );
+    let geometry = vm
+        .eval(
+            r#"JSON.stringify(['a', 'b', 'c', 'd'].map((id) => {
+  const element = document.getElementById(id), range = document.createRange();
+  range.selectNodeContents(element);
+  const text = range.getBoundingClientRect();
+  return [text.left, text.right, getComputedStyle(element).direction];
+}))"#,
+        )
+        .unwrap();
+    let geometry = serde_json::from_str::<[(f64, f64, String); 4]>(&geometry).unwrap();
+    for (index, direction) in ["rtl", "ltr", "ltr", "rtl"].into_iter().enumerate() {
+        let (left, right, computed) = &geometry[index];
+        assert_eq!(computed, direction, "{geometry:?}");
+        if direction == "rtl" {
+            assert!(
+                (right - 300.0).abs() < 0.02 && *left > 150.0,
+                "{geometry:?}"
+            );
+        } else {
+            assert!(left.abs() < 0.02 && *right < 150.0, "{geometry:?}");
+        }
+    }
+}
+
+/// Chromium 156 re-resolves `dir=auto` after its text changes: `t` and `u`
+/// (text in a child span) become RTL, `v` becomes LTR and the empty `w` turns
+/// RTL when Hebrew is appended. Author `direction` on `x` still wins.
+#[test]
+fn dir_auto_direction_follows_text_mutations() {
+    let mut vm = new_parsed_test_vm(
+        "https://dir-auto-mutation.test/",
+        "<!doctype html><meta charset=utf-8><style>body{margin:0}div{font:20px/30px monospace;width:300px}.l{direction:ltr}</style><div id=t dir=auto>ab</div><div id=u dir=auto><span id=s>ab</span></div><div id=v dir=auto>שלום</div><div id=w dir=auto></div><div id=x class=l dir=auto>שלום</div>",
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    let geometry = vm
+        .eval(
+            r#"const ids = ['t', 'u', 'v', 'w', 'x'], node = (id) => document.getElementById(id);
+ids.forEach((id) => node(id).offsetWidth);
+node('t').firstChild.data = 'שלום';
+node('s').firstChild.data = 'שלום';
+node('v').firstChild.data = 'hello';
+node('w').append('שלום');
+JSON.stringify(ids.map((id) => {
+  const element = node(id), range = document.createRange();
+  range.selectNodeContents(element);
+  const text = range.getBoundingClientRect();
+  return [text.left, text.right, getComputedStyle(element).direction];
+}))"#,
+        )
+        .unwrap();
+    let geometry = serde_json::from_str::<[(f64, f64, String); 5]>(&geometry).unwrap();
+    for (index, direction) in ["rtl", "rtl", "ltr", "rtl", "ltr"].into_iter().enumerate() {
+        let (left, right, computed) = &geometry[index];
+        assert_eq!(computed, direction, "{geometry:?}");
+        if direction == "rtl" {
+            assert!(
+                (right - 300.0).abs() < 0.02 && *left > 150.0,
+                "{geometry:?}"
+            );
+        } else {
+            assert!(left.abs() < 0.02 && *right < 150.0, "{geometry:?}");
+        }
+    }
+}

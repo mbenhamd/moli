@@ -840,6 +840,12 @@ impl ResolvedLayoutStyle {
             )
             .into(),
         };
+        taffy.padding = taffy.padding.map(|side| {
+            layout_unit_length(side.into_raw()).map_or(side, taffy::LengthPercentage::length)
+        });
+        taffy.margin = taffy.margin.map(|side| {
+            layout_unit_length(side.into_raw()).map_or(side, taffy::LengthPercentageAuto::length)
+        });
         // Taffy's generic leaf algorithm transfers aspect ratios before a
         // replaced-element measure callback runs. CSS Sizing 4 defines zero,
         // infinite and NaN ratios as degenerate, so normalize them at the
@@ -2408,7 +2414,7 @@ fn taffy_size_dimension(
         GenericSize::MaxContent => taffy::Dimension::max_content(),
         GenericSize::FitContent => taffy::Dimension::fit_content(),
         GenericSize::Stretch | GenericSize::WebkitFillAvailable => taffy::Dimension::stretch(),
-        _ => fallback,
+        _ => layout_unit_dimension(fallback),
     }
 }
 
@@ -2423,8 +2429,26 @@ fn taffy_max_size_dimension(
         GenericMaxSize::Stretch | GenericMaxSize::WebkitFillAvailable => {
             taffy::Dimension::stretch()
         }
-        _ => fallback,
+        _ => layout_unit_dimension(fallback),
     }
+}
+
+/// Blink stores resolved fixed `<length>` sizes, paddings and margins as
+/// `LayoutUnit`s, whose float constructor truncates toward zero to 1/64 px:
+/// `width: 1.9rem` (30.4px) is used as 30.390625px wherever the box lands.
+/// Truncating here keeps used lengths on the same lattice as Taffy's 1/64
+/// rounding tree instead of letting the position-dependent edge rounding pick
+/// 30.40625 for some boxes.
+fn layout_unit_length(length: taffy::CompactLength) -> Option<f32> {
+    if length.tag() != taffy::CompactLength::LENGTH_TAG || !length.value().is_finite() {
+        return None;
+    }
+    let scale = f64::from(crate::LAYOUT_SUBPIXELS_PER_CSS_PIXEL);
+    Some(((f64::from(length.value()) * scale).trunc() / scale) as f32)
+}
+
+fn layout_unit_dimension(dimension: taffy::Dimension) -> taffy::Dimension {
+    layout_unit_length(dimension.into_raw()).map_or(dimension, taffy::Dimension::length)
 }
 
 fn taffy_display(display: LayoutDisplay) -> TaffyDisplay {

@@ -5,7 +5,7 @@ use style::Atom;
 use taffy::{
     AbsoluteAxis, AlignContent, AlignContentKeyword, AlignmentSafety, AutoSizeBehavior,
     AvailableSpace, BlockContext, BlockFormattingContext, BoxSizing, CacheTree, Clear,
-    DetailedGridInfo, Dimension, Display, FlexDirection, FloatDirection, Layout,
+    DetailedGridInfo, Dimension, Display, FlexDirection, FlexWrap, FloatDirection, Layout,
     LayoutBlockContainer, LayoutFlexboxContainer, LayoutGridContainer, LayoutInput, LayoutOutput,
     LayoutPartialTree, LeafLayoutContext, Line, MaybeMath, MaybeResolve, NodeId, Point,
     ResolveOrZero, RoundTree, RunMode, Size, SizingMode, SizingPurpose, Style, TraversePartialTree,
@@ -531,6 +531,15 @@ where
                     child: id,
                     container: original_parent,
                 });
+            } else if world.boxes[original_parent.index()]
+                .style
+                .display()
+                .is_grid_container()
+            {
+                positioned_static_sources.push(PositionedStaticSource::GridContainer {
+                    child: id,
+                    container: original_parent,
+                });
             } else if original_parent_uses_block_layout(world, original_parent) {
                 let placeholder_style = world.boxes[id.index()]
                     .style
@@ -885,6 +894,12 @@ enum PositionedStaticSource {
         child: LayoutBoxId,
         container: LayoutBoxId,
     },
+    /// CSS Grid 1 §9.2: the child is aligned as the sole grid item of an area
+    /// whose edges coincide with the grid container's content edges.
+    GridContainer {
+        child: LayoutBoxId,
+        container: LayoutBoxId,
+    },
 }
 
 /// Resolves static-position contributions after the normal-flow formatting
@@ -906,6 +921,9 @@ fn finish_positioned_static_layout<N>(
             } => (child, block_static_position(world, placeholder, container)),
             PositionedStaticSource::FlexContainer { child, container } => {
                 (child, flex_static_position(world, child, container))
+            }
+            PositionedStaticSource::GridContainer { child, container } => {
+                (child, grid_static_position(world, child, container))
             }
         };
         let area = positioned_containing_area(world, child, viewport);
@@ -952,17 +970,13 @@ where
     )
 }
 
-fn flex_static_position<N>(
-    world: &LayoutWorld<N>,
-    child: LayoutBoxId,
-    container: LayoutBoxId,
-) -> PhysicalStaticPosition
+/// The container's content box in global unrounded coordinates, which both
+/// flex and grid static positions align within.
+fn static_content_box<N>(world: &LayoutWorld<N>, container: LayoutBoxId) -> (Point<f32>, Size<f32>)
 where
     N: Copy + Debug + Eq + Hash,
 {
-    let container_box = &world.boxes[container.index()];
-    let child_box = &world.boxes[child.index()];
-    let container_layout = container_box.unrounded_layout;
+    let container_layout = world.boxes[container.index()].unrounded_layout;
     let scrollbar = world.get_scrollbar_insets(container.to_taffy());
     let container_origin = unrounded_global_origin(world, container);
     let content_origin = Point {
@@ -993,6 +1007,75 @@ where
             - container_layout.padding.bottom)
             .max(0.0),
     };
+    (content_origin, content_size)
+}
+
+fn grid_static_position<N>(
+    world: &LayoutWorld<N>,
+    child: LayoutBoxId,
+    container: LayoutBoxId,
+) -> PhysicalStaticPosition
+where
+    N: Copy + Debug + Eq + Hash,
+{
+    let container_box = &world.boxes[container.index()];
+    let child_box = &world.boxes[child.index()];
+    let (content_origin, content_size) = static_content_box(world, container);
+    let container_writing_mode = container_box.style.writing_mode();
+    let child_layout = child_box.unrounded_layout;
+    // Grid self-alignment has no flex-wrap reversal, so the flex cross-axis
+    // resolver applies unchanged to each grid axis: `normal` and `stretch`
+    // fall back to start for an out-of-flow box.
+    let axis_edge = |physical_axis: AbsoluteAxis, align_self, align_items| {
+        let margin = match physical_axis {
+            AbsoluteAxis::Horizontal => child_layout.margin.left + child_layout.margin.right,
+            AbsoluteAxis::Vertical => child_layout.margin.top + child_layout.margin.bottom,
+        };
+        FlexCrossAxisStaticContext {
+            align_self,
+            align_items: Some(align_items),
+            flex_wrap: FlexWrap::NoWrap,
+            child_writing_mode: child_box.style.writing_mode(),
+            child_direction: child_box.style.taffy.direction,
+            container_writing_mode,
+            container_direction: container_box.style.taffy.direction,
+            physical_axis,
+            overflows: child_layout.size.get_abs(physical_axis) + margin
+                > content_size.get_abs(physical_axis),
+        }
+        .resolve()
+    };
+    let inline_edge = axis_edge(
+        container_writing_mode.inline_axis(),
+        child_box.style.taffy.justify_self,
+        container_box.style.taffy.justify_items,
+    );
+    let block_edge = axis_edge(
+        container_writing_mode.block_axis(),
+        child_box.style.taffy.align_self,
+        container_box.style.taffy.align_items,
+    );
+    physical_static_position_from_logical(
+        content_origin,
+        content_size,
+        container_writing_mode,
+        container_box.style.taffy.direction,
+        inline_edge,
+        block_edge,
+    )
+}
+
+fn flex_static_position<N>(
+    world: &LayoutWorld<N>,
+    child: LayoutBoxId,
+    container: LayoutBoxId,
+) -> PhysicalStaticPosition
+where
+    N: Copy + Debug + Eq + Hash,
+{
+    let container_box = &world.boxes[container.index()];
+    let child_box = &world.boxes[child.index()];
+    let (content_origin, content_size) = static_content_box(world, container);
     let flex_direction = container_box.style.taffy.flex_direction;
     let is_column = matches!(
         flex_direction,

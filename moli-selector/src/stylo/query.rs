@@ -18,7 +18,9 @@ mod element;
 // This logic is intentionally split from `element` because it changes with web
 // platform semantics, while the element adapter should stay mostly structural.
 mod pseudo;
-pub(crate) use pseudo::{html_directionality, html_directionality_lacks_stylo_hint};
+pub(crate) use pseudo::{
+    html_auto_directionality_owner, html_directionality, html_directionality_lacks_stylo_hint,
+};
 
 use style::{
     context::QuirksMode,

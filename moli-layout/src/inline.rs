@@ -2284,6 +2284,9 @@ impl InlineBuildInput {
             1.0,
             quantize,
         );
+        builder.set_base_direction(paragraph_base_direction(
+            &world.boxes[self.root_style.index()].style,
+        ));
         let style_indices = styles
             .iter()
             .map(|style| builder.push_style(style.clone()))
@@ -2997,6 +3000,17 @@ impl InlineNormalizer {
             &pending.ancestors,
             vec![pending.origin],
         );
+    }
+}
+
+/// CSS Writing Modes 3 §2.4.2: the paragraph embedding level comes from the
+/// block container's `direction`; only `unicode-bidi: plaintext` uses the
+/// first strong character (UAX #9 rules P2/P3).
+fn paragraph_base_direction(style: &crate::style::ResolvedLayoutStyle) -> parley::BaseDirection {
+    match (style.unicode_bidi(), style.direction()) {
+        (InlineUnicodeBidi::Plaintext, _) => parley::BaseDirection::Auto,
+        (_, InlineDirection::Ltr) => parley::BaseDirection::Ltr,
+        (_, InlineDirection::Rtl) => parley::BaseDirection::Rtl,
     }
 }
 
