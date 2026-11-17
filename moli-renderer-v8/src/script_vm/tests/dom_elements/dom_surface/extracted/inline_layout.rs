@@ -1728,3 +1728,37 @@ fn rtl_block_sets_the_paragraph_direction_of_ltr_text() {
     assert!((geometry[2][1] - 40.0).abs() < 0.02, "{geometry:?}");
     assert_eq!(geometry[2][2], 96.0, "{geometry:?}");
 }
+
+/// Chromium 156 resolves `dir=auto` and `<bdi>` from their text and lets the
+/// result inherit: `a` and `d` are RTL from Hebrew, `b` and `c` are LTR inside
+/// an RTL parent. Lines are [left, right] of the text plus computed direction.
+#[test]
+fn dir_auto_and_bdi_resolve_the_paragraph_direction_from_content() {
+    let mut vm = new_parsed_test_vm(
+        "https://dir-auto-paragraph.test/",
+        "<!doctype html><meta charset=utf-8><style>body{margin:0}div,p,bdi{font:20px/30px monospace;width:300px;margin:0}</style><div id=a dir=auto>שלום ab</div><div dir=rtl><div id=b dir=auto>ab</div><bdi id=c style=display:block>ab</bdi></div><div dir=auto><p id=d>שלום ab</p></div>",
+    );
+    let geometry = vm
+        .eval(
+            r#"JSON.stringify(['a', 'b', 'c', 'd'].map((id) => {
+  const element = document.getElementById(id), range = document.createRange();
+  range.selectNodeContents(element);
+  const text = range.getBoundingClientRect();
+  return [text.left, text.right, getComputedStyle(element).direction];
+}))"#,
+        )
+        .unwrap();
+    let geometry = serde_json::from_str::<[(f64, f64, String); 4]>(&geometry).unwrap();
+    for (index, direction) in ["rtl", "ltr", "ltr", "rtl"].into_iter().enumerate() {
+        let (left, right, computed) = &geometry[index];
+        assert_eq!(computed, direction, "{geometry:?}");
+        if direction == "rtl" {
+            assert!(
+                (right - 300.0).abs() < 0.02 && *left > 150.0,
+                "{geometry:?}"
+            );
+        } else {
+            assert!(left.abs() < 0.02 && *right < 150.0, "{geometry:?}");
+        }
+    }
+}
