@@ -1230,7 +1230,12 @@ fn resolve_computed_horizontal_auto_margin(
     context: StyleComputationContext,
     resolution: StyleResolutionContext<'_>,
 ) -> Option<String> {
-    if !value.eq_ignore_ascii_case("auto") {
+    // Without a box there is no used value, so CSSOM keeps `auto` (for the
+    // physical sides and the logical margins resolved through them).
+    if !value.eq_ignore_ascii_case("auto")
+        || display_none_ancestor(runtime, handle, resolution)
+        || resolution.computed_property(runtime, handle, "display") == "contents"
+    {
         return None;
     }
     let parent_width =
