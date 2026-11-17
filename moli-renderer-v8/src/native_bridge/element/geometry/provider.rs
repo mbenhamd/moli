@@ -127,32 +127,92 @@ fn read_svg_content_client_rects(
     ))
 }
 
-/// The outermost `<svg>` hosting `source` (itself when `source` is one) and
-/// that `<svg>`'s client border box, for CTM queries. `None` when `source` is
-/// not SVG content of a rendered outermost `<svg>`.
-pub(crate) fn svg_viewport_root_client_box(
+/// The outermost `<svg>` hosting `source` (`source` itself when it is one),
+/// with that root's rendered viewport when it has a CSS box: its
+/// untransformed content size and the affine map from its content box to
+/// client coordinates (which carries CSS transforms on the root and its
+/// ancestors). `None` when no outermost `<svg>` hosts `source`.
+pub(crate) fn svg_viewport_root_geometry(
     runtime: &PageScriptHost,
     source: DomHandle,
-) -> Result<Option<(DomHandle, [f64; 4])>, LayoutError> {
+) -> Option<(
+    DomHandle,
+    Option<crate::context_bootstrap::svg_runtime::screen::SvgRootViewport>,
+)> {
     use crate::context_bootstrap::svg_runtime::screen;
     let root = if screen::is_outermost_svg(runtime, source) {
         source
     } else {
-        let Some(root) = screen::svg_layout_viewport_root(runtime, source) else {
-            return Ok(None);
-        };
-        root
+        screen::svg_layout_viewport_root(runtime, source)?
     };
-    let Some(root_box) = read_css_box_client_rects(runtime, root)?
-        .into_iter()
-        .reduce(union_client_rect)
-    else {
-        return Ok(None);
+    if !runtime.dom_host().is_connected(root) {
+        return Some((root, None));
+    }
+    Some((root, svg_root_viewport(runtime, root)))
+}
+
+fn svg_root_viewport(
+    runtime: &PageScriptHost,
+    root: DomHandle,
+) -> Option<crate::context_bootstrap::svg_runtime::screen::SvgRootViewport> {
+    use crate::context_bootstrap::svg_runtime::screen::{SvgRootViewport, svg_root_content_box};
+    let (Some(metrics), Some(model)) = (
+        read_element_metrics(runtime, root).ok().flatten(),
+        read_box_model(runtime, root).ok().flatten(),
+    ) else {
+        // Without box-model geometry (an `<svg>` laid out in a
+        // `<foreignObject>` content pass), the client border box is the
+        // untransformed viewport.
+        let border_box = read_css_box_client_rects(runtime, root)
+            .ok()?
+            .into_iter()
+            .reduce(union_client_rect)?;
+        let [x, y, width, height] = svg_root_content_box(
+            runtime,
+            root,
+            [
+                border_box.left,
+                border_box.top,
+                border_box.width,
+                border_box.height,
+            ],
+        );
+        return Some(SvgRootViewport {
+            width,
+            height,
+            content_to_client: SvgMatrixComponents::translate(x, y),
+        });
     };
-    Ok(Some((
-        root,
-        [root_box.left, root_box.top, root_box.width, root_box.height],
-    )))
+    let width = f64::from(metrics.content_size.width);
+    let height = f64::from(metrics.content_size.height);
+    let [origin, top_right, _, bottom_left] = model
+        .content
+        .points
+        .map(|point| (f64::from(point.x), f64::from(point.y)));
+    // The content quad is the content box mapped through every transform up
+    // to the viewport; its edges recover that affine map. An empty edge
+    // carries no direction, so it keeps the unit axis.
+    let axis = |to: (f64, f64), length: f64, unit: (f64, f64)| {
+        if length > 0.0 {
+            ((to.0 - origin.0) / length, (to.1 - origin.1) / length)
+        } else {
+            unit
+        }
+    };
+    let (a, b) = axis(top_right, width, (1.0, 0.0));
+    let (c, d) = axis(bottom_left, height, (0.0, 1.0));
+    Some(SvgRootViewport {
+        width,
+        height,
+        content_to_client: SvgMatrixComponents {
+            a,
+            b,
+            c,
+            d,
+            e: origin.0,
+            f: origin.1,
+        },
+    })
 }
 
 pub(crate) fn read_client_rects(

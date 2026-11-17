@@ -3874,16 +3874,17 @@ pub(super) fn svg_graphics_get_bbox_callback<'s>(
     rv.set(build_dom_rect_like(scope, bbox.x, bbox.y, bbox.width, bbox.height).into());
 }
 
-/// The CTM `compute` derives for a connected element of a rendered outermost
-/// `<svg>`, or `null` (an element outside a rendered SVG viewport).
+/// The CTM `compute` derives for an SVG element. An element outside a
+/// rendered viewport (unrendered or detached) keeps the user-space walk, so
+/// it reports the identity unless its own transforms say otherwise.
 fn svg_graphics_ctm<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     receiver: v8::Local<'s, v8::Object>,
     compute: fn(
         &crate::native_bridge::PageScriptHost,
         crate::document_runtime::DomHandle,
-        crate::document_runtime::DomHandle,
-        [f64; 4],
+        Option<crate::document_runtime::DomHandle>,
+        Option<super::screen::SvgRootViewport>,
     ) -> SvgMatrixComponents,
     rv: &mut v8::ReturnValue<'_, v8::Value>,
 ) {
@@ -3892,21 +3893,14 @@ fn svg_graphics_ctm<'s>(
     let matrix =
         crate::native_bridge::node_runtime_and_handle_from_object_or_detached(scope, target)
             .ok()
-            .and_then(|(runtime_ptr, handle)| {
+            .map_or_else(SvgMatrixComponents::identity, |(runtime_ptr, handle)| {
                 let runtime = unsafe { &*runtime_ptr };
-                if !runtime.dom_host().is_connected(handle) {
-                    return None;
-                }
-                let (root, root_box) =
-                    crate::native_bridge::element::svg_viewport_root_client_box(runtime, handle)
-                        .ok()
-                        .flatten()?;
-                Some(compute(runtime, handle, root, root_box))
+                let (root, viewport) =
+                    crate::native_bridge::element::svg_viewport_root_geometry(runtime, handle)
+                        .map_or((None, None), |(root, viewport)| (Some(root), viewport));
+                compute(runtime, handle, root, viewport)
             });
-    match matrix {
-        Some(matrix) => rv.set(build_svg_matrix(scope, matrix).into()),
-        None => rv.set(v8::null(scope).into()),
-    }
+    rv.set(build_svg_matrix(scope, matrix).into());
 }
 
 pub(super) fn svg_graphics_get_ctm_callback<'s>(
