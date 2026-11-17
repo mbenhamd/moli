@@ -4056,6 +4056,61 @@ async fn pointer_focus_hides_focus_visible_until_a_key_goes_down() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pointer_press_on_plain_content_keeps_focus_visible_for_script_focus() {
+    let mut ctx = TestContext::new();
+    with_loaded_document(
+        &mut ctx,
+        r#"<html><body style='margin:0'>
+                <div id='opener' style='position:absolute;left:0;top:0;width:80px;height:80px'
+                  onclick="document.getElementById('close').focus()">open</div>
+                <button id='button' style='position:absolute;left:100px;top:0'>button</button>
+                <button id='close' style='position:absolute;left:200px;top:0'>close</button>
+               </body></html>"#,
+    )
+    .await;
+    ctx.capture_fixture_layout(None).await;
+    let visible =
+        "[document.activeElement.id, document.activeElement.matches(':focus-visible')].join('=')";
+    // Chromium 156: a press on content with nothing focusable only clears
+    // focus, so the opener's script focus shows the ring, on a fresh page
+    // and after earlier script focus alike.
+    let mut id = 0;
+    for before in ["null", "document.getElementById('button').focus()"] {
+        let _ = evaluate_string(&mut ctx, &format!("String({before})")).await;
+        for kind in ["mousePressed", "mouseReleased"] {
+            id += 1;
+            ctx.process_async(json!({
+                "id": id,
+                "method": "Input.dispatchMouseEvent",
+                "params": { "type": kind, "x": INPUT_HIT_X, "y": INPUT_HIT_Y, "button": "left", "buttons": 1, "clickCount": 1 }
+            }))
+            .await;
+            ctx.expect_result(id, json!({}), None);
+        }
+        assert_eq!(
+            evaluate_string(&mut ctx, visible).await,
+            "close=true",
+            "{before}"
+        );
+    }
+    // A press that focused the button keeps the opener's script focus
+    // without a ring: the plain press does not reset the pointer focus.
+    for (x, y) in [(120, 10), (INPUT_HIT_X, INPUT_HIT_Y)] {
+        for kind in ["mousePressed", "mouseReleased"] {
+            id += 1;
+            ctx.process_async(json!({
+                "id": id,
+                "method": "Input.dispatchMouseEvent",
+                "params": { "type": kind, "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1 }
+            }))
+            .await;
+            ctx.expect_result(id, json!({}), None);
+        }
+    }
+    assert_eq!(evaluate_string(&mut ctx, visible).await, "close=false");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn dispatch_key_event_arrowup_wraps_radio_group_backward() {
     let mut ctx = TestContext::new();
     with_loaded_document(

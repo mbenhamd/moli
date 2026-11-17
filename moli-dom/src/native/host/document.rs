@@ -721,11 +721,21 @@ impl DomHost {
         false
     }
 
-    /// A pointer press moved focus (to `focused`, or away from every
-    /// element): later script focus stays without a focus ring until a key
-    /// goes down.
+    /// A pointer press moved focus to `focused`, or cleared it (`None`, or
+    /// the document's body when the press hit nothing focusable).
+    ///
+    /// Only a press that focused an element records a pointer focus, which
+    /// keeps later script focus without a focus ring until a key goes down.
+    /// A press that only clears focus keeps the last focus type, as in
+    /// Chromium 156: script focus after it shows the ring unless an earlier
+    /// press focused an element. Either press forgets earlier key presses.
     pub fn note_pointer_focus_change(&self, focused: Option<DomHandle>) {
-        if focused.is_some() {
+        let focused_element = focused.is_some_and(|handle| {
+            self.owner_document_handle(handle)
+                .and_then(|document| self.document_body_handle_for_document(document))
+                != Some(handle)
+        });
+        if focused_element {
             self.last_focus_from_pointer.set(true);
         }
         self.had_keyboard_event.set(false);
