@@ -194,6 +194,7 @@ mod image_bitmap;
 mod objects;
 mod offscreen;
 mod path;
+mod path2d;
 mod state;
 mod transform;
 mod webgl;
@@ -253,6 +254,7 @@ pub(crate) use offscreen::{
     offscreen_canvas_convert_to_blob_callback, offscreen_canvas_get_context_callback,
     offscreen_canvas_transfer_to_image_bitmap_callback,
 };
+pub(crate) use path2d::{path2d_add_path_callback, path2d_constructor_callback};
 pub(crate) use webgl::{
     WEBGL_CONSTANTS, WEBGL2_CONSTANTS, webgl_boolean_callback,
     webgl_check_framebuffer_status_callback, webgl_create_buffer_callback,

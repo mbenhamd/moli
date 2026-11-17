@@ -489,6 +489,44 @@ fn require_canvas_context_receiver<'s>(
     false
 }
 
+/// WebIDL `CanvasFillRule` conversion; `undefined` is the "nonzero" default.
+fn canvas_fill_rule_argument<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+    member: &str,
+) -> Option<moli_layout::PaintFillRule> {
+    if value.is_undefined() {
+        return Some(moli_layout::PaintFillRule::NonZero);
+    }
+    let rule = value.to_string(scope)?.to_rust_string_lossy(scope);
+    match rule.as_str() {
+        "nonzero" => Some(moli_layout::PaintFillRule::NonZero),
+        "evenodd" => Some(moli_layout::PaintFillRule::EvenOdd),
+        _ => {
+            throw_type_error(
+                scope,
+                &format!(
+                    "Failed to execute '{member}' on 'CanvasRenderingContext2D': The provided value '{rule}' is not a valid enum value of type CanvasFillRule."
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// `CanvasPath` mixin members are shared by the 2D contexts and `Path2D`;
+/// each receiver owns its own native path state.
+fn require_canvas_path_receiver<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    receiver: v8::Local<'s, v8::Object>,
+    member: &str,
+) -> bool {
+    if web_api_interfaces::Path2D::is_instance(scope, receiver) {
+        return true;
+    }
+    require_canvas_context_receiver(scope, receiver, member)
+}
+
 pub(crate) fn canvas_context_fill_style_getter_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
@@ -992,7 +1030,7 @@ pub(crate) fn canvas_context_rect_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_canvas_context_receiver(scope, args.this(), "rect") {
+    if !require_canvas_path_receiver(scope, args.this(), "rect") {
         return;
     }
     let Some(parsed) = webidl::parse_args::<CanvasContextRectPathArgs>(scope, &args) else {
@@ -1021,7 +1059,7 @@ pub(crate) fn canvas_context_close_path_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_canvas_context_receiver(scope, args.this(), "closePath") {
+    if !require_canvas_path_receiver(scope, args.this(), "closePath") {
         return;
     }
     let path_state = canvas_path_state(scope, args.this());
@@ -1033,7 +1071,7 @@ pub(crate) fn canvas_context_move_to_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_canvas_context_receiver(scope, args.this(), "moveTo") {
+    if !require_canvas_path_receiver(scope, args.this(), "moveTo") {
         return;
     }
     let Some(parsed) = webidl::parse_args::<CanvasContextMoveToArgs>(scope, &args) else {
@@ -1048,7 +1086,7 @@ pub(crate) fn canvas_context_line_to_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_canvas_context_receiver(scope, args.this(), "lineTo") {
+    if !require_canvas_path_receiver(scope, args.this(), "lineTo") {
         return;
     }
     let Some(parsed) = webidl::parse_args::<CanvasContextLineToArgs>(scope, &args) else {
@@ -1063,7 +1101,7 @@ pub(crate) fn canvas_context_quadratic_curve_to_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_canvas_context_receiver(scope, args.this(), "quadraticCurveTo") {
+    if !require_canvas_path_receiver(scope, args.this(), "quadraticCurveTo") {
         return;
     }
     let Some(parsed) = webidl::parse_args::<CanvasContextQuadraticCurveToArgs>(scope, &args) else {
@@ -1080,7 +1118,7 @@ pub(crate) fn canvas_context_bezier_curve_to_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_canvas_context_receiver(scope, args.this(), "bezierCurveTo") {
+    if !require_canvas_path_receiver(scope, args.this(), "bezierCurveTo") {
         return;
     }
     let Some(parsed) = webidl::parse_args::<CanvasContextBezierCurveToArgs>(scope, &args) else {
@@ -1104,7 +1142,7 @@ pub(crate) fn canvas_context_arc_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_canvas_context_receiver(scope, args.this(), "arc") {
+    if !require_canvas_path_receiver(scope, args.this(), "arc") {
         return;
     }
     let Some(parsed) = webidl::parse_args::<CanvasContextArcArgs>(scope, &args) else {
@@ -1146,7 +1184,7 @@ pub(crate) fn canvas_context_arc_to_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_canvas_context_receiver(scope, args.this(), "arcTo") {
+    if !require_canvas_path_receiver(scope, args.this(), "arcTo") {
         return;
     }
     let Some(parsed) = webidl::parse_args::<CanvasContextArcToArgs>(scope, &args) else {
@@ -1175,7 +1213,7 @@ pub(crate) fn canvas_context_ellipse_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_canvas_context_receiver(scope, args.this(), "ellipse") {
+    if !require_canvas_path_receiver(scope, args.this(), "ellipse") {
         return;
     }
     let Some(parsed) = webidl::parse_args::<CanvasContextEllipseArgs>(scope, &args) else {
@@ -1329,14 +1367,30 @@ pub(crate) fn canvas_context_fill_callback<'s>(
     let Some(canvas) = canvas_owner_from_context(scope, args.this()) else {
         return;
     };
+    // fill(optional fillRule) or fill(Path2D, optional fillRule).
+    let path2d = super::path2d::path2d_argument(scope, args.get(0));
+    let rule_index = i32::from(path2d.is_some());
+    let Some(fill_rule) = canvas_fill_rule_argument(scope, args.get(rule_index), "fill") else {
+        return;
+    };
     let path_state = canvas_path_state(scope, args.this());
     let fragment = with_path_state(&path_state, |state| {
-        if state.is_empty() || state.inverse_transform().is_none() {
+        state.inverse_transform()?;
+        let path = match &path2d {
+            // A Path2D is in user space; draw it under the current transform.
+            Some(path2d) => {
+                let mut mapped = super::path::Canvas2dPathState::default();
+                mapped.add_path(path2d, kurbo::Affine::new(state.transform().coefficients));
+                mapped.paint_path()
+            }
+            None => state.paint_path(),
+        };
+        if path.elements.is_empty() {
             return None;
         }
         Some(PaintFragment::Fill {
-            fill_rule: moli_layout::PaintFillRule::NonZero,
-            shape: PaintShape::Path(state.paint_path()),
+            fill_rule,
+            shape: PaintShape::Path(path),
             brush: PaintBrush::Solid(context_fill_color(scope, args.this())),
             transform: PaintTransform2D::IDENTITY,
         })
@@ -1358,15 +1412,24 @@ pub(crate) fn canvas_context_stroke_callback<'s>(
     let Some(canvas) = canvas_owner_from_context(scope, args.this()) else {
         return;
     };
+    let path2d = super::path2d::path2d_argument(scope, args.get(0));
     let path_state = canvas_path_state(scope, args.this());
     let fragment = with_path_state(&path_state, |state| {
-        if state.is_empty() {
+        // A Path2D is already in the current user space.
+        let path = match &path2d {
+            Some(path2d) => {
+                state.inverse_transform()?;
+                path2d.paint_path()
+            }
+            None => state.stroke_path()?,
+        };
+        if path.elements.is_empty() {
             return None;
         }
         Some(PaintFragment::Stroke(context_stroke(
             scope,
             args.this(),
-            state.stroke_path()?,
+            path,
             state.transform(),
         )))
     });

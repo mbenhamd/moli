@@ -40,6 +40,7 @@ percent-encoding = "2.3"
 selectors = "0.41"
 stylo = "0.22"
 stylo_static_prefs = "0.22"
+svgtypes = "0.16.1"
 moli-action-window = { path = "../moli-action-window" }
 moli-broadcast-channel = { path = "../moli-broadcast-channel" }
 moli-browser-profile = { path = "../moli-browser-profile" }

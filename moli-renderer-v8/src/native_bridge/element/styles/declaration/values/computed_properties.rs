@@ -135,6 +135,19 @@ pub(super) fn computed_style_property_value_after_style_update(
     if property == "direction" {
         return computed_direction_with_resolution(runtime, handle, resolution);
     }
+    // CSSOM resolves a logical margin through its physical side, so it
+    // reports the same used value as that side (e.g. `auto` as pixels).
+    if let Some(physical) = physical_inline_margin_property(runtime, handle, property, resolution) {
+        return computed_style_property_value_after_style_update(
+            runtime,
+            handle,
+            physical,
+            context,
+            prepared_inputs,
+            observation,
+            prepared_style,
+        );
+    }
     if matches!(property, "left" | "right" | "top" | "bottom")
         && let Some(midpoint) =
             active_css_animation_midpoint_px_with_resolution(runtime, handle, property, resolution)
@@ -284,6 +297,30 @@ pub(super) fn computed_style_property_value_after_style_update(
         })
         .unwrap_or(value);
     resolve_moli_computed_style_value(runtime, handle, property, &value, context, resolution)
+}
+
+/// The physical margin a horizontal-writing-mode `margin-inline-*` maps to.
+fn physical_inline_margin_property(
+    runtime: &PageScriptHost,
+    handle: DomHandle,
+    property: &str,
+    resolution: StyleResolutionContext<'_>,
+) -> Option<&'static str> {
+    let start = match property {
+        "margin-inline-start" => true,
+        "margin-inline-end" => false,
+        _ => return None,
+    };
+    let writing_mode = resolution.raw_property(runtime, handle, "writing-mode");
+    if !writing_mode.is_empty() && writing_mode != "horizontal-tb" {
+        return None;
+    }
+    let rtl = computed_direction_with_resolution(runtime, handle, resolution) == "rtl";
+    Some(if start != rtl {
+        "margin-left"
+    } else {
+        "margin-right"
+    })
 }
 
 pub(super) fn computed_property_requires_stylesheet_sources(
