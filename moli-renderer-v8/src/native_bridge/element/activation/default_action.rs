@@ -1990,7 +1990,12 @@ pub(crate) fn perform_number_spin_keyboard_default_action(
             value: &value,
             min: element.attribute("min"),
             max: element.attribute("max"),
-            step: element.attribute("step"),
+            // Blink `StepUpFromLayoutObject` builds its step range with
+            // `kAnyIsDefaultStep`: the spin button steps a `step=any` field
+            // by the default step, where `stepUp()` would throw.
+            step: element
+                .attribute("step")
+                .filter(|step| !step.trim().eq_ignore_ascii_case("any")),
             value_attribute: element.attribute("value"),
         },
         direction,
