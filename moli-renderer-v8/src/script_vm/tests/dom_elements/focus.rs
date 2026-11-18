@@ -847,3 +847,47 @@ fn range_keys_step_the_focused_slider_instead_of_scrolling() {
         "input:181|change:181|input:360|change:360|input:359|change:359|input:323|change:323 0"
     );
 }
+
+/// Chromium 156 blurs a focused element synchronously when removing its
+/// `contenteditable` or `tabindex` leaves it unfocusable, before the
+/// mutation returns; focus moves to the body. An element that stays
+/// focusable through another attribute keeps focus.
+#[test]
+fn losing_contenteditable_or_tabindex_blurs_the_focused_element_synchronously() {
+    let mut vm = new_storage_html_test_vm("https://example.com/");
+    let result = vm
+        .eval(
+            r#"(() => {
+        const cases = {
+            ceFalse: ['<div id=e contenteditable=true>x</div>', e => e.setAttribute('contenteditable', 'false')],
+            ceProperty: ['<div id=e contenteditable=true>x</div>', e => { e.contentEditable = 'false'; }],
+            tabindexRemoved: ['<div id=e tabindex=0>x</div>', e => e.removeAttribute('tabindex')],
+            tabindexKept: ['<div id=e contenteditable=true tabindex=0>x</div>', e => e.setAttribute('contenteditable', 'false')],
+        };
+        const out = {};
+        for (const [name, [html, mutate]] of Object.entries(cases)) {
+            document.body.innerHTML = html;
+            const e = document.getElementById('e');
+            e.focus();
+            const log = [];
+            for (const type of ['blur', 'focusout']) {
+                e.addEventListener(type, event => log.push(`${type}:${event.relatedTarget}`));
+            }
+            mutate(e);
+            log.push(document.activeElement === e ? 'kept' : document.activeElement.localName);
+            out[name] = log.join(' ');
+        }
+        return JSON.stringify(out);
+    })()"#,
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result).unwrap(),
+        serde_json::json!({
+            "ceFalse": "blur:null focusout:null body",
+            "ceProperty": "blur:null focusout:null body",
+            "tabindexRemoved": "blur:null focusout:null body",
+            "tabindexKept": "kept",
+        })
+    );
+}
