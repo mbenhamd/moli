@@ -602,13 +602,13 @@ async fn svg_dash_expansion_is_bounded_under_a_huge_path_length() {
     .expect("SVG dash bound hit-test fixture should run");
 }
 
-/// `pointer-events` keywords other than `auto`, `none` and `visiblePainted`
-/// change what SVG content hits, which the walk does not model. An
-/// element naming one, and a query outside the outer `<svg>`'s content box,
-/// keep the outer `<svg>` answer instead of a guessed one. Each `<svg>` is
-/// a block; the third has 20px of padding.
+/// SVG `pointer-events` keywords choose the hit area regardless of paint:
+/// `all` hits an unfilled circle's interior, `stroke` only a rect's
+/// unpainted outline. A query outside the outer `<svg>`'s content box keeps
+/// the outer `<svg>` answer. Each `<svg>` is a block; the third has 20px of
+/// padding. Chromium 156 gives the same answers.
 #[tokio::test(flavor = "current_thread")]
-async fn svg_unmodelled_pointer_events_and_points_outside_the_content_box_stay_coarse() {
+async fn svg_pointer_events_keywords_and_points_outside_the_content_box() {
     run_page_vm_async_test(async move {
         let mut page_vm = svg_hit_test_page_vm(
             "svg-pointer-events-keyword-hit-test",
@@ -626,10 +626,11 @@ async fn svg_unmodelled_pointer_events_and_points_outside_the_content_box_stay_c
         assert_eq!(
             page_vm
                 .vm_mut()
-                .eval("__hits([[50, 50], [50, 150], [15, 215], [40, 240]])")?,
+                .eval("__hits([[50, 50], [50, 150], [0, 100], [15, 215], [40, 240]])")?,
             [
-                "s1|s1,body,html",
+                "c1|c1,b1,s1,body,html",
                 "s2|s2,body,html",
+                "r2|r2,s2,body,html",
                 "s3|s3,body,html",
                 "r3|r3,s3,body,html",
             ]
@@ -641,10 +642,11 @@ async fn svg_unmodelled_pointer_events_and_points_outside_the_content_box_stay_c
     .expect("SVG pointer-events keyword hit-test fixture should run");
 }
 
-/// A stylesheet rule with an unmodelled SVG-only `pointer-events` keyword
-/// keeps the outer `<svg>` answer instead of a guessed one.
+/// A stylesheet rule's SVG `pointer-events` keyword reaches the computed
+/// value: `stroke` hits the rect's unpainted outline but not its painted
+/// interior, as in Chromium 156.
 #[tokio::test(flavor = "current_thread")]
-async fn svg_stylesheet_pointer_events_keyword_keeps_the_outer_svg() {
+async fn svg_stylesheet_pointer_events_keyword_applies() {
     run_page_vm_async_test(async move {
         let mut page_vm = svg_hit_test_page_vm(
             "svg-stylesheet-pointer-events-hit-test",
@@ -654,8 +656,8 @@ async fn svg_stylesheet_pointer_events_keyword_keeps_the_outer_svg() {
 </svg>"#,
         )?;
         assert_eq!(
-            page_vm.vm_mut().eval("__hits([[50, 50]])")?,
-            "s|s,body,html"
+            page_vm.vm_mut().eval("__hits([[50, 50], [0, 50]])")?,
+            "s|s,body,html r|r,s,body,html"
         );
         Ok::<_, anyhow::Error>(())
     })
@@ -663,10 +665,10 @@ async fn svg_stylesheet_pointer_events_keyword_keeps_the_outer_svg() {
     .expect("SVG stylesheet pointer-events hit-test fixture should run");
 }
 
-/// A shadow root's stylesheet is author style too: its SVG-only
-/// `pointer-events` keyword keeps the outer `<svg>` answer.
+/// A shadow root's stylesheet is author style too: its `pointer-events:
+/// all` lets an unfilled circle win, as in Chromium 156.
 #[tokio::test(flavor = "current_thread")]
-async fn svg_shadow_root_stylesheet_pointer_events_keyword_keeps_the_outer_svg() {
+async fn svg_shadow_root_stylesheet_pointer_events_keyword_applies() {
     run_page_vm_async_test(async move {
         let mut page_vm = svg_hit_test_page_vm(
             "svg-shadow-stylesheet-pointer-events-hit-test",
@@ -687,7 +689,7 @@ __root.innerHTML = `<style>.hit { pointer-events: all }</style>
             page_vm
                 .vm_mut()
                 .eval("__root.elementFromPoint(50, 50).id")?,
-            "s"
+            "c"
         );
         Ok::<_, anyhow::Error>(())
     })
@@ -695,11 +697,11 @@ __root.innerHTML = `<style>.hit { pointer-events: all }</style>
     .expect("SVG shadow stylesheet pointer-events hit-test fixture should run");
 }
 
-/// An SVG-only `pointer-events` keyword written through the CSSOM, as the d3
-/// zoom overlay's `.style("pointer-events", "all")` does, keeps the outer
-/// `<svg>` answer.
+/// An SVG `pointer-events` keyword written through the CSSOM, as the d3
+/// zoom overlay's `.style("pointer-events", "all")` does, applies: the
+/// unfilled circle wins, as in Chromium 156.
 #[tokio::test(flavor = "current_thread")]
-async fn svg_cssom_written_pointer_events_keyword_keeps_the_outer_svg() {
+async fn svg_cssom_written_pointer_events_keyword_applies() {
     run_page_vm_async_test(async move {
         let mut page_vm = svg_hit_test_page_vm(
             "svg-cssom-pointer-events-hit-test",
@@ -715,7 +717,7 @@ async fn svg_cssom_written_pointer_events_keyword_keeps_the_outer_svg() {
         page_vm.vm_mut().publish_layout_for_test()?;
         assert_eq!(
             page_vm.vm_mut().eval("__hits([[50, 50]])")?,
-            "s|s,body,html"
+            "c|c,b,s,body,html"
         );
         Ok::<_, anyhow::Error>(())
     })
@@ -723,8 +725,9 @@ async fn svg_cssom_written_pointer_events_keyword_keeps_the_outer_svg() {
     .expect("SVG CSSOM pointer-events hit-test fixture should run");
 }
 
-/// A CSSOM edit turns a `<style>` sheet into its serialization. An SVG-only
-/// `pointer-events` keyword in it still keeps the outer `<svg>` answer.
+/// A CSSOM edit turns a `<style>` sheet into its serialization, which keeps
+/// the SVG `pointer-events` keyword, so the unfilled circle still wins, as
+/// in Chromium 156.
 #[tokio::test(flavor = "current_thread")]
 async fn svg_pointer_events_keyword_survives_an_unrelated_stylesheet_edit() {
     run_page_vm_async_test(async move {
@@ -743,10 +746,126 @@ async fn svg_pointer_events_keyword_survives_an_unrelated_stylesheet_edit() {
         page_vm.vm_mut().publish_layout_for_test()?;
         assert_eq!(
             page_vm.vm_mut().eval("__hits([[50, 50]])")?,
-            "s|s,body,html"
+            "c|c,b,s,body,html"
         );
         Ok::<_, anyhow::Error>(())
     })
     .await
     .expect("SVG edited stylesheet pointer-events hit-test fixture should run");
+}
+
+/// Marker content and filter output are painted but never hit: the marked,
+/// filtered line is hit only on its own stroke, and a transparent
+/// `pointer-events: fill` polygon over the arrowhead takes its place, as in
+/// Chromium 156.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_markers_and_filters_do_not_extend_the_hit_area() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-marker-filter-hit-test",
+            r#"<svg id=s width=200 height=100 style="display:block">
+  <defs><marker id=m markerWidth=20 markerHeight=20 refX=0 refY=5 markerUnits=userSpaceOnUse orient=auto><polygon points="0,0 20,5 0,10" fill=red /></marker></defs>
+  <rect id=b width=200 height=100 fill=blue />
+  <line id=l x1=20 y1=50 x2=150 y2=50 stroke=black stroke-width=4 marker-end="url(#m)" style="filter:drop-shadow(0 0 4px red)" />
+  <polygon id=h points="150,40 190,50 150,60" fill=transparent style="pointer-events:fill" />
+</svg>"#,
+        )?;
+        assert_eq!(
+            page_vm
+                .vm_mut()
+                .eval("__hits([[100, 50], [100, 55], [160, 50], [195, 50]])")?,
+            [
+                "l|l,b,s,body,html",
+                "b|b,s,body,html",
+                "h|h,b,s,body,html",
+                "b|b,s,body,html",
+            ]
+            .join(" "),
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG marker and filter hit-test fixture should run");
+}
+
+/// SVG content has no CSS box, yet DevTools reports its stroke bounding box
+/// as every box-model quad and as its content quad, which Playwright uses to
+/// click it. Chromium 156 answers the same quad and a 14x14 size.
+#[tokio::test(flavor = "current_thread")]
+async fn devtools_geometry_reports_svg_content_stroke_bounds() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-devtools-geometry",
+            r#"<svg width=200 height=100 style="display:block;margin:10px"><g transform="translate(20 5)"><circle id=c cx=40 cy=40 r=5 stroke=black stroke-width=4 fill=none /></g></svg>"#,
+        )?;
+        let circle = page_vm
+            .vm()
+            .document_runtime
+            .get_element_by_id("c")
+            .expect("circle should be connected");
+        let quad = crate::runtime::RendererGeometryQuad {
+            points: [63.0, 48.0, 77.0, 48.0, 77.0, 62.0, 63.0, 62.0],
+        };
+        assert_eq!(
+            page_vm.document_geometry_for_live_node_handle(circle)?,
+            crate::runtime::RendererDocumentNodeGeometry::FoundElement {
+                box_model: Box::new(crate::runtime::RendererDocumentBoxModel {
+                    content: quad,
+                    padding: quad,
+                    border: quad,
+                    margin: quad,
+                    width: 14,
+                    height: 14,
+                }),
+                content_quads: vec![quad],
+            }
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG DevTools geometry fixture should run");
+}
+
+/// SVG content scrolls its stroke-inclusive bounding box through the outer
+/// `<svg>`'s scroll containers. Chromium 156 aligns this circle's stroke
+/// box top (1000 + 300 - 7) with the viewport top.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_content_scrolls_its_stroke_bounds_into_view() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-scroll-into-view",
+            r#"<div style="height:1000px"></div><svg width=200 height=400 style="display:block"><circle id=c cx=50 cy=300 r=5 stroke=black stroke-width=4 fill=red /></svg><div style="height:1000px"></div>"#,
+        )?;
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                "document.getElementById('c').scrollIntoView(); String(Math.round(scrollY))"
+            )?,
+            "1293"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG scroll-into-view fixture should run");
+}
+
+/// Percentage geometry attributes resolve against the nearest viewport,
+/// here an outer `<svg>` sized only by CSS. Chromium 156 answers these
+/// bounding boxes for the 400x300 viewport.
+#[tokio::test(flavor = "current_thread")]
+async fn svg_percentage_geometry_resolves_against_a_css_sized_viewport() {
+    run_page_vm_async_test(async move {
+        let mut page_vm = svg_hit_test_page_vm(
+            "svg-percentage-bbox",
+            r#"<div style="position:relative;width:400px;height:300px"><svg style="position:absolute;inset:0;width:100%;height:100%;overflow:visible"><circle id=c cx=40% cy=30% r=5 stroke=black stroke-width=4 fill=red /><line id=l x1=10% y1=10% x2=50% y2=50% stroke=black /></svg></div>"#,
+        )?;
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                "['c','l'].map(id => { const b = document.getElementById(id).getBBox(); return [b.x, b.y, b.width, b.height].join(','); }).join(' ')"
+            )?,
+            "155,85,10,10 40,30,160,120"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("SVG percentage bbox fixture should run");
 }

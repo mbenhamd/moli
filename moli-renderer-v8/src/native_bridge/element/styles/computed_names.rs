@@ -15,10 +15,7 @@ pub(super) fn computed_property_count(
         return 0;
     }
     computed_longhand_count()
-        + sorted_custom_property_names(&ComputedStyleRead::new_with_context(
-            runtime, handle, context,
-        ))
-        .len()
+        + ComputedStyleRead::new_with_context(runtime, handle, context).custom_property_count()
 }
 
 pub(super) fn computed_property_name_at(
@@ -36,10 +33,8 @@ pub(super) fn computed_property_name_at(
         return computed_longhand_name_at(index).map(str::to_owned);
     }
 
-    let custom_names = sorted_custom_property_names(&ComputedStyleRead::new_with_context(
-        runtime, handle, context,
-    ));
-    custom_names.get(index - longhand_count).cloned()
+    ComputedStyleRead::new_with_context(runtime, handle, context)
+        .sorted_custom_property_name_at(index - longhand_count)
 }
 
 pub(super) fn computed_property_names(

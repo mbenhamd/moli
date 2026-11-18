@@ -1369,20 +1369,6 @@ impl PageScriptHost {
             .shadow_root_has_adopted_style_sheet_sources(self.dom_host(), root)
     }
 
-    /// Remembers a CSSOM write of an SVG-only `pointer-events` keyword; see
-    /// `svg_runtime::hit_test::note_cssom_write`.
-    pub(crate) fn note_cssom_svg_pointer_events(&self) {
-        self.cssom_declared_svg_pointer_events.set(true);
-    }
-
-    /// Whether author text ever parsed into a stylesheet of this runtime, or
-    /// written through the CSSOM, declared an SVG-only `pointer-events`
-    /// keyword. The parse drops it, so no later serialization shows it.
-    pub(crate) fn svg_pointer_events_keyword_seen(&self) -> bool {
-        self.cssom_declared_svg_pointer_events.get()
-            || self.live_stylesheets.parsed_svg_pointer_events_keyword()
-    }
-
     pub(crate) fn register_css_custom_property_for_document(
         &mut self,
         document: DomHandle,
@@ -2607,6 +2593,13 @@ impl PageScriptHost {
         handle: DomHandle,
     ) -> Option<&crate::css_style::CssInlineStyleDeclarationState> {
         self.inline_style_declarations.get(&handle)
+    }
+
+    pub(crate) fn take_element_inline_style_declaration_state(
+        &mut self,
+        handle: DomHandle,
+    ) -> Option<crate::css_style::CssInlineStyleDeclarationState> {
+        self.inline_style_declarations.remove(&handle)
     }
 
     pub(crate) fn set_element_inline_style_declaration_state(
