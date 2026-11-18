@@ -102,22 +102,25 @@ pub(super) fn inline_style_declaration_state_from_css_text(
     inline_style_declaration_state_from_entries(&entries)
 }
 
-pub(super) fn inline_style_declaration_state_for_handle(
-    runtime: &PageScriptHost,
+/// Moves the element's declaration state out for an in-place write. The flag
+/// says whether it came from storage, so an abandoned write can put it back.
+pub(super) fn take_inline_style_declaration_state_for_handle(
+    runtime: &mut PageScriptHost,
     handle: DomHandle,
     base_url: Option<&url::Url>,
-) -> CssInlineStyleDeclarationState {
+) -> (CssInlineStyleDeclarationState, bool) {
     if runtime.element_inline_style_csp_state(handle)
         == crate::style_engine::InlineStyleCspState::BlockedAttribute
     {
-        return CssInlineStyleDeclarationState::default();
+        return (CssInlineStyleDeclarationState::default(), false);
     }
-    runtime
-        .element_inline_style_declaration_state(handle)
-        .cloned()
-        .unwrap_or_else(|| {
-            inline_style_declaration_state_from_css_text(&style_string(runtime, handle), base_url)
-        })
+    match runtime.take_element_inline_style_declaration_state(handle) {
+        Some(state) => (state, true),
+        None => (
+            inline_style_declaration_state_from_css_text(&style_string(runtime, handle), base_url),
+            false,
+        ),
+    }
 }
 
 pub(super) fn inline_css_text_pdb_storage_state(
@@ -625,7 +628,13 @@ pub(super) fn refresh_inline_state_entries_after_pdb_mutation(
         state.refresh_pdb_entries();
         return;
     }
-    let block_entries = inline_state_block_entries(state);
+    // Only side entries are matched against the block, so skip serializing
+    // every block declaration when there are none.
+    let block_entries = if state.side_entries.is_empty() {
+        Vec::new()
+    } else {
+        inline_state_block_entries(state)
+    };
     let mut retained_affecting_side_entries = state
         .side_entries
         .iter()

@@ -205,6 +205,22 @@ impl CssInlineStyleDeclarationState {
             .unwrap_or_else(|| serialize_css_style_entries(&self.entries()))
     }
 
+    /// Returns `(css_text, style_resolution_text)`.
+    ///
+    /// The two strings differ only when renderer-projected placeholder
+    /// entries are present; every other branch of [`Self::css_text`] and
+    /// [`Self::style_resolution_text`] serializes the same declarations, so
+    /// one serialization serves both.
+    pub(crate) fn css_text_and_style_resolution_text(&self) -> (String, String) {
+        if !self.entries.iter().any(|entry| entry.name == "all")
+            && css_style_entries_have_renderer_projection(&self.entries)
+        {
+            return (self.css_text(), self.style_resolution_text());
+        }
+        let css_text = self.css_text();
+        (css_text.clone(), css_text)
+    }
+
     pub(crate) fn refresh_pdb_entries(&mut self) {
         if self.side_entries.is_empty()
             && !self.entries.iter().any(|entry| entry.name == "all")
@@ -365,11 +381,12 @@ fn pdb_value_fragment_is_supported(property: &str, value: &str) -> bool {
 
 fn css_style_entries_have_renderer_projection(entries: &[CssStyleEntry]) -> bool {
     entries.iter().any(|entry| {
-        let name = canonical_style_property_name(&entry.name);
-        !moli_css_parse::is_cssom_custom_property_name(&name)
-            && (entry.value.is_empty()
-                || moli_css_parse::css_value_may_contain_var_function(&entry.value)
-                || moli_css_parse::css_value_may_contain_env_function(&entry.value))
+        (entry.value.is_empty()
+            || moli_css_parse::css_value_may_contain_var_function(&entry.value)
+            || moli_css_parse::css_value_may_contain_env_function(&entry.value))
+            && !moli_css_parse::is_cssom_custom_property_name(&canonical_style_property_name(
+                &entry.name,
+            ))
     })
 }
 
