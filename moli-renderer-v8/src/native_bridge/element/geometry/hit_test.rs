@@ -28,6 +28,14 @@ pub(crate) struct InputSurfaceHit {
     pub(crate) control: Option<LayoutControlSurfaceHit<DomHandle>>,
 }
 
+/// Layout hits in one frame that may carry SVG content in front of the box
+/// hit. Resolving SVG content measures text through the document's layout
+/// services, so it runs after the frozen tree borrow ends.
+struct SvgContentCandidates {
+    hits: Vec<LayoutHit<DomHandle>>,
+    root_to_frame: LayoutTransform2D,
+}
+
 #[derive(Clone, Copy)]
 struct FrameHitTest {
     document: DomHandle,
@@ -104,7 +112,8 @@ pub(crate) fn input_surface_hit_test(
             });
     }
     runtime.ensure_current_layout()?;
-    runtime
+    let mut svg_candidates = Vec::new();
+    let hit = runtime
         .with_latest_layout_tree_for_document(document, |tree| {
             input_surface_hit_test_in_tree(
                 runtime,
@@ -114,9 +123,36 @@ pub(crate) fn input_surface_hit_test(
                 ignore_pointer_events_none,
                 include_scrollbars,
                 0,
+                &mut svg_candidates,
             )
         })
-        .ok_or(LayoutError::NoLayoutSnapshot)?
+        .ok_or(LayoutError::NoLayoutSnapshot)??;
+    Ok(svg_content_input_hit(runtime, svg_candidates).unwrap_or(hit))
+}
+
+/// Input targets the same SVG content `elementFromPoint` reports. The
+/// outermost frame that has SVG content under the point wins, because the
+/// box hit only descended into a child frame when no such content lay in
+/// front of it.
+fn svg_content_input_hit(
+    runtime: &PageScriptHost,
+    candidates: Vec<SvgContentCandidates>,
+) -> Option<InputSurfaceHit> {
+    candidates.into_iter().find_map(|frame| {
+        let handle = frame.hits.iter().find_map(|hit| {
+            crate::native_bridge::document::svg_content_hits(runtime, hit, true)
+                .into_iter()
+                .next()
+                .filter(|handle| runtime.dom_host().is_connected(*handle))
+        })?;
+        Some(InputSurfaceHit {
+            input: Some(InputHit {
+                handle,
+                root_to_frame: frame.root_to_frame,
+            }),
+            control: None,
+        })
+    })
 }
 
 pub(crate) fn observable_deep_hit_test(
@@ -180,6 +216,7 @@ fn input_surface_hit_test_in_tree(
     ignore_pointer_events_none: bool,
     include_scrollbars: bool,
     depth: usize,
+    svg_candidates: &mut Vec<SvgContentCandidates>,
 ) -> Result<InputSurfaceHit, LayoutError> {
     let live_dom_hit = if include_scrollbars {
         let mut live_dom_hit = None;
@@ -212,17 +249,18 @@ fn input_surface_hit_test_in_tree(
                 }
             }
         }
-        // No scrollbar lies in front, so SVG content answers as it does for
-        // the plain hit test below.
-        live_dom_hit.map(|dom_hit| {
-            if ignore_pointer_events_none {
-                return dom_hit;
-            }
-            live_svg_content_hit_in_tree(runtime, tree, point).unwrap_or(dom_hit)
-        })
+        live_dom_hit
     } else {
         live_hit_in_tree(runtime, tree, point, ignore_pointer_events_none)
     };
+    // No scrollbar lies in front, so SVG content may answer instead of the
+    // box hit, as it does for `elementFromPoint`.
+    if !ignore_pointer_events_none {
+        svg_candidates.push(SvgContentCandidates {
+            hits: svg_content_candidate_hits(tree, point),
+            root_to_frame,
+        });
+    }
     let Some((layout_hit, target)) = live_dom_hit else {
         return Ok(InputSurfaceHit::default());
     };
@@ -275,6 +313,7 @@ fn input_surface_hit_test_in_tree(
         ignore_pointer_events_none,
         include_scrollbars,
         depth + 1,
+        svg_candidates,
     )?;
     if child_hit.input.is_some() || child_hit.control.is_some() {
         Ok(child_hit)
@@ -292,11 +331,6 @@ fn live_hit_in_tree(
     point: LayoutPoint,
     ignore_pointer_events_none: bool,
 ) -> Option<(LayoutHit<DomHandle>, DomHandle)> {
-    if !ignore_pointer_events_none
-        && let Some(svg_hit) = live_svg_content_hit_in_tree(runtime, tree, point)
-    {
-        return Some(svg_hit);
-    }
     let first_hit = tree.hit_test(point, ignore_pointer_events_none);
     let live_first_hit = first_hit.and_then(|hit| {
         let target = element_for_hit_source(runtime, hit.source)?;
@@ -319,17 +353,14 @@ fn live_hit_in_tree(
         })
 }
 
-/// Input targets the same SVG content `elementFromPoint` reports. Layout
-/// stops at the outer `<svg>`, and content can re-enable pointer events
-/// below an `<svg>` with `pointer-events: none`. Front to back, SVG content
-/// painted at or above the first box that respects pointer events wins.
-/// `None` leaves the box hit alone.
-fn live_svg_content_hit_in_tree(
-    runtime: &PageScriptHost,
+/// Layout stops at the outer `<svg>`, and content can re-enable pointer
+/// events below an `<svg>` with `pointer-events: none`. Front to back, SVG
+/// content painted at or above the first box that respects pointer events
+/// wins, so those hits are the candidates.
+fn svg_content_candidate_hits(
     tree: &FrozenLayoutTree<DomHandle>,
     point: LayoutPoint,
-) -> Option<(LayoutHit<DomHandle>, DomHandle)> {
-    let live = |handle: DomHandle| runtime.dom_host().is_connected(handle).then_some(handle);
+) -> Vec<LayoutHit<DomHandle>> {
     let identity = |hit: &LayoutHit<DomHandle>| {
         (
             hit.source,
@@ -341,26 +372,17 @@ fn live_svg_content_hit_in_tree(
     let respecting = tree.hit_test(point, false);
     if tree.hit_test(point, true).as_ref().map(identity) == respecting.as_ref().map(identity) {
         // Nothing transparent to pointer events lies in front.
-        let hit = respecting?;
-        let shape = crate::native_bridge::document::svg_content_hits(runtime, &hit, true)
-            .into_iter()
-            .next()
-            .and_then(live)?;
-        return Some((hit, shape));
+        return respecting.into_iter().collect();
     }
+    let mut hits = Vec::new();
     for hit in tree.hit_test_all(point, true) {
-        if let Some(shape) = crate::native_bridge::document::svg_content_hits(runtime, &hit, true)
-            .into_iter()
-            .next()
-            .and_then(live)
-        {
-            return Some((hit, shape));
-        }
-        if hit.pointer_events {
-            return None;
+        let respects_pointer_events = hit.pointer_events;
+        hits.push(hit);
+        if respects_pointer_events {
+            break;
         }
     }
-    None
+    hits
 }
 
 fn live_hit_in_frame(

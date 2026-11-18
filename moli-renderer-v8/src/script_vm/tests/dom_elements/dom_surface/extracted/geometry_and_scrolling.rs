@@ -74,7 +74,7 @@ fn wheel_at_the_focused_number_field_steps_it_instead_of_scrolling() {
 fn pointer_input_targets_svg_content() {
     let mut vm = new_parsed_test_vm(
         "https://pointer-svg-content.test/",
-        r#"<!doctype html><html><body style="margin:0"><div style="position:relative;width:300px;height:200px"><div id=under style="position:absolute;left:0;top:0;width:300px;height:200px"></div><svg id=over style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"><circle id=c cx=40% cy=40% r=5 fill=blue style="pointer-events:auto" /></svg></div><svg id=plain width=100 height=100 style="display:block"><rect id=r x=10 y=10 width=50 height=50 /></svg></body></html>"#,
+        r#"<!doctype html><html><body style="margin:0"><div style="position:relative;width:300px;height:200px"><div id=under style="position:absolute;left:0;top:0;width:300px;height:200px"></div><svg id=over style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"><circle id=c cx=40% cy=40% r=5 fill=blue style="pointer-events:auto" /></svg></div><svg id=plain width=100 height=100 style="display:block"><rect id=r x=10 y=10 width=50 height=50 /><text id=label x=70 y=90 font-size=10>x</text></svg></body></html>"#,
     );
     vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
     vm.eval(
