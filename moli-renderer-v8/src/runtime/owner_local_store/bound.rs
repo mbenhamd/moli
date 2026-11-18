@@ -805,6 +805,17 @@ pub(super) fn page_ready_descriptor_snapshot(
             }
         });
     if let Some(timer) = timer {
+        // A due animation frame is a rendering opportunity: it runs ahead of
+        // ordinary tasks queued before it, as Chromium's frame does. Timers
+        // due earlier still run first through the same heap.
+        if entry.page_vm().has_due_animation_frame() {
+            descriptors.retain(|descriptor| {
+                matches!(
+                    descriptor,
+                    crate::page_task_queue::RendererPageReadyDescriptor::ActionWindow { .. }
+                )
+            });
+        }
         descriptors.push(timer);
         due_deadline_was_ready = true;
     }

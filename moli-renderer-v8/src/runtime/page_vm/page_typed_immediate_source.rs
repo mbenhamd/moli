@@ -124,6 +124,12 @@ impl PageVm {
         }
     }
 
+    /// Whether a requested animation frame has reached its time. Chromium
+    /// begins that frame before other queued tasks run.
+    pub(in crate::runtime) fn has_due_animation_frame(&self) -> bool {
+        self.vm().has_ready_animation_frame_callback()
+    }
+
     pub(in crate::runtime) fn due_page_timer_ready_descriptor(
         &self,
         selection: RendererPageTimerSelection,

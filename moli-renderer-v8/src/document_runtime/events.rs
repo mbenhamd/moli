@@ -169,6 +169,7 @@ impl DocumentRuntime {
         target_receiver: v8::Local<'s, v8::Object>,
         timestamp: f64,
         delay_ms: u32,
+        overdue: std::time::Duration,
         owner: HostTimerOwner,
     ) -> u32 {
         self.timeouts.queue_window_animation_frame_callback(
@@ -177,8 +178,13 @@ impl DocumentRuntime {
             target_receiver,
             timestamp,
             delay_ms,
+            overdue,
             owner,
         )
+    }
+
+    pub(crate) fn has_pending_animation_frame(&self) -> bool {
+        self.timeouts.has_pending_animation_frame()
     }
 
     pub(crate) fn queue_window_idle_callback<'s>(

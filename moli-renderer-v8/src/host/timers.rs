@@ -217,6 +217,14 @@ impl ScheduledTimerTask {
     fn is_animation_frame_callback(&self) -> bool {
         matches!(
             &self.callback,
+            ScheduledTimerCallback::WindowWebIdl(callback)
+                if callback.is_animation_frame() && !callback.is_cancelled_animation_frame()
+        )
+    }
+
+    fn is_animation_frame_task(&self) -> bool {
+        matches!(
+            &self.callback,
             ScheduledTimerCallback::WindowWebIdl(callback) if callback.is_animation_frame()
         )
     }
@@ -380,6 +388,7 @@ impl HostTimeoutScheduler {
             owner,
             false,
             extra_args,
+            Instant::now(),
         )
     }
 
@@ -401,6 +410,7 @@ impl HostTimeoutScheduler {
             owner,
             true,
             extra_args,
+            Instant::now(),
         )
     }
 
@@ -411,8 +421,12 @@ impl HostTimeoutScheduler {
         target_receiver: v8::Local<'s, v8::Object>,
         timestamp: f64,
         delay_ms: u32,
+        overdue: Duration,
         owner: HostTimerOwner,
     ) -> u32 {
+        // A frame that is already due keeps its own deadline, so it stays
+        // ahead of tasks queued after the frame time.
+        let now = Instant::now();
         self.queue_window_webidl(
             scope,
             callback,
@@ -422,7 +436,15 @@ impl HostTimeoutScheduler {
             owner,
             false,
             Vec::new(),
+            now.checked_sub(overdue).unwrap_or(now),
         )
+    }
+
+    /// Whether an animation-frame task, live or cancelled, is still waiting
+    /// for its frame.
+    pub(crate) fn has_pending_animation_frame(&self) -> bool {
+        self.scheduler
+            .has_pending_matching(ScheduledTimerTask::is_animation_frame_task)
     }
 
     pub(crate) fn queue_window_idle_callback<'s>(
@@ -445,6 +467,7 @@ impl HostTimeoutScheduler {
             owner,
             false,
             Vec::new(),
+            Instant::now(),
         )
     }
 
@@ -466,6 +489,7 @@ impl HostTimeoutScheduler {
             owner,
             false,
             vec![result],
+            Instant::now(),
         )
     }
 
@@ -480,6 +504,7 @@ impl HostTimeoutScheduler {
         owner: HostTimerOwner,
         is_interval: bool,
         extra_args: Vec<v8::Global<v8::Value>>,
+        scheduled_at: Instant,
     ) -> u32 {
         let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
             return 0;
@@ -507,10 +532,9 @@ impl HostTimeoutScheduler {
             is_interval,
             extra_args,
         };
-        let now = Instant::now();
         let id = self
             .scheduler
-            .schedule_after(task, u64::from(delay_ms), now);
+            .schedule_after(task, u64::from(delay_ms), scheduled_at);
         id.get()
     }
 
@@ -974,6 +998,13 @@ impl HostTimeoutScheduler {
         let running_matches = self.running_timer.is_some_and(|running| {
             !running.internal && running.id == id && running.window_owner == Some(owner)
         });
+        if pending_matches
+            && let Some(ScheduledTimerCallback::WindowWebIdl(callback)) =
+                self.scheduler.active_payload(id).map(|task| &task.callback)
+            && callback.is_animation_frame()
+        {
+            return callback.cancel_animation_frame();
+        }
         if pending_matches || running_matches {
             self.scheduler.cancel(id)
         } else {
