@@ -207,10 +207,10 @@ pub(crate) use activation::{
     finish_legacy_activation_for_dispatched_click, move_contenteditable_caret_to_line_boundary,
     perform_auxiliary_link_default_action, perform_click_default_action_for_dispatched_event,
     perform_drop_default_action, perform_number_spin_keyboard_default_action,
-    perform_range_keyboard_default_action, perform_triple_click_selection_default_action,
-    prepare_legacy_activation_for_dispatched_click, replace_contenteditable_selection,
-    scroll_to_document_fragment_target, scroll_to_url_fragment_or_top,
-    select_contenteditable_contents,
+    perform_number_spin_wheel_default_action, perform_range_keyboard_default_action,
+    perform_triple_click_selection_default_action, prepare_legacy_activation_for_dispatched_click,
+    replace_contenteditable_selection, scroll_to_document_fragment_target,
+    scroll_to_url_fragment_or_top, select_contenteditable_contents,
 };
 pub(super) use activation::{input_show_picker_callback, node_click_callback};
 use activation::{
@@ -298,8 +298,9 @@ pub(crate) use events::{
 pub(crate) use focus::is_disabled_form_control;
 use focus::is_focusable;
 pub(crate) use focus::{
-    contenteditable_editing_host, focus_element, focus_live_element_for_inspector,
-    initial_contenteditable_caret, perform_access_key_default_action_for_dispatched_event,
+    blur_active_element_that_lost_focusability, contenteditable_editing_host, focus_element,
+    focus_live_element_for_inspector, initial_contenteditable_caret,
+    perform_access_key_default_action_for_dispatched_event,
     perform_hover_interest_default_action_for_dispatched_event, perform_mouse_focus_default_action,
     perform_tab_focus_default_action_for_dispatched_event, post_parse_autofocus_is_pending,
     process_post_parse_autofocus, reset_focus_from_previous_handle,
@@ -2125,4 +2126,6 @@ pub(in crate::native_bridge::element) fn resolved_reflected_element_attribute_ha
         .and_then(|candidate| runtime.dom_host().resolve_reference_target_chain(candidate))
 }
 
-pub(crate) use geometry::{read_client_rects, svg_viewport_root_geometry};
+pub(crate) use geometry::{
+    read_client_rects, read_svg_content_stroke_bounds, svg_viewport_root_geometry,
+};

@@ -37,8 +37,8 @@ pub(crate) struct Coarse;
 /// fragment, so CSS transforms on the outer box are already undone.
 ///
 /// [`Coarse`] unless every element below `root` is on the allowlist (see
-/// [`eligible_children`]). Candidates honour `pointer-events` (`auto` acts
-/// as `visiblePainted`), `visibility`, `display` and nested `<svg>`
+/// [`eligible_children`]). Candidates honour `pointer-events` (see
+/// [`PointerEventsTarget`]), `visibility`, `display` and nested `<svg>`
 /// viewport clipping. Shapes test their exact fill and their stroke (width,
 /// caps, dashing, `pathLength`). Painted text tests its SVG bounding box.
 pub(crate) fn svg_content_hits_at_point(
@@ -57,9 +57,7 @@ pub(crate) fn svg_content_hits_at_point(
     let Some(root_style) = computed_values(runtime, root) else {
         return Ok(Vec::new());
     };
-    if has_unmodelled_effects(runtime, root, &root_style)
-        || document_declares_svg_pointer_events(runtime, root)
-    {
+    if has_unmodelled_effects(runtime, root, &root_style) {
         return Err(Coarse);
     }
     let view_box = runtime
@@ -97,8 +95,8 @@ enum Content {
 ///
 /// Rendered content may use `g`, nested `svg` (see [`nested_svg`]), the
 /// basic shapes, `path`, `text` and `tspan`; `defs` may hold only paint
-/// servers. Paint servers, `title` and `desc` are never hit and their
-/// content is not inspected. Every other element (`use`, `image`,
+/// servers and markers. Paint servers, markers, `title` and `desc` are
+/// never hit and their content is not inspected. Every other element (`use`, `image`,
 /// `foreignObject`, `switch`, `symbol`, `a`, `textPath`, animation
 /// elements, ...) is [`Coarse`], as is any rendered element with an effect,
 /// a transform or a length the model does not reproduce. Stops at the first
@@ -123,7 +121,7 @@ fn eligible_children(
         };
         match (content, local_name) {
             (_, "title" | "desc") => {}
-            (Content::Graphics, "linearGradient" | "radialGradient" | "pattern") => {}
+            (Content::Graphics, "linearGradient" | "radialGradient" | "pattern" | "marker") => {}
             (Content::Graphics, "defs") => {
                 eligible_definitions(runtime, child)?;
             }
@@ -142,7 +140,8 @@ fn eligible_children(
 }
 
 /// `<defs>` content is never rendered in place; only paint servers, which
-/// fills and strokes reference, are on the allowlist.
+/// fills and strokes reference, and markers, which are never hit, are on
+/// the allowlist.
 fn eligible_definitions(runtime: &PageScriptHost, defs: DomHandle) -> Result<(), Coarse> {
     for child in runtime.dom_host().child_handles(defs).collect::<Vec<_>>() {
         let Some(node) = runtime.dom_host().node(child) else {
@@ -153,7 +152,7 @@ fn eligible_definitions(runtime: &PageScriptHost, defs: DomHandle) -> Result<(),
         }
         if !matches!(
             node.local_name(),
-            Some("linearGradient" | "radialGradient" | "pattern" | "title" | "desc")
+            Some("linearGradient" | "radialGradient" | "pattern" | "marker" | "title" | "desc")
         ) {
             return Err(Coarse);
         }
@@ -289,12 +288,10 @@ impl Walk<'_> {
         scope: Scope,
     ) -> Result<ShapeHit, Coarse> {
         let runtime = self.runtime;
-        // Stylo's Servo build parses only `auto | none`; SVG treats `auto` as
-        // `visiblePainted`.
-        if computed.clone_pointer_events() == style::computed_values::pointer_events::T::None
-            || computed.clone_visibility() != style::computed_values::visibility::T::Visible
-            || !scope.ctm.is_invertible()
-        {
+        let Some(target) = PointerEventsTarget::of(computed) else {
+            return Ok(ShapeHit::Miss);
+        };
+        if !scope.ctm.is_invertible() {
             return Ok(ShapeHit::Miss);
         }
         let inverse = scope.ctm.inverse();
@@ -312,8 +309,8 @@ impl Walk<'_> {
         };
         match local_name {
             "circle" | "ellipse" | "line" | "path" | "polygon" | "polyline" | "rect" => {
-                let fill = paint_is_painted(runtime, handle, &computed.clone_fill())?;
-                let stroke = paint_is_painted(runtime, handle, &computed.clone_stroke())?;
+                let fill = target.fill(runtime, handle, computed)?;
+                let stroke = target.stroke(runtime, handle, computed)?;
                 if !fill && !stroke {
                     return Ok(ShapeHit::Miss);
                 }
@@ -365,11 +362,74 @@ impl Walk<'_> {
                 if super::text_layout::svg_text_root(runtime, handle).is_none() {
                     return Ok(ShapeHit::Miss);
                 }
-                let painted = paint_is_painted(runtime, handle, &computed.clone_fill())?
-                    || paint_is_painted(runtime, handle, &computed.clone_stroke())?;
-                Ok(hit(painted && bbox_contains(runtime, handle, local)))
+                let targeted = target.fill(runtime, handle, computed)?
+                    || target.stroke(runtime, handle, computed)?;
+                Ok(hit(targeted && bbox_contains(runtime, handle, local)))
             }
             _ => Ok(ShapeHit::Miss),
+        }
+    }
+}
+
+/// The parts of a shape that `pointer-events` lets a point hit.
+#[derive(Clone, Copy)]
+enum PointerEventsTarget {
+    /// The fill and the stroke where each is painted (not `none`;
+    /// `transparent` paints).
+    Painted,
+    /// The fill area, painted or not.
+    Fill,
+    /// The stroke area, painted or not.
+    Stroke,
+    /// Both areas, painted or not.
+    FillAndStroke,
+}
+
+impl PointerEventsTarget {
+    /// The target of an element's computed `pointer-events`, or `None` when
+    /// it is not hit at all. `auto` acts as `visiblePainted`; the
+    /// `visible*` keywords and `auto` also require `visibility: visible`.
+    fn of(computed: &ComputedValues) -> Option<Self> {
+        use style::computed_values::pointer_events::T as PointerEvents;
+        let (requires_visibility, target) = match computed.clone_pointer_events() {
+            PointerEvents::None => return None,
+            PointerEvents::Auto | PointerEvents::Visiblepainted => (true, Self::Painted),
+            PointerEvents::Visiblefill => (true, Self::Fill),
+            PointerEvents::Visiblestroke => (true, Self::Stroke),
+            PointerEvents::Visible => (true, Self::FillAndStroke),
+            PointerEvents::Painted => (false, Self::Painted),
+            PointerEvents::Fill => (false, Self::Fill),
+            PointerEvents::Stroke => (false, Self::Stroke),
+            PointerEvents::All => (false, Self::FillAndStroke),
+        };
+        (!requires_visibility
+            || computed.clone_visibility() == style::computed_values::visibility::T::Visible)
+            .then_some(target)
+    }
+
+    fn fill(
+        self,
+        runtime: &PageScriptHost,
+        handle: DomHandle,
+        computed: &ComputedValues,
+    ) -> Result<bool, Coarse> {
+        match self {
+            Self::Painted => paint_is_painted(runtime, handle, &computed.clone_fill()),
+            Self::Fill | Self::FillAndStroke => Ok(true),
+            Self::Stroke => Ok(false),
+        }
+    }
+
+    fn stroke(
+        self,
+        runtime: &PageScriptHost,
+        handle: DomHandle,
+        computed: &ComputedValues,
+    ) -> Result<bool, Coarse> {
+        match self {
+            Self::Painted => paint_is_painted(runtime, handle, &computed.clone_stroke()),
+            Self::Stroke | Self::FillAndStroke => Ok(true),
+            Self::Fill => Ok(false),
         }
     }
 }
@@ -397,178 +457,24 @@ fn bbox_contains(runtime: &PageScriptHost, handle: DomHandle, local: SvgGeometry
     })
 }
 
-/// Clipping, masking, filters, markers and `vector-effect` change what is
-/// painted or hit in ways the model does not reproduce.
+/// Clipping, masking and `vector-effect` change what is hit in ways the
+/// model does not reproduce. Filters and markers change only what is
+/// painted: neither a filter's output nor marker content is hit.
 fn has_unmodelled_effects(
     runtime: &PageScriptHost,
     handle: DomHandle,
     computed: &ComputedValues,
 ) -> bool {
-    use style::values::generics::url::GenericUrlOrNone;
-    let marker =
-        |value: style::values::computed::url::UrlOrNone| !matches!(value, GenericUrlOrNone::None);
     !matches!(
         computed.clone_clip_path(),
         style::values::generics::basic_shape::ClipPath::None
-    ) || !computed.clone_filter().0.is_empty()
-        || marker(computed.clone_marker_start())
-        || marker(computed.clone_marker_mid())
-        || marker(computed.clone_marker_end())
-        || computed.clone_vector_effect() != style::values::computed::VectorEffect::none()
-        || [
-            "clip-path",
-            "mask",
-            "filter",
-            "marker",
-            "marker-start",
-            "marker-mid",
-            "marker-end",
-        ]
-        .into_iter()
-        .any(|attribute| {
+    ) || computed.clone_vector_effect() != style::values::computed::VectorEffect::none()
+        || ["clip-path", "mask"].into_iter().any(|attribute| {
             runtime
                 .dom_host()
                 .get_attribute(handle, attribute)
                 .is_some()
         })
-        || element_declares_svg_pointer_events(runtime, handle)
-}
-
-/// `pointer-events` keywords other than `auto` and `none` are SVG-only, and
-/// the style engine drops them, so the element computes `auto` (treated as
-/// `visiblePainted`). `visiblePainted` itself behaves exactly like that.
-/// Any other one (`all`, `fill`, `stroke`, ...) changes what is hit and is
-/// not modelled.
-fn is_unmodelled_pointer_events_keyword(keyword: &str) -> bool {
-    [
-        "visiblefill",
-        "visiblestroke",
-        "visible",
-        "painted",
-        "fill",
-        "stroke",
-        "all",
-        "bounding-box",
-    ]
-    .iter()
-    .any(|candidate| keyword.eq_ignore_ascii_case(candidate))
-}
-
-/// Whether CSS `text` declares `pointer-events` with an unmodelled keyword.
-/// A textual scan that reads `/* ... */` comments as whitespace. It may
-/// also match inside a string or a comment's text, which only makes a
-/// query coarse.
-pub(crate) fn css_declares_svg_pointer_events(text: &str) -> bool {
-    const NAME: &str = "pointer-events";
-    let bytes = text.as_bytes();
-    let mut from = 0;
-    while let Some(offset) = bytes[from..]
-        .windows(NAME.len())
-        .position(|window| window.eq_ignore_ascii_case(NAME.as_bytes()))
-    {
-        from += offset + NAME.len();
-        let index = skip_whitespace_and_comments(bytes, from);
-        if bytes.get(index) == Some(&b':') && value_starts_with_unmodelled_keyword(text, index + 1)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// Whether a CSSOM write of `value` to the property `name` declares an
-/// unmodelled `pointer-events` keyword.
-pub(crate) fn property_declares_svg_pointer_events(name: &str, value: &str) -> bool {
-    name.eq_ignore_ascii_case("pointer-events") && value_starts_with_unmodelled_keyword(value, 0)
-}
-
-/// Whether the CSS value at byte `index` of `text` starts with an
-/// unmodelled `pointer-events` keyword.
-fn value_starts_with_unmodelled_keyword(text: &str, index: usize) -> bool {
-    let bytes = text.as_bytes();
-    let start = skip_whitespace_and_comments(bytes, index);
-    let end = bytes[start..]
-        .iter()
-        .position(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'-'))
-        .map_or(bytes.len(), |length| start + length);
-    is_unmodelled_pointer_events_keyword(&text[start..end])
-}
-
-/// The first byte at or after `index` that is neither whitespace nor part
-/// of a `/* ... */` comment.
-fn skip_whitespace_and_comments(bytes: &[u8], mut index: usize) -> usize {
-    loop {
-        match bytes.get(index) {
-            Some(byte) if byte.is_ascii_whitespace() => index += 1,
-            Some(b'/') if bytes.get(index + 1) == Some(&b'*') => {
-                index = bytes[index + 2..]
-                    .windows(2)
-                    .position(|window| window == b"*/")
-                    .map_or(bytes.len(), |offset| index + 2 + offset + 2);
-            }
-            _ => return index,
-        }
-    }
-}
-
-fn element_declares_svg_pointer_events(runtime: &PageScriptHost, handle: DomHandle) -> bool {
-    let host = runtime.dom_host();
-    host.get_attribute(handle, "pointer-events")
-        .is_some_and(|value| is_unmodelled_pointer_events_keyword(value.trim()))
-        || host
-            .get_attribute(handle, "style")
-            .is_some_and(|style| css_declares_svg_pointer_events(&style))
-}
-
-/// Notes a CSSOM write to the inline style of element `handle`; `declares` is
-/// whether the written text declares an unmodelled `pointer-events`
-/// keyword. The write reserializes the `style` attribute from what the
-/// style engine kept, dropping such a keyword from the written text and
-/// from the current attribute alike, so the runtime remembers it instead.
-/// Once the runtime has noted one, nothing is read; otherwise the current
-/// attribute is scanned in place, without a copy.
-pub(crate) fn note_inline_style_write(runtime: &PageScriptHost, handle: DomHandle, declares: bool) {
-    if runtime.svg_pointer_events_keyword_seen() {
-        return;
-    }
-    if declares
-        || runtime
-            .dom_host()
-            .node(handle)
-            .and_then(|node| node.as_element())
-            .and_then(|element| element.attribute("style"))
-            .is_some_and(css_declares_svg_pointer_events)
-    {
-        runtime.note_cssom_svg_pointer_events();
-    }
-}
-
-/// Notes a CSSOM write in the page of `scope` to a declaration block or
-/// stylesheet that keeps only what the style engine parsed; `declares` is
-/// whether the written text declares an unmodelled `pointer-events`
-/// keyword.
-pub(crate) fn note_cssom_write(scope: &mut v8::PinScope<'_, '_>, declares: bool) {
-    if !declares {
-        return;
-    }
-    if let Some(host_ptr) = crate::util::context_host_ptr_from_global_bridge(scope) {
-        unsafe { &*host_ptr }.note_cssom_svg_pointer_events();
-    }
-}
-
-/// An author stylesheet rule with an unmodelled `pointer-events` keyword is
-/// dropped before any computed value can show it, so its presence in the
-/// document, or in any author text the runtime parsed or the CSSOM wrote
-/// whose text is gone, makes every query coarse.
-fn document_declares_svg_pointer_events(runtime: &PageScriptHost, root: DomHandle) -> bool {
-    if runtime.svg_pointer_events_keyword_seen() {
-        return true;
-    }
-    let document = runtime
-        .dom_host()
-        .owner_document_handle(root)
-        .unwrap_or_else(|| runtime.document_handle());
-    runtime.any_author_stylesheet_text(document, css_declares_svg_pointer_events)
 }
 
 /// Whether the element is placed by its `transform` attribute alone, which
@@ -943,6 +849,26 @@ fn geometry_element(
         },
         _ => return Ok(None),
     }))
+}
+
+/// Half the painted stroke width of a basic shape, in its user units: how
+/// far its stroke bounding box extends past its fill bounding box. Zero for
+/// other elements, an unpainted stroke, and widths that need a viewport.
+pub(crate) fn svg_shape_stroke_outset(runtime: &PageScriptHost, handle: DomHandle) -> f64 {
+    let is_shape = matches!(
+        runtime
+            .dom_host()
+            .node(handle)
+            .and_then(|node| node.local_name()),
+        Some("circle" | "ellipse" | "line" | "path" | "polygon" | "polyline" | "rect")
+    );
+    let Some(computed) = is_shape.then(|| computed_values(runtime, handle)).flatten() else {
+        return 0.0;
+    };
+    if paint_is_painted(runtime, handle, &computed.clone_stroke()) != Ok(true) {
+        return 0.0;
+    }
+    stroke_width(&computed, Lengths(None)).map_or(0.0, |width| width.max(0.0) / 2.0)
 }
 
 fn stroke_width(computed: &ComputedValues, lengths: Lengths) -> Result<f64, Coarse> {

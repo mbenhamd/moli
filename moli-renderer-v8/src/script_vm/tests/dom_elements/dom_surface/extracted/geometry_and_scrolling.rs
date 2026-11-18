@@ -27,6 +27,77 @@ fn element_scroll_into_view_surface_is_available() {
         r#"{"instanceType":"function","protoType":"function","inElement":true,"ownProperty":false,"callResult":"undefined","protoEnumerable":false}"#
     );
 }
+/// Chromium 156: a wheel at the focused number field steps it once against
+/// the vertical delta and fires `input` instead of scrolling; `change`
+/// waits for blur. An unfocused or read-only field lets the page scroll.
+#[test]
+fn wheel_at_the_focused_number_field_steps_it_instead_of_scrolling() {
+    let mut vm = new_parsed_test_vm(
+        "https://wheel-number-spin.test/",
+        r#"<!doctype html><html><body style="margin:0;height:3000px"><input id=n type=number min=1 max=20 value=18 style="display:block;height:20px"><input id=r type=number value=3 readonly style="display:block;height:20px"></body></html>"#,
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.eval(
+        r#"
+        window.__log = [];
+        for (const id of ["n", "r"]) {
+          const field = document.getElementById(id);
+          for (const type of ["input", "change"]) {
+            field.addEventListener(type, () => __log.push(`${id}:${type}=${field.value}`));
+          }
+        }
+        "#,
+    )
+    .expect("listeners should install");
+
+    fn wheel_at(vm: &mut StandaloneScriptVmHarness, y: f64, delta_y: f64) -> String {
+        vm.dispatch_mouse_event_at_point(5.0, y, "wheel", -1, Some(0), 0.0, delta_y)
+            .expect("wheel input should dispatch");
+        vm.eval("(() => { const s = `${__log.splice(0).join(' ')}|${scrollY}|${document.activeElement.id}`; scrollTo(0, 0); return s; })()")
+            .expect("wheel outcome should evaluate")
+    }
+    assert_eq!(wheel_at(&mut vm, 10.0, 100.0), "|100|");
+    vm.eval("document.getElementById('n').focus(); 'focused'")
+        .expect("number field should focus");
+    assert_eq!(wheel_at(&mut vm, 10.0, 100.0), "n:input=17|0|n");
+    assert_eq!(wheel_at(&mut vm, 10.0, -300.0), "n:input=18|0|n");
+    assert_eq!(wheel_at(&mut vm, 10.0, 40.0), "n:input=17|0|n");
+    vm.eval("document.getElementById('r').focus(); 'focused'")
+        .expect("read-only field should focus");
+    assert_eq!(wheel_at(&mut vm, 30.0, 100.0), "n:change=17|100|r");
+}
+
+/// Chromium 156 targets pointer input at the SVG content `elementFromPoint`
+/// reports: a shape that re-enables pointer events under an `<svg>` with
+/// `pointer-events: none`, and a shape inside a plain `<svg>`.
+#[test]
+fn pointer_input_targets_svg_content() {
+    let mut vm = new_parsed_test_vm(
+        "https://pointer-svg-content.test/",
+        r#"<!doctype html><html><body style="margin:0"><div style="position:relative;width:300px;height:200px"><div id=under style="position:absolute;left:0;top:0;width:300px;height:200px"></div><svg id=over style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"><circle id=c cx=40% cy=40% r=5 fill=blue style="pointer-events:auto" /></svg></div><svg id=plain width=100 height=100 style="display:block"><rect id=r x=10 y=10 width=50 height=50 /><text id=label x=70 y=90 font-size=10>x</text></svg></body></html>"#,
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.eval(
+        r#"
+        window.__log = [];
+        for (const type of ["pointerdown", "mousedown"]) {
+          document.addEventListener(type, event => __log.push(`${type}:${event.target.id}`), true);
+        }
+        "#,
+    )
+    .expect("listeners should install");
+    for (x, y) in [(120.0, 80.0), (200.0, 150.0), (30.0, 230.0)] {
+        for event in ["mousedown", "mouseup"] {
+            vm.dispatch_mouse_event_at_point(x, y, event, 0, Some(1), 0.0, 0.0)
+                .expect("mouse input should dispatch");
+        }
+    }
+    assert_eq!(
+        vm.eval("__log.join(' ')").expect("log should evaluate"),
+        "pointerdown:c mousedown:c pointerdown:under mousedown:under pointerdown:r mousedown:r"
+    );
+}
+
 #[test]
 fn wheel_default_action_scrolls_unless_canceled() {
     let mut vm = new_storage_test_vm("https://wheel-default-scroll.test/");
