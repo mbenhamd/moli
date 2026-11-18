@@ -8,7 +8,10 @@ use crate::util::{
     call_script_visible_function, get_private_object, get_private_value, set_private_value,
 };
 
+mod css_transitions;
 mod element_registry;
+
+pub(crate) use css_transitions::queue_css_transition_task_if_due;
 
 const ANIMATION_PLAY_STATE_SLOT: &str = "__moliAnimationPlayState";
 const ANIMATION_ID_SLOT: &str = "__moliAnimationId";
@@ -26,6 +29,7 @@ const ANIMATION_MICROTASK_TOKEN_SLOT: &str = "__moliAnimationMicrotaskToken";
 const CSS_ANIMATION_TARGET_SLOT: &str = "__moliCssAnimationTarget";
 const KEYFRAME_EFFECT_TARGET_SLOT: &str = "__moliKeyframeEffectTarget";
 const KEYFRAME_EFFECT_KEYFRAMES_SLOT: &str = "__moliKeyframeEffectKeyframes";
+const KEYFRAME_EFFECT_TIMING_SLOT: &str = "__moliKeyframeEffectTiming";
 const ANIMATION_SEQUENCE_SLOT: &str = "__moliAnimationSequence";
 
 /// Creation order of every `Animation`, which composite order sorts script
@@ -150,6 +154,8 @@ struct KeyframeEffectObjectDeclaration<'s> {
 struct KeyframeEffectPrototypeDeclaration {
     #[webapi(method, length = 1, callback = keyframe_effect_set_keyframes_callback)]
     set_keyframes: (),
+    #[webapi(method, length = 0, callback = keyframe_effect_get_timing_callback)]
+    get_timing: (),
 }
 
 #[derive(WebApiFunctionTemplate)]
@@ -212,6 +218,11 @@ pub(super) fn install_animation_template_bindings<'s>(
         "KeyframeEffect" => {
             KeyframeEffectPrototypeDeclaration::initialize_prototype_template(scope, prototype);
         }
+        "CSSTransition" => {
+            css_transitions::CssTransitionPrototypeDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
         "Element" => {
             ElementAnimationPrototypeDeclaration::initialize_prototype_template(scope, prototype);
         }
@@ -268,7 +279,53 @@ pub(super) fn keyframe_effect_constructor_callback<'s>(
     KeyframeEffectObjectDeclaration::new(args.get(0), args.get(1))
         .initialize(scope, args.this())
         .expect("KeyframeEffect declaration should initialize object");
+    set_private_value(scope, args.this(), KEYFRAME_EFFECT_TIMING_SLOT, args.get(2));
     rv.set(args.this().into());
+}
+
+/// `AnimationEffect.getTiming()`: the specified timing, from the effect's
+/// options (a duration number or an `EffectTiming` dictionary) over the
+/// dictionary defaults (Web Animations §6.5.3).
+fn keyframe_effect_get_timing_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    let options = get_private_value(scope, args.this(), KEYFRAME_EFFECT_TIMING_SLOT);
+    let timing = v8::Object::new(scope);
+    let defaults: [(&'static str, v8::Local<v8::Value>); 8] = [
+        ("delay", v8::Number::new(scope, 0.0).into()),
+        ("direction", v8str(scope, "normal").into()),
+        ("duration", v8str(scope, "auto").into()),
+        ("easing", v8str(scope, "linear").into()),
+        ("endDelay", v8::Number::new(scope, 0.0).into()),
+        ("fill", v8str(scope, "auto").into()),
+        ("iterationStart", v8::Number::new(scope, 0.0).into()),
+        ("iterations", v8::Number::new(scope, 1.0).into()),
+    ];
+    for (name, default) in defaults {
+        let key = v8str(scope, name);
+        let value = match options {
+            Some(options) if options.is_number() => {
+                if name == "duration" {
+                    options
+                } else {
+                    default
+                }
+            }
+            Some(options) if options.is_object() => {
+                let options = v8::Local::<v8::Object>::try_from(options)
+                    .expect("an object value is an object");
+                options
+                    .get(scope, key.into())
+                    .filter(|value| !value.is_undefined())
+                    .unwrap_or(default)
+            }
+            _ => default,
+        };
+        let _ = timing.set(scope, key.into(), value);
+    }
+    rv.set(timing.into());
 }
 
 fn keyframe_effect_set_keyframes_callback<'s>(
@@ -504,6 +561,11 @@ pub(super) fn animation_cancel_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    if let Some(id) = css_transitions::css_transition_id(scope, args.this()) {
+        css_transitions::settle_css_transition_from_script(scope, args.this(), id, false);
+        rv.set_undefined();
+        return;
+    }
     clear_animation_effect_style(scope, args.this());
     element_registry::unregister(scope, args.this());
     set_animation_play_state(scope, args.this(), "idle");
@@ -516,6 +578,11 @@ pub(super) fn animation_finish_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    if let Some(id) = css_transitions::css_transition_id(scope, args.this()) {
+        css_transitions::settle_css_transition_from_script(scope, args.this(), id, true);
+        rv.set_undefined();
+        return;
+    }
     animation_finish(scope, args.this(), true);
     rv.set_undefined();
 }
@@ -555,7 +622,7 @@ fn element_animate_callback<'s>(
     let effect = if args.get(0).is_null_or_undefined() && args.get(1).is_null_or_undefined() {
         v8::null(scope).into()
     } else {
-        new_keyframe_effect_for_target(scope, args.this(), args.get(0))
+        new_keyframe_effect_for_target(scope, args.this(), args.get(0), args.get(1))
             .map(v8::Local::<v8::Value>::from)
             .unwrap_or_else(|| v8::null(scope).into())
     };
@@ -575,12 +642,24 @@ fn element_get_animations_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let mut animations = element_registry::for_element(scope, args.this())
-        .into_iter()
-        .map(v8::Local::<v8::Value>::from)
-        .collect::<Vec<_>>();
+    // Composite order: CSS transitions, CSS animations, then script
+    // animations (Web Animations §5.4.2; CSS Transitions Level 2 §5.1).
+    let mut animations: Vec<v8::Local<v8::Value>> = Vec::new();
+    let mut css_animations: Vec<v8::Local<v8::Value>> = Vec::new();
     if let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, args.this()) {
         let runtime = unsafe { &*runtime_ptr };
+        // `getAnimations()` flushes style first, so a pending style change
+        // starts its transitions now (Web Animations §6.10).
+        let _ = crate::native_bridge::element::computed_style_property_for_handle(
+            runtime,
+            handle,
+            "transition-property",
+        );
+        animations.extend(
+            css_transitions::element_css_transitions(scope, runtime, handle, args.this())
+                .into_iter()
+                .map(v8::Local::<v8::Value>::from),
+        );
         if crate::native_bridge::element::css_animation_start_applies(runtime, handle)
             && let Some(animation) = new_running_animation(scope)
         {
@@ -590,9 +669,15 @@ fn element_get_animations_callback<'s>(
                 CSS_ANIMATION_TARGET_SLOT,
                 args.this().into(),
             );
-            animations.push(animation.into());
+            css_animations.push(animation.into());
         }
     }
+    animations.extend(css_animations);
+    animations.extend(
+        element_registry::for_element(scope, args.this())
+            .into_iter()
+            .map(v8::Local::<v8::Value>::from),
+    );
     rv.set(v8::Array::new_with_elements(scope, &animations).into());
 }
 
@@ -604,11 +689,29 @@ fn document_or_shadow_root_get_animations_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    let mut css_transitions = Vec::new();
     let mut css_animations = Vec::new();
     let mut script_animations = Vec::new();
     if let Ok((runtime_ptr, root)) = node_runtime_and_handle_from_object(scope, args.this()) {
         let elements = tree_element_handles(unsafe { &*runtime_ptr }, root);
         for handle in elements {
+            let has_transitions = !unsafe { &*runtime_ptr }
+                .style_engine_ref()
+                .css_transitions_for_element(unsafe { &*runtime_ptr }.dom_host(), handle)
+                .is_empty();
+            if has_transitions {
+                let target = unsafe { &mut *runtime_ptr }
+                    .native_bridge_mut()
+                    .wrap_handle(scope, runtime_ptr, handle);
+                if let Some(target) = target {
+                    css_transitions.extend(css_transitions::element_css_transitions(
+                        scope,
+                        unsafe { &*runtime_ptr },
+                        handle,
+                        target,
+                    ));
+                }
+            }
             // Script animations live on the element's wrapper, so an element
             // without one has none.
             let wrapper = unsafe { &*runtime_ptr }
@@ -644,8 +747,9 @@ fn document_or_shadow_root_get_animations_callback<'s>(
         })
         .collect::<Vec<_>>();
     script_animations.sort_by(|(left, _), (right, _)| left.total_cmp(right));
-    let animations = css_animations
+    let animations = css_transitions
         .into_iter()
+        .chain(css_animations)
         .chain(
             script_animations
                 .into_iter()
@@ -677,10 +781,11 @@ fn new_keyframe_effect_for_target<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     target: v8::Local<'s, v8::Object>,
     keyframes: v8::Local<'s, v8::Value>,
+    options: v8::Local<'s, v8::Value>,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let constructor = global_constructor_object(scope, "KeyframeEffect")
         .and_then(|constructor| v8::Local::<v8::Function>::try_from(constructor).ok())?;
-    constructor.new_instance(scope, &[target.into(), keyframes])
+    constructor.new_instance(scope, &[target.into(), keyframes, options])
 }
 
 fn new_running_animation<'s>(

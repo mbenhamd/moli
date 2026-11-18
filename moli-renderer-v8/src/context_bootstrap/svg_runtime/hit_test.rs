@@ -289,8 +289,8 @@ impl Walk<'_> {
         scope: Scope,
     ) -> Result<ShapeHit, Coarse> {
         let runtime = self.runtime;
-        // Stylo's Servo build parses only `auto | none`; SVG treats `auto` as
-        // `visiblePainted`.
+        // SVG treats `auto` as `visiblePainted`; every other keyword except
+        // `none` makes the query coarse in `has_unmodelled_effects`.
         if computed.clone_pointer_events() == style::computed_values::pointer_events::T::None
             || computed.clone_visibility() != style::computed_values::visibility::T::Visible
             || !scope.ctm.is_invertible()
@@ -431,14 +431,20 @@ fn has_unmodelled_effects(
                 .get_attribute(handle, attribute)
                 .is_some()
         })
+        || !matches!(
+            computed.clone_pointer_events(),
+            style::computed_values::pointer_events::T::Auto
+                | style::computed_values::pointer_events::T::None
+                | style::computed_values::pointer_events::T::Visiblepainted
+        )
         || element_declares_svg_pointer_events(runtime, handle)
 }
 
-/// `pointer-events` keywords other than `auto` and `none` are SVG-only, and
-/// the style engine drops them, so the element computes `auto` (treated as
-/// `visiblePainted`). `visiblePainted` itself behaves exactly like that.
-/// Any other one (`all`, `fill`, `stroke`, ...) changes what is hit and is
-/// not modelled.
+/// `pointer-events` keywords other than `auto` and `none` are SVG-only.
+/// `visiblePainted` behaves exactly like `auto` here. Any other one (`all`,
+/// `fill`, `stroke`, ...) changes what is hit and is not modelled. The style
+/// engine computes all of them except `bounding-box`, which it drops, so the
+/// textual scans below remain the only signal for that keyword.
 fn is_unmodelled_pointer_events_keyword(keyword: &str) -> bool {
     [
         "visiblefill",
@@ -556,10 +562,11 @@ pub(crate) fn note_cssom_write(scope: &mut v8::PinScope<'_, '_>, declares: bool)
     }
 }
 
-/// An author stylesheet rule with an unmodelled `pointer-events` keyword is
-/// dropped before any computed value can show it, so its presence in the
+/// An author stylesheet rule with `pointer-events: bounding-box` is dropped
+/// before any computed value can show it, so an unmodelled keyword in the
 /// document, or in any author text the runtime parsed or the CSSOM wrote
-/// whose text is gone, makes every query coarse.
+/// whose text is gone, makes every query coarse. The scan also matches the
+/// keywords the style engine does compute, which only keeps queries coarse.
 fn document_declares_svg_pointer_events(runtime: &PageScriptHost, root: DomHandle) -> bool {
     if runtime.svg_pointer_events_keyword_seen() {
         return true;

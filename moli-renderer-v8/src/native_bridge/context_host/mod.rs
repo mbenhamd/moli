@@ -1316,6 +1316,10 @@ impl DerefMut for PageScriptHost {
 }
 
 impl PageScriptHost {
+    pub(crate) fn style_engine_ref(&self) -> &MoliStyleEngine {
+        &self.style_engine
+    }
+
     pub(crate) fn advance_app_manifest_link_change_epoch(&mut self) {
         self.app_manifest_link_change_epoch = self.app_manifest_link_change_epoch.wrapping_add(1);
     }

@@ -1,7 +1,11 @@
 #[cfg(test)]
 use std::sync::Arc as StdArc;
 use std::sync::Once;
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
 
 use crate::{document_runtime::DomHandle, dom::native::DomHost};
 use dom::ElementState as StyloElementState;
@@ -90,6 +94,7 @@ mod target_queries;
 mod target_result;
 #[cfg(test)]
 mod tests;
+pub(crate) mod transitions;
 mod ua;
 mod world_environment;
 mod world_key;
@@ -167,6 +172,7 @@ pub(crate) struct MoliStyleEngine {
     owner_stylesheet_source_documents: RefCell<HashMap<DomHandle, DomHandle>>,
     linked_stylesheet_owner_documents: RefCell<HashMap<DomHandle, DomHandle>>,
     inline_style_metadata_documents: RefCell<HashMap<DomHandle, DomHandle>>,
+    css_transition_task_due: Cell<Option<f64>>,
 }
 
 impl Default for MoliStyleEngine {
@@ -191,6 +197,7 @@ impl MoliStyleEngine {
             owner_stylesheet_source_documents: RefCell::new(HashMap::new()),
             linked_stylesheet_owner_documents: RefCell::new(HashMap::new()),
             inline_style_metadata_documents: RefCell::new(HashMap::new()),
+            css_transition_task_due: Cell::new(None),
         }
     }
 
@@ -774,6 +781,7 @@ impl MoliStyleEngine {
     }
 
     pub(crate) fn clear_for_document_replacement(&mut self, document: DomHandle) {
+        self.css_transition_task_due.set(None);
         self.clear_owner_document_indexes_for_document(document);
         self.dom_adapter.clear_element_data_for_document(document);
         self.dom_adapter
@@ -854,6 +862,7 @@ impl MoliStyleEngine {
         owner_document: DomHandle,
         document_context: StyleSourceDocumentContext<'_>,
     ) {
+        self.sample_css_transitions(host);
         for document in document_context.documents_with_owner(owner_document) {
             self.drain_pending_style_invalidations_for_document_and_boundary(
                 host,
@@ -916,6 +925,93 @@ impl MoliStyleEngine {
             StyleSourceDocumentContext::for_root_document(document),
             StyleInvalidationDrainBoundary::TestExplicit,
         );
+    }
+
+    /// Samples every Document's CSS transitions now: finishes those that
+    /// ended and restyles the elements whose transition values changed.
+    /// Returns whether any element must restyle.
+    pub(crate) fn sample_css_transitions(&self, host: &DomHost) -> bool {
+        let now = transitions::animation_clock_now();
+        let mut restyled = false;
+        for world in self.document_worlds.active_worlds() {
+            let roots = world
+                .css_transitions
+                .sample(now, |handle| host.is_connected(handle));
+            if roots.is_empty() {
+                continue;
+            }
+            world.document_state.note_visual_input_change();
+            self.invalidation_cleanup_for_world(&world)
+                .invalidate_subtrees(host, roots);
+            restyled = true;
+        }
+        restyled
+    }
+
+    /// The transition events and `Animation` state changes not yet delivered
+    /// to script.
+    pub(crate) fn take_css_transition_events(&self) -> Vec<transitions::CssTransitionEvent> {
+        self.document_worlds
+            .active_worlds()
+            .iter()
+            .flat_map(|world| world.css_transitions.take_events())
+            .collect()
+    }
+
+    /// Milliseconds until the CSS transitions need a task: zero when events
+    /// are pending, the time to the next phase change while transitions run,
+    /// and `None` when there are none.
+    pub(crate) fn css_transition_task_delay_ms(&self) -> Option<f64> {
+        let now = transitions::animation_clock_now();
+        let mut delay: Option<f64> = None;
+        for world in self.document_worlds.active_worlds() {
+            let transitions = &world.css_transitions;
+            let due = if transitions.has_pending_events() {
+                Some(0.0)
+            } else {
+                transitions
+                    .next_phase_change()
+                    .map(|time| ((time - now) * 1000.0).max(0.0))
+            };
+            if let Some(due) = due {
+                delay = Some(delay.map_or(due, |delay| delay.min(due)));
+            }
+        }
+        delay
+    }
+
+    /// The clock seconds at which the earliest queued CSS transition task
+    /// runs, which the queuer sets and the task clears.
+    pub(crate) fn css_transition_task_due(&self) -> &Cell<Option<f64>> {
+        &self.css_transition_task_due
+    }
+
+    /// The running CSS transitions of `element`, in composite order.
+    pub(crate) fn css_transitions_for_element(
+        &self,
+        host: &DomHost,
+        element: DomHandle,
+    ) -> Vec<transitions::CssTransitionRecord> {
+        self.active_owner_document_world(host, element)
+            .map(|world| world.css_transitions.records_for_element(element))
+            .unwrap_or_default()
+    }
+
+    /// Ends (`finish`) or cancels CSS transition `id` and restyles its element.
+    pub(crate) fn settle_css_transition(&self, host: &DomHost, id: u64, finish: bool) {
+        for world in self.document_worlds.active_worlds() {
+            let target = if finish {
+                world.css_transitions.finish(id)
+            } else {
+                world.css_transitions.cancel(id)
+            };
+            if let Some(target) = target {
+                world.document_state.note_visual_input_change();
+                self.invalidation_cleanup_for_world(&world)
+                    .invalidate_subtrees(host, [target]);
+                return;
+            }
+        }
     }
 
     pub(crate) fn retained_current_element_state(

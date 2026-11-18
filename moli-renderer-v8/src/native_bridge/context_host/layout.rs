@@ -367,6 +367,8 @@ impl PageScriptHost {
             return Ok(());
         }
         self.sync_pending_scroll_offsets();
+        // Running CSS transitions restyle their elements at this time first.
+        self.style_engine.sample_css_transitions(self.dom_host());
         let document = self.document_handle();
         let viewport = self.layout_viewport_for_document(document);
         let inputs = self.live_layout_input_key(viewport, None);

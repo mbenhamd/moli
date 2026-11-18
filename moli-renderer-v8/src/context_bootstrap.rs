@@ -1,6 +1,7 @@
 pub(crate) mod abort_signal;
 pub(crate) mod abort_signal_events;
 mod animation_runtime;
+pub(crate) use animation_runtime::queue_css_transition_task_if_due;
 mod assets;
 mod bar_prop;
 pub(crate) mod bridge_descriptor;

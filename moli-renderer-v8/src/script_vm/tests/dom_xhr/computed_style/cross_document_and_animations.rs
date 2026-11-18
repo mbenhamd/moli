@@ -901,6 +901,93 @@ async fn css_transition_state_uses_final_values_without_runtime_events() {
     );
 }
 
+/// Chromium 156: a style change after a style flush starts a `CSSTransition`
+/// whose current value applies at once (left 200px at progress 0 for
+/// `steps(1, jump-both)`); `cancel()` drops it and fires `transitioncancel`.
+#[tokio::test]
+async fn css_transition_starts_at_style_change_and_cancels_with_event() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-start-cancel.test/",
+        r#"<html><head><style>
+body { margin: 0; }
+#t { position: absolute; left: 0; width: 10px; height: 10px;
+     transition: left 3600s steps(1, jump-both); }
+#t.on { left: 400px; }
+</style></head><body><div id="t"></div></body></html>"#,
+    );
+
+    let started = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  globalThis.__events = [];
+  for (const type of ['transitionrun', 'transitionstart', 'transitionend', 'transitioncancel']) {
+    t.addEventListener(type, (event) => {
+      __events.push(`${type}:${event.propertyName}:${event.isTrusted}`);
+    });
+  }
+  getComputedStyle(t).left;
+  t.classList.add('on');
+  const animations = t.getAnimations();
+  const animation = animations[0];
+  globalThis.__transition = animation;
+  animation.finished.then(() => 'resolved', (error) => error.name).then((outcome) => {
+    globalThis.__finished = outcome;
+  });
+  const timing = animation.effect.getTiming();
+  return [
+    animations.length,
+    animation.constructor.name,
+    animation.transitionProperty,
+    timing.duration,
+    timing.fill,
+    timing.easing,
+    getComputedStyle(t).left,
+    animation.playState,
+    t.getAnimations()[0] === animation,
+  ].join('|');
+})()
+"#,
+        )
+        .expect("transition start should evaluate");
+    assert_eq!(
+        started,
+        "1|CSSTransition|left|3600000|backwards|steps(1, jump-both)|200px|running|true"
+    );
+    // Layout uses the transition's current value too.
+    publish_layout_for_test(&mut vm);
+    let x = vm
+        .eval("String(document.getElementById('t').getBoundingClientRect().x)")
+        .expect("transition geometry should be readable");
+    assert_eq!(x, "200");
+
+    let canceled = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  __transition.cancel();
+  return [getComputedStyle(t).left, __transition.playState, t.getAnimations().length].join('|');
+})()
+"#,
+        )
+        .expect("transition cancel should evaluate");
+    assert_eq!(canceled, "400px|idle|0");
+
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("transition task should run");
+    let delivered = vm
+        .eval(r#"[globalThis.__finished, __events.join(',')].join('|')"#)
+        .expect("transition events should be readable");
+    assert_eq!(
+        delivered,
+        "AbortError|transitionrun:left:true,transitionstart:left:true,transitioncancel:left:true"
+    );
+}
+
 #[tokio::test]
 async fn invalid_move_before_does_not_run_plain_transition_runtime() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");

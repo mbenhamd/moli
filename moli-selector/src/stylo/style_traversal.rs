@@ -1646,6 +1646,10 @@ impl<'a> StyleNode<'a> {
 }
 
 impl<'a> StyleElement<'a> {
+    fn transition_set_key(self) -> style::animation::AnimationSetKey {
+        style::animation::AnimationSetKey::new_for_non_pseudo(self.as_node().opaque())
+    }
+
     fn data(self) -> &'a StyleNodeData {
         // SAFETY: See StyleNode::data.
         unsafe { &*self.0.as_ptr() }
@@ -2061,9 +2065,13 @@ impl<'a> TElement for StyleElement<'a> {
 
     fn transition_rule(
         &self,
-        _: &SharedStyleContext,
+        context: &SharedStyleContext,
     ) -> Option<Arc<Locked<PropertyDeclarationBlock>>> {
-        None
+        context.animations.get_transition_declarations(
+            &self.transition_set_key(),
+            context.current_time_for_animations,
+            self.as_node().owner_doc().shared_lock(),
+        )
     }
 
     fn state(&self) -> ElementState {
@@ -2187,20 +2195,29 @@ impl<'a> TElement for StyleElement<'a> {
         false
     }
 
+    // Only CSS transitions run in the style engine; the caller keeps their
+    // state in the context's `DocumentAnimationSet`.
     fn may_have_animations(&self) -> bool {
-        false
+        true
     }
 
-    fn has_animations(&self, _: &SharedStyleContext) -> bool {
-        false
+    fn has_animations(&self, context: &SharedStyleContext) -> bool {
+        self.has_css_transitions(context, None)
     }
 
     fn has_css_animations(&self, _: &SharedStyleContext, _: Option<PseudoElement>) -> bool {
         false
     }
 
-    fn has_css_transitions(&self, _: &SharedStyleContext, _: Option<PseudoElement>) -> bool {
-        false
+    fn has_css_transitions(
+        &self,
+        context: &SharedStyleContext,
+        pseudo_element: Option<PseudoElement>,
+    ) -> bool {
+        pseudo_element.is_none()
+            && context
+                .animations
+                .has_active_transitions(&self.transition_set_key())
     }
 
     fn shadow_root(&self) -> Option<<Self::ConcreteNode as TNode>::ConcreteShadowRoot> {

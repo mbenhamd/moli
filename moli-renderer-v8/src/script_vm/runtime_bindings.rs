@@ -203,6 +203,9 @@ pub(crate) fn perform_microtask_checkpoint_and_report_pending_promise_rejections
             scope, host,
         );
         host.finish_deferred_child_subresource_request_scope_pop();
+        // Transitions that the task's style changes started need the
+        // transition task for their events and `finished` promises.
+        crate::context_bootstrap::queue_css_transition_task_if_due(scope);
     }
     let promise_stats = if trace_enabled {
         moli_trace::take_promise_hook_stats()

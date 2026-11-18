@@ -602,8 +602,8 @@ async fn svg_dash_expansion_is_bounded_under_a_huge_path_length() {
     .expect("SVG dash bound hit-test fixture should run");
 }
 
-/// `pointer-events` keywords other than `auto` and `none` are SVG-only and
-/// the style engine drops them, so the element would read as `auto`. An
+/// `pointer-events` keywords other than `auto`, `none` and `visiblePainted`
+/// change what SVG content hits, which the walk does not model. An
 /// element naming one, and a query outside the outer `<svg>`'s content box,
 /// keep the outer `<svg>` answer instead of a guessed one. Each `<svg>` is
 /// a block; the third has 20px of padding.
@@ -641,9 +641,8 @@ async fn svg_unmodelled_pointer_events_and_points_outside_the_content_box_stay_c
     .expect("SVG pointer-events keyword hit-test fixture should run");
 }
 
-/// A stylesheet rule with an SVG-only `pointer-events` keyword is dropped
-/// before any computed value shows it, so its presence keeps every outer
-/// `<svg>` answer in that document.
+/// A stylesheet rule with an unmodelled SVG-only `pointer-events` keyword
+/// keeps the outer `<svg>` answer instead of a guessed one.
 #[tokio::test(flavor = "current_thread")]
 async fn svg_stylesheet_pointer_events_keyword_keeps_the_outer_svg() {
     run_page_vm_async_test(async move {
@@ -696,9 +695,9 @@ __root.innerHTML = `<style>.hit { pointer-events: all }</style>
     .expect("SVG shadow stylesheet pointer-events hit-test fixture should run");
 }
 
-/// The CSSOM drops an SVG-only `pointer-events` keyword written through it,
-/// as the d3 zoom overlay's `.style("pointer-events", "all")` does, so the
-/// runtime remembers the write and keeps the outer `<svg>` answer.
+/// An SVG-only `pointer-events` keyword written through the CSSOM, as the d3
+/// zoom overlay's `.style("pointer-events", "all")` does, keeps the outer
+/// `<svg>` answer.
 #[tokio::test(flavor = "current_thread")]
 async fn svg_cssom_written_pointer_events_keyword_keeps_the_outer_svg() {
     run_page_vm_async_test(async move {
@@ -724,9 +723,8 @@ async fn svg_cssom_written_pointer_events_keyword_keeps_the_outer_svg() {
     .expect("SVG CSSOM pointer-events hit-test fixture should run");
 }
 
-/// A CSSOM edit turns a `<style>` sheet into its serialization, which has
-/// dropped an SVG-only `pointer-events` keyword. The runtime noted the
-/// keyword when it parsed the text, so the outer `<svg>` answer stays.
+/// A CSSOM edit turns a `<style>` sheet into its serialization. An SVG-only
+/// `pointer-events` keyword in it still keeps the outer `<svg>` answer.
 #[tokio::test(flavor = "current_thread")]
 async fn svg_pointer_events_keyword_survives_an_unrelated_stylesheet_edit() {
     run_page_vm_async_test(async move {

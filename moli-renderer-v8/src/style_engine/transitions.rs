@@ -1,0 +1,508 @@
+//! CSS Transitions for one Document (CSS Transitions Level 1 and 2).
+//!
+//! Stylo's Servo transition engine decides, at each style change event, which
+//! transitions start, reverse or cancel, and interpolates their values. Moli
+//! resolves styles on demand rather than in a traversal, so the resolver
+//! entry points hand each published primary style to
+//! [`process_css_transitions`], and this store adds what the traversal's
+//! embedder owns: the document animation clock, transition identity, the
+//! transition events, and the `Animation` state script observes.
+//!
+//! The clock only advances when the page samples it (a computed-style read,
+//! a layout or a transition task). A sample restyles every element whose
+//! transitions run, so a style read after it shows the values at that time.
+
+use std::{
+    cell::{Cell, RefCell},
+    collections::{BTreeMap, HashMap},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use style::{
+    animation::{AnimationSetKey, AnimationState, DocumentAnimationSet},
+    context::StyleContext,
+    data::ElementStyles,
+    dom::{OpaqueNode, TElement, TNode},
+    matching::MatchMethods,
+    properties::ComputedValues,
+    servo_arc::Arc as ServoArc,
+};
+use style_traits::ToCss;
+
+use crate::document_runtime::DomHandle;
+
+/// Seconds since the Unix epoch: the time base of the document animation clock.
+pub(crate) fn animation_clock_now() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs_f64()
+}
+
+/// Stylo keeps `<time>` values as `f32` seconds; script sees the specified
+/// value (Chromium 156: `getTiming().duration` is 400 for `400ms`, not
+/// 400.0000059604645).
+fn specified_seconds(seconds: f64) -> f64 {
+    let specified = seconds as f32;
+    specified.to_string().parse().unwrap_or(seconds)
+}
+
+/// The transition events of CSS Transitions Level 2 §6.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CssTransitionEventKind {
+    Run,
+    Start,
+    End,
+    Cancel,
+}
+
+impl CssTransitionEventKind {
+    pub(crate) fn event_type(self) -> &'static str {
+        match self {
+            Self::Run => "transitionrun",
+            Self::Start => "transitionstart",
+            Self::End => "transitionend",
+            Self::Cancel => "transitioncancel",
+        }
+    }
+}
+
+/// A transition event, or for a cancel that script cannot observe as an
+/// event, only the `Animation` state change (`dispatch` is false).
+#[derive(Clone, Debug)]
+pub(crate) struct CssTransitionEvent {
+    pub(crate) id: u64,
+    pub(crate) target: DomHandle,
+    pub(crate) kind: CssTransitionEventKind,
+    pub(crate) property: String,
+    /// Seconds, as `TransitionEvent.elapsedTime`.
+    pub(crate) elapsed_time: f64,
+    pub(crate) dispatch: bool,
+}
+
+/// The phase of a transition's animation effect, which decides the
+/// transition events (CSS Transitions Level 2 §6.1).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransitionPhase {
+    /// No event has been queued yet.
+    Idle,
+    Before,
+    Active,
+    After,
+}
+
+/// What script can observe of one CSS transition.
+#[derive(Clone, Debug)]
+pub(crate) struct CssTransitionRecord {
+    pub(crate) id: u64,
+    pub(crate) target: DomHandle,
+    pub(crate) property: String,
+    /// The style change event that started this transition; transitions
+    /// started by the same one sort by property name (CSS Transitions
+    /// Level 2 §5.1, "animation composite order").
+    pub(crate) generation: u64,
+    /// Clock seconds at which the active interval starts: the style change
+    /// event plus the transition delay.
+    pub(crate) start_time: f64,
+    /// Seconds.
+    pub(crate) delay: f64,
+    /// Seconds.
+    pub(crate) duration: f64,
+    pub(crate) easing: String,
+    pub(crate) from: String,
+    pub(crate) to: String,
+    phase: TransitionPhase,
+}
+
+impl CssTransitionRecord {
+    fn phase_at(&self, now: f64) -> TransitionPhase {
+        if now < self.start_time {
+            TransitionPhase::Before
+        } else if now < self.start_time + self.duration {
+            TransitionPhase::Active
+        } else {
+            TransitionPhase::After
+        }
+    }
+
+    /// `elapsedTime` at the start (`at_end == false`) or end of the active
+    /// interval.
+    fn interval_elapsed_time(&self, at_end: bool) -> f64 {
+        let start = (-self.delay).clamp(0.0, self.duration);
+        if at_end { self.duration } else { start }
+    }
+
+    fn event(
+        &self,
+        kind: CssTransitionEventKind,
+        elapsed_time: f64,
+        dispatch: bool,
+    ) -> CssTransitionEvent {
+        CssTransitionEvent {
+            id: self.id,
+            target: self.target,
+            kind,
+            property: self.property.clone(),
+            elapsed_time,
+            dispatch,
+        }
+    }
+
+    /// Queues the events for a phase change to `phase`.
+    fn advance_to(&mut self, phase: TransitionPhase, events: &mut Vec<CssTransitionEvent>) {
+        use CssTransitionEventKind::{End, Run, Start};
+        use TransitionPhase::{Active, After, Before, Idle};
+        let start = self.interval_elapsed_time(false);
+        let end = self.interval_elapsed_time(true);
+        match (self.phase, phase) {
+            (Idle, Before) => events.push(self.event(Run, start, true)),
+            (Idle, Active) => {
+                events.push(self.event(Run, start, true));
+                events.push(self.event(Start, start, true));
+            }
+            (Idle, After) => {
+                events.push(self.event(Run, start, true));
+                events.push(self.event(Start, start, true));
+                events.push(self.event(End, end, true));
+            }
+            (Before, Active) => events.push(self.event(Start, start, true)),
+            (Before, After) => {
+                events.push(self.event(Start, start, true));
+                events.push(self.event(End, end, true));
+            }
+            (Active, After) => events.push(self.event(End, end, true)),
+            _ => {}
+        }
+        if phase != Idle {
+            self.phase = phase;
+        }
+    }
+}
+
+#[derive(Default)]
+struct TransitionStore {
+    next_id: u64,
+    next_generation: u64,
+    /// Per element, the record ids of Stylo's `ElementAnimationSet`
+    /// transitions, index for index.
+    ids: HashMap<OpaqueNode, Vec<u64>>,
+    /// Transitions that have not finished or been canceled.
+    records: BTreeMap<u64, CssTransitionRecord>,
+    events: Vec<CssTransitionEvent>,
+}
+
+/// One Document's CSS transitions.
+pub(crate) struct DocumentCssTransitions {
+    animations: DocumentAnimationSet,
+    clock: Cell<f64>,
+    store: RefCell<TransitionStore>,
+}
+
+impl Default for DocumentCssTransitions {
+    fn default() -> Self {
+        Self {
+            animations: DocumentAnimationSet::default(),
+            clock: Cell::new(animation_clock_now()),
+            store: RefCell::default(),
+        }
+    }
+}
+
+impl DocumentCssTransitions {
+    /// The set and time a style resolution context resolves with. While no
+    /// transition runs, the clock follows real time, so a transition starts
+    /// at its style change event; while one runs, it only advances when
+    /// sampled, so every element restyled at a sample shows the same time.
+    pub(super) fn resolution_inputs(&self) -> (DocumentAnimationSet, f64) {
+        if self.store.borrow().records.is_empty() {
+            self.clock.set(animation_clock_now());
+        }
+        (self.animations.clone(), self.clock.get())
+    }
+
+    /// Drops every transition, for a Document replacement.
+    pub(super) fn clear(&self) {
+        self.animations.sets.write().clear();
+        *self.store.borrow_mut() = TransitionStore::default();
+    }
+
+    pub(crate) fn has_pending_events(&self) -> bool {
+        !self.store.borrow().events.is_empty()
+    }
+
+    pub(crate) fn take_events(&self) -> Vec<CssTransitionEvent> {
+        std::mem::take(&mut self.store.borrow_mut().events)
+    }
+
+    /// Clock seconds of the next phase change, when a transition event or
+    /// a finished `Animation` is due.
+    pub(crate) fn next_phase_change(&self) -> Option<f64> {
+        self.store
+            .borrow()
+            .records
+            .values()
+            .map(|record| {
+                if self.clock.get() < record.start_time {
+                    record.start_time
+                } else {
+                    record.start_time + record.duration
+                }
+            })
+            .min_by(f64::total_cmp)
+    }
+
+    /// The running transitions of `target`, in composite order.
+    pub(crate) fn records_for_element(&self, target: DomHandle) -> Vec<CssTransitionRecord> {
+        let mut records = self
+            .store
+            .borrow()
+            .records
+            .values()
+            .filter(|record| record.target == target)
+            .cloned()
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            left.generation
+                .cmp(&right.generation)
+                .then_with(|| left.property.cmp(&right.property))
+        });
+        records
+    }
+
+    /// Advances the clock to `now`, finishes the transitions that ended, and
+    /// cancels those of elements for which `connected` is false. Returns the
+    /// elements whose transition values changed, which must restyle.
+    pub(super) fn sample(&self, now: f64, connected: impl Fn(DomHandle) -> bool) -> Vec<DomHandle> {
+        let mut store = self.store.borrow_mut();
+        if store.records.is_empty() {
+            self.clock.set(now);
+            return Vec::new();
+        }
+        let advanced = now > self.clock.get();
+        if advanced {
+            self.clock.set(now);
+        }
+        let now = self.clock.get();
+        let store = &mut *store;
+        let mut restyle = Vec::new();
+        let mut sets = self.animations.sets.write();
+        let mut removed = Vec::new();
+        for (key, set) in sets.iter_mut() {
+            let Some(ids) = store.ids.get(&key.node) else {
+                continue;
+            };
+            let target = DomHandle::new(key.node.0);
+            if !connected(target) {
+                for (transition, id) in set.transitions.iter_mut().zip(ids) {
+                    transition.state = AnimationState::Canceled;
+                    if let Some(record) = store.records.remove(id) {
+                        store
+                            .events
+                            .push(record.event(CssTransitionEventKind::Cancel, 0.0, false));
+                    }
+                }
+                removed.push(key.clone());
+                continue;
+            }
+            let mut changed = false;
+            for (transition, id) in set.transitions.iter_mut().zip(ids) {
+                if !matches!(
+                    transition.state,
+                    AnimationState::Pending | AnimationState::Running
+                ) {
+                    continue;
+                }
+                let Some(record) = store.records.get_mut(id) else {
+                    continue;
+                };
+                let phase = record.phase_at(now);
+                record.advance_to(phase, &mut store.events);
+                if phase == TransitionPhase::Active {
+                    transition.state = AnimationState::Running;
+                }
+                if phase == TransitionPhase::After {
+                    // The end event queued above also settles `finished`.
+                    transition.state = AnimationState::Finished;
+                    store.records.remove(id);
+                    changed = true;
+                } else if advanced {
+                    changed = true;
+                }
+            }
+            if changed {
+                restyle.push(target);
+            }
+        }
+        for key in removed {
+            sets.remove(&key);
+            store.ids.remove(&key.node);
+        }
+        restyle
+    }
+
+    /// Ends transition `id` now, as `Animation.finish()` does. Returns its
+    /// element, which must restyle.
+    pub(crate) fn finish(&self, id: u64) -> Option<DomHandle> {
+        self.settle(id, true)
+    }
+
+    /// Cancels transition `id`, as `Animation.cancel()` does. Returns its
+    /// element, which must restyle.
+    pub(crate) fn cancel(&self, id: u64) -> Option<DomHandle> {
+        self.settle(id, false)
+    }
+
+    fn settle(&self, id: u64, finish: bool) -> Option<DomHandle> {
+        let mut store = self.store.borrow_mut();
+        let store = &mut *store;
+        let mut record = store.records.remove(&id)?;
+        let node = OpaqueNode(record.target.index());
+        let mut sets = self.animations.sets.write();
+        let key = AnimationSetKey::new_for_non_pseudo(node);
+        if let (Some(set), Some(ids)) = (sets.get_mut(&key), store.ids.get(&node))
+            && let Some(index) = ids.iter().position(|candidate| *candidate == id)
+            && let Some(transition) = set.transitions.get_mut(index)
+        {
+            // A completed transition, either way: it stops contributing its
+            // value, and the restyle that follows does not start a new
+            // transition to the same end value from the stale before-change
+            // style (Chromium 156 keeps `left: 400px` after `cancel()`).
+            transition.state = AnimationState::Finished;
+        }
+        let now = self.clock.get();
+        if finish {
+            record.advance_to(TransitionPhase::After, &mut store.events);
+        } else {
+            let elapsed = (now - record.start_time).clamp(0.0, record.duration);
+            let dispatch = record.phase != TransitionPhase::Idle;
+            store
+                .events
+                .push(record.event(CssTransitionEventKind::Cancel, elapsed, dispatch));
+        }
+        Some(record.target)
+    }
+
+    /// Records the transitions that the style change event just processed
+    /// for `key` started or canceled, and drops the finished and canceled
+    /// ones from Stylo's set, as Servo's `process_animations_for_style` does.
+    fn sync_after_style_change(&self, key: &AnimationSetKey, target: DomHandle) {
+        let mut store = self.store.borrow_mut();
+        let store = &mut *store;
+        let mut sets = self.animations.sets.write();
+        let Some(set) = sets.get_mut(key) else {
+            if let Some(ids) = store.ids.remove(&key.node) {
+                for id in ids {
+                    store.records.remove(&id);
+                }
+            }
+            return;
+        };
+        let now = self.clock.get();
+        let mut ids = store.ids.remove(&key.node).unwrap_or_default();
+        let generation = store.next_generation;
+        let mut started = false;
+        for transition in set.transitions.iter_mut().skip(ids.len()) {
+            transition.is_new = false;
+            store.next_id += 1;
+            let id = store.next_id;
+            ids.push(id);
+            started = true;
+            let animation = &transition.property_animation;
+            let mut from = String::new();
+            let _ = animation.from_value().uncompute().to_css(&mut from);
+            let mut to = String::new();
+            let _ = animation.to_value().uncompute().to_css(&mut to);
+            store.records.insert(
+                id,
+                CssTransitionRecord {
+                    id,
+                    target,
+                    property: animation.property_id().name().into_owned(),
+                    generation,
+                    start_time: transition.start_time,
+                    delay: specified_seconds(transition.delay),
+                    duration: specified_seconds(animation.duration),
+                    easing: animation.timing_function().to_css_string(),
+                    from,
+                    to,
+                    phase: TransitionPhase::Idle,
+                },
+            );
+        }
+        if started {
+            store.next_generation += 1;
+        }
+        for (transition, id) in set.transitions.iter().zip(&ids) {
+            if transition.state != AnimationState::Canceled {
+                continue;
+            }
+            if let Some(record) = store.records.remove(id) {
+                let elapsed = (now - record.start_time).clamp(0.0, record.duration);
+                let dispatch = record.phase != TransitionPhase::Idle;
+                store
+                    .events
+                    .push(record.event(CssTransitionEventKind::Cancel, elapsed, dispatch));
+            }
+        }
+        // A transition that starts queues its run event (and any later one
+        // that is already due) at its style change event.
+        for id in &ids {
+            if let Some(record) = store.records.get_mut(id)
+                && record.phase == TransitionPhase::Idle
+            {
+                let phase = record.phase_at(now);
+                record.advance_to(phase, &mut store.events);
+            }
+        }
+        let mut index = 0;
+        ids.retain(|_| {
+            let keep = matches!(
+                set.transitions[index].state,
+                AnimationState::Pending | AnimationState::Running
+            );
+            index += 1;
+            keep
+        });
+        set.transitions.retain(|transition| {
+            matches!(
+                transition.state,
+                AnimationState::Pending | AnimationState::Running
+            )
+        });
+        if set.transitions.is_empty() {
+            sets.remove(key);
+        } else {
+            store.ids.insert(key.node, ids);
+        }
+    }
+}
+
+/// Runs the style change event for `element`, whose primary style changed
+/// from `old` to the one in `styles`: starts, reverses or cancels its
+/// transitions and replaces the primary style with one that carries their
+/// current values.
+pub(super) fn process_css_transitions<E>(
+    transitions: &DocumentCssTransitions,
+    context: &mut StyleContext<E>,
+    element: E,
+    old: Option<ServoArc<ComputedValues>>,
+    styles: &mut ElementStyles,
+) where
+    E: TElement,
+{
+    let Some(new_primary) = styles.primary.take() else {
+        return;
+    };
+    let key = AnimationSetKey::new_for_non_pseudo(element.as_node().opaque());
+    if old.is_none()
+        || (!new_primary.get_ui().specifies_transitions()
+            && !context.shared.animations.sets.read().contains_key(&key))
+    {
+        styles.primary = Some(new_primary);
+        return;
+    }
+    let primary =
+        element.process_transitions_for_resolved_style(context, old.as_ref(), new_primary);
+    styles.primary = Some(primary);
+    transitions.sync_after_style_change(&key, DomHandle::new(element.as_node().debug_id()));
+}
