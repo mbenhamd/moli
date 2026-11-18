@@ -719,6 +719,11 @@ where
         self.box_caches.get_mut((slot.get() - 1) as usize)
     }
 
+    pub(crate) fn numeric_cache_ref(&self, id: LayoutBoxId) -> Option<&Cache> {
+        let slot = self.boxes.get(id.index())?.cache_slot?;
+        self.box_caches.get((slot.get() - 1) as usize)
+    }
+
     pub(crate) fn numeric_cache_mut(&mut self, id: LayoutBoxId) -> &mut Cache {
         let slot = if let Some(slot) = self.boxes[id.index()].cache_slot {
             slot

@@ -447,7 +447,13 @@ fn scale_layout(layout: Layout, factor: f32) -> Layout {
     Layout {
         location: layout.location.map(|value| value * factor),
         size: layout.size.map(|value| value * factor),
-        scrollable_overflow_rect: layout.scrollable_overflow_rect.map(|value| value * factor),
+        scrollable_overflow_rect: taffy::ScrollableOverflow::new(
+            layout
+                .scrollable_overflow_rect
+                .rect()
+                .map(|value| value * factor),
+            layout.scrollable_overflow_rect.is_reversed(),
+        ),
         scrollbar_size: layout.scrollbar_size.map(|value| value * factor),
         border: layout.border.map(|value| value * factor),
         padding: layout.padding.map(|value| value * factor),
@@ -1800,11 +1806,11 @@ impl<N> CacheTree for LayoutWorld<N>
 where
     N: Copy + Debug + Eq + Hash,
 {
-    fn cache_get(&mut self, node_id: NodeId, inputs: &LayoutInput) -> Option<LayoutOutput> {
+    fn cache_get(&self, node_id: NodeId, inputs: &LayoutInput) -> Option<LayoutOutput> {
         if self.is_viewport_taffy_node(node_id) {
             self.viewport_layout.cache.get(inputs)
         } else {
-            self.numeric_cache(LayoutBoxId::from_taffy(node_id))
+            self.numeric_cache_ref(LayoutBoxId::from_taffy(node_id))
                 .and_then(|cache| cache.get(inputs))
         }
     }
@@ -2416,7 +2422,10 @@ where
                 inputs.sizing_mode,
                 inputs.axis,
             );
-            return LayoutOutput::from_sizes(size, size);
+            return LayoutOutput::from_sizes(
+                size,
+                (taffy::Rect::from(size), Point { x: false, y: false }).into(),
+            );
         }
 
         let scrollbar_insets = self.get_scrollbar_insets(id.to_taffy());
@@ -2564,11 +2573,16 @@ where
                     + scrollbar_insets.top
                     + block_offset,
             );
-            output.scrollable_overflow_rect.bottom = output.scrollable_overflow_rect.bottom.max(
+            let mut overflow = output.scrollable_overflow_rect.rect();
+            overflow.bottom = overflow.bottom.max(
                 measurement.alignment_block_size
                     + padding.top
                     + padding.bottom
                     + block_offset.max(0.0),
+            );
+            output.scrollable_overflow_rect = taffy::ScrollableOverflow::new(
+                overflow,
+                output.scrollable_overflow_rect.is_reversed(),
             );
             output.baselines.first = measurement
                 .first_baseline
@@ -2931,7 +2945,10 @@ where
                 }
                 let mut content_context = block_context.sub_context(
                     padding_border.top,
-                    [padding_border.left, padding_border.right],
+                    taffy::FloatInsets {
+                        left: padding_border.left,
+                        right: padding_border.right,
+                    },
                 );
                 float_line_clearances = self.break_inline_lines_with_floats(
                     context,
@@ -2955,7 +2972,10 @@ where
                 root_context.set_width(width + padding_border.left + padding_border.right);
                 let mut content_context = root_context.sub_context(
                     padding_border.top,
-                    [padding_border.left, padding_border.right],
+                    taffy::FloatInsets {
+                        left: padding_border.left,
+                        right: padding_border.right,
+                    },
                 );
                 float_line_clearances = self.break_inline_lines_with_floats(
                     context,
@@ -3344,7 +3364,7 @@ fn inline_float_slot(
     minimum_width: f32,
 ) -> taffy::ContentSlot {
     loop {
-        let slot = context.find_content_slot(min_y, Clear::None, after);
+        let slot = context.find_content_slot(min_y, 0.0, Clear::None, after);
         if slot.segment_id.is_none() || slot.width >= minimum_width {
             return slot;
         }

@@ -54,7 +54,10 @@ fn output(width: f32) -> LayoutOutput {
         width,
         height: 20.0,
     };
-    LayoutOutput::from_sizes(size, size)
+    LayoutOutput::from_sizes(
+        size,
+        (taffy::Rect::from(size), taffy::Point { x: false, y: false }).into(),
+    )
 }
 
 #[test]
