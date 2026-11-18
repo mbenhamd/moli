@@ -34,17 +34,21 @@ fn element_scroll_into_view_surface_is_available() {
 fn wheel_at_the_focused_number_field_steps_it_instead_of_scrolling() {
     let mut vm = new_parsed_test_vm(
         "https://wheel-number-spin.test/",
-        r#"<!doctype html><html><body style="margin:0;height:3000px"><input id=n type=number min=1 max=20 value=18 style="display:block;height:20px"><input id=r type=number value=3 readonly style="display:block;height:20px"><script>
-          window.__log = [];
-          for (const id of ["n", "r"]) {
-            const field = document.getElementById(id);
-            for (const type of ["input", "change"]) {
-              field.addEventListener(type, () => __log.push(`${id}:${type}=${field.value}`));
-            }
-          }
-        </script></body></html>"#,
+        r#"<!doctype html><html><body style="margin:0;height:3000px"><input id=n type=number min=1 max=20 value=18 style="display:block;height:20px"><input id=r type=number value=3 readonly style="display:block;height:20px"></body></html>"#,
     );
     vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.eval(
+        r#"
+        window.__log = [];
+        for (const id of ["n", "r"]) {
+          const field = document.getElementById(id);
+          for (const type of ["input", "change"]) {
+            field.addEventListener(type, () => __log.push(`${id}:${type}=${field.value}`));
+          }
+        }
+        "#,
+    )
+    .expect("listeners should install");
 
     fn wheel_at(vm: &mut StandaloneScriptVmHarness, y: f64, delta_y: f64) -> String {
         vm.dispatch_mouse_event_at_point(5.0, y, "wheel", -1, Some(0), 0.0, delta_y)
@@ -70,14 +74,18 @@ fn wheel_at_the_focused_number_field_steps_it_instead_of_scrolling() {
 fn pointer_input_targets_svg_content() {
     let mut vm = new_parsed_test_vm(
         "https://pointer-svg-content.test/",
-        r#"<!doctype html><html><body style="margin:0"><div style="position:relative;width:300px;height:200px"><div id=under style="position:absolute;left:0;top:0;width:300px;height:200px"></div><svg id=over style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"><circle id=c cx=40% cy=40% r=5 fill=blue style="pointer-events:auto" /></svg></div><svg id=plain width=100 height=100 style="display:block"><rect id=r x=10 y=10 width=50 height=50 /></svg><script>
-          window.__log = [];
-          for (const type of ["pointerdown", "mousedown"]) {
-            document.addEventListener(type, event => __log.push(`${type}:${event.target.id}`), true);
-          }
-        </script></body></html>"#,
+        r#"<!doctype html><html><body style="margin:0"><div style="position:relative;width:300px;height:200px"><div id=under style="position:absolute;left:0;top:0;width:300px;height:200px"></div><svg id=over style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"><circle id=c cx=40% cy=40% r=5 fill=blue style="pointer-events:auto" /></svg></div><svg id=plain width=100 height=100 style="display:block"><rect id=r x=10 y=10 width=50 height=50 /></svg></body></html>"#,
     );
     vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    vm.eval(
+        r#"
+        window.__log = [];
+        for (const type of ["pointerdown", "mousedown"]) {
+          document.addEventListener(type, event => __log.push(`${type}:${event.target.id}`), true);
+        }
+        "#,
+    )
+    .expect("listeners should install");
     for (x, y) in [(120.0, 80.0), (200.0, 150.0), (30.0, 230.0)] {
         for event in ["mousedown", "mouseup"] {
             vm.dispatch_mouse_event_at_point(x, y, event, 0, Some(1), 0.0, 0.0)

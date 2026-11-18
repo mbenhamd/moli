@@ -212,7 +212,14 @@ fn input_surface_hit_test_in_tree(
                 }
             }
         }
-        live_dom_hit
+        // No scrollbar lies in front, so SVG content answers as it does for
+        // the plain hit test below.
+        live_dom_hit.map(|dom_hit| {
+            if ignore_pointer_events_none {
+                return dom_hit;
+            }
+            live_svg_content_hit_in_tree(runtime, tree, point).unwrap_or(dom_hit)
+        })
     } else {
         live_hit_in_tree(runtime, tree, point, ignore_pointer_events_none)
     };
