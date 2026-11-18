@@ -863,6 +863,15 @@ impl HostTimeoutScheduler {
         )
     }
 
+    /// The deadline of the earliest due animation frame. The frame keeps
+    /// its target time even when other tasks delayed it.
+    pub(crate) fn ready_animation_frame_deadline(&self) -> Option<Instant> {
+        self.scheduler.next_ready_deadline_matching(
+            Instant::now(),
+            ScheduledTimerTask::is_animation_frame_callback,
+        )
+    }
+
     pub(crate) fn next_ready_timer_deadline(
         &self,
         selection: RendererPageTimerSelection,

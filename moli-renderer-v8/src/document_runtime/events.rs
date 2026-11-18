@@ -338,6 +338,10 @@ impl DocumentRuntime {
         self.timeouts.has_ready_animation_frame_callback()
     }
 
+    pub(crate) fn ready_animation_frame_deadline(&self) -> Option<std::time::Instant> {
+        self.timeouts.ready_animation_frame_deadline()
+    }
+
     pub(crate) fn ms_to_next_timeout(&self) -> Option<u64> {
         self.timeouts.ms_to_next()
     }
