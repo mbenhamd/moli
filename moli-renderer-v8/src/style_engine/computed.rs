@@ -327,6 +327,20 @@ impl StyloComputedStyleSnapshot {
     pub(crate) fn custom_property_names(&self) -> Vec<String> {
         computed_custom_property_names_for_style(&self.primary)
     }
+
+    pub(crate) fn custom_property_count(&self) -> usize {
+        with_live_custom_property_names(&self.primary, |names| names.len())
+    }
+
+    /// The `index`-th custom property name in serialization (code-unit) order.
+    pub(crate) fn sorted_custom_property_name_at(&self, index: usize) -> Option<String> {
+        with_live_custom_property_names(&self.primary, |names| {
+            // Every name shares the `--` prefix, so ordering the bare names
+            // matches ordering the serialized ones.
+            names.sort_unstable();
+            names.get(index).map(|name| format!("--{name}"))
+        })
+    }
 }
 
 fn content_visibility_applies(display: Display) -> bool {
@@ -747,6 +761,15 @@ fn computed_style_snapshot_after_style_update_with_key(
 }
 
 fn computed_custom_property_names_for_style(style: &ComputedValues) -> Vec<String> {
+    with_live_custom_property_names(style, |names| {
+        names.iter().map(|name| format!("--{name}")).collect()
+    })
+}
+
+fn with_live_custom_property_names<R>(
+    style: &ComputedValues,
+    visit: impl FnOnce(&mut [&str]) -> R,
+) -> R {
     let custom_properties = style.custom_properties();
     let property_count = custom_properties.inherited.len() + custom_properties.non_inherited.len();
     let mut seen = HashSet::with_capacity(property_count);
@@ -766,10 +789,10 @@ fn computed_custom_property_names_for_style(style: &ComputedValues) -> Vec<Strin
                 .or_else(|| custom_properties.non_inherited.get(name))
                 .is_some()
         {
-            names.push(format!("--{name}"));
+            names.push(&**name);
         }
     }
-    names
+    visit(&mut names)
 }
 
 fn with_resolved_style<R>(
