@@ -46,11 +46,11 @@ use crate::native_bridge::element::{
     observable_input_hit_test, perform_auxiliary_link_default_action, perform_drop_default_action,
     perform_implicit_submission_from_control, perform_keyboard_scroll_default_action,
     perform_mouse_focus_default_action, perform_number_spin_keyboard_default_action,
-    perform_range_keyboard_default_action, perform_scrollbar_scroll_default_action,
-    perform_text_input, perform_triple_click_selection_default_action,
-    perform_wheel_scroll_default_action, replace_contenteditable_selection,
-    replace_text_control_selection, select_contenteditable_contents,
-    text_control_set_selection_range_internal,
+    perform_number_spin_wheel_default_action, perform_range_keyboard_default_action,
+    perform_scrollbar_scroll_default_action, perform_text_input,
+    perform_triple_click_selection_default_action, perform_wheel_scroll_default_action,
+    replace_contenteditable_selection, replace_text_control_selection,
+    select_contenteditable_contents, text_control_set_selection_range_internal,
     text_control_set_selection_range_with_direction_internal, text_control_value, update_focus,
 };
 use crate::native_bridge::{
@@ -1605,7 +1605,15 @@ impl ScriptVm {
                 if let Some(event) = event {
                     let dispatched =
                         dispatch_public_event(scope, runtime_ptr, mouse_dispatch_handle, event);
-                    if event_name == "wheel" && dispatched.allows_default() {
+                    if event_name == "wheel"
+                        && dispatched.allows_default()
+                        && !perform_number_spin_wheel_default_action(
+                            scope,
+                            runtime_ptr,
+                            mouse_dispatch_handle,
+                            delta_y,
+                        )
+                    {
                         let _ = perform_wheel_scroll_default_action(
                             scope,
                             runtime_ptr,

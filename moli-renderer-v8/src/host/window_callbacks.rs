@@ -37,6 +37,10 @@ pub(super) struct ScheduledWindowWebIdlCallback {
     callback: WindowWebIdlCallbackFunction,
     target_receiver: v8::Global<v8::Object>,
     kind: WindowWebIdlCallbackTaskKind,
+    /// A cancelled animation-frame callback stays on the heap as the frame's
+    /// boundary: the frame still starts at its time, so callbacks requested
+    /// for it after the cancellation keep its timestamp and deadline.
+    cancelled: std::cell::Cell<bool>,
 }
 
 impl ScheduledWindowWebIdlCallback {
@@ -53,6 +57,7 @@ impl ScheduledWindowWebIdlCallback {
             callback,
             target_receiver: v8::Global::new(scope, target_receiver),
             kind,
+            cancelled: std::cell::Cell::new(false),
         })
     }
 
@@ -90,6 +95,17 @@ impl ScheduledWindowWebIdlCallback {
         )
     }
 
+    /// Cancels an animation-frame callback while keeping its frame boundary
+    /// on the heap. Returns false for other callbacks and for a callback that
+    /// was already cancelled.
+    pub(super) fn cancel_animation_frame(&self) -> bool {
+        self.is_animation_frame() && !self.cancelled.replace(true)
+    }
+
+    pub(super) fn is_cancelled_animation_frame(&self) -> bool {
+        self.cancelled.get()
+    }
+
     pub(super) fn is_geolocation_watch<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
@@ -110,6 +126,14 @@ impl ScheduledWindowWebIdlCallback {
         host_ptr: *mut PageScriptHost,
         extra_args: &[v8::Global<v8::Value>],
     ) -> WebIdlCallbackExecutionOutcome<v8::Global<v8::Value>, Box<V8ExceptionReport>> {
+        if let WindowWebIdlCallbackTaskKind::AnimationFrame { timestamp } = self.kind {
+            // The frame starts whether or not this callback still runs.
+            let window = v8::Local::new(scope, &self.target_receiver);
+            crate::window_host::finish_animation_frame_callback_batch(scope, window, timestamp);
+            if self.cancelled.get() {
+                return WebIdlCallbackExecutionOutcome::Unavailable;
+            }
+        }
         let Some(prepared) = self.callback.prepare_execution(scope, host_ptr, None) else {
             return WebIdlCallbackExecutionOutcome::Unavailable;
         };
@@ -124,8 +148,6 @@ impl ScheduledWindowWebIdlCallback {
                 v8::Local::new(scope, &self.target_receiver).into()
             }
             WindowWebIdlCallbackTaskKind::AnimationFrame { timestamp } => {
-                let window = v8::Local::new(scope, &self.target_receiver);
-                crate::window_host::finish_animation_frame_callback_batch(scope, window, timestamp);
                 arguments.push(v8::Number::new(scope, timestamp).into());
                 v8::undefined(scope).into()
             }

@@ -699,6 +699,11 @@ impl DocumentRuntime {
         if changed && name == "disabled" && self.dom_host.is_html_element_named(handle, "link") {
             let _ = self.dom_host.set_link_explicitly_enabled(handle, false);
         }
+        if changed && attribute_controls_focusability(None, name) {
+            crate::native_bridge::element::blur_active_element_that_lost_focusability(
+                scope, host_ptr, handle,
+            );
+        }
         if changed
             && !Self::apply_frame_owner_attribute_mutation_followup(
                 scope, host_ptr, handle, name, false,
@@ -875,6 +880,11 @@ impl DocumentRuntime {
         if changed {
             self.dispatch_custom_element_form_state_attribute_change(scope, host_ptr, handle, name);
         }
+        if changed && attribute_controls_focusability(None, name) {
+            crate::native_bridge::element::blur_active_element_that_lost_focusability(
+                scope, host_ptr, handle,
+            );
+        }
         if changed
             && !Self::apply_frame_owner_attribute_mutation_followup(
                 scope, host_ptr, handle, name, true,
@@ -1010,6 +1020,11 @@ impl DocumentRuntime {
             && self.dom_host.is_html_element_named(handle, "link")
         {
             let _ = self.dom_host.set_link_explicitly_enabled(handle, true);
+        }
+        if changed && attribute_controls_focusability(namespace, local_name) {
+            crate::native_bridge::element::blur_active_element_that_lost_focusability(
+                scope, host_ptr, handle,
+            );
         }
         record_dom_binding_timing("dom.removeAttributeNS", started);
         changed
@@ -1148,6 +1163,11 @@ impl DocumentRuntime {
             && self.dom_host.is_html_element_named(handle, "link")
         {
             let _ = self.dom_host.set_link_explicitly_enabled(handle, false);
+        }
+        if changed && attribute_controls_focusability(namespace, local_name) {
+            crate::native_bridge::element::blur_active_element_that_lost_focusability(
+                scope, host_ptr, handle,
+            );
         }
         record_dom_binding_timing(
             attribute_operation_for_handle(
@@ -2168,6 +2188,13 @@ pub(super) fn apply_runtime_mutation_effects_to_dom_host(
     result.changed = mutation_result.changed;
     result.runtime_script_start_candidates = mutation_result.runtime_script_start_candidates;
     result
+}
+
+/// Removing `contenteditable` or `tabindex` can leave the focused element
+/// unfocusable; Chromium then blurs it before the mutation returns.
+fn attribute_controls_focusability(namespace: Option<&str>, name: &str) -> bool {
+    namespace.is_none()
+        && (name.eq_ignore_ascii_case("contenteditable") || name.eq_ignore_ascii_case("tabindex"))
 }
 
 fn should_dispatch_attribute_changed_for_set(

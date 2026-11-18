@@ -3576,7 +3576,7 @@ impl PageVm {
             .map(Some)
     }
 
-    fn document_geometry_for_live_node_handle(
+    pub(in crate::runtime) fn document_geometry_for_live_node_handle(
         &mut self,
         handle: DomHandle,
     ) -> Result<RendererDocumentNodeGeometry> {
@@ -3623,6 +3623,40 @@ impl PageVm {
                 "geometry provider returned a mismatched element-metrics answer"
             ));
         };
+        // SVG content has no CSS box: DevTools reports its stroke bounding
+        // box as every box-model quad and as its one content quad.
+        let svg_bounds = if is_element && box_model.is_none() {
+            self.vm_mut()
+                .svg_content_stroke_bounds(handle)
+                .map_err(|error| anyhow::anyhow!("failed to resolve SVG geometry: {error}"))?
+        } else {
+            None
+        };
+        let (box_model, content_quads) = match svg_bounds {
+            Some([x, y, width, height]) => {
+                let (left, top) = (x as f32, y as f32);
+                let (right, bottom) = ((x + width) as f32, (y + height) as f32);
+                let quad = moli_layout::LayoutQuad {
+                    points: [
+                        moli_layout::LayoutPoint::new(left, top),
+                        moli_layout::LayoutPoint::new(right, top),
+                        moli_layout::LayoutPoint::new(right, bottom),
+                        moli_layout::LayoutPoint::new(left, bottom),
+                    ],
+                };
+                (
+                    Some(moli_layout::LayoutBoxModel {
+                        content: quad,
+                        padding: quad,
+                        border: quad,
+                        margin: quad,
+                    }),
+                    vec![quad],
+                )
+            }
+            None => (box_model, content_quads),
+        };
+        let svg_size = svg_bounds.map(|[_, _, width, height]| (width as f32, height as f32));
         let mut composed_quads = Vec::new();
         if let Some(model) = box_model {
             composed_quads.extend([model.content, model.padding, model.border, model.margin]);
@@ -3641,8 +3675,12 @@ impl PageVm {
         if !is_element {
             return Ok(RendererDocumentNodeGeometry::FoundNonElement { content_quads });
         }
-        let (Some(_), Some(element_metrics)) = (box_model, element_metrics) else {
-            return Ok(RendererDocumentNodeGeometry::NoLayoutObject);
+        let (width, height) = match (box_model, element_metrics, svg_size) {
+            (Some(_), _, Some((width, height))) => (width, height),
+            (Some(_), Some(metrics), None) => {
+                (metrics.offset_size.width, metrics.offset_size.height)
+            }
+            _ => return Ok(RendererDocumentNodeGeometry::NoLayoutObject),
         };
         let [content, padding, border, margin] = composed_quads[..model_quad_count] else {
             return Err(anyhow::anyhow!(
@@ -3655,8 +3693,8 @@ impl PageVm {
                 padding: renderer_geometry_quad(padding),
                 border: renderer_geometry_quad(border),
                 margin: renderer_geometry_quad(margin),
-                width: rounded_css_integer(element_metrics.offset_size.width),
-                height: rounded_css_integer(element_metrics.offset_size.height),
+                width: rounded_css_integer(width),
+                height: rounded_css_integer(height),
             }),
             content_quads,
         })

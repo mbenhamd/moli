@@ -606,7 +606,7 @@ fn outer_svg_hit(
 /// the `<svg>`. Resolve the shapes under the point from the SVG geometry,
 /// foremost first. Where the geometry model is not exact, no content is
 /// reported and the `<svg>` box answers on its own.
-fn svg_content_hits(
+pub(crate) fn svg_content_hits(
     runtime: &PageScriptHost,
     hit: &moli_layout::LayoutHit<DomHandle>,
     first_only: bool,

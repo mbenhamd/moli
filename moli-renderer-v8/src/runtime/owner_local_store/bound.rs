@@ -805,6 +805,18 @@ pub(super) fn page_ready_descriptor_snapshot(
             }
         });
     if let Some(timer) = timer {
+        // A due animation frame is a rendering opportunity. It runs ahead of
+        // tasks that became ready after the frame was due, as Chromium's frame
+        // does. Tasks ready by the frame's deadline keep their order before
+        // it, so a long frame callback cannot starve them. Timers due earlier
+        // still run first through the same heap.
+        if let Some(frame_deadline) = entry.page_vm().due_animation_frame_deadline() {
+            descriptors.retain(|descriptor| {
+                descriptor
+                    .ready_metadata()
+                    .is_none_or(|ready| ready.ready_at <= frame_deadline)
+            });
+        }
         descriptors.push(timer);
         due_deadline_was_ready = true;
     }

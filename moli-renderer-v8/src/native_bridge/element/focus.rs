@@ -265,7 +265,7 @@ fn element_is_scrollable(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     }
 }
 
-fn shadow_including_contains(
+pub(crate) fn shadow_including_contains(
     runtime: &PageScriptHost,
     ancestor: DomHandle,
     node: DomHandle,
@@ -454,6 +454,25 @@ pub(crate) fn schedule_focus_blur_if_needed(
         let delay = v8::Integer::new(scope, 0);
         let args = [callback.into(), delay.into()];
         let _ = set_timeout.call(scope, global.into(), &args);
+    }
+}
+
+/// After an attribute change on `changed`, blurs the focused element when it
+/// is `changed` or inside it and is no longer focusable: Chromium runs this
+/// focus fixup synchronously for `contenteditable` and `tabindex`, so `blur`
+/// and `focusout` fire before the mutation returns and focus moves to the
+/// body.
+pub(crate) fn blur_active_element_that_lost_focusability(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    changed: DomHandle,
+) {
+    let runtime = unsafe { &*runtime_ptr };
+    let Some(active) = runtime.active_element_handle() else {
+        return;
+    };
+    if shadow_including_contains(runtime, changed, active) && !is_focusable(runtime, active) {
+        update_focus(scope, runtime_ptr, None);
     }
 }
 
