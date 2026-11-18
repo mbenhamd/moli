@@ -215,7 +215,7 @@ body { font: 16px/1.5 sans-serif; }
 
     assert_eq!(
         result,
-        "24px|700|19.92px|19.92px|32px|700|21.44px|21.44px|24px|700|19.92px|19.92px|16px|16px|700|underline|pointer|13.3281px"
+        "24px|700|19.92px|19.92px|32px|700|21.44px|21.44px|24px|700|19.92px|19.92px|16px|16px|700|underline|pointer|13.3333px"
     );
 }
 
