@@ -27,6 +27,61 @@ fn element_scroll_into_view_surface_is_available() {
         r#"{"instanceType":"function","protoType":"function","inElement":true,"ownProperty":false,"callResult":"undefined","protoEnumerable":false}"#
     );
 }
+/// Chromium 156: a wheel at the focused number field steps it once against
+/// the vertical delta and fires `input` instead of scrolling; `change`
+/// waits for blur. An unfocused or read-only field lets the page scroll.
+#[test]
+fn wheel_at_the_focused_number_field_steps_it_instead_of_scrolling() {
+    let mut vm = new_storage_test_vm("https://wheel-number-spin.test/");
+    vm.eval(
+        r#"
+        (() => {
+          if (!document.documentElement) {
+            document.appendChild(document.createElement("html"));
+          }
+          if (!document.body) {
+            document.documentElement.appendChild(document.createElement("body"));
+          }
+          document.documentElement.style.margin = "0";
+          document.body.style.cssText = "margin: 0; height: 3000px";
+          document.body.innerHTML =
+            '<input id="n" type="number" min="1" max="20" value="18" style="display: block; height: 20px">' +
+            '<input id="r" type="number" value="3" readonly style="display: block; height: 20px">';
+          window.__log = [];
+          for (const id of ["n", "r"]) {
+            const field = document.getElementById(id);
+            for (const type of ["input", "change"]) {
+              field.addEventListener(type, () => __log.push(`${id}:${type}=${field.value}`));
+            }
+          }
+        })()
+        "#,
+    )
+    .expect("number wheel fixture should initialize");
+    publish_layout_for_test(&mut vm);
+
+    fn wheel_at(vm: &mut StandaloneScriptVmHarness, y: f64, delta_y: f64) -> String {
+        vm.dispatch_mouse_event_at_point(5.0, y, "wheel", -1, Some(0), 0.0, delta_y)
+            .expect("wheel input should dispatch");
+        publish_layout_for_test(vm);
+        vm.eval("(() => { const s = `${__log.splice(0).join(' ')}|${scrollY}|${document.activeElement.id}`; scrollTo(0, 0); return s; })()")
+            .expect("wheel outcome should evaluate")
+    }
+    fn click_at(vm: &mut StandaloneScriptVmHarness, y: f64) {
+        for event in ["mousedown", "mouseup"] {
+            vm.dispatch_mouse_event_at_point(5.0, y, event, 0, Some(1), 0.0, 0.0)
+                .expect("click input should dispatch");
+        }
+    }
+    assert_eq!(wheel_at(&mut vm, 10.0, 100.0), "|100|");
+    click_at(&mut vm, 10.0);
+    assert_eq!(wheel_at(&mut vm, 10.0, 100.0), "n:input=17|0|n");
+    assert_eq!(wheel_at(&mut vm, 10.0, -300.0), "n:input=18|0|n");
+    assert_eq!(wheel_at(&mut vm, 10.0, 40.0), "n:input=17|0|n");
+    click_at(&mut vm, 30.0);
+    assert_eq!(wheel_at(&mut vm, 30.0, 100.0), "n:change=17|100|r");
+}
+
 #[test]
 fn wheel_default_action_scrolls_unless_canceled() {
     let mut vm = new_storage_test_vm("https://wheel-default-scroll.test/");
