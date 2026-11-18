@@ -63,6 +63,33 @@ fn wheel_at_the_focused_number_field_steps_it_instead_of_scrolling() {
     assert_eq!(wheel_at(&mut vm, 30.0, 100.0), "n:change=17|100|r");
 }
 
+/// Chromium 156 targets pointer input at the SVG content `elementFromPoint`
+/// reports: a shape that re-enables pointer events under an `<svg>` with
+/// `pointer-events: none`, and a shape inside a plain `<svg>`.
+#[test]
+fn pointer_input_targets_svg_content() {
+    let mut vm = new_parsed_test_vm(
+        "https://pointer-svg-content.test/",
+        r#"<!doctype html><html><body style="margin:0"><div style="position:relative;width:300px;height:200px"><div id=under style="position:absolute;left:0;top:0;width:300px;height:200px"></div><svg id=over style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"><circle id=c cx=40% cy=40% r=5 fill=blue style="pointer-events:auto" /></svg></div><svg id=plain width=100 height=100 style="display:block"><rect id=r x=10 y=10 width=50 height=50 /></svg><script>
+          window.__log = [];
+          for (const type of ["pointerdown", "mousedown"]) {
+            document.addEventListener(type, event => __log.push(`${type}:${event.target.id}`), true);
+          }
+        </script></body></html>"#,
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    for (x, y) in [(120.0, 80.0), (200.0, 150.0), (30.0, 230.0)] {
+        for event in ["mousedown", "mouseup"] {
+            vm.dispatch_mouse_event_at_point(x, y, event, 0, Some(1), 0.0, 0.0)
+                .expect("mouse input should dispatch");
+        }
+    }
+    assert_eq!(
+        vm.eval("__log.join(' ')").expect("log should evaluate"),
+        "pointerdown:c mousedown:c pointerdown:under mousedown:under pointerdown:r mousedown:r"
+    );
+}
+
 #[test]
 fn wheel_default_action_scrolls_unless_canceled() {
     let mut vm = new_storage_test_vm("https://wheel-default-scroll.test/");

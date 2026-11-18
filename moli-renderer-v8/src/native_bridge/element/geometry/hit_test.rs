@@ -285,6 +285,11 @@ fn live_hit_in_tree(
     point: LayoutPoint,
     ignore_pointer_events_none: bool,
 ) -> Option<(LayoutHit<DomHandle>, DomHandle)> {
+    if !ignore_pointer_events_none
+        && let Some(svg_hit) = live_svg_content_hit_in_tree(runtime, tree, point)
+    {
+        return Some(svg_hit);
+    }
     let first_hit = tree.hit_test(point, ignore_pointer_events_none);
     let live_first_hit = first_hit.and_then(|hit| {
         let target = element_for_hit_source(runtime, hit.source)?;
@@ -305,6 +310,50 @@ fn live_hit_in_tree(
                 .is_connected(target)
                 .then_some((hit, target))
         })
+}
+
+/// Input targets the same SVG content `elementFromPoint` reports. Layout
+/// stops at the outer `<svg>`, and content can re-enable pointer events
+/// below an `<svg>` with `pointer-events: none`. Front to back, SVG content
+/// painted at or above the first box that respects pointer events wins.
+/// `None` leaves the box hit alone.
+fn live_svg_content_hit_in_tree(
+    runtime: &PageScriptHost,
+    tree: &FrozenLayoutTree<DomHandle>,
+    point: LayoutPoint,
+) -> Option<(LayoutHit<DomHandle>, DomHandle)> {
+    let live = |handle: DomHandle| runtime.dom_host().is_connected(handle).then_some(handle);
+    let identity = |hit: &LayoutHit<DomHandle>| {
+        (
+            hit.source,
+            hit.fragment,
+            hit.paint_order,
+            hit.pointer_events,
+        )
+    };
+    let respecting = tree.hit_test(point, false);
+    if tree.hit_test(point, true).as_ref().map(identity) == respecting.as_ref().map(identity) {
+        // Nothing transparent to pointer events lies in front.
+        let hit = respecting?;
+        let shape = crate::native_bridge::document::svg_content_hits(runtime, &hit, true)
+            .into_iter()
+            .next()
+            .and_then(live)?;
+        return Some((hit, shape));
+    }
+    for hit in tree.hit_test_all(point, true) {
+        if let Some(shape) = crate::native_bridge::document::svg_content_hits(runtime, &hit, true)
+            .into_iter()
+            .next()
+            .and_then(live)
+        {
+            return Some((hit, shape));
+        }
+        if hit.pointer_events {
+            return None;
+        }
+    }
+    None
 }
 
 fn live_hit_in_frame(
