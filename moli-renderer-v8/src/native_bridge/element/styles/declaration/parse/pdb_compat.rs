@@ -83,6 +83,14 @@ pub(super) fn style_entry_affects_property_query(
     if entry.name == property || affected_names.iter().any(|name| name == &entry.name) {
         return true;
     }
+    // A custom property is neither a shorthand nor a longhand of any other
+    // property (`all` excludes custom properties), so name identity above is
+    // the only relation. Skip the per-entry property-id lookups below.
+    if moli_css_parse::is_cssom_custom_property_name(property)
+        || moli_css_parse::is_cssom_custom_property_name(&entry.name)
+    {
+        return false;
+    }
     if let Some(entry_affected_names) = style_property_affected_names_with_pdb(&entry.name)
         && entry_affected_names
             .iter()
@@ -165,6 +173,8 @@ pub(crate) fn set_pdb_block_property_collecting_entries(
             );
         }
     }
+    // A rejected entry abandons the whole write, including earlier entries.
+    let block_before_entries = block.clone();
     let mut entries = Vec::new();
     for entry in &parsed.entries {
         if style_entry_is_pdb_supplemental_side_entry(entry) {
@@ -173,6 +183,7 @@ pub(crate) fn set_pdb_block_property_collecting_entries(
         let projection =
             block.set_property_with_projection(&entry.name, &entry.value, entry.priority);
         if projection.set_result == moli_css_parse::CssSetResult::ParseError {
+            *block = block_before_entries;
             return None;
         }
         entries.extend(projection.entries.into_iter().map(StyleEntry::from));
@@ -651,13 +662,26 @@ pub(super) fn cssom_border_property_write_uses_pdb(name: &str) -> bool {
             | "border-right-width"
             | "border-bottom-width"
             | "border-left-width"
+            | "border-block-start-style"
+            | "border-block-end-style"
+            | "border-inline-start-style"
+            | "border-inline-end-style"
+            | "border-block-start-width"
+            | "border-block-end-width"
+            | "border-inline-start-width"
+            | "border-inline-end-width"
+            | "border-start-start-radius"
+            | "border-start-end-radius"
+            | "border-end-start-radius"
+            | "border-end-end-radius"
+            | "border-spacing"
     )
 }
 
 pub(super) fn cssom_outline_property_write_uses_pdb(name: &str) -> bool {
     matches!(
         name,
-        "outline" | "outline-width" | "outline-style" | "outline-color"
+        "outline" | "outline-width" | "outline-style" | "outline-color" | "outline-offset"
     )
 }
 
@@ -927,7 +951,29 @@ pub(super) fn parse_animation_timing_function_preferred_supplemental_entries(
 pub(crate) fn style_property_affected_names_with_pdb(name: &str) -> Option<Vec<String>> {
     crate::style_engine::ensure_stylo_browser_compat_prefs();
     let name = canonical_style_property_name(name);
-    moli_css_parse::CssDeclarationBlock::affected_names_for_property(&name)
+    if moli_css_parse::is_cssom_custom_property_name(&name) {
+        return moli_css_parse::CssDeclarationBlock::affected_names_for_property(&name);
+    }
+    // The answer depends only on the property name and the process-wide Stylo
+    // prefs fixed above, and CSSOM mutation paths ask it once per declaration
+    // in the block, so remember it per thread. Custom property names are
+    // unbounded and are answered directly above.
+    thread_local! {
+        static AFFECTED_NAMES: std::cell::RefCell<std::collections::HashMap<String, Option<Vec<String>>>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    AFFECTED_NAMES.with(|cache| {
+        if let Some(cached) = cache.borrow().get(name.as_str()) {
+            return cached.clone();
+        }
+        let affected = moli_css_parse::CssDeclarationBlock::affected_names_for_property(&name);
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 4096 {
+            cache.clear();
+        }
+        cache.insert(name, affected.clone());
+        affected
+    })
 }
 
 pub(crate) fn style_property_mutation_affected_names_with_pdb(name: &str) -> Option<Vec<String>> {

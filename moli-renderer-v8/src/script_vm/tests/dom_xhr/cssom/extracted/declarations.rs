@@ -3161,3 +3161,71 @@ fn windowless_inline_style_tracks_native_attributes_and_adoption() {
       return 'pass';
     })()"#).unwrap(), "pass");
 }
+
+// Chromium 156 (Playwright 1.64.1) serializes these logical border, spacing
+// and outline-offset longhands through the ordinary declaration block: the
+// block pair recombines to `border-block-style` and every value keeps its
+// authored position, priority and canonical spelling.
+#[test]
+fn css_style_declaration_logical_border_and_spacing_longhands_use_declaration_block() {
+    let mut vm = new_storage_test_vm("https://style-logical-border-longhands.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const element = document.createElement('div');
+  const style = element.style;
+  style.setProperty('border-block-start-style', 'solid');
+  style.setProperty('border-block-end-style', 'solid');
+  style.setProperty('outline-offset', '2px');
+  style.setProperty('border-spacing', '1px 2px', 'important');
+  style.setProperty('border-start-start-radius', '3px 4px');
+  return [
+    style.cssText,
+    element.getAttribute('style'),
+    style.getPropertyValue('border-spacing'),
+    style.getPropertyPriority('border-spacing'),
+  ].join('|');
+})()
+"#,
+        )
+        .expect("logical border longhand setProperty should evaluate");
+
+    let css_text = "border-block-style: solid; outline-offset: 2px; border-spacing: 1px 2px !important; border-start-start-radius: 3px 4px;";
+    assert_eq!(result, format!("{css_text}|{css_text}|1px 2px|important"));
+}
+
+// Chromium 156 rejects each of these values and keeps the previous
+// declarations unchanged.
+#[test]
+fn css_style_declaration_logical_border_and_spacing_longhands_reject_invalid_values() {
+    let mut vm = new_storage_test_vm("https://style-logical-border-invalid.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const style = document.createElement('div').style;
+  style.setProperty('border-block-end-style', 'solid');
+  style.setProperty('outline-offset', '2px');
+  style.setProperty('border-spacing', '1px');
+  style.setProperty('border-block-end-style', '0px');
+  style.setProperty('border-inline-start-width', 'bogus');
+  style.setProperty('outline-offset', 'auto');
+  style.setProperty('border-spacing', '5px inherit');
+  return [
+    style.cssText,
+    style.getPropertyValue('border-block-end-style'),
+    style.getPropertyValue('border-inline-start-width'),
+  ].join('|');
+})()
+"#,
+        )
+        .expect("invalid logical border longhand setProperty should evaluate");
+
+    assert_eq!(
+        result,
+        "border-block-end-style: solid; outline-offset: 2px; border-spacing: 1px;|solid|"
+    );
+}
