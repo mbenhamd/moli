@@ -398,6 +398,14 @@ fn deliver_css_transition_event(
     host_ptr: *mut PageScriptHost,
     event: &CssTransitionEvent,
 ) {
+    // The transition task can run in any Window of this host. The
+    // `CSSTransition` objects and the event belong to the realm of the
+    // element's Document (a same-origin child frame has its own).
+    let Some(context) = unsafe { &*host_ptr }.node_event_execution_context(scope, event.target)
+    else {
+        return;
+    };
+    let scope = &mut v8::ContextScope::new(scope, context);
     if let Some(animation) = existing_transition_object(scope, event.id) {
         match event.kind {
             CssTransitionEventKind::End => {
