@@ -1976,18 +1976,97 @@ pub(crate) fn perform_number_spin_keyboard_default_action(
         "arrowdown" | "down" => InputStepDirection::Down,
         _ => return false,
     };
+    match step_number_field_from_spin_button(runtime_ptr, handle, direction) {
+        None => false,
+        Some(changed) => {
+            if changed {
+                dispatch_input_and_change_events(scope, runtime_ptr, handle);
+            }
+            true
+        }
+    }
+}
+
+/// Default action for an uncancelled WheelEvent targeting the focused
+/// number field: its spin button consumes the wheel and steps the value once
+/// against the vertical delta, firing `input`; `change` waits for blur (Blink
+/// `SpinButtonElement::ForwardEvent` calls `DoStepAction(wheelDeltaY)` when
+/// `ShouldSpinButtonRespondToWheelEvents`, then marks the event handled).
+/// Returns whether the field consumed the wheel, which then does not scroll.
+pub(crate) fn perform_number_spin_wheel_default_action(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut PageScriptHost,
+    target: DomHandle,
+    delta_y: f64,
+) -> bool {
+    // The wheel may land in the field's user-agent shadow tree; the field
+    // itself must be the focused element.
     let runtime = unsafe { &*runtime_ptr };
-    let Some(element) = runtime
+    let Some(handle) = runtime.active_element_handle().filter(|active| {
+        crate::native_bridge::element::focus::shadow_including_contains(runtime, *active, target)
+    }) else {
+        return false;
+    };
+    let direction = if delta_y < 0.0 {
+        Some(InputStepDirection::Up)
+    } else if delta_y > 0.0 {
+        Some(InputStepDirection::Down)
+    } else {
+        None
+    };
+    let Some(direction) = direction else {
+        return is_steppable_number_field(unsafe { &*runtime_ptr }, handle);
+    };
+    let previous_value = unsafe { &*runtime_ptr }
         .dom_host()
         .node(handle)
         .and_then(Node::as_element)
-        .filter(|element| element.is_html_input() && element.input_type() == InputType::Number)
-    else {
-        return false;
-    };
-    if is_disabled_form_control(runtime, handle) || element.attribute("readonly").is_some() {
-        return false;
+        .map(|element| element.input_value());
+    match step_number_field_from_spin_button(runtime_ptr, handle, direction) {
+        None => false,
+        Some(changed) => {
+            if changed && let Some(previous_value) = previous_value.as_deref() {
+                // Unlike the keyboard step, `change` waits for blur.
+                unsafe { &mut *runtime_ptr }
+                    .mark_text_control_change_pending(handle, previous_value);
+            }
+            if changed
+                && unsafe { &*runtime_ptr }.dom_host().is_connected(handle)
+                && let Some(event) = construct_simple_event(scope, "input", true, false, false)
+            {
+                let _ = dispatch_public_event(scope, runtime_ptr, handle, event);
+            }
+            true
+        }
     }
+}
+
+fn is_steppable_number_field(runtime: &PageScriptHost, handle: DomHandle) -> bool {
+    runtime
+        .dom_host()
+        .node(handle)
+        .and_then(Node::as_element)
+        .is_some_and(|element| {
+            element.is_html_input()
+                && element.input_type() == InputType::Number
+                && element.attribute("readonly").is_none()
+        })
+        && !is_disabled_form_control(runtime, handle)
+}
+
+/// Blink `StepUpFromLayoutObject` for a number field's spin button: `None`
+/// when `handle` is not an enabled, writable number field; otherwise whether
+/// one step changed its value.
+fn step_number_field_from_spin_button(
+    runtime_ptr: *mut PageScriptHost,
+    handle: DomHandle,
+    direction: InputStepDirection,
+) -> Option<bool> {
+    let runtime = unsafe { &*runtime_ptr };
+    if !is_steppable_number_field(runtime, handle) {
+        return None;
+    }
+    let element = runtime.dom_host().node(handle).and_then(Node::as_element)?;
     let value = element.input_value();
     let outcome = step_input_value(
         InputStepState {
@@ -2007,14 +2086,12 @@ pub(crate) fn perform_number_spin_keyboard_default_action(
         1.0,
     );
     let Ok(InputStepOutcome::Set(next_value)) = outcome else {
-        return true;
+        return Some(false);
     };
-    if next_value != value
-        && unsafe { &mut *runtime_ptr }.set_input_value_from_user_edit(handle, &next_value)
-    {
-        dispatch_input_and_change_events(scope, runtime_ptr, handle);
-    }
-    true
+    Some(
+        next_value != value
+            && unsafe { &mut *runtime_ptr }.set_input_value_from_user_edit(handle, &next_value),
+    )
 }
 
 fn dispatch_input_and_change_events(

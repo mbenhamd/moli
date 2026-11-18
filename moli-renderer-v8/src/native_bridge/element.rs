@@ -217,7 +217,7 @@ pub(crate) use activation::{
 #[cfg(feature = "devtools")]
 pub(crate) use activation::{
     activate_handle_after_touch_release, activate_handle_via_keyboard,
-    select_contenteditable_contents,
+    perform_number_spin_wheel_default_action, select_contenteditable_contents,
 };
 pub(crate) use activation::{
     activate_handle_via_synthetic_click, dispatched_click_activation_target,
@@ -331,8 +331,8 @@ use focus::is_focusable;
 #[cfg(feature = "devtools")]
 pub(crate) use focus::perform_mouse_focus_default_action;
 pub(crate) use focus::{
-    contenteditable_editing_host, focus_element, initial_contenteditable_caret,
-    perform_access_key_default_action_for_dispatched_event,
+    blur_active_element_that_lost_focusability, contenteditable_editing_host, focus_element,
+    initial_contenteditable_caret, perform_access_key_default_action_for_dispatched_event,
     perform_hover_interest_default_action_for_dispatched_event,
     perform_tab_focus_default_action_for_dispatched_event, post_parse_autofocus_is_pending,
     process_post_parse_autofocus, reset_focus_from_previous_handle,
@@ -2170,6 +2170,6 @@ pub(in crate::native_bridge::element) fn resolved_reflected_element_attribute_ha
         .and_then(|candidate| runtime.dom_host().resolve_reference_target_chain(candidate))
 }
 
-#[cfg(feature = "devtools")]
-pub(crate) use geometry::read_client_rects;
 pub(crate) use geometry::svg_viewport_root_geometry;
+#[cfg(feature = "devtools")]
+pub(crate) use geometry::{read_client_rects, read_svg_content_stroke_bounds};

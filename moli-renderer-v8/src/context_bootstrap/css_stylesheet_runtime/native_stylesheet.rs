@@ -1,13 +1,4 @@
 use super::*;
-use crate::context_bootstrap::svg_runtime::hit_test;
-
-/// A stylesheet changed through the CSSOM keeps only what the style engine
-/// parsed, so an SVG-only `pointer-events` keyword in the written text is
-/// noted for hit testing before it is dropped.
-fn note_cssom_rule_text(scope: &mut v8::PinScope<'_, '_>, text: &str) {
-    hit_test::note_cssom_write(scope, hit_test::css_declares_svg_pointer_events(text));
-}
-
 fn set_css_style_sheet_live_stylesheet<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     sheet: v8::Local<'s, v8::Object>,
@@ -268,7 +259,6 @@ pub(crate) fn replace_css_style_sheet_live_stylesheet_from_text<'s>(
     sheet: v8::Local<'s, v8::Object>,
     css_text: &str,
 ) -> Option<()> {
-    note_cssom_rule_text(scope, css_text);
     if let Some(stylesheet) = css_style_sheet_live_stylesheet(scope, sheet) {
         stylesheet.replace_from_text(css_text);
         let rules = css_style_sheet_rules_array(scope, sheet);
@@ -331,7 +321,6 @@ pub(crate) fn insert_css_style_sheet_live_rule<'s>(
     rule_text: &str,
     index: usize,
 ) -> Result<(), CssRuleInsertError> {
-    note_cssom_rule_text(scope, rule_text);
     require_css_style_sheet_live_stylesheet(scope, sheet).insert_rule(rule_text, index)
 }
 
@@ -349,7 +338,6 @@ pub(crate) fn replace_css_style_sheet_live_rule<'s>(
     rule_text: &str,
     index: usize,
 ) -> Result<(), CssRuleInsertError> {
-    note_cssom_rule_text(scope, rule_text);
     require_css_style_sheet_live_stylesheet(scope, sheet).replace_rule(rule_text, index)
 }
 
@@ -372,7 +360,6 @@ pub(crate) fn insert_css_style_sheet_live_nested_rule<'s>(
     containing_rule_type_bits: u32,
     parse_relative_rule_type: Option<CssRuleType>,
 ) -> Result<(), CssRuleInsertError> {
-    note_cssom_rule_text(scope, rule_text);
     require_css_style_sheet_live_stylesheet(scope, sheet).insert_nested_rule(
         parent_path,
         rule_text,
@@ -391,7 +378,6 @@ pub(crate) fn replace_css_style_sheet_live_nested_rule<'s>(
     containing_rule_type_bits: u32,
     parse_relative_rule_type: Option<CssRuleType>,
 ) -> Result<(), CssRuleInsertError> {
-    note_cssom_rule_text(scope, rule_text);
     require_css_style_sheet_live_stylesheet(scope, sheet).replace_nested_rule(
         parent_path,
         rule_text,
@@ -417,7 +403,6 @@ pub(crate) fn insert_css_style_sheet_live_keyframe_rule<'s>(
     rule_text: &str,
     index: usize,
 ) -> Result<(), CssRuleInsertError> {
-    note_cssom_rule_text(scope, rule_text);
     require_css_style_sheet_live_stylesheet(scope, sheet).insert_keyframe_rule(
         parent_path,
         rule_text,
@@ -432,7 +417,6 @@ pub(crate) fn replace_css_style_sheet_live_keyframe_rule<'s>(
     rule_text: &str,
     index: usize,
 ) -> Result<(), CssRuleInsertError> {
-    note_cssom_rule_text(scope, rule_text);
     require_css_style_sheet_live_stylesheet(scope, sheet).replace_keyframe_rule(
         parent_path,
         rule_text,
@@ -518,7 +502,6 @@ pub(crate) fn set_css_style_sheet_live_style_rule_declarations<'s>(
     rule_path: &[usize],
     declaration_text: &str,
 ) -> Result<(), CssRuleInsertError> {
-    note_cssom_rule_text(scope, declaration_text);
     require_css_style_sheet_live_stylesheet(scope, sheet)
         .set_style_rule_declarations(rule_path, declaration_text)
 }
@@ -585,7 +568,6 @@ pub(crate) fn set_css_style_sheet_live_nested_declarations_rule_declarations<'s>
     rule_path: &[usize],
     declaration_text: &str,
 ) -> Result<(), CssRuleInsertError> {
-    note_cssom_rule_text(scope, declaration_text);
     require_css_style_sheet_live_stylesheet(scope, sheet)
         .set_nested_declarations_rule_declarations(rule_path, declaration_text)
 }
@@ -597,7 +579,6 @@ pub(crate) fn set_css_style_sheet_live_keyframe_rule_declarations<'s>(
     index: usize,
     declaration_text: &str,
 ) -> Result<(), CssRuleInsertError> {
-    note_cssom_rule_text(scope, declaration_text);
     require_css_style_sheet_live_stylesheet(scope, sheet).set_keyframe_rule_declarations(
         parent_path,
         index,

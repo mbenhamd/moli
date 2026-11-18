@@ -748,18 +748,23 @@ pub(super) fn window_request_animation_frame_callback<'s>(
     let global = scope.get_current_context().global(scope);
     let now = current_animation_frame_time_ms(scope);
     let frame_interval = f64::from(WINDOW_REQUEST_ANIMATION_FRAME_DELAY_MS);
+    let runtime = unsafe { &mut *host_ptr };
     // Chromium begins a frame as soon as one is requested when none ran in the
     // last frame interval, and otherwise keeps the frame cadence. Requests made
-    // before that frame starts share its timestamp.
+    // before that frame starts share its timestamp, even when other tasks
+    // delay it past its time or its earlier callbacks were cancelled.
+    let frame_still_queued = runtime.has_pending_animation_frame();
     let target_timestamp =
         get_private_value(scope, global, WINDOW_PENDING_ANIMATION_FRAME_TIMESTAMP_SLOT)
             .and_then(|value| value.number_value(scope))
-            .filter(|timestamp| *timestamp + frame_interval > now)
+            .filter(|timestamp| frame_still_queued || *timestamp + frame_interval > now)
             .unwrap_or_else(|| {
                 let timestamp =
                     get_private_value(scope, global, WINDOW_LAST_ANIMATION_FRAME_TIMESTAMP_SLOT)
                         .and_then(|value| value.number_value(scope))
-                        .map_or(now, |last| now.max(last + frame_interval));
+                        .map_or(now, |last| {
+                            now.max(next_frame_timestamp(last, frame_interval))
+                        });
                 set_private_value(
                     scope,
                     global,
@@ -769,13 +774,14 @@ pub(super) fn window_request_animation_frame_callback<'s>(
                 timestamp
             });
     let delay_ms = (target_timestamp - now).ceil().clamp(0.0, u32::MAX as f64) as u32;
-    let runtime = unsafe { &mut *host_ptr };
+    let overdue = std::time::Duration::from_secs_f64((now - target_timestamp).max(0.0) / 1000.0);
     let timeout_id = runtime.queue_window_animation_frame_callback(
         scope,
         parsed.callback,
         args.this(),
         target_timestamp,
         delay_ms,
+        overdue,
         crate::host::HostTimerOwner::Window,
     );
     rv.set_uint32(timeout_id);
@@ -2029,6 +2035,17 @@ pub(crate) fn current_time_ms() -> f64 {
         * 1000.0
 }
 
+/// The earliest timestamp of the frame after `last`. Rounding `last +
+/// interval` down would show script a frame gap below the interval.
+fn next_frame_timestamp(last: f64, interval: f64) -> f64 {
+    let next = last + interval;
+    if next - last < interval {
+        next.next_up()
+    } else {
+        next
+    }
+}
+
 fn current_animation_frame_time_ms(scope: &mut v8::PinScope<'_, '_>) -> f64 {
     let global = scope.get_current_context().global(scope);
     global
@@ -2238,6 +2255,15 @@ mod tests {
     use crate::structured_clone::{
         RuntimeMessageAgentCluster, StructuredCloneMetadata, V8StructuredClonePayload,
     };
+
+    #[test]
+    fn next_frame_timestamp_never_shows_a_gap_below_the_interval() {
+        for tenths in 0..20_000 {
+            let last = f64::from(tenths) / 10.0;
+            let next = next_frame_timestamp(last, 16.0);
+            assert!(next - last >= 16.0, "{last} -> {next}");
+        }
+    }
 
     #[test]
     fn iframe_width_attribute_uses_html_dimension_rules() {

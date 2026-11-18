@@ -6,7 +6,9 @@ use crate::{
 };
 
 use super::super::styles::ComputedStyleRead;
-use super::provider::{read_box_model, read_scroll_into_view_geometry};
+use super::provider::{
+    read_box_model, read_scroll_into_view_geometry, read_svg_content_stroke_bounds,
+};
 use super::scroll::{
     apply_observable_window_scroll, resolve_scroll_target, set_node_scroll_position,
 };
@@ -114,7 +116,7 @@ fn scroll_node_into_view_with_params(
     let Some(target) = resolve_scroll_target(runtime, handle) else {
         return Ok(None);
     };
-    let Some(mut geometry) = read_scroll_into_view_geometry(runtime, target)? else {
+    let Some(mut geometry) = read_target_scroll_into_view_geometry(runtime, target)? else {
         return Ok(None);
     };
     if relative_rect.is_none()
@@ -152,6 +154,41 @@ fn scroll_node_into_view_with_params(
         return Ok(None);
     }
     perform_bubbling_scroll_into_view(scope, runtime_ptr, target, geometry, params, 0).map(Some)
+}
+
+/// SVG content has no CSS box of its own. Blink's
+/// `AbsoluteBoundingBoxRectForScrollIntoView` uses the shape's
+/// stroke-inclusive bounding box, and the scroll containers are those of the
+/// outermost `<svg>` that renders it.
+fn read_target_scroll_into_view_geometry(
+    runtime: &PageScriptHost,
+    target: DomHandle,
+) -> Result<Option<moli_layout::LayoutScrollIntoViewGeometry<DomHandle>>, moli_layout::LayoutError>
+{
+    if let Some(geometry) = read_scroll_into_view_geometry(runtime, target)? {
+        return Ok(Some(geometry));
+    }
+    let Some(root) =
+        crate::context_bootstrap::svg_runtime::screen::svg_layout_viewport_root(runtime, target)
+    else {
+        return Ok(None);
+    };
+    let Some([left, top, width, height]) = read_svg_content_stroke_bounds(runtime, target)? else {
+        return Ok(None);
+    };
+    let Some(mut geometry) = read_scroll_into_view_geometry(runtime, root)? else {
+        return Ok(None);
+    };
+    geometry.target_rects =
+        vec![
+            moli_layout::LayoutTransform2D::IDENTITY.map_rect(moli_layout::LayoutRect::new(
+                left as f32,
+                top as f32,
+                width as f32,
+                height as f32,
+            )),
+        ];
+    Ok(Some(geometry))
 }
 
 #[cfg(feature = "devtools")]

@@ -449,6 +449,15 @@ impl ScriptVm {
     }
 
     #[cfg(feature = "devtools")]
+    pub(crate) fn svg_content_stroke_bounds(
+        &mut self,
+        handle: DomHandle,
+    ) -> Result<Option<[f64; 4]>, moli_layout::LayoutError> {
+        let host = self._context_host.borrow();
+        crate::native_bridge::element::read_svg_content_stroke_bounds(&host, handle)
+    }
+
+    #[cfg(feature = "devtools")]
     pub(crate) fn observable_deep_hit_test_for_current_document(
         &mut self,
         point: moli_layout::LayoutPoint,

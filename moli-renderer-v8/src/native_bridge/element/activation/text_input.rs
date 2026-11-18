@@ -95,11 +95,19 @@ pub(crate) fn perform_text_input(
     }
     // Physical characters retain their keypress target. IME commits resolve
     // focus after beforeinput, like Blink's composition-confirm insertion.
+    // When beforeinput leaves nothing focused (for example, the editor stopped
+    // being an editing host and blurred), Blink still targets the root
+    // editable element around the selection and focuses it before editing.
+    let mut refocus_editing_host = None;
     let target = match source {
         TextInputSource::Keyboard => Some(initial_target),
-        TextInputSource::InputMethod => runtime
-            .active_element_handle()
-            .or_else(|| runtime.document_focus_fallback_handle()),
+        TextInputSource::InputMethod => runtime.active_element_handle().or_else(|| {
+            refocus_editing_host = (runtime.dom_host().is_connected(initial_target)
+                && !is_text_control(runtime, initial_target))
+            .then(|| contenteditable_editing_host(runtime, initial_target))
+            .flatten();
+            refocus_editing_host.or_else(|| runtime.document_focus_fallback_handle())
+        }),
     };
     let Some(target) =
         target.filter(|target| runtime.dom_host().owner_document_handle(*target) == Some(document))
@@ -121,6 +129,19 @@ pub(crate) fn perform_text_input(
     {
         return false;
     }
+    if let Some(host) = refocus_editing_host
+        && runtime.active_element_handle().is_none()
+    {
+        update_focus(scope, runtime_ptr, Some(host));
+        // Focus callbacks are an author-code boundary.
+        let runtime = unsafe { &*runtime_ptr };
+        if runtime.dom_host().owner_document_handle(host) != Some(document)
+            || runtime.owner_dispatch_scope_for_node(host).is_none()
+        {
+            return false;
+        }
+    }
+    let runtime = unsafe { &*runtime_ptr };
     // Text controls preserve their event target's selection even if listeners
     // move focus. An editing host instead uses the live focused selection.
     let edit_target = if was_text_control {

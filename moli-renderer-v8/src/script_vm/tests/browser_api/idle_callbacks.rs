@@ -460,3 +460,47 @@ fn animation_frame_and_idle_cancellation_use_required_unsigned_long_handles() {
         r#"{"animation":{"missing":"throw:TypeError","wrongReceiver":"throw:TypeError","symbol":"throw:TypeError","object":"return:undefined","conversions":1},"idle":{"missing":"throw:TypeError","wrongReceiver":"throw:TypeError","symbol":"throw:TypeError","object":"return:undefined","conversions":1}}"#
     );
 }
+
+/// A frame that is due keeps its place ahead of later tasks even when its
+/// callback is cancelled and requested again on every task, as a layout
+/// effect that reschedules its measurement does. Chromium 156 runs the frame
+/// every one or two 10ms tasks of this chain; it never waits for the chain to
+/// end.
+#[tokio::test]
+async fn a_due_animation_frame_runs_between_tasks_that_cancel_and_request_it_again() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_storage_test_vm("https://animation-frame-reschedule.test/");
+
+    vm.eval(
+        r#"
+        globalThis.__frameChain = [];
+        (() => {
+          const busy = ms => { const end = performance.now() + ms; while (performance.now() < end); };
+          let id = 0, n = 0;
+          const step = () => {
+            n++;
+            __frameChain.push("t" + n);
+            if (n < 12) setTimeout(step, 0);
+            busy(10);
+            cancelAnimationFrame(id);
+            id = requestAnimationFrame(() => __frameChain.push("raf"));
+          };
+          setTimeout(step, 0);
+        })();
+        "#,
+    )
+    .expect("animation frame reschedule setup");
+
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("animation frame reschedule chain should drain");
+    assert_eq!(
+        vm.eval(
+            "String(__frameChain.indexOf('raf') > 0 && __frameChain.indexOf('raf') < __frameChain.indexOf('t12'))"
+        )
+        .expect("animation frame reschedule result"),
+        "true",
+        "{}",
+        vm.eval("__frameChain.join(' ')").unwrap_or_default()
+    );
+}

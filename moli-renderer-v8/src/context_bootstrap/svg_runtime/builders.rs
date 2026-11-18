@@ -1471,19 +1471,25 @@ fn svg_computed_path_data(
     }
 }
 
+/// A geometry attribute of SVG content in user units. Percentages resolve
+/// against the nearest viewport and font-relative units against the
+/// element's font, as Blink's `SVGLengthContext` does; absent or
+/// unresolvable values are 0.
 fn svg_geometry_length_attribute_for_handle(
     runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
     attribute: &str,
 ) -> f64 {
-    runtime
-        .dom_host()
-        .get_attribute(handle, attribute)
-        .as_deref()
-        .and_then(parse_svg_length_value)
-        .filter(|parsed| parsed.value.is_finite())
-        .map(|parsed| parsed.value)
-        .unwrap_or(0.0)
+    svg_geometry_user_length_attribute_for_handle(runtime, handle, attribute).unwrap_or(0.0)
+}
+
+fn svg_geometry_user_length_attribute_for_handle(
+    runtime: &crate::native_bridge::PageScriptHost,
+    handle: crate::document_runtime::DomHandle,
+    attribute: &str,
+) -> Option<f64> {
+    let value = runtime.dom_host().get_attribute(handle, attribute)?;
+    svg_attribute_length_to_user_units(runtime, handle, attribute, value.trim())
 }
 
 fn svg_geometry_rect_radius_attribute_for_handle(
@@ -1492,9 +1498,9 @@ fn svg_geometry_rect_radius_attribute_for_handle(
     attribute: &str,
     fallback_attribute: &str,
 ) -> f64 {
-    svg_geometry_optional_length_attribute_for_handle(runtime, handle, attribute)
+    svg_geometry_user_length_attribute_for_handle(runtime, handle, attribute)
         .or_else(|| {
-            svg_geometry_optional_length_attribute_for_handle(runtime, handle, fallback_attribute)
+            svg_geometry_user_length_attribute_for_handle(runtime, handle, fallback_attribute)
         })
         .unwrap_or(0.0)
 }
@@ -4033,6 +4039,14 @@ fn svg_nearest_viewport_dimensions(
                 });
             if let (Some(width), Some(height)) = (width, height) {
                 return Some((width, height));
+            }
+            // An outermost `<svg>` sized by CSS establishes its laid-out
+            // content box as the viewport.
+            if super::screen::is_outermost_svg(runtime, candidate)
+                && let Some((_, Some(viewport))) =
+                    crate::native_bridge::element::svg_viewport_root_geometry(runtime, candidate)
+            {
+                return Some((viewport.width, viewport.height));
             }
         }
         current = node.parent_node();

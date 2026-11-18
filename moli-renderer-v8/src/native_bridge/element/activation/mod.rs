@@ -33,7 +33,8 @@ pub(crate) use default_action::{
 #[cfg(feature = "devtools")]
 pub(crate) use default_action::{
     move_contenteditable_caret_to_line_boundary, perform_number_spin_keyboard_default_action,
-    perform_range_keyboard_default_action, perform_triple_click_selection_default_action,
+    perform_number_spin_wheel_default_action, perform_range_keyboard_default_action,
+    perform_triple_click_selection_default_action,
 };
 pub(crate) use targets::{
     SpecialBrowsingContextTarget, navigate_existing_browsing_context_target,

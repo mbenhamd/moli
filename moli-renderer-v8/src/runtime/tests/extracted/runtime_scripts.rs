@@ -2703,6 +2703,70 @@ async fn owner_runtime_expression_await_uses_page_wake_or_timer_deadline() {
         "page-level await must not expose an internal completion binding: {globals}"
     );
 }
+/// A due animation frame runs ahead only of tasks that became ready after
+/// it was due. A message posted from a frame callback, after it requested
+/// the next frame, was ready first and runs before that frame, even when
+/// every frame callback overruns the frame interval. Chromium 156 logs
+/// "raf msg raf raf raf raf raf".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_ready_before_a_due_frame_runs_before_it() {
+    let runtime = JsRuntime::initialize();
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let page_url = url::Url::parse("https://example.test/frame-task-order").expect("page url");
+    let (mut page, _, _creation_diagnostics, _creation_artifacts, pending_download) = runtime
+        .create_html_page_from_response(
+            page_url.clone(),
+            page_url,
+            None,
+            false,
+            0,
+            200,
+            vec![("content-type".to_owned(), b"text/html".to_vec())],
+            &loader,
+            crate::RendererWebStorageHandles::ephemeral(),
+            "<!doctype html><body>frame task order</body>".to_owned(),
+            crate::RendererDocumentOptions {
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("page should load");
+    assert!(pending_download.is_none());
+
+    let (observed, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"new Promise(resolve => {
+  const busy = ms => { const end = performance.now() + ms; while (performance.now() < end); };
+  const log = [];
+  let frames = 0;
+  const frame = () => {
+    frames++;
+    log.push("raf");
+    if (frames < 6) requestAnimationFrame(frame); else setTimeout(() => resolve(log.join(" ")), 50);
+    if (frames === 1) {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => log.push("msg");
+      channel.port2.postMessage(0);
+    }
+    busy(20);
+  };
+  requestAnimationFrame(frame);
+})"#
+            .to_owned(),
+            await_promise: true,
+        })
+        .await
+        .expect("frame loop should settle");
+    assert_eq!(
+        renderer_json_value(observed),
+        Some(serde_json::json!("raf msg raf raf raf raf raf"))
+    );
+
+    page.close_async()
+        .await
+        .expect("frame task order page should close");
+}
 #[tokio::test(flavor = "multi_thread")]
 async fn script_snapshot_ignores_window_indexed_child_frame_globals() {
     let runtime = JsRuntime::initialize();
