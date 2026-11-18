@@ -742,6 +742,7 @@ impl PageScriptHost {
         );
         let document_url = network_attribution.document_url.clone();
         let request_origin = loader.fetch_context().request_origin();
+        let web_security_disabled = loader.request_client().web_security_disabled();
         let pause_info = (matches!(script.url.scheme(), "http" | "https")
             && self.should_intercept_subresource(SubresourceResourceType::Script))
         .then(|| self.root_document_lifecycle_identity())
@@ -764,7 +765,7 @@ impl PageScriptHost {
                         &request_origin,
                         None,
                     )
-                    .interception_request_headers(),
+                    .interception_request_headers_with_web_security(web_security_disabled),
                     request_body: None,
                     request_body_bytes: None,
                     resource_type: SubresourceResourceType::Script,
@@ -818,6 +819,7 @@ impl PageScriptHost {
                     script,
                     request_origin,
                     Some(document_character_set),
+                    web_security_disabled,
                     Box::new(start),
                     Box::new(finish),
                 ),

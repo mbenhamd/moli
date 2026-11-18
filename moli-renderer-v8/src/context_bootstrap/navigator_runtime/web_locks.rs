@@ -32,7 +32,7 @@ const LOCK_MODE_SLOT: &str = "__moliLockMode";
 struct LockManagerObjectDeclaration {}
 
 #[derive(Default, WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::LockManager, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::LockManager, enumerable)]
 struct LockManagerPrototypeDeclaration {
     #[webapi(method, length = 2, callback = lock_manager_request, returns_promise)]
     request: (),
@@ -50,7 +50,7 @@ struct LockObjectDeclaration {
 }
 
 #[derive(Default, WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Lock, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::Lock, enumerable)]
 struct LockPrototypeDeclaration {
     #[webapi(accessor_property, getter = lock_name_getter)]
     name: (),

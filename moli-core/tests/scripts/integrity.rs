@@ -1,3 +1,6 @@
+#[path = "referrer_policy_inheritance.rs"]
+mod referrer_policy_inheritance;
+
 use super::*;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -589,8 +592,8 @@ async fn direct_scripts_send_origin_and_fetch_metadata() -> Result<()> {
             .collect();
         let expected_origins = match name {
             "home" => vec![Some(origin.as_str()), Some("null")],
-            "roundtrip" => vec![None, Some(origin.as_str()), Some("null")],
-            "control" | "graph" | "graph-blocked" | "no-cors" => vec![None],
+            "roundtrip" => vec![Some(origin.as_str()), Some(origin.as_str()), Some("null")],
+            "no-cors" => vec![None],
             _ => vec![Some(origin.as_str())],
         };
         assert_eq!(actual.len(), expected_origins.len(), "{name}: {actual:?}");
@@ -677,7 +680,7 @@ async fn srcdoc_module_requests_use_window_origin_instead_of_base_url() -> Resul
     let requests = servers.requests.lock();
     for kind in ["module", "classic", "preload", "dynamic"] {
         for (origin_kind, origin) in [
-            ("same-origin", None),
+            ("same-origin", Some(servers.origin.as_str())),
             ("inherited", Some(servers.origin.as_str())),
             ("sandboxed", Some("null")),
         ] {
@@ -991,7 +994,7 @@ async fn service_worker_script_redirect_preserves_origin_and_credentials() -> Re
                 assert_eq!(
                     request.origin.as_deref(),
                     if name == "control" {
-                        None
+                        Some(servers.origin.as_str())
                     } else {
                         Some("null")
                     },

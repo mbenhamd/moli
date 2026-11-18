@@ -314,7 +314,6 @@ pub(in crate::context_bootstrap) fn worker_constructor_callback<'s>(
                 resolved_url.to_string(),
                 creator_request_client.clone(),
             )
-            .with_interception_context(host.native_interception_context())
             .with_script_kind(worker_options.worker_type)
             .with_module_credentials_mode(worker_options.credentials_mode.0)
             .with_module_static_import_initiator_url(base_url.clone())
@@ -333,23 +332,20 @@ pub(in crate::context_bootstrap) fn worker_constructor_callback<'s>(
             .with_storage_bucket_store(Some(host.storage_bucket_store()))
             .with_pause_evaluation_until_debugger(
                 host.browser_context_runtime()
-                    .dedicated_worker_pause_on_start_for_devtools(),
+                    .dedicated_worker_waits_for_debugger(),
             );
             if let Some(client_id) = reserved_service_worker_client_id {
                 options = options.with_reserved_service_worker_client_id(client_id);
             }
-            let worker_handle = spawn_worker_with_options(options);
-            let worker_id =
-                host.register_worker(scope, worker, worker_handle, execution_context_owner);
-            let recorded = host.record_dedicated_worker_target_created(
-                worker_id,
+            let wait_for_debugger = options.pause_evaluation_until_debugger;
+            let worker_id = host.register_worker(
+                scope,
+                worker,
+                options,
+                execution_context_owner,
                 base_url.clone(),
                 request_url,
                 worker_options.name.clone(),
-            );
-            debug_assert!(
-                recorded,
-                "newly registered local DedicatedWorker must publish its target"
             );
             let recorded = host.record_dedicated_worker_target_script_loaded(
                 worker_id,
@@ -360,10 +356,14 @@ pub(in crate::context_bootstrap) fn worker_constructor_callback<'s>(
                 recorded,
                 "newly registered local DedicatedWorker must publish its main script response"
             );
+            host.publish_live_turn_output_prefix();
+            if !wait_for_debugger {
+                host.start_registered_local_worker(worker_id);
+            }
             worker_id
         } else {
-            let cross_origin_http_worker_script =
-                is_cross_origin_http_worker_script(&base_url, &resolved_url);
+            let cross_origin_http_worker_script = !creator_request_client.web_security_disabled()
+                && is_cross_origin_http_worker_script(&base_url, &resolved_url);
             let reserved_service_worker_client_id = if cross_origin_http_worker_script {
                 None
             } else {
@@ -839,17 +839,24 @@ fn materialize_nested_worker_script_source(
         .with_page_network_policy()
         .with_network_partition_key(context.network_policy.network_partition_key.clone())
         .with_initiator_url(&context.base_url)
-        .with_request_origin(moli_url::WebOrigin::from_url(&context.base_url));
+        .with_request_origin(moli_url::WebOrigin::from_serialized(
+            context
+                .creator_message_security
+                .serialized_origin()
+                .unwrap_or("null"),
+        ));
     let response = loader
         .request_client()
         .fetch_text_for_worker_blocking_boundary(request)
         .map_err(|error| format!("Failed to load worker script `{resource_url}`: {error}"))?;
-    crate::worker::ensure_worker_script_redirect_chain_same_origin(
-        &context.base_url,
-        &response.redirect_chain,
-        &response.final_url,
-    )
-    .map_err(|message| format!("Failed to construct 'Worker': {message}"))?;
+    if !loader.request_client().web_security_disabled() {
+        crate::worker::ensure_worker_script_redirect_chain_same_origin(
+            &context.base_url,
+            &response.redirect_chain,
+            &response.final_url,
+        )
+        .map_err(|message| format!("Failed to construct 'Worker': {message}"))?;
+    }
     moli_fetch::ensure_http_status_success(response.final_url.as_str(), response.status, false)
         .map_err(|error| error.to_string())?;
     crate::worker::ensure_worker_script_mime_acceptable(

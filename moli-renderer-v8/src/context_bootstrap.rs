@@ -1,11 +1,11 @@
-pub(crate) mod abort_signal;
+pub(crate) use moli_webapi::abort_signal_values as abort_signal;
 pub(crate) mod abort_signal_events;
 mod animation_runtime;
 mod assets;
 mod bar_prop;
 pub(crate) mod bridge_descriptor;
-mod external;
 pub(crate) use bar_prop::install_window_bar_props;
+use moli_webapi::external;
 pub(crate) use runtime_state::{
     install_lightweight_popup_legacy_objects, window_realm_secure_context_available,
 };
@@ -23,10 +23,11 @@ pub(crate) use css_fontface_runtime::{
 };
 mod css_runtime;
 pub(crate) mod css_stylesheet_runtime;
-mod dom_quad;
-mod dom_rect;
-mod dom_rect_list;
-mod encoded_video_chunk;
+pub(crate) use moli_webapi::dom_rect;
+use moli_webapi::{
+    dom_quad, dom_rect_list, encoded_video_chunk, geometry as geometry_runtime, geometry_clone,
+    image_data, time_ranges,
+};
 mod event_document;
 mod event_legacy;
 pub(crate) mod event_target_dispatch;
@@ -35,18 +36,16 @@ mod events;
 pub(crate) mod exposed_interfaces;
 mod file_api;
 mod form_data_runtime;
-mod geometry_clone;
-mod geometry_runtime;
 mod history_mutation;
 mod history_runtime;
-mod picture_in_picture;
+use moli_webapi::picture_in_picture;
 #[cfg(test)]
-pub(crate) use picture_in_picture::closed_window_for_test as closed_picture_in_picture_window_for_test;
-mod time_ranges;
+mod picture_in_picture_tests;
+#[cfg(test)]
+pub(crate) use picture_in_picture_tests::closed_window_for_test as closed_picture_in_picture_window_for_test;
 pub(crate) mod web_mcp;
 pub(crate) use history_runtime::state::bind_isolated_window_history_owner;
 mod idle_detection;
-mod image_data;
 mod javascript_url;
 pub(crate) use self::idle_detection::{
     apply_idle_override_to_current_context, retire_idle_detectors_in_current_context,
@@ -81,7 +80,7 @@ mod media_cues;
 pub(crate) use media_cues::new_media_error_value;
 mod media_file_template;
 mod media_queries;
-mod media_source;
+use moli_webapi::media_source;
 mod message_ports;
 mod microtask_checkpoint;
 mod navigation_activation;
@@ -176,11 +175,16 @@ pub(crate) use self::css_runtime::css_lazy_state_diagnostics;
 pub(crate) use self::css_runtime::{
     css_supports_condition_text, install_css_runtime_state_for_document,
 };
+#[cfg(any(feature = "devtools", test))]
+pub(crate) use self::events::construct_native_touch_event;
+#[cfg(feature = "devtools")]
 pub(crate) use self::events::construct_original_text_input_event;
 pub(crate) use self::events::{
     clear_input_event_target_ranges, construct_original_event,
     construct_original_page_transition_event, construct_original_storage_event_utf16,
 };
+#[cfg(any(feature = "devtools", test))]
+pub(crate) use self::touch_runtime::construct_native_touch;
 pub(crate) use crypto::{
     CryptoKeyAlgorithmClonePayload, CryptoKeyClonePayload, WebCryptoRejection, WebCryptoTaskResult,
     crypto_key_clone_payload_from_object, crypto_key_object_from_clone_payload,
@@ -219,29 +223,29 @@ pub(crate) use navigation_traversal_coordinator::abort_history_traversal_admissi
 pub(crate) use navigation_traversal_execution::apply_authorized_history_traversal_task;
 pub(crate) use performance_runtime::PERFORMANCE_TIME_ORIGIN_SLOT;
 pub(crate) use performance_runtime::performance_slot_number;
+#[cfg(feature = "devtools")]
+pub(crate) use selection_surface::window_selection_is_collapsed;
 pub(crate) use selection_surface::{
     bind_isolated_window_selection_owner, focus_editing_host_selection,
     focus_text_control_selection, selection_value_for_window,
-    sync_selection_owner_document_for_window, window_selection_is_collapsed,
+    sync_selection_owner_document_for_window,
 };
 pub(crate) use shared::{dom_time_since_origin_millis, unix_epoch_millis};
+pub(crate) mod encoded_frames;
 mod specs;
-mod stream_adapter;
-mod stream_objects;
+use moli_webapi::streams::adapter as stream_adapter;
 mod streams;
 mod style_font_template;
 pub(crate) mod svg_runtime;
-mod touch_runtime;
+use moli_webapi::touch as touch_runtime;
 mod trusted_types;
 mod url_form;
-mod url_search_params_runtime;
-mod video_codecs;
+use moli_webapi::url_search_params as url_search_params_runtime;
+use moli_webapi::video_codecs;
 mod view_transition_runtime;
 mod web_audio_runtime;
 mod web_storage;
 mod webassembly_runtime;
-mod webrtc;
-pub(crate) use webrtc::encoded_frames;
 mod websocket;
 mod window_accessors;
 pub(crate) use window_accessors::{
@@ -251,7 +255,7 @@ pub(crate) use window_accessors::{
 mod window_events;
 mod window_lazy_surface;
 mod window_receiver;
-pub(crate) use window_receiver::is_window_receiver;
+pub(crate) use window_receiver::{is_window_receiver, require_same_origin_window_receiver};
 mod window_runtime;
 
 pub(crate) use form_data_runtime::{
@@ -316,19 +320,30 @@ pub(crate) use self::dom_rect::build_dom_rect_object;
 pub(crate) use self::dom_rect_list::build_dom_rect_list_object;
 pub(crate) use self::encoded_video_chunk::{
     EncodedVideoChunkClonePayload, EncodedVideoChunkType,
-    build_encoded_video_chunk_from_clone_payload, encoded_video_chunk_clone_payload_from_object,
+    encoded_video_chunk_clone_payload_from_object,
 };
+// Exposure belongs to the renderer; the shared binding only allocates native values.
+pub(crate) fn build_encoded_video_chunk_from_clone_payload<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    payload: EncodedVideoChunkClonePayload,
+) -> Option<v8::Local<'s, v8::Object>> {
+    if !exposed_interfaces::is_realm_interface_exposed(scope, "EncodedVideoChunk") {
+        return None;
+    }
+    encoded_video_chunk::build_encoded_video_chunk_from_clone_payload(scope, payload)
+}
+
 pub(crate) use self::events::{
     EVENT_DISPATCHING_SLOT, EVENT_PASSIVE_SLOT, EVENT_STOP_IMMEDIATE_PROPAGATION_SLOT,
     EVENT_STOP_PROPAGATION_SLOT, clear_event_composed_path, construct_original_error_event,
     construct_original_message_event, error_event_handler_arguments, event_attribute,
     event_backing, event_bool_attribute, event_callback_values, event_initialized,
     event_internal_bool_flag, event_is_dispatching, event_is_error_event, event_is_mouse_event,
-    event_private_value, initialize_event_object, initialize_event_object_with_type,
-    initialize_event_wrapper, initialize_native_security_policy_violation_event,
-    mark_agent_submit_event, mark_event_trusted, new_event_state, new_event_wrapper,
-    node_event_callback_values, set_event_composed_path, set_event_internal_flag,
-    set_event_private_value, set_event_trusted, submit_event_submitter_value,
+    event_private_value, initialize_event_object,
+    initialize_native_security_policy_violation_event, mark_agent_submit_event, mark_event_trusted,
+    new_event_state, new_event_wrapper, node_event_callback_values, set_event_composed_path,
+    set_event_internal_flag, set_event_private_value, set_event_trusted,
+    submit_event_submitter_value,
 };
 #[cfg(test)]
 pub(crate) use self::file_api::drag_data_read_count_for_test;
@@ -337,20 +352,28 @@ pub(crate) use self::file_api::{
     DirectoryReaderCallbackAdmission, DirectoryReaderCallbackTask,
     DirectoryReaderCallbackTaskEffect, FileEntryFileCallbackTask, FileEntryFileCallbackTaskEffect,
 };
+#[cfg(feature = "devtools")]
 pub(crate) use self::file_api::{
-    DragDataStoreMode, NativeDragDataStore, create_drag_data_transfer_view,
-    create_external_drag_data_store, create_native_drag_data_store, finish_drag_data_transfer_view,
-    native_data_transfer_drop_effect, native_data_transfer_effect_allowed,
-    native_data_transfer_file_count, native_data_transfer_files, native_data_transfer_get_data,
-    native_data_transfer_has_type, native_set_drag_drop_effect, populate_native_drag_data_store,
-    protect_native_drag_source_view, read_string_drag_data, readonly_data_transfer_for_input,
-    replace_drag_data_store_contents, update_drag_data_store_operations_mask,
+    DragDataStoreMode, create_drag_data_transfer_view, create_native_drag_data_store,
+    native_set_drag_drop_effect, populate_native_drag_data_store, protect_native_drag_source_view,
+    read_string_drag_data,
 };
 pub(crate) use self::file_api::{
     FileReaderReadMode, FileReadingTask, build_file_list_object, build_file_object,
     build_file_object_unpublished, file_clone_metadata, file_list_files_from_object,
     finish_file_reader_read, flush_one_pending_file_reading_task, is_file_list_object,
-    queue_file_reading_task, selected_file_from_object,
+    queue_file_reading_task, selected_file_from_object, set_file_relative_path,
+};
+pub(crate) use self::file_api::{
+    NativeDragDataStore, finish_drag_data_transfer_view, native_data_transfer_drop_effect,
+    native_data_transfer_effect_allowed, native_data_transfer_file_count,
+    native_data_transfer_files, native_data_transfer_get_data, native_data_transfer_has_type,
+    readonly_data_transfer_for_input,
+};
+#[cfg(feature = "devtools")]
+pub(crate) use self::file_api::{
+    create_external_drag_data_store, replace_drag_data_store_contents,
+    update_drag_data_store_operations_mask,
 };
 pub(crate) use self::form_data_runtime::form_data_request_body;
 pub(crate) use self::geometry_clone::{
@@ -403,16 +426,18 @@ pub(crate) use self::location_runtime::{
 pub(crate) use self::media_cues::{
     set_text_track_cue_track, text_track_cue_id, text_track_cue_times, text_track_cue_track,
 };
+#[cfg(feature = "devtools")]
+pub(crate) use self::media_queries::SimpleObjectEventListenerInspectorSnapshot;
+#[cfg(feature = "devtools")]
+pub(crate) use self::media_queries::simple_event_target_inspector_listener_snapshots;
 pub(crate) use self::media_queries::{
-    ResolvedSimpleEventTarget, SimpleObjectEventListenerInspectorSnapshot,
-    dispatch_media_query_list_change_events, dispatch_simple_event_target_event,
-    dispatch_simple_event_target_event_collecting_errors,
+    ResolvedSimpleEventTarget, dispatch_media_query_list_change_events,
+    dispatch_simple_event_target_event, dispatch_simple_event_target_event_collecting_errors,
     dispatch_simple_event_target_event_with_ancestors,
     dispatch_simple_event_target_event_with_checkpoint, initialize_simple_event_target,
     install_simple_event_target_handlers, simple_event_target_handler_getter_callback,
-    simple_event_target_handler_setter_callback, simple_event_target_inspector_listener_snapshots,
-    simple_object_event_listeners_snapshot, simple_object_event_set_handler,
-    simple_object_has_event_listeners,
+    simple_event_target_handler_setter_callback, simple_object_event_listeners_snapshot,
+    simple_object_event_set_handler, simple_object_has_event_listeners,
 };
 use self::message_ports::schedule_scope_callback;
 pub(crate) use self::message_ports::{
@@ -443,7 +468,8 @@ pub(crate) use self::navigation_traversal::queue_top_level_history_traversal_by_
 pub(crate) use self::navigator_runtime::install_worker_navigator_runtime_state;
 pub(crate) use self::navigator_runtime::run_web_lock_task;
 pub(crate) use self::navigator_runtime::{
-    bind_window_navigator_identity_seed, set_window_navigator_identity,
+    bind_window_navigator_identity_seed, navigator_owner_dispatch_scope,
+    set_window_navigator_identity,
 };
 pub(crate) use self::navigator_runtime::{
     dispatch_screen_orientation_change, dispatch_window_visual_viewport_resize,
@@ -484,8 +510,7 @@ pub(crate) use self::shared::structured_deserialize_value;
 pub(crate) use self::shared::structured_serialize_value;
 pub(in crate::context_bootstrap) use self::shared::*;
 pub(crate) use self::shared::{
-    CHILD_BROWSING_CONTEXT_HANDLE_SLOT, READABLE_STREAM_CHILD_REALM_HANDLED_REJECTION_SLOT,
-    WINDOW_CUSTOM_ELEMENTS_SLOT, WINDOW_NAME_SLOT,
+    CHILD_BROWSING_CONTEXT_HANDLE_SLOT, WINDOW_CUSTOM_ELEMENTS_SLOT, WINDOW_NAME_SLOT,
 };
 pub(crate) use self::shared::{
     RuntimeMessageSourceSecurity, prepare_value_for_window_post_message,
@@ -574,8 +599,7 @@ pub(super) use super::{
     native_bridge::{self, PageScriptHost},
     util::{
         callback_data_item, context_host_ptr_from_global_bridge, get_private_value,
-        object_number_property, set_private_value, throw_range_error, throw_type_error, v8_string,
-        v8str,
+        object_number_property, set_private_value, throw_type_error, v8_string, v8str,
     },
 };
 use crate::web_api_interfaces;
@@ -821,7 +845,7 @@ pub(crate) fn install_worker_base64_runtime_state<'s>(
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::AbortSignal, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::AbortSignal, enumerable)]
 struct WorkerAbortSignalTemplateDeclaration {
     #[webapi(
         static_method = "abort",
@@ -870,9 +894,7 @@ struct WorkerAbortSignalTemplateDeclaration {
     interface = web_api_interfaces::AbortController,
     constructor_callback = crate::worker::abort::worker_abort_controller_constructor_callback,
     constructor_length = 0,
-    enumerable,
-    receiver
-)]
+    enumerable)]
 struct WorkerAbortControllerTemplateDeclaration {
     #[webapi(
         accessor_property,

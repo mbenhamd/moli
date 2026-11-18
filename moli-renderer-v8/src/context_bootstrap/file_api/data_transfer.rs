@@ -7,9 +7,11 @@ use crate::runtime::{
 use crate::util::{get_private_object, get_private_value, set_private_value};
 use crate::web_api_interfaces;
 use crate::webidl;
+#[cfg(feature = "devtools")]
+use moli_file_api::data_transfer::drag_effect_allowed_from_mask;
 use moli_file_api::data_transfer::{
     DataTransferItemSummary, child_entry_full_path, clear_data_removes_item,
-    contains_string_item_type, data_transfer_types_from_items, drag_effect_allowed_from_mask,
+    contains_string_item_type, data_transfer_types_from_items,
     drag_operations_mask_from_effect_allowed, normalize_drag_data_type, valid_drop_effect,
     valid_effect_allowed,
 };
@@ -165,7 +167,7 @@ struct DataTransferShellDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::DataTransfer, receiver)]
+#[webapi(interface = web_api_interfaces::DataTransfer)]
 struct DataTransferPrototypeAccessorsDeclaration {
     #[webapi(accessor_property, getter = data_transfer_files_getter, enumerable)]
     files: (),
@@ -207,7 +209,7 @@ struct DataTransferItemListObjectDeclaration<'s> {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::DataTransferItemList, receiver)]
+#[webapi(interface = web_api_interfaces::DataTransferItemList)]
 struct DataTransferItemListPrototypeAccessorsDeclaration {
     #[webapi(accessor_property, getter = data_transfer_item_list_length_getter, enumerable)]
     length: (),
@@ -258,7 +260,7 @@ struct DataTransferItemViewDeclaration<'s> {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::DataTransferItem, receiver)]
+#[webapi(interface = web_api_interfaces::DataTransferItem)]
 struct DataTransferItemPrototypeAccessorsDeclaration {
     #[webapi(accessor_property, getter = data_transfer_item_kind_getter, enumerable)]
     kind: (),
@@ -318,7 +320,8 @@ struct FileSystemDirectoryEntryObjectDeclaration<'s, 'full_path, 'name> {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::FileSystemEntry)]
+// The legacy entry getters return empty values when the receiver has no entry.
+#[webapi(interface = web_api_interfaces::FileSystemEntry, receiver = false)]
 struct FileSystemEntryPrototypeAccessorsDeclaration {
     #[webapi(accessor_property, getter = file_system_entry_filesystem_getter, enumerable)]
     filesystem: (),
@@ -1043,6 +1046,7 @@ pub(crate) fn create_native_drag_data_store(
     })
 }
 
+#[cfg(feature = "devtools")]
 pub(crate) fn create_external_drag_data_store(
     scope: &mut v8::PinScope<'_, '_>,
     data: &RendererDragData,
@@ -1173,6 +1177,7 @@ pub(crate) fn populate_native_drag_data_store<'s>(
     append_drag_data_records(scope, records, data)
 }
 
+#[cfg(feature = "devtools")]
 pub(crate) fn replace_drag_data_store_contents<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     store: &NativeDragDataStore,
@@ -1188,6 +1193,7 @@ pub(crate) fn replace_drag_data_store_contents<'s>(
     Some(())
 }
 
+#[cfg(feature = "devtools")]
 pub(crate) fn update_drag_data_store_operations_mask(
     scope: &mut v8::PinScope<'_, '_>,
     store: &NativeDragDataStore,
@@ -2125,6 +2131,7 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "devtools")]
     #[test]
     fn event_views_share_records_without_reviving_closed_view_permissions() {
         with_transfer_scope(|scope| {

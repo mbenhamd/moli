@@ -2600,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "moli"
-version = "1.1.25"
+version = "1.1.26"
 dependencies = [
  "anyhow",
  "axum",
@@ -2685,6 +2685,15 @@ version = "0.1.0"
 dependencies = [
  "encoding_rs",
  "html5ever 0.40.1",
+]
+
+[[package]]
+name = "moli-command-types"
+version = "0.1.0"
+dependencies = [
+ "moli-dom",
+ "moli-page-types",
+ "serde_json",
 ]
 
 [[package]]
@@ -2888,6 +2897,7 @@ dependencies = [
  "html5ever 0.40.1",
  "indexmap",
  "moli-css-parse",
+ "moli-file-api",
  "moli-html-input-temporal",
  "moli-html-input-type",
  "moli-html2md",
@@ -2964,6 +2974,7 @@ dependencies = [
 name = "moli-fetch-types"
 version = "0.1.0"
 dependencies = [
+ "moli-web-mime",
  "serde",
  "strum",
  "url",
@@ -3073,12 +3084,22 @@ version = "0.1.0"
 dependencies = [
  "moli-crypto",
  "moli-file-api",
+ "moli-indexeddb-types",
  "moli-sqlite",
  "parking_lot",
  "rusqlite",
  "serde",
  "strum",
  "tokio",
+]
+
+[[package]]
+name = "moli-indexeddb-types"
+version = "0.1.0"
+dependencies = [
+ "moli-sqlite",
+ "rusqlite",
+ "serde",
  "unicode-id-start",
 ]
 
@@ -3403,7 +3424,6 @@ dependencies = [
  "anyhow",
  "app_units",
  "base64 0.22.1",
- "brotlic",
  "bytes",
  "crossbeam-channel",
  "cssparser",
@@ -3412,7 +3432,6 @@ dependencies = [
  "encoding_rs",
  "euclid",
  "fastrand",
- "flate2",
  "futures-util",
  "hashlink",
  "html5ever 0.40.1",
@@ -3427,6 +3446,7 @@ dependencies = [
  "moli-broadcast-channel",
  "moli-browser-profile",
  "moli-canvas",
+ "moli-command-types",
  "moli-content-type",
  "moli-cookie-jar",
  "moli-crypto",
@@ -3483,6 +3503,7 @@ dependencies = [
  "moli-web-errors",
  "moli-web-mime",
  "moli-web-storage",
+ "moli-webapi",
  "moli-webapi-declare",
  "moli-webcrypto",
  "moli-webidl",
@@ -3736,6 +3757,7 @@ dependencies = [
  "moli-web-errors",
  "serde_json",
  "v8",
+ "widestring",
 ]
 
 [[package]]
@@ -3775,6 +3797,42 @@ dependencies = [
  "parking_lot",
  "rusqlite",
  "tempfile",
+]
+
+[[package]]
+name = "moli-webapi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "brotlic",
+ "cssparser",
+ "encoding_rs",
+ "fastrand",
+ "flate2",
+ "http",
+ "moli-browser-profile",
+ "moli-canvas",
+ "moli-fetch-types",
+ "moli-file-api",
+ "moli-geometry",
+ "moli-indexeddb-types",
+ "moli-streams",
+ "moli-time",
+ "moli-url",
+ "moli-v8-test-util",
+ "moli-v8-util",
+ "moli-web-errors",
+ "moli-web-mime",
+ "moli-webapi-declare",
+ "moli-webidl",
+ "moli-webidl-callback",
+ "moli-websocket-types",
+ "parking_lot",
+ "serde_json",
+ "strum",
+ "url",
+ "v8",
 ]
 
 [[package]]
@@ -3864,6 +3922,7 @@ dependencies = [
  "moli-file-api",
  "moli-header-field",
  "moli-url",
+ "moli-websocket-types",
  "openssl",
  "parking_lot",
  "rcgen",
@@ -3873,6 +3932,14 @@ dependencies = [
  "tokio-tungstenite",
  "url",
  "urlencoding",
+]
+
+[[package]]
+name = "moli-websocket-types"
+version = "0.1.0"
+dependencies = [
+ "moli-url",
+ "url",
 ]
 
 [[package]]

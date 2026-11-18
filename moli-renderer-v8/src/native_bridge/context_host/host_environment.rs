@@ -1081,6 +1081,7 @@ impl PageScriptHost {
         self.sync_pending_document_style_sources();
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn owner_style_sheet_text(&self, owner: DomHandle) -> Option<String> {
         let dom_host = self.dom_host() as *const _;
         self.style_engine
@@ -2309,6 +2310,7 @@ impl PageScriptHost {
         changed
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn set_autofilled(&mut self, handle: DomHandle, autofilled: bool) -> bool {
         let old_state = self.retained_current_element_state(handle);
         let changed = unsafe {
@@ -2773,6 +2775,7 @@ impl PageScriptHost {
             .any(|pattern| moli_fetch::url_pattern_matches(pattern, value))
     }
 
+    #[cfg(any(test, feature = "devtools"))]
     pub(crate) fn set_fetch_subresource_interception(
         &mut self,
         classes: SubresourceInterceptionClasses,

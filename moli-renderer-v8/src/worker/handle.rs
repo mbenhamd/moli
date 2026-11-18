@@ -1,17 +1,11 @@
 //! Worker-side message types and parent-facing handle.
 
-use crate::RendererSyntheticResponseBody;
-use crate::protocol_types::{
-    PendingSubresourceContinueEvent, PendingSubresourceFetchInfo, SubresourceAuthCredentials,
-    SubresourceNetworkRecord, SubresourceNetworkRequestHandle, WebSocketFrameDirection,
-    WebSocketFrameOpcode,
-};
+use crate::protocol_types::SubresourceNetworkRecord;
 use crate::runtime::WorkerInspectorError;
 use crate::runtime::{
-    RendererRuntimeInspectorMessage, RendererRuntimeInspectorResponseSender,
-    ServiceWorkerClientFocus, ServiceWorkerClientFocusResult, ServiceWorkerClientMessage,
-    ServiceWorkerClientNavigate, ServiceWorkerClientNavigateResult, ServiceWorkerClientQuery,
-    ServiceWorkerClientQueryResult, ServiceWorkerClientsOpenWindow,
+    RendererRuntimeInspectorMessage, ServiceWorkerClientFocus, ServiceWorkerClientFocusResult,
+    ServiceWorkerClientMessage, ServiceWorkerClientNavigate, ServiceWorkerClientNavigateResult,
+    ServiceWorkerClientQuery, ServiceWorkerClientQueryResult, ServiceWorkerClientsOpenWindow,
     ServiceWorkerClientsOpenWindowResult, ServiceWorkerCloseNotification,
     ServiceWorkerFetchCompletion, ServiceWorkerFetchEvent, ServiceWorkerFetchStreamChunk,
     ServiceWorkerFetchStreamStarted, ServiceWorkerGetNotifications,
@@ -37,7 +31,7 @@ use crate::types::{BroadcastChannelId, DedicatedWorkerId, MessagePortId, Network
 use crate::worker::inspector_task_runner::{WorkerInspectorTaskMode, WorkerInspectorTaskRunner};
 use anyhow::Result;
 use moli_crypto::sha256_hex;
-use moli_fetch::{RequestCredentialsMode, ResponseHead};
+use moli_fetch::ResponseHead;
 use moli_shared_worker::SharedWorkerInstanceId;
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -45,9 +39,14 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use tokio::sync::mpsc;
 #[cfg(test)]
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::{mpsc, oneshot};
+#[cfg(test)]
+use tokio::sync::oneshot;
+
+#[cfg(feature = "devtools")]
+mod devtools;
 use url::Url;
 
 /// How to determine a worker's secure-context state during startup.
@@ -81,6 +80,8 @@ impl WorkerSecureContextPolicy {
 /// Message from the parent context to the worker.
 #[derive(Debug)]
 pub(crate) enum WorkerMessage {
+    /// Release bootstrap after the native owner has registered the Worker.
+    Start,
     /// A `postMessage` payload encoded via V8 structured clone.
     Post(V8StructuredClonePayload),
     /// A transferred `MessagePort` has queued work ready for delivery.
@@ -183,94 +184,6 @@ pub(crate) enum WorkerMessage {
     SetCacheDisabled(bool),
     /// Update the Network.setBlockedURLs state visible to worker-owned fetch/XHR.
     SetBlockedUrlPatterns(Vec<String>),
-    /// Continue a worker-owned fetch() that was paused for Fetch domain interception.
-    ContinuePendingFetch(WorkerPendingFetchContinue),
-    /// Continue a worker-owned XHR that was paused for Fetch domain interception.
-    ContinuePendingXhr(WorkerPendingXhrContinue),
-    /// Continue a worker-owned CSP report that was paused for Fetch domain interception.
-    ContinuePendingCspReport(WorkerPendingFetchContinue),
-    /// Continue a worker-owned fetch() response that was paused for Fetch domain interception.
-    ContinuePendingFetchResponse {
-        request: WorkerPendingFetchContinue,
-        response_code: Option<u16>,
-        response_headers: Option<Vec<(String, Vec<u8>)>>,
-    },
-    /// Continue a worker-owned XHR response that was paused for Fetch domain interception.
-    ContinuePendingXhrResponse {
-        request: WorkerPendingXhrContinue,
-        response_code: Option<u16>,
-        response_headers: Option<Vec<(String, Vec<u8>)>>,
-    },
-    /// Fail a worker-owned fetch() that was paused for Fetch domain interception.
-    FailPendingFetch {
-        request: WorkerPendingFetchContinue,
-        error_text: String,
-    },
-    /// Fail a worker-owned XHR that was paused for Fetch domain interception.
-    FailPendingXhr {
-        request: WorkerPendingXhrContinue,
-        error_text: String,
-    },
-    /// Fail a worker-owned CSP report that was paused for Fetch domain interception.
-    FailPendingCspReport {
-        request: WorkerPendingFetchContinue,
-        error_text: String,
-    },
-    /// Fail a worker-owned fetch() that was paused for Fetch domain auth handling.
-    FailPendingFetchAuth {
-        request: WorkerPendingFetchContinue,
-        error_text: String,
-    },
-    /// Fail a worker-owned XHR that was paused for Fetch domain auth handling.
-    FailPendingXhrAuth {
-        request: WorkerPendingXhrContinue,
-        error_text: String,
-    },
-    /// Fail a worker-owned fetch() response that was paused for Fetch domain interception.
-    FailPendingFetchResponse {
-        request: WorkerPendingFetchContinue,
-        error_text: String,
-    },
-    /// Fail a worker-owned XHR response that was paused for Fetch domain interception.
-    FailPendingXhrResponse {
-        request: WorkerPendingXhrContinue,
-        error_text: String,
-    },
-    /// Fulfill a worker-owned fetch() that was paused for Fetch domain interception.
-    FulfillPendingFetch {
-        request: WorkerPendingFetchContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    },
-    /// Fulfill a worker-owned XHR that was paused for Fetch domain interception.
-    FulfillPendingXhr {
-        request: WorkerPendingXhrContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    },
-    /// Fulfill a worker-owned CSP report that was paused for Fetch domain interception.
-    FulfillPendingCspReport {
-        request: WorkerPendingFetchContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    },
-    /// Fulfill a worker-owned fetch() response that was paused for Fetch domain interception.
-    FulfillPendingFetchResponse {
-        request: WorkerPendingFetchContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    },
-    /// Fulfill a worker-owned XHR response that was paused for Fetch domain interception.
-    FulfillPendingXhrResponse {
-        request: WorkerPendingXhrContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    },
     /// Request the worker to terminate.
     Terminate,
 }
@@ -335,7 +248,7 @@ pub(crate) enum WorkerToParentMessage {
     /// A Service Worker periodic sync event finished dispatch and all `waitUntil()` promises.
     ServiceWorkerPeriodicSyncCompleted(ServiceWorkerPeriodicSyncCompletion),
     /// A Service Worker requested display/recording of a notification.
-    ServiceWorkerShowNotification(ServiceWorkerShowNotification),
+    ServiceWorkerShowNotification(Box<ServiceWorkerShowNotification>),
     /// A Service Worker requested stored notification snapshots.
     ServiceWorkerGetNotifications(ServiceWorkerGetNotifications),
     /// A Service Worker requested registration of a one-shot background sync tag.
@@ -389,18 +302,13 @@ pub(crate) enum WorkerToParentMessage {
     /// Worker-owned subresource activity that should be surfaced through the page/CDP host.
     SubresourceNetwork(SubresourceNetworkRecord),
     /// Worker-owned fetch/XHR that should be paused by the page/CDP Fetch domain.
+    #[cfg(test)]
     PendingSubresourceFetch(WorkerPendingSubresourceFetch),
     /// Worker-owned fetch/XHR was canceled before CDP made a Fetch-domain decision.
-    PendingSubresourceFetchCanceled { fetch_id: u32, error_text: String },
+
     /// Completion signal for a worker-owned fetch/XHR that was continued after interception.
+    #[cfg(test)]
     SubresourceContinue(PendingSubresourceContinueEvent),
-    /// Worker-owned WebSocket handshake activity. The embedded socket id is worker-local; the
-    /// parent remaps it before exposing it through page-level CDP state.
-    WebSocketSubresource(SubresourceNetworkRecord),
-    /// Worker-owned WebSocket lifecycle activity.
-    WebSocketLifecycle(WorkerWebSocketLifecycleEvent),
-    /// Worker-owned WebSocket frame activity.
-    WebSocketFrame(WorkerWebSocketFrameEvent),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -562,26 +470,18 @@ pub(crate) enum WorkerErrorSource {
     InitialScriptEvaluation,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct WorkerPendingSubresourceFetch {
-    /// Opaque worker-local request id. Historically named `fetch_id`; also used for XHR pauses.
-    pub(crate) fetch_id: u32,
-    /// Request-time authority. Parent-side CDP continuation must use this
-    /// captured client instead of resolving whichever Worker or Document is
-    /// current when the command eventually arrives.
-    pub(crate) load: crate::network::loads::ResourceLoadLease,
-    pub(crate) credentials_mode: RequestCredentialsMode,
-    pub(crate) request_mode: moli_fetch::RequestMode,
+    pub(crate) fetch_id: u64,
     pub(crate) network_partition_key: Option<String>,
     pub(crate) info: PendingSubresourceFetchInfo,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct WorkerPendingFetchContinue {
-    pub(crate) redirect_headers: Option<moli_fetch::RequestHeaders>,
-    pub(crate) fetch_id: u32,
-    pub(crate) internal_id: u64,
-    pub(crate) network_request_handle: Option<SubresourceNetworkRequestHandle>,
+    pub(crate) fetch_id: u64,
     pub(crate) url: Url,
     pub(crate) method: String,
     /// Upload bytes after applying explicit overrides, including an empty body.
@@ -592,12 +492,10 @@ pub(crate) struct WorkerPendingFetchContinue {
     pub(crate) auth: Option<SubresourceAuthCredentials>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct WorkerPendingXhrContinue {
-    pub(crate) redirect_headers: Option<moli_fetch::RequestHeaders>,
-    pub(crate) xhr_id: u32,
-    pub(crate) internal_id: u64,
-    pub(crate) network_request_handle: Option<SubresourceNetworkRequestHandle>,
+    pub(crate) xhr_id: u64,
     pub(crate) url: Url,
     pub(crate) method: String,
     /// Upload bytes after applying explicit overrides, including an empty body.
@@ -606,55 +504,6 @@ pub(crate) struct WorkerPendingXhrContinue {
     pub(crate) intercept_response: bool,
     pub(crate) handle_auth_requests: bool,
     pub(crate) auth: Option<SubresourceAuthCredentials>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum WorkerWebSocketLifecycleEvent {
-    Open {
-        socket_id: u64,
-        document_url: Url,
-        url: Url,
-    },
-    Error {
-        socket_id: u64,
-        document_url: Url,
-        url: Url,
-        error_text: String,
-    },
-    Closing {
-        socket_id: u64,
-        document_url: Url,
-        url: Url,
-    },
-    Close {
-        socket_id: u64,
-        document_url: Url,
-        url: Url,
-        code: u16,
-        reason: String,
-        was_clean: bool,
-    },
-}
-
-impl WorkerWebSocketLifecycleEvent {
-    pub(crate) fn socket_id(&self) -> u64 {
-        match self {
-            Self::Open { socket_id, .. }
-            | Self::Error { socket_id, .. }
-            | Self::Closing { socket_id, .. }
-            | Self::Close { socket_id, .. } => *socket_id,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct WorkerWebSocketFrameEvent {
-    pub(crate) socket_id: u64,
-    pub(crate) document_url: Url,
-    pub(crate) url: Url,
-    pub(crate) direction: WebSocketFrameDirection,
-    pub(crate) opcode: WebSocketFrameOpcode,
-    pub(crate) payload_length: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -697,17 +546,16 @@ impl WorkerRuntimeEvent {
     }
 }
 
-/// Handle held by the parent (main-frame) context to communicate with a
-/// running worker.
+/// Shared handle for worker startup, termination and network cancellation.
 #[derive(Clone, Debug)]
-pub(crate) struct WorkerDevToolsHandle {
+pub(crate) struct WorkerControlHandle {
     network_cancel: moli_fetch::FetchCancelHandle,
     isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
     worker_tx: mpsc::UnboundedSender<WorkerMessage>,
     inspector_tasks: WorkerInspectorTaskRunner,
 }
 
-impl WorkerDevToolsHandle {
+impl WorkerControlHandle {
     pub(crate) fn new(
         wake_tx: mpsc::UnboundedSender<WorkerMessage>,
         isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
@@ -728,50 +576,25 @@ impl WorkerDevToolsHandle {
         &self.inspector_tasks
     }
 
-    pub(crate) fn dispatch_runtime_protocol_message(
-        &self,
-        inspector_session_id: Option<String>,
-        raw_json: String,
-        deferred_response: Option<RendererRuntimeInspectorResponseSender>,
-        response_tx: oneshot::Sender<Result<Vec<RendererRuntimeInspectorMessage>>>,
-    ) -> bool {
-        self.inspector_tasks.append_protocol_message(
-            inspector_session_id,
-            raw_json,
-            deferred_response,
-            response_tx,
-        )
-    }
-
-    pub(crate) fn attach_runtime_inspector_session(
-        &self,
-        inspector_session_id: Option<String>,
-    ) -> bool {
-        self.inspector_tasks.append_attach(inspector_session_id)
-    }
-
-    pub(crate) fn detach_runtime_inspector_session(
-        &self,
-        inspector_session_id: Option<String>,
-    ) -> tokio::sync::oneshot::Receiver<anyhow::Result<()>> {
-        self.inspector_tasks.append_detach(inspector_session_id)
-    }
-
-    pub(crate) fn run_if_waiting_for_debugger(&self) -> bool {
-        self.inspector_tasks.append_run_if_waiting_for_debugger()
-    }
-
-    pub(crate) fn dispose(&self, error: WorkerInspectorError) {
+    fn dispose(&self, error: WorkerInspectorError) {
         self.network_cancel.cancel();
         self.inspector_tasks.dispose(error);
     }
 
-    pub(crate) fn terminate_for_devtools(&self) -> bool {
+    pub(crate) fn terminate(&self) -> bool {
+        self.terminate_with_error(WorkerInspectorError::Closed)
+    }
+
+    fn terminate_with_error(&self, error: WorkerInspectorError) -> bool {
         if let Some(handle) = self.isolate_handle.lock().as_ref() {
             handle.terminate_execution();
         }
-        self.dispose(WorkerInspectorError::Closed);
+        self.dispose(error);
         self.worker_tx.send(WorkerMessage::Terminate).is_ok()
+    }
+
+    fn start(&self) -> bool {
+        self.worker_tx.send(WorkerMessage::Start).is_ok()
     }
 }
 
@@ -782,9 +605,8 @@ pub(crate) struct WorkerHandle {
     rx: Option<mpsc::UnboundedReceiver<WorkerToParentMessage>>,
     /// Join handle for the worker OS thread.
     join_handle: Option<std::thread::JoinHandle<()>>,
-    isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
     termination_requested: Arc<AtomicBool>,
-    devtools: WorkerDevToolsHandle,
+    control: WorkerControlHandle,
 }
 
 impl WorkerHandle {
@@ -812,38 +634,22 @@ impl WorkerHandle {
         isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
         termination_requested: Arc<AtomicBool>,
     ) -> Self {
-        let devtools = WorkerDevToolsHandle::new(tx.clone(), Arc::clone(&isolate_handle));
-        Self::new_with_termination_requested_and_devtools(
-            tx,
-            rx,
-            join_handle,
-            isolate_handle,
-            termination_requested,
-            devtools,
-        )
+        let control = WorkerControlHandle::new(tx.clone(), Arc::clone(&isolate_handle));
+        Self::new_with_control(rx, join_handle, termination_requested, control)
     }
 
-    pub(crate) fn new_with_termination_requested_and_devtools(
-        tx: mpsc::UnboundedSender<WorkerMessage>,
+    pub(crate) fn new_with_control(
         rx: mpsc::UnboundedReceiver<WorkerToParentMessage>,
         join_handle: std::thread::JoinHandle<()>,
-        isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
         termination_requested: Arc<AtomicBool>,
-        devtools: WorkerDevToolsHandle,
+        control: WorkerControlHandle,
     ) -> Self {
         Self {
-            tx,
+            tx: control.worker_tx.clone(),
             rx: Some(rx),
             join_handle: Some(join_handle),
-            isolate_handle,
             termination_requested,
-            devtools,
-        }
-    }
-
-    fn terminate_execution_if_ready(&self) {
-        if let Some(handle) = self.isolate_handle.lock().as_ref() {
-            handle.terminate_execution();
+            control,
         }
     }
 
@@ -852,9 +658,13 @@ impl WorkerHandle {
         // event loop can then reject an already-selected task without relying
         // on ordering between cloned mpsc senders.
         self.termination_requested.store(true, Ordering::Release);
-        self.terminate_execution_if_ready();
-        self.devtools.dispose(WorkerInspectorError::Terminated);
-        let _ = self.tx.send(WorkerMessage::Terminate);
+        let _ = self
+            .control
+            .terminate_with_error(WorkerInspectorError::Terminated);
+    }
+
+    pub(crate) fn start_evaluation(&self) -> bool {
+        self.control.start()
     }
 
     /// Send a message to the worker (`postMessage`).
@@ -876,43 +686,8 @@ impl WorkerHandle {
         }
     }
 
-    pub(crate) fn dispatch_runtime_protocol_message(
-        &self,
-        inspector_session_id: Option<String>,
-        raw_json: String,
-        deferred_response: Option<RendererRuntimeInspectorResponseSender>,
-        response_tx: oneshot::Sender<Result<Vec<RendererRuntimeInspectorMessage>>>,
-    ) -> bool {
-        self.devtools.dispatch_runtime_protocol_message(
-            inspector_session_id,
-            raw_json,
-            deferred_response,
-            response_tx,
-        )
-    }
-
-    pub(crate) fn attach_runtime_inspector_session(
-        &self,
-        inspector_session_id: Option<String>,
-    ) -> bool {
-        self.devtools
-            .attach_runtime_inspector_session(inspector_session_id)
-    }
-
-    pub(crate) fn detach_runtime_inspector_session(
-        &self,
-        inspector_session_id: Option<String>,
-    ) -> tokio::sync::oneshot::Receiver<anyhow::Result<()>> {
-        self.devtools
-            .detach_runtime_inspector_session(inspector_session_id)
-    }
-
-    pub(crate) fn run_if_waiting_for_debugger_for_devtools(&self) -> bool {
-        self.devtools.run_if_waiting_for_debugger()
-    }
-
-    pub(crate) fn devtools_handle(&self) -> WorkerDevToolsHandle {
-        self.devtools.clone()
+    pub(crate) fn control_handle(&self) -> WorkerControlHandle {
+        self.control.clone()
     }
 
     pub(crate) fn set_extra_http_headers(&self, headers: &moli_fetch::RequestHeaders) {
@@ -1185,198 +960,18 @@ impl WorkerHandle {
             .send(WorkerMessage::ServiceWorkerShowNotificationResult(result));
     }
 
-    pub(crate) fn continue_pending_fetch(&self, request: WorkerPendingFetchContinue) {
-        let _ = self.tx.send(WorkerMessage::ContinuePendingFetch(request));
-    }
-
-    pub(crate) fn continue_pending_xhr(&self, request: WorkerPendingXhrContinue) {
-        let _ = self.tx.send(WorkerMessage::ContinuePendingXhr(request));
-    }
-
-    pub(crate) fn continue_pending_csp_report(&self, request: WorkerPendingFetchContinue) {
-        let _ = self
-            .tx
-            .send(WorkerMessage::ContinuePendingCspReport(request));
-    }
-
-    pub(crate) fn continue_pending_fetch_response(
-        &self,
-        request: WorkerPendingFetchContinue,
-        response_code: Option<u16>,
-        response_headers: Option<Vec<(String, Vec<u8>)>>,
-    ) {
-        let _ = self.tx.send(WorkerMessage::ContinuePendingFetchResponse {
-            request,
-            response_code,
-            response_headers,
-        });
-    }
-
-    pub(crate) fn continue_pending_xhr_response(
-        &self,
-        request: WorkerPendingXhrContinue,
-        response_code: Option<u16>,
-        response_headers: Option<Vec<(String, Vec<u8>)>>,
-    ) {
-        let _ = self.tx.send(WorkerMessage::ContinuePendingXhrResponse {
-            request,
-            response_code,
-            response_headers,
-        });
-    }
-
-    pub(crate) fn fail_pending_fetch(
-        &self,
-        request: WorkerPendingFetchContinue,
-        error_text: String,
-    ) {
-        let _ = self.tx.send(WorkerMessage::FailPendingFetch {
-            request,
-            error_text,
-        });
-    }
-
-    pub(crate) fn fail_pending_xhr(&self, request: WorkerPendingXhrContinue, error_text: String) {
-        let _ = self.tx.send(WorkerMessage::FailPendingXhr {
-            request,
-            error_text,
-        });
-    }
-
-    pub(crate) fn fail_pending_csp_report(
-        &self,
-        request: WorkerPendingFetchContinue,
-        error_text: String,
-    ) {
-        let _ = self.tx.send(WorkerMessage::FailPendingCspReport {
-            request,
-            error_text,
-        });
-    }
-
-    pub(crate) fn fail_pending_fetch_auth(
-        &self,
-        request: WorkerPendingFetchContinue,
-        error_text: String,
-    ) {
-        let _ = self.tx.send(WorkerMessage::FailPendingFetchAuth {
-            request,
-            error_text,
-        });
-    }
-
-    pub(crate) fn fail_pending_xhr_auth(
-        &self,
-        request: WorkerPendingXhrContinue,
-        error_text: String,
-    ) {
-        let _ = self.tx.send(WorkerMessage::FailPendingXhrAuth {
-            request,
-            error_text,
-        });
-    }
-
-    pub(crate) fn fail_pending_fetch_response(
-        &self,
-        request: WorkerPendingFetchContinue,
-        error_text: String,
-    ) {
-        let _ = self.tx.send(WorkerMessage::FailPendingFetchResponse {
-            request,
-            error_text,
-        });
-    }
-
-    pub(crate) fn fail_pending_xhr_response(
-        &self,
-        request: WorkerPendingXhrContinue,
-        error_text: String,
-    ) {
-        let _ = self.tx.send(WorkerMessage::FailPendingXhrResponse {
-            request,
-            error_text,
-        });
-    }
-
-    pub(crate) fn fulfill_pending_fetch(
-        &self,
-        request: WorkerPendingFetchContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    ) {
-        let _ = self.tx.send(WorkerMessage::FulfillPendingFetch {
-            request,
-            response_code,
-            response_headers,
-            response_body,
-        });
-    }
-
-    pub(crate) fn fulfill_pending_xhr(
-        &self,
-        request: WorkerPendingXhrContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    ) {
-        let _ = self.tx.send(WorkerMessage::FulfillPendingXhr {
-            request,
-            response_code,
-            response_headers,
-            response_body,
-        });
-    }
-
-    pub(crate) fn fulfill_pending_csp_report(
-        &self,
-        request: WorkerPendingFetchContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    ) {
-        let _ = self.tx.send(WorkerMessage::FulfillPendingCspReport {
-            request,
-            response_code,
-            response_headers,
-            response_body,
-        });
-    }
-
-    pub(crate) fn fulfill_pending_fetch_response(
-        &self,
-        request: WorkerPendingFetchContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    ) {
-        let _ = self.tx.send(WorkerMessage::FulfillPendingFetchResponse {
-            request,
-            response_code,
-            response_headers,
-            response_body,
-        });
-    }
-
-    pub(crate) fn fulfill_pending_xhr_response(
-        &self,
-        request: WorkerPendingXhrContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    ) {
-        let _ = self.tx.send(WorkerMessage::FulfillPendingXhrResponse {
-            request,
-            response_code,
-            response_headers,
-            response_body,
-        });
-    }
-
     pub(crate) fn take_receiver(
         &mut self,
     ) -> Option<mpsc::UnboundedReceiver<WorkerToParentMessage>> {
         self.rx.take()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_test_receiver(
+        &mut self,
+        rx: mpsc::UnboundedReceiver<WorkerToParentMessage>,
+    ) {
+        self.rx = Some(rx);
     }
 
     #[cfg(test)]
@@ -1415,3 +1010,8 @@ impl Drop for WorkerHandle {
         let _ = self.join_handle.take();
     }
 }
+
+#[cfg(test)]
+use crate::protocol_types::{
+    PendingSubresourceContinueEvent, PendingSubresourceFetchInfo, SubresourceAuthCredentials,
+};

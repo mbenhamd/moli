@@ -43,6 +43,7 @@ class GroupSelectionTests(unittest.TestCase):
         self.assertIn("locale-timezone-inputs", DEFAULT_GROUP_NAMES)
         self.assertIn("webgl-viewport", DEFAULT_GROUP_NAMES)
         self.assertIn("svg-rect", DEFAULT_GROUP_NAMES)
+        self.assertIn("web-security", DEFAULT_GROUP_NAMES)
         self.assertIn("layout-policy", DEFAULT_GROUP_NAMES)
         self.assertIn("scrollbar-visibility", DEFAULT_GROUP_NAMES)
         self.assertIn("target-lifecycle", DEFAULT_GROUP_NAMES)
@@ -53,7 +54,7 @@ class GroupSelectionTests(unittest.TestCase):
             ("protocol-schema", "puppeteer"),
         )
 
-    def test_only_external_environment_groups_remain_opt_in(self) -> None:
+    def test_external_clients_remain_opt_in(self) -> None:
         optional_names = tuple(group.name for group in OPTIONAL_EXTERNAL_GROUPS)
 
         self.assertEqual(

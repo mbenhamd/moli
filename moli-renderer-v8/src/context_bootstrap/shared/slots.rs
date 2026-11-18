@@ -37,16 +37,9 @@ pub(in crate::context_bootstrap) const WINDOW_PARENT_SLOT: &str = "__moliWindowP
 pub(in crate::context_bootstrap) const WINDOW_TOP_SLOT: &str = "__moliWindowTop";
 pub(in crate::context_bootstrap) const WINDOW_FRAMES_SLOT: &str = "__moliWindowFrames";
 // Each SimpleEventTarget stores its own listener registry directly under this key.
-pub(crate) const SIMPLE_EVENT_TARGET_LISTENERS_SLOT: &str = "__moliEventTargetListeners";
+pub(crate) use moli_webapi::event_target::SIMPLE_EVENT_TARGET_LISTENERS_SLOT;
 pub(in crate::context_bootstrap) const DOM_IMPLEMENTATION_SINGLETON_SLOT: &str =
     "__moliDOMImplementationSingleton";
-pub(in crate::context_bootstrap) const URL_HREF_SLOT: &str = "__moliUrlHref";
-pub(in crate::context_bootstrap) const URL_SEARCH_PARAMS_SLOT: &str = "__moliUrlSearchParams";
-pub(in crate::context_bootstrap) const URL_SEARCH_PARAMS_PAIRS_SLOT: &str =
-    "__moliUrlSearchParamsPairs";
-pub(in crate::context_bootstrap) const URL_SEARCH_PARAMS_OWNER_SLOT: &str =
-    "__moliUrlSearchParamsOwner";
-pub(in crate::context_bootstrap) const FORM_DATA_ENTRIES_SLOT: &str = "__moliFormDataEntries";
 pub(in crate::context_bootstrap) const STATIC_RANGE_START_CONTAINER_STORAGE_KEY: &str =
     "__moliStaticRangeStartContainer";
 pub(in crate::context_bootstrap) const STATIC_RANGE_START_OFFSET_STORAGE_KEY: &str =
@@ -115,8 +108,6 @@ pub(in crate::context_bootstrap) const PERFORMANCE_OBSERVER_QUEUE_SLOT: &str =
     "__moliPerformanceObserverQueue";
 pub(in crate::context_bootstrap) const PERFORMANCE_OBSERVER_SUPPORTED_ENTRY_TYPES_SLOT: &str =
     "__moliPerformanceObserverSupportedEntryTypes";
-pub(in crate::context_bootstrap) const PERFORMANCE_ENTRY_LIST_ENTRIES_SLOT: &str =
-    "__moliPerformanceEntryListEntries";
 pub(in crate::context_bootstrap) const PERFORMANCE_ENTRIES_SLOT: &str = "__moliPerformanceEntries";
 pub(in crate::context_bootstrap) const MEDIA_QUERY_LIST_MEDIA_SLOT: &str =
     "__moliMediaQueryListMedia";
@@ -126,117 +117,8 @@ pub(in crate::context_bootstrap) const MEDIA_QUERY_LIST_ONCHANGE_SLOT: &str =
     "__moliMediaQueryListOnchange";
 pub(in crate::context_bootstrap) const MEDIA_QUERY_LIST_REGISTRY_SLOT: &str =
     "__moliMediaQueryLists";
-pub(in crate::context_bootstrap) const CRYPTO_KEY_KIND_SLOT: &str = "__moliCryptoKeyKind";
-pub(in crate::context_bootstrap) const CRYPTO_KEY_ALGORITHM_SLOT: &str = "__moliCryptoKeyAlgorithm";
-pub(in crate::context_bootstrap) const CRYPTO_KEY_EXTRACTABLE_SLOT: &str =
-    "__moliCryptoKeyExtractable";
-pub(in crate::context_bootstrap) const CRYPTO_KEY_USAGES_SLOT: &str = "__moliCryptoKeyUsages";
-pub(in crate::context_bootstrap) const CRYPTO_KEY_VISIBLE_ALGORITHM_SLOT: &str =
-    "__moliCryptoKeyVisibleAlgorithm";
-pub(in crate::context_bootstrap) const CRYPTO_KEY_VISIBLE_USAGES_SLOT: &str =
-    "__moliCryptoKeyVisibleUsages";
-pub(in crate::context_bootstrap) const CRYPTO_KEY_BYTES_SLOT: &str = "__moliCryptoKeyBytes";
-pub(in crate::context_bootstrap) const READABLE_STREAM_QUEUE_SLOT: &str =
-    "__moliReadableStreamQueue";
-pub(in crate::context_bootstrap) const READABLE_STREAM_QUEUE_HEAD_SLOT: &str =
-    "__moliReadableStreamQueueHead";
-pub(in crate::context_bootstrap) const READABLE_STREAM_CLOSED_SLOT: &str =
-    "__moliReadableStreamClosed";
-pub(in crate::context_bootstrap) const READABLE_STREAM_ERROR_SLOT: &str =
-    "__moliReadableStreamError";
-pub(in crate::context_bootstrap) const READABLE_STREAM_LOCKED_SLOT: &str =
-    "__moliReadableStreamLocked";
-pub(in crate::context_bootstrap) const READABLE_STREAM_DISTURBED_SLOT: &str =
-    "__moliReadableStreamDisturbed";
-pub(in crate::context_bootstrap) const READABLE_STREAM_HWM_SLOT: &str =
-    "__moliReadableStreamHighWaterMark";
-pub(in crate::context_bootstrap) const READABLE_STREAM_CONTROLLER_SLOT: &str =
-    "__moliReadableStreamController";
-pub(in crate::context_bootstrap) const READABLE_STREAM_BYTE_STREAM_SLOT: &str =
-    "__moliReadableStreamByteStream";
-pub(in crate::context_bootstrap) const READABLE_BYTE_STREAM_AUTO_ALLOCATE_CHUNK_SIZE_SLOT: &str =
-    "__moliReadableByteStreamAutoAllocateChunkSize";
-pub(in crate::context_bootstrap) const READABLE_BYTE_STREAM_PENDING_PULL_INTOS_SLOT: &str =
-    "__moliReadableByteStreamPendingPullIntos";
-pub(in crate::context_bootstrap) const READABLE_BYTE_STREAM_BYOB_REQUEST_SLOT: &str =
-    "__moliReadableByteStreamByobRequest";
-pub(in crate::context_bootstrap) const READABLE_STREAM_PULL_STATE_SLOT: &str =
-    "__moliReadableStreamPullState";
-pub(crate) const READABLE_STREAM_CHILD_REALM_HANDLED_REJECTION_SLOT: &str =
-    "__moliReadableStreamChildRealmHandledRejection";
-pub(in crate::context_bootstrap) const READABLE_STREAM_PENDING_READS_SLOT: &str =
-    "__moliReadableStreamPendingReads";
-pub(in crate::context_bootstrap) const READABLE_STREAM_PENDING_READ_PROMISE_SLOT: &str =
-    "__moliReadableStreamPendingReadPromise";
-pub(in crate::context_bootstrap) const READABLE_STREAM_PENDING_CLOSED_PROMISES_SLOT: &str =
-    "__moliReadableStreamPendingClosedPromises";
-pub(in crate::context_bootstrap) const READABLE_STREAM_PIPE_OWNER_SLOT: &str =
-    "__moliReadableStreamPipeOwner";
-pub(in crate::context_bootstrap) const READABLE_STREAM_TEE_STATE_SLOT: &str =
-    "__moliReadableStreamTeeState";
-pub(in crate::context_bootstrap) const READABLE_STREAM_READER_STREAM_SLOT: &str =
-    "__moliReadableStreamReaderStream";
-pub(in crate::context_bootstrap) const READABLE_STREAM_READER_CLOSED_PROMISE_SLOT: &str =
-    "__moliReadableStreamReaderClosedPromise";
-pub(in crate::context_bootstrap) const READABLE_STREAM_READER_CLOSED_PROMISE_ENTRY_SLOT: &str =
-    "__moliReadableStreamReaderClosedPromiseEntry";
-pub(in crate::context_bootstrap) const READABLE_STREAM_BYOB_REQUEST_CONTROLLER_SLOT: &str =
-    "__moliReadableStreamByobRequestController";
-pub(in crate::context_bootstrap) const READABLE_STREAM_BYOB_REQUEST_VIEW_SLOT: &str =
-    "__moliReadableStreamByobRequestView";
-pub(in crate::context_bootstrap) const READABLE_STREAM_ITERATOR_READER_SLOT: &str =
-    "__moliReadableStreamIteratorReader";
-pub(in crate::context_bootstrap) const READABLE_STREAM_ITERATOR_CLOSED_SLOT: &str =
-    "__moliReadableStreamIteratorClosed";
-pub(in crate::context_bootstrap) const READABLE_STREAM_ITERATOR_PREVENT_CANCEL_SLOT: &str =
-    "__moliReadableStreamIteratorPreventCancel";
-pub(in crate::context_bootstrap) const READABLE_STREAM_ITERATOR_RETURNING_SLOT: &str =
-    "__moliReadableStreamIteratorReturning";
-pub(in crate::context_bootstrap) const READABLE_STREAM_ITERATOR_OPERATION_ACTIVE_SLOT: &str =
-    "__moliReadableStreamIteratorOperationActive";
-pub(in crate::context_bootstrap) const READABLE_STREAM_ITERATOR_OPERATIONS_SLOT: &str =
-    "__moliReadableStreamIteratorOperations";
-pub(in crate::context_bootstrap) const READABLE_STREAM_ASYNC_ITERATOR_PROTOTYPE_SLOT: &str =
-    "__moliReadableStreamAsyncIteratorPrototype";
-pub(in crate::context_bootstrap) const WRITABLE_STREAM_LOCKED_SLOT: &str =
-    "__moliWritableStreamLocked";
-pub(in crate::context_bootstrap) const WRITABLE_STREAM_SINK_SLOT: &str = "__moliWritableStreamSink";
-pub(in crate::context_bootstrap) const WRITABLE_STREAM_CONTROLLER_SLOT: &str =
-    "__moliWritableStreamController";
-pub(in crate::context_bootstrap) const WRITABLE_STREAM_ALGORITHMS_SLOT: &str =
-    "__moliWritableStreamAlgorithms";
-pub(in crate::context_bootstrap) const WRITABLE_STREAM_WRITER_STREAM_SLOT: &str =
-    "__moliWritableStreamWriterStream";
-pub(in crate::context_bootstrap) const WRITABLE_STREAM_CURRENT_WRITER_SLOT: &str =
-    "__moliWritableStreamCurrentWriter";
-pub(in crate::context_bootstrap) const WRITABLE_STREAM_WRITER_READY_PROMISE_SLOT: &str =
-    "__moliWritableStreamWriterReadyPromise";
-pub(in crate::context_bootstrap) const WRITABLE_STREAM_WRITER_CLOSED_PROMISE_SLOT: &str =
-    "__moliWritableStreamWriterClosedPromise";
-pub(in crate::context_bootstrap) const WRITABLE_STREAM_CLOSED_SLOT: &str =
-    "__moliWritableStreamClosed";
-pub(in crate::context_bootstrap) const WRITABLE_STREAM_TARGET_READABLE_SLOT: &str =
-    "__moliWritableStreamTargetReadable";
-pub(in crate::context_bootstrap) const WRITABLE_STREAM_TRANSFORMER_SLOT: &str =
-    "__moliWritableStreamTransformer";
-pub(in crate::context_bootstrap) const WRITABLE_STREAM_MODE_SLOT: &str = "__moliWritableStreamMode";
-pub(in crate::context_bootstrap) const WRITABLE_STREAM_STRATEGY_SLOT: &str =
-    "__moliWritableStreamStrategy";
-pub(in crate::context_bootstrap) const WRITABLE_STREAM_PIPE_OWNER_SLOT: &str =
-    "__moliWritableStreamPipeOwner";
-pub(in crate::context_bootstrap) const TRANSFORM_STREAM_READABLE_SLOT: &str =
-    "__moliTransformStreamReadable";
-pub(in crate::context_bootstrap) const TRANSFORM_STREAM_WRITABLE_SLOT: &str =
-    "__moliTransformStreamWritable";
-pub(in crate::context_bootstrap) const STREAM_CONTROLLER_STREAM_SLOT: &str =
-    "__moliStreamControllerStream";
-pub(in crate::context_bootstrap) const STREAM_CONTROLLER_SIGNAL_SLOT: &str =
-    "__moliStreamControllerSignal";
-pub(in crate::context_bootstrap) const STREAM_CONTROLLER_WRITABLE_STREAM_SLOT: &str =
-    "__moliStreamControllerWritableStream";
-pub(in crate::context_bootstrap) const STREAM_CONTROLLER_ALGORITHMS_SLOT: &str =
-    "__moliStreamControllerAlgorithms";
-pub(in crate::context_bootstrap) const TRANSFORM_STREAM_CONTROLLER_FINISH_PROMISE_SLOT: &str =
-    "__moliTransformStreamControllerFinishPromise";
-pub(in crate::context_bootstrap) const TRANSFORM_STREAM_CONTROLLER_FINISH_RESIDENCE_SLOT: &str =
-    "__moliTransformStreamControllerFinishResidence";
+pub(in crate::context_bootstrap) use moli_webapi::streams::slots::{
+    READABLE_STREAM_CONTROLLER_SLOT, READABLE_STREAM_HWM_SLOT, READABLE_STREAM_PENDING_READS_SLOT,
+    STREAM_CONTROLLER_ALGORITHMS_SLOT, TRANSFORM_STREAM_READABLE_SLOT,
+    TRANSFORM_STREAM_WRITABLE_SLOT, WRITABLE_STREAM_SINK_SLOT,
+};

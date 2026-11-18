@@ -79,6 +79,7 @@ impl super::PageDocumentCommandTarget {
             .as_ref()
             .or_else(|| self.network_pause.as_ref()?.response_body())
     }
+    #[cfg(feature = "devtools")]
     pub fn update_native_interception_policy(
         &self,
         classes: crate::page::SubresourceInterceptionClasses,
@@ -89,6 +90,12 @@ impl super::PageDocumentCommandTarget {
         } else {
             false
         }
+    }
+
+    pub fn observes_worker_network(&self) -> bool {
+        self.network_pause
+            .as_ref()
+            .is_some_and(ResourceInterceptionPause::observes_worker_network)
     }
 
     pub fn has_native_network_pause(&self) -> bool {
@@ -106,6 +113,7 @@ impl super::PageDocumentCommandTarget {
         self
     }
 
+    #[cfg(feature = "devtools")]
     pub fn start_resource_command(
         &self,
         command: crate::RendererPageCommand,

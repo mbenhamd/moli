@@ -39,32 +39,40 @@ use crate::types::ScriptSkipReason;
 use moli_page_types::{
     ContentSecurityPolicyIssueSnapshot, ContentSecurityPolicyViolationType, InspectorIssueSnapshot,
     InspectorSourceCodeLocationSnapshot, QuirksModeIssueSnapshot, ScriptObservableOutput,
-    ScriptObservableOutputItem, V8InspectorSessionAttach,
+    ScriptObservableOutputItem,
 };
-use std::{
-    collections::{BTreeMap, HashMap},
-    marker::PhantomData,
-    ptr::NonNull,
-    rc::Rc,
-    sync::Arc,
-    time::Instant,
-};
+use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::ptr::NonNull;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Instant;
 use url::Url;
 
 mod auxiliary_page;
 pub(crate) mod backend_node_registry;
 mod command_turn_output;
+#[cfg(feature = "devtools")]
 mod css_agent_state;
+#[cfg(feature = "devtools")]
+mod devtools;
 mod document_lifecycle_turn;
 pub(crate) mod dom_agent_state;
+#[cfg(feature = "devtools")]
 mod dom_mutations;
+#[cfg(feature = "devtools")]
 mod dom_search;
 #[cfg(feature = "ace-protocol")]
 mod extension_host;
 mod followed_navigation;
+#[cfg(feature = "devtools")]
 mod frontend_node_bindings;
 mod javascript_navigation_lifecycle;
 mod main_document_lifecycle_completion;
+#[cfg(feature = "devtools")]
+mod page_action_window;
+#[cfg(not(feature = "devtools"))]
+#[path = "page_action_window_disabled.rs"]
 mod page_action_window;
 mod page_broadcast_channel_delivery;
 mod page_callback_task_completion;
@@ -161,6 +169,7 @@ mod page_task_checkpoint;
 mod page_task_completion;
 
 use backend_node_registry::new_shared_renderer_backend_node_registry;
+#[cfg(feature = "devtools")]
 use css_agent_state::RendererCssAgentSessionState;
 use dom_agent_state::RendererDomAgentState;
 pub(in crate::runtime) use followed_navigation::{
@@ -1103,26 +1112,6 @@ pub(crate) struct PageVmEnvConfig {
 }
 
 impl PageVmEnvConfig {
-    fn inspector_protocol_configurations(
-        &self,
-    ) -> BTreeMap<DevToolsSessionKey, RendererInspectorProtocolConfiguration> {
-        self.runtime_inspector_session_restore_snapshots
-            .iter()
-            .filter(|restore| restore.protocol_configuration.requires_restore())
-            .map(|restore| {
-                (
-                    DevToolsSessionKey::from_wire_session_id(
-                        restore
-                            .inspector_session_id
-                            .as_deref()
-                            .filter(|id| !id.is_empty()),
-                    ),
-                    restore.protocol_configuration.clone(),
-                )
-            })
-            .collect()
-    }
-
     pub(crate) fn apply_navigation_response_headers(
         &mut self,
         final_url: &Url,
@@ -1664,9 +1653,9 @@ pub(crate) struct PageVm {
         Arc<ScriptExecutionReport>,
     )>,
     dom_agent_state: RendererDomAgentState,
-    pending_dom_mutation_event_batches: Vec<RendererDomMutationEventBatch>,
+    #[cfg(feature = "devtools")]
+    pub(super) devtools: devtools::PageDevToolsState,
     last_published_document_title: String,
-    css_agent_sessions: HashMap<Option<String>, RendererCssAgentSessionState>,
     // Page-owned task queue lives on the page VM itself so parse-time turns and later lifecycle
     // turns share one owner-lane carrier. The runtime still uses it in narrow slices today, but
     // it is now a page resource rather than two unrelated local queues created in different
@@ -1690,8 +1679,6 @@ pub(crate) struct PageVm {
     pub(super) permission_overrides: Vec<crate::protocol_types::PermissionOverrideRegistration>,
     pub(super) document_start_scripts: Vec<DocumentStartScript>,
     pub(super) runtime_bindings: Vec<crate::protocol_types::RuntimeBindingRegistration>,
-    pub(super) runtime_inspector_protocol_configurations:
-        BTreeMap<DevToolsSessionKey, RendererInspectorProtocolConfiguration>,
     pub(super) extra_http_headers: moli_fetch::RequestHeaders,
     pub(super) document_settings: moli_page_types::DocumentSettings,
     pub(super) network_offline: bool,
@@ -1871,20 +1858,6 @@ impl PageVm {
         self.absorb_pending_dom_mutations_into_output_journal();
         self.record_document_title_change_if_needed();
         self.vm_mut().settle_renderer_output_publication()
-    }
-
-    /// Nested Main dispatch cannot end the suspended outer command scope.
-    /// Drain its ready prefix, materialize native DOM facts, and use the same
-    /// Inspector-state resolution as ordinary owner settlement before replying.
-    pub(super) fn publish_nested_command_output_prefix(
-        &mut self,
-    ) -> Option<super::RendererOutputFence> {
-        self.vm().append_live_command_output_prefix();
-        self.absorb_pending_dom_mutations_into_output_journal();
-        self.record_document_title_change_if_needed();
-        let publication = self.vm_mut().settle_renderer_output_prefix()?;
-        let journal = self.vm().renderer_command_output_journal();
-        journal.publish_resolved_prefix_and_declare_fence(publication)
     }
 
     fn record_document_title_change_if_needed(&mut self) {
@@ -2437,6 +2410,7 @@ impl PageVm {
             restores.is_empty() || is_on_named_owner_execution_lane_for(&self.local_executor),
             "runtime inspector session restore must execute on the matching named owner lane"
         );
+        #[cfg(feature = "devtools")]
         for restore in restores {
             self.vm_mut().initialize_inspector_session_after_attach(
                 restore.inspector_session_id.as_deref(),
@@ -2450,35 +2424,6 @@ impl PageVm {
             self.vm_mut().receive_web_mcp_navigation(id);
         }
         Ok(())
-    }
-
-    fn runtime_inspector_session_restore_snapshots(
-        &self,
-    ) -> Vec<RendererInspectorSessionRestoreSnapshot> {
-        let mut snapshots = self
-            .runtime_inspector_protocol_configurations
-            .iter()
-            .map(|(session_key, protocol_configuration)| {
-                (
-                    session_key.clone(),
-                    RendererInspectorSessionRestoreSnapshot {
-                        inspector_session_id: session_key.wire_session_id().map(str::to_owned),
-                        protocol_configuration: protocol_configuration.clone(),
-                        ..RendererInspectorSessionRestoreSnapshot::default()
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        for (session_key, state) in self.vm().inspector_v8_session_states() {
-            snapshots
-                .entry(session_key.clone())
-                .or_insert_with(|| RendererInspectorSessionRestoreSnapshot {
-                    inspector_session_id: session_key.wire_session_id().map(str::to_owned),
-                    ..RendererInspectorSessionRestoreSnapshot::default()
-                })
-                .v8_attach = V8InspectorSessionAttach::Reattach(state);
-        }
-        snapshots.into_values().collect()
     }
 
     pub(super) fn run_document_start_scripts_on_named_owner_lane<F>(
@@ -4022,13 +3967,6 @@ impl PageVm {
         self.capture_page_state_with_policy(capture_policy)
     }
 
-    /// A debugger callback already holds the document isolate. The nested
-    /// handler can capture native metadata/reports, but must not read JS
-    /// location objects or snapshot globals through another isolate borrow.
-    pub(super) fn capture_nested_page_state(&mut self) -> Result<PageVmStateCapture> {
-        self.capture_page_state_with_policy(super::RendererPageStateCapturePolicy::ProtocolTurn)
-    }
-
     #[cfg(test)]
     fn capture_page_state(&mut self) -> Result<PageVmStateCapture> {
         self.refresh_document_url_from_location();
@@ -4505,9 +4443,9 @@ impl PageVm {
             report,
             report_snapshot_cache: None,
             dom_agent_state,
-            pending_dom_mutation_event_batches: Vec::new(),
+            #[cfg(feature = "devtools")]
+            devtools: devtools::PageDevToolsState::new(env),
             last_published_document_title: String::new(),
-            css_agent_sessions: HashMap::new(),
             page_task_queue,
             page_action_window: page_action_window::RendererPageActionWindow::default(),
             next_module_script_evaluation_reaction_id: 0,
@@ -4518,7 +4456,6 @@ impl PageVm {
             permission_overrides: env.permission_overrides.clone(),
             document_start_scripts: env.document_start_scripts.clone(),
             runtime_bindings: env.runtime_bindings.clone(),
-            runtime_inspector_protocol_configurations: env.inspector_protocol_configurations(),
             extra_http_headers: env.extra_http_headers.clone(),
             document_settings: env.document_settings.clone(),
             network_offline: env.network_offline,
@@ -4586,6 +4523,7 @@ impl PageVm {
         self.vm_mut().set_network_offline(env.network_offline);
         self.vm_mut()
             .set_blocked_url_patterns(&env.blocked_url_patterns);
+        #[cfg(feature = "devtools")]
         self.vm_mut()
             .set_fetch_subresource_interception(env.fetch_subresource_interception_classes);
         if matches!(
@@ -4911,291 +4849,6 @@ impl PageVm {
             })
     }
 
-    pub(crate) fn configure_document_dom_agent_session(
-        &mut self,
-        inspector_session_id: Option<&str>,
-        include_whitespace: bool,
-    ) {
-        let document_id = self.current_dom_agent_document_id();
-        self.dom_agent_state.set_include_whitespace(
-            inspector_session_id,
-            document_id,
-            include_whitespace,
-        );
-    }
-
-    pub(super) fn document_dom_agent_includes_whitespace(
-        &self,
-        inspector_session_id: Option<&str>,
-    ) -> bool {
-        self.dom_agent_state
-            .includes_whitespace(inspector_session_id, self.current_dom_agent_document_id())
-    }
-
-    pub(super) fn discard_document_frontend_bindings(
-        &mut self,
-        inspector_session_id: Option<&str>,
-    ) {
-        let document_id = self.current_dom_agent_document_id();
-        self.dom_agent_state
-            .discard_frontend_bindings(inspector_session_id, document_id);
-        self.sync_devtools_dom_mutation_recording_interest();
-    }
-
-    pub(in crate::runtime::page_vm) fn register_document_search_results(
-        &mut self,
-        inspector_session_id: Option<&str>,
-        matches: Vec<dom_search::DocumentSearchMatch>,
-    ) -> crate::RendererDomSearchRegistration {
-        let mut backend_node_ids = Vec::with_capacity(matches.len());
-        for search_match in matches {
-            let backend_node_id = match search_match {
-                dom_search::DocumentSearchMatch::Live(handle) => {
-                    let Some(backend_node_id) =
-                        self.renderer_backend_node_id_for_live_handle(handle)
-                    else {
-                        continue;
-                    };
-                    backend_node_id
-                }
-                dom_search::DocumentSearchMatch::Generated { host, identity } => {
-                    let Some(backend_node_id) =
-                        self.renderer_backend_node_id_for_inspector_node(host, identity)
-                    else {
-                        continue;
-                    };
-                    backend_node_id
-                }
-            };
-            backend_node_ids.push(backend_node_id);
-        }
-        let document_id = self.current_dom_agent_document_id();
-        self.dom_agent_state.register_search_results(
-            inspector_session_id,
-            document_id,
-            backend_node_ids,
-        )
-    }
-
-    pub(super) fn document_frontend_node_id_for_backend_node_id(
-        &mut self,
-        inspector_session_id: Option<&str>,
-        backend_node_id: u32,
-    ) -> u32 {
-        let document_id = self.current_dom_agent_document_id();
-        self.dom_agent_state.frontend_node_id_for_backend_node_id(
-            inspector_session_id,
-            document_id,
-            backend_node_id,
-        )
-    }
-
-    pub(super) fn document_frontend_node_id_for_backend_node_id_in_whitespace_projection(
-        &mut self,
-        inspector_session_id: Option<&str>,
-        backend_node_id: u32,
-        include_whitespace: bool,
-        is_whitespace_text: bool,
-    ) -> u32 {
-        // Chromium keeps the node's backend identity and any search-result
-        // position, but represents a node hidden from this session's Inspector
-        // projection with frontend id 0. In particular, do not create a binding
-        // that another command can use to re-expose the whitespace node.
-        if !include_whitespace && is_whitespace_text {
-            return 0;
-        }
-        self.document_frontend_node_id_for_backend_node_id(inspector_session_id, backend_node_id)
-    }
-
-    pub(super) fn document_node_is_published(
-        &self,
-        inspector_session_id: Option<&str>,
-        backend_node_id: u32,
-    ) -> bool {
-        self.dom_agent_state.node_is_published(
-            inspector_session_id,
-            self.current_dom_agent_document_id(),
-            backend_node_id,
-        )
-    }
-
-    pub(super) fn existing_document_frontend_node_id(
-        &self,
-        inspector_session_id: Option<&str>,
-        backend_node_id: u32,
-    ) -> Option<u32> {
-        self.dom_agent_state
-            .frontend_node_id_for_existing_backend_node_id(
-                inspector_session_id,
-                self.current_dom_agent_document_id(),
-                backend_node_id,
-            )
-    }
-
-    pub(super) fn document_frontend_node_binding(
-        &mut self,
-        inspector_session_id: Option<&str>,
-        frontend_node_id: u32,
-    ) -> crate::RendererDomFrontendNodeBindingResolution {
-        let document_id = self.current_dom_agent_document_id();
-        self.dom_agent_state.frontend_node_binding(
-            inspector_session_id,
-            document_id,
-            frontend_node_id,
-        )
-    }
-
-    /// Resolve an Inspector input without exposing an internal-only binding.
-    pub(super) fn published_document_frontend_node_binding(
-        &mut self,
-        inspector_session_id: Option<&str>,
-        frontend_node_id: u32,
-    ) -> crate::RendererDomFrontendNodeBindingResolution {
-        match self.document_frontend_node_binding(inspector_session_id, frontend_node_id) {
-            crate::RendererDomFrontendNodeBindingResolution::BackendNodeId(backend_node_id)
-                if self.document_node_is_published(inspector_session_id, backend_node_id) =>
-            {
-                crate::RendererDomFrontendNodeBindingResolution::BackendNodeId(backend_node_id)
-            }
-            _ => crate::RendererDomFrontendNodeBindingResolution::NotFound,
-        }
-    }
-
-    pub(super) fn register_document_bidi_node_binding(
-        &mut self,
-        inspector_session_id: Option<&str>,
-        shared_id: String,
-        backend_node_id: u32,
-    ) {
-        let document_id = self.current_dom_agent_document_id();
-        self.dom_agent_state.register_bidi_node_binding(
-            inspector_session_id,
-            document_id,
-            shared_id,
-            backend_node_id,
-        );
-    }
-
-    pub(super) fn document_bidi_node_binding(
-        &mut self,
-        inspector_session_id: Option<&str>,
-        shared_id: &str,
-    ) -> crate::RendererDomBidiNodeBindingResolution {
-        let document_id = self.current_dom_agent_document_id();
-        self.dom_agent_state
-            .bidi_node_binding(inspector_session_id, document_id, shared_id)
-    }
-
-    pub(super) fn document_bidi_node_shared_id_for_backend_node_id(
-        &mut self,
-        inspector_session_id: Option<&str>,
-        backend_node_id: u32,
-    ) -> crate::RendererDomBidiNodeSharedIdResolution {
-        let document_id = self.current_dom_agent_document_id();
-        self.dom_agent_state
-            .bidi_node_shared_id_for_backend_node_id(
-                inspector_session_id,
-                document_id,
-                backend_node_id,
-            )
-    }
-
-    pub(super) fn document_search_results(
-        &mut self,
-        inspector_session_id: Option<&str>,
-        search_id: &str,
-        from_index: usize,
-        to_index: usize,
-    ) -> crate::RendererDomSearchResultsResolution {
-        let document_id = self.current_dom_agent_document_id();
-        self.dom_agent_state.search_results_slice(
-            inspector_session_id,
-            document_id,
-            search_id,
-            from_index,
-            to_index,
-        )
-    }
-
-    pub(super) fn discard_document_search_results(
-        &mut self,
-        inspector_session_id: Option<&str>,
-        search_id: &str,
-    ) {
-        let document_id = self.current_dom_agent_document_id();
-        self.dom_agent_state
-            .discard_search_results(inspector_session_id, document_id, search_id);
-    }
-
-    pub(super) fn set_document_node_stack_traces_enabled(
-        &mut self,
-        inspector_session_id: Option<&str>,
-        enabled: bool,
-    ) {
-        let document_id = self.current_dom_agent_document_id();
-        self.dom_agent_state.set_node_stack_traces_enabled(
-            inspector_session_id,
-            document_id,
-            enabled,
-        );
-    }
-
-    pub(super) fn document_node_stack_trace(
-        &mut self,
-        inspector_session_id: Option<&str>,
-        frontend_node_id: u32,
-    ) -> crate::RendererDomNodeStackTraceResolution {
-        let document_id = self.current_dom_agent_document_id();
-        let crate::RendererDomFrontendNodeBindingResolution::BackendNodeId(backend_node_id) =
-            self.published_document_frontend_node_binding(inspector_session_id, frontend_node_id)
-        else {
-            return crate::RendererDomNodeStackTraceResolution::MissingNode;
-        };
-        let Some(key) = self
-            .dom_agent_state
-            .backend_node_key_for_id(backend_node_id)
-        else {
-            return crate::RendererDomNodeStackTraceResolution::MissingNode;
-        };
-        if Some(key.document_id) != document_id
-            || key.inspector_identity.is_some()
-            || self
-                .vm()
-                .document_runtime
-                .dom_host()
-                .node(key.handle)
-                .is_none()
-        {
-            return crate::RendererDomNodeStackTraceResolution::MissingNode;
-        }
-        crate::RendererDomNodeStackTraceResolution::Found(
-            self.dom_agent_state.node_creation_stack_trace(
-                inspector_session_id,
-                document_id,
-                key.document_id,
-                key.handle,
-            ),
-        )
-    }
-
-    pub(super) fn bind_file_chooser_activation_backend_node_id(
-        &mut self,
-        activation: &mut crate::RendererPendingFileChooserActivation,
-    ) -> bool {
-        let Some((handle, document_id)) = activation.live_node_source() else {
-            return activation.backend_node_id != 0;
-        };
-        activation.node_id = Some(handle);
-        activation.backend_node_id =
-            self.renderer_backend_node_id_for_node_key(document_id, handle);
-        assert!(
-            self.dom_agent_state
-                .retain_detached_backend_node_resolution(activation.backend_node_id),
-            "file chooser backend node id must exist before it is exposed"
-        );
-        true
-    }
-
     /// Returns the exact authority for the currently committed main Document.
     ///
     /// `PageVm` deliberately does not cache this value: `document.open()` and
@@ -5350,3 +5003,32 @@ pub(crate) fn deferred_page_vm_drop_pending_count_for_testing() -> usize {
 pub(super) mod test_support;
 #[cfg(test)]
 mod tests;
+
+#[cfg(not(feature = "devtools"))]
+impl PageVm {
+    pub(super) fn absorb_pending_dom_mutations_into_output_journal(&mut self) {}
+    pub(crate) fn flush_pending_dom_mutation_event_batches(&mut self) {}
+    pub(super) fn sync_devtools_dom_mutation_recording_interest(&self) {}
+    pub(super) fn prepare_dom_agent_for_main_document_dom_content_loaded(
+        &mut self,
+        document: RendererDocumentLifecycleIdentity,
+    ) -> bool {
+        self.document_lifecycle.identity() == document
+    }
+}
+
+#[cfg(not(feature = "devtools"))]
+impl PageVm {
+    pub(super) fn document_dom_agent_includes_whitespace(&self, _session: Option<&str>) -> bool {
+        false
+    }
+}
+
+#[cfg(not(feature = "devtools"))]
+impl PageVm {
+    fn runtime_inspector_session_restore_snapshots(
+        &self,
+    ) -> Vec<RendererInspectorSessionRestoreSnapshot> {
+        Vec::new()
+    }
+}

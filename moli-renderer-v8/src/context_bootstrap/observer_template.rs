@@ -2,10 +2,8 @@ use super::media_queries::{
     media_query_list_add_listener_callback, media_query_list_remove_listener_callback,
 };
 use super::performance_runtime::{
-    performance_entry_list_get_entries_by_name_callback,
-    performance_entry_list_get_entries_by_type_callback,
-    performance_entry_list_get_entries_callback, performance_observer_disconnect_callback,
-    performance_observer_observe_callback, performance_observer_take_records_callback,
+    performance_observer_disconnect_callback, performance_observer_observe_callback,
+    performance_observer_take_records_callback,
 };
 use super::resize_observer_runtime::{
     resize_observer_disconnect_callback, resize_observer_observe_callback,
@@ -16,7 +14,7 @@ use crate::web_api_interfaces;
 use moli_webapi_declare::WebApiFunctionTemplate;
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::MutationObserver, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::MutationObserver, enumerable)]
 struct MutationObserverTemplateMethodsDeclaration {
     #[webapi(method, length = 1, callback = observer_runtime::mutation_observer_observe_callback)]
     observe: (),
@@ -37,7 +35,7 @@ struct MutationObserverTemplateMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::IntersectionObserver, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::IntersectionObserver, enumerable)]
 struct IntersectionObserverTemplateMethodsDeclaration {
     #[webapi(
         method,
@@ -69,7 +67,7 @@ struct IntersectionObserverTemplateMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::MediaQueryList, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::MediaQueryList, enumerable)]
 struct MediaQueryListTemplateMethodsDeclaration {
     #[webapi(method, length = 1, callback = media_query_list_add_listener_callback)]
     add_listener: (),
@@ -79,7 +77,7 @@ struct MediaQueryListTemplateMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::ResizeObserver, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::ResizeObserver, enumerable)]
 struct ResizeObserverTemplateMethodsDeclaration {
     #[webapi(method, length = 1, callback = resize_observer_observe_callback)]
     observe: (),
@@ -95,7 +93,7 @@ struct ResizeObserverTemplateMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::PerformanceObserver, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::PerformanceObserver, enumerable)]
 struct PerformanceObserverTemplateMethodsDeclaration {
     #[webapi(method, length = 0, callback = performance_observer_observe_callback)]
     observe: (),
@@ -105,27 +103,6 @@ struct PerformanceObserverTemplateMethodsDeclaration {
 
     #[webapi(method, length = 0, callback = performance_observer_take_records_callback)]
     take_records: (),
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::PerformanceObserverEntryList, enumerable, receiver)]
-struct PerformanceObserverEntryListTemplateMethodsDeclaration {
-    #[webapi(method, length = 0, callback = performance_entry_list_get_entries_callback)]
-    get_entries: (),
-
-    #[webapi(
-        method,
-        length = 1,
-        callback = performance_entry_list_get_entries_by_type_callback
-    )]
-    get_entries_by_type: (),
-
-    #[webapi(
-        method,
-        length = 1,
-        callback = performance_entry_list_get_entries_by_name_callback
-    )]
-    get_entries_by_name: (),
 }
 
 pub(super) fn install_observer_template_bindings<'s>(
@@ -167,10 +144,7 @@ pub(super) fn install_observer_template_bindings<'s>(
             );
         }
         "PerformanceObserverEntryList" => {
-            let proto = template.prototype_template(scope);
-            PerformanceObserverEntryListTemplateMethodsDeclaration::initialize_prototype_template(
-                scope, proto,
-            );
+            moli_webapi::performance::entry_list::install(scope, template);
         }
         _ => {}
     }

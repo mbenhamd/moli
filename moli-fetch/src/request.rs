@@ -69,6 +69,9 @@ pub struct Request {
     pub browser_request_metadata: Option<BrowserRequestMetadata>,
     browser_navigation_kind: BrowserNavigationRequestKind,
     context: RequestContext,
+    /// Non-CORS loaders carry the selected Origin across redirects, independently
+    /// of subsequent referrer policies. The actual request origin is unchanged.
+    redirect_origin_header: Option<String>,
     referrer_source: ReferrerSource,
     /// Retained independently so Fetch can reset an explicit selection to client.
     client_referrer_url: Option<Url>,
@@ -255,6 +258,7 @@ pub enum BrowserRequestMetadata {
     Ping,
     Script,
     SharedWorker,
+    ServiceWorker,
     Style,
     StyleModule,
     TextTrack,
@@ -276,6 +280,7 @@ impl BrowserRequestMetadata {
             Self::Manifest => "manifest",
             Self::Script => "script",
             Self::SharedWorker => "sharedworker",
+            Self::ServiceWorker => "serviceworker",
             Self::Worker => "worker",
             Self::Style | Self::StyleModule => "style",
             Self::TextTrack => "track",
@@ -665,6 +670,7 @@ impl Request {
             browser_request_metadata: None,
             browser_navigation_kind: BrowserNavigationRequestKind::Navigate,
             context: RequestContext::Http,
+            redirect_origin_header: None,
             referrer_source: ReferrerSource::Client,
             client_referrer_url: None,
             use_page_network_policy: false,
@@ -704,6 +710,7 @@ impl Request {
             browser_request_metadata: None,
             browser_navigation_kind: BrowserNavigationRequestKind::Navigate,
             context: RequestContext::Http,
+            redirect_origin_header: None,
             referrer_source: ReferrerSource::Client,
             client_referrer_url: None,
             use_page_network_policy: false,
@@ -776,6 +783,7 @@ impl Request {
             browser_request_metadata: None,
             browser_navigation_kind: BrowserNavigationRequestKind::Navigate,
             context: RequestContext::Http,
+            redirect_origin_header: None,
             referrer_source: ReferrerSource::Client,
             client_referrer_url: None,
             use_page_network_policy: false,
@@ -968,6 +976,16 @@ impl Request {
     /// generated fields are visible to interception, but are not promoted into
     /// the author header list retained across redirects.
     pub fn interception_request_headers(&self) -> crate::RequestHeaders {
+        self.interception_request_headers_with_web_security(false)
+    }
+
+    /// [`Self::interception_request_headers`] under the browser instance's
+    /// web-security policy; disabled web security omits the Origin that only
+    /// the CORS loader would have generated.
+    pub fn interception_request_headers_with_web_security(
+        &self,
+        disabled: bool,
+    ) -> crate::RequestHeaders {
         let mut headers = self.request_headers.clone();
         let present = |headers: &crate::RequestHeaders, name: &str| {
             headers
@@ -983,7 +1001,7 @@ impl Request {
             ));
         }
         if !present(&headers, "origin")
-            && let Some(origin) = self.origin_header_value(&self.url)
+            && let Some(origin) = self.origin_header_value(&self.url, disabled)
         {
             headers.push(("Origin".to_owned(), origin.into_bytes()));
         }
@@ -1085,6 +1103,9 @@ impl Request {
         response_url: &Url,
         response_headers: &[(String, Vec<u8>)],
     ) {
+        if self.request_mode != RequestMode::Cors {
+            self.redirect_origin_header = self.origin_header_value(response_url, false);
+        }
         self.referrer_source = self
             .referrer_header_value(response_url)
             .and_then(|value| Url::parse(&value).ok())
@@ -1186,17 +1207,69 @@ impl Request {
         self
     }
 
-    pub(crate) fn origin_header_value(&self, request_url: &Url) -> Option<String> {
-        self.request_origin()?;
+    pub(crate) fn origin_header_value(&self, request_url: &Url, disabled: bool) -> Option<String> {
+        // Resource loaders set their CORS Origin before the network loader.
+        // Fetch/XHR, EventSource and media rely on the network CORS loader;
+        // form navigation supplies Origin independently of that loader.
+        let renderer_cors_origin = self.request_mode == RequestMode::Cors
+            && self.browser_request_metadata.is_some_and(|metadata| {
+                !matches!(
+                    metadata,
+                    BrowserRequestMetadata::Fetch
+                        | BrowserRequestMetadata::Xhr
+                        | BrowserRequestMetadata::EventSource
+                        | BrowserRequestMetadata::Manifest
+                        | BrowserRequestMetadata::Audio
+                        | BrowserRequestMetadata::Video
+                )
+            });
+        if disabled && self.request_mode != RequestMode::Navigate && !renderer_cors_origin {
+            return None;
+        }
+        let origin = self.request_origin()?;
         if !matches!(request_url.scheme(), "http" | "https") {
             return None;
         }
         let safe_method =
             self.method.eq_ignore_ascii_case("GET") || self.method.eq_ignore_ascii_case("HEAD");
         if safe_method
-            && (self.request_mode != RequestMode::Cors || !self.has_cross_origin_url(request_url))
+            && (self.request_mode != RequestMode::Cors
+                || (!renderer_cors_origin && !self.has_cross_origin_url(request_url)))
         {
             return None;
+        }
+        // Without a CORS loader, Chromium carries the existing header and makes
+        // it opaque on the first cross-origin redirect, including navigation.
+        if (disabled || self.request_mode != RequestMode::Cors)
+            && self
+                .redirect_chain
+                .iter()
+                .any(|redirect| !same_origin(&redirect.from_url, &redirect.to_url))
+        {
+            return Some("null".to_owned());
+        }
+        if self.request_mode != RequestMode::Cors
+            && let Some(origin) = &self.redirect_origin_header
+        {
+            return Some(origin.clone());
+        }
+        // Chromium applies referrer-policy Origin suppression to navigation
+        // POSTs. Fetch keeps its real origin even in no-cors/same-origin mode.
+        if self.request_mode == RequestMode::Navigate {
+            let suppress_origin = match self.effective_referrer_policy() {
+                "no-referrer" => true,
+                "same-origin" => !origin.same_origin_url(request_url),
+                "no-referrer-when-downgrade"
+                | "strict-origin"
+                | "strict-origin-when-cross-origin" => {
+                    origin.ascii_serialization().starts_with("https://")
+                        && request_url.scheme() != "https"
+                }
+                _ => false,
+            };
+            if suppress_origin {
+                return Some("null".to_owned());
+            }
         }
         Some(self.serialized_origin())
     }
@@ -1382,7 +1455,18 @@ impl Request {
 
     /// Follows an authorized redirect without rebuilding the Fetch request.
     pub fn follow_redirect(&mut self, redirect: RedirectInfo) -> Result<()> {
-        self.validate_request_mode_for_url(&redirect.to_url)?;
+        self.follow_redirect_with_web_security(redirect, false)
+    }
+
+    /// Follow using the owning client's policy; the request's real origin and mode are unchanged.
+    pub fn follow_redirect_with_web_security(
+        &mut self,
+        redirect: RedirectInfo,
+        disabled: bool,
+    ) -> Result<()> {
+        if !disabled {
+            self.validate_request_mode_for_url(&redirect.to_url)?;
+        }
         self.check_redirect_policy(&redirect.to_url)?;
         // Cookie origin adaptation must not become a new referrer source,
         // including when this hop selected no referrer at all.
@@ -1421,6 +1505,14 @@ impl Request {
 
     /// Applies request policy before cache lookup or dispatch, including retries.
     pub fn admit_request_url(&self, request_url: &Url) -> Result<()> {
+        self.admit_request_url_with_web_security(request_url, false)
+    }
+
+    pub fn admit_request_url_with_web_security(
+        &self,
+        request_url: &Url,
+        disabled: bool,
+    ) -> Result<()> {
         // Recheck the effective URL before dispatch/cache lookup, including
         // internal HTTPS upgrades. The hop ordinal lets report producers avoid
         // duplicating the earlier redirect-target check.
@@ -1430,7 +1522,11 @@ impl Request {
         {
             (policy.0)(request_url, self.redirect_chain.len())?;
         }
-        self.validate_request_mode_for_url(request_url)
+        if disabled {
+            Ok(())
+        } else {
+            self.validate_request_mode_for_url(request_url)
+        }
     }
 
     /// Checks Fetch mode restrictions without invoking stateful redirect policy.

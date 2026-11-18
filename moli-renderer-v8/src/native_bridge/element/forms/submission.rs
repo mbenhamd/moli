@@ -1,16 +1,19 @@
 use super::*;
 use crate::context_bootstrap::sandbox_blocks_ancestor_or_top_navigation_from_source;
 use crate::native_bridge::context_host::ChildBrowsingContextNavigationRequest;
+use crate::native_bridge::element::NodePublicEventDispatchOutcome;
+#[cfg(feature = "devtools")]
+use crate::native_bridge::element::activate_handle_via_keyboard;
 use crate::native_bridge::element::activation::{
     SpecialBrowsingContextTarget, browsing_context_window_for_dispatch_scope,
     form_navigation_target_document, named_iframe_target_handle_for_navigation,
 };
-use crate::native_bridge::element::{
-    NodePublicEventDispatchOutcome, TextEditInputType, activate_handle_via_keyboard,
-    dispatch_beforeinput,
-};
+#[cfg(feature = "devtools")]
+use crate::native_bridge::element::{TextEditInputType, dispatch_beforeinput};
+#[cfg(feature = "devtools")]
 use crate::runtime::RendererInputDispatchOutcome;
-use crate::util::{v8_string, v8str};
+use crate::runtime::RendererNavigationInitiator;
+use crate::util::v8_string;
 use moli_dom::forms::normalize_form_submission_newlines;
 use moli_encoding::{
     encode_text_for_legacy_web, form_submission_encoding, form_urlencoded_serialize_pairs,
@@ -21,6 +24,7 @@ use url::Url;
 /// Runs the control's Enter default action, including its beforeinput gate.
 /// None means this target is not eligible; cancellation is a handled branch
 /// and must never fall through to ordinary character insertion.
+#[cfg(feature = "devtools")]
 pub(crate) fn perform_implicit_submission_from_control(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
@@ -54,6 +58,7 @@ pub(crate) fn perform_implicit_submission_from_control(
     ))
 }
 
+#[cfg(feature = "devtools")]
 fn input_blocks_implicit_submission(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     runtime
         .dom_host()
@@ -79,6 +84,7 @@ fn input_blocks_implicit_submission(runtime: &PageScriptHost, handle: DomHandle)
         })
 }
 
+#[cfg(feature = "devtools")]
 fn perform_implicit_form_submission(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
@@ -245,7 +251,9 @@ fn submit_form_with_submit_event_inner(
     }
 
     let submitter_value = wrap_handle_value(scope, runtime_ptr, submitter_handle);
-    if let Some(event) = construct_submit_event(scope, submitter_value, true, true) {
+    if let Some(event) =
+        construct_submit_event(scope, runtime_ptr, form_handle, submitter_value, true, true)
+    {
         if invocation.is_some() {
             crate::context_bootstrap::mark_agent_submit_event(scope, event);
         }
@@ -379,7 +387,7 @@ pub(in crate::native_bridge) fn form_reset_callback<'s>(
         return;
     }
 
-    if dispatch_form_reset_event(scope, runtime_ptr, form_handle, args.this()).allows_default() {
+    if dispatch_form_reset_event(scope, runtime_ptr, form_handle).allows_default() {
         crate::context_bootstrap::web_mcp::cancel_form_execution(scope, runtime_ptr, form_handle);
         let _ = reset_form_default_action(
             scope,
@@ -391,81 +399,23 @@ pub(in crate::native_bridge) fn form_reset_callback<'s>(
     rv.set_undefined();
 }
 
-fn dispatch_form_reset_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
+pub(in crate::native_bridge::element) fn dispatch_form_reset_event(
+    scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
     form_handle: DomHandle,
-    receiver: v8::Local<'s, v8::Object>,
 ) -> NodePublicEventDispatchOutcome {
-    let Some(context) = receiver.get_creation_context(scope) else {
-        return NodePublicEventDispatchOutcome::canceled_before_dispatch();
-    };
-    let scope = &mut v8::ContextScope::new(scope, context);
-    let Some(event) = construct_simple_event(scope, "reset", true, true, false) else {
-        return NodePublicEventDispatchOutcome::canceled_before_dispatch();
-    };
-    align_event_constructor_function_realm_with_target(scope, event, receiver);
-    dispatch_public_event(scope, runtime_ptr, form_handle, event)
-}
-
-fn align_event_constructor_function_realm_with_target<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event: v8::Local<'s, v8::Object>,
-    target: v8::Local<'s, v8::Object>,
-) {
-    let Some(target_constructor) = target
-        .get(scope, v8str(scope, "constructor").into())
-        .and_then(|constructor| constructor.to_object(scope))
-    else {
-        return;
-    };
-    align_event_constructor_function_realm_with_constructor(scope, event, target_constructor);
-}
-
-fn align_event_constructor_function_realm_with_constructor<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event: v8::Local<'s, v8::Object>,
-    target_constructor: v8::Local<'s, v8::Object>,
-) {
-    let Some(event_prototype) = event.get_prototype(scope) else {
-        return;
-    };
-    let Some(function_body) = v8_string(scope, "") else {
-        return;
-    };
-    let Some(target_function_constructor) = target_constructor
-        .get(scope, v8str(scope, "constructor").into())
-        .and_then(|constructor| v8::Local::<v8::Function>::try_from(constructor).ok())
-    else {
-        return;
-    };
-    let Some(event_constructor_value) = target_function_constructor.call(
+    let Some(event) = construct_simple_event_for_target(
         scope,
-        v8::undefined(scope).into(),
-        &[function_body.into()],
+        runtime_ptr,
+        form_handle,
+        "reset",
+        true,
+        true,
+        false,
     ) else {
-        return;
+        return NodePublicEventDispatchOutcome::canceled_before_dispatch();
     };
-    let Ok(event_constructor) = v8::Local::<v8::Function>::try_from(event_constructor_value) else {
-        return;
-    };
-    event_constructor.set_name(v8str(scope, "Event"));
-    let _ = event_constructor.set(scope, v8str(scope, "prototype").into(), event_prototype);
-    if !crate::context_bootstrap::event_backing(scope, event)
-        .define_own_property(
-            scope,
-            v8str(scope, "constructor").into(),
-            event_constructor.into(),
-            v8::PropertyAttribute::DONT_ENUM,
-        )
-        .unwrap_or(false)
-    {
-        let _ = crate::context_bootstrap::event_backing(scope, event).set(
-            scope,
-            v8str(scope, "constructor").into(),
-            event_constructor.into(),
-        );
-    }
+    dispatch_public_event(scope, runtime_ptr, form_handle, event)
 }
 
 pub(in crate::native_bridge) fn form_submit_callback<'s>(
@@ -603,11 +553,23 @@ pub(in crate::native_bridge) fn submit_form_default_action(
     };
     // A parsed/detached Document has no browsing context to navigate. Resolve
     // that from the native document, independently of the form's wrapper kind.
-    if source_document
-        .is_none_or(|document| !unsafe { &*runtime_ptr }.document_has_browsing_context(document))
-    {
-        return false;
-    }
+    let (submitting_document, initiator_url, initiator_origin) = {
+        let runtime = unsafe { &*runtime_ptr };
+        let Some(document) =
+            source_document.filter(|&document| runtime.document_has_browsing_context(document))
+        else {
+            return false;
+        };
+        (
+            document,
+            runtime.document_url_for_handle(document),
+            moli_url::WebOrigin::from_serialized(
+                &runtime
+                    .document_security_origin(document)
+                    .ascii_serialization(),
+            ),
+        )
+    };
     let source_popup = source_document.and_then(|document| {
         unsafe { &*runtime_ptr }.lightweight_popup_id_for_document_handle(document)
     });
@@ -627,6 +589,16 @@ pub(in crate::native_bridge) fn submit_form_default_action(
     if sandbox_blocks_navigation {
         return true;
     }
+    // formdata can change the policy. Read it now from the captured submitting
+    // Document, not the form's potentially changed owner or navigation target.
+    let initiator = RendererNavigationInitiator::new(
+        initiator_url,
+        initiator_origin,
+        crate::context_bootstrap::document_referrer_policy_for_native_document(
+            unsafe { &*runtime_ptr },
+            submitting_document,
+        ),
+    );
 
     let special_target = target_name
         .as_deref()
@@ -715,6 +687,7 @@ pub(in crate::native_bridge) fn submit_form_default_action(
                         target_name,
                         source_document,
                         ChildBrowsingContextNavigationRequest {
+                            initiator,
                             url: resolved_url,
                             method: "POST".to_owned(),
                             body: Some(body),
@@ -768,6 +741,7 @@ pub(in crate::native_bridge) fn submit_form_default_action(
                         body,
                         content_type,
                         &form_data_entries,
+                        initiator,
                     );
                 }
                 submit_post_form_to_top_level_browsing_context(
@@ -780,6 +754,7 @@ pub(in crate::native_bridge) fn submit_form_default_action(
                     content_type,
                     &form_data_entries,
                     user_initiated,
+                    initiator,
                 )
             }
         },
@@ -1012,6 +987,7 @@ fn submit_post_form_to_top_level_browsing_context(
     content_type: String,
     form_data_entries: &[(String, v8::Global<v8::Value>)],
     user_initiated: bool,
+    initiator: RendererNavigationInitiator,
 ) -> bool {
     let Some(window) = browsing_context_window_for_dispatch_scope(
         scope,
@@ -1047,6 +1023,7 @@ fn submit_post_form_to_top_level_browsing_context(
         None,
         moli_fetch::BrowserNavigationRequestKind::Navigate,
     );
+    unsafe { &mut *runtime_ptr }.set_pending_location_navigation_source(initiator, None);
     crate::context_bootstrap::web_mcp::bind_root_navigation(
         unsafe { &mut *runtime_ptr },
         form_handle,
@@ -1064,6 +1041,7 @@ fn submit_post_form_to_child_browsing_context(
     body: bytes::Bytes,
     content_type: String,
     form_data_entries: &[(String, v8::Global<v8::Value>)],
+    initiator: RendererNavigationInitiator,
 ) -> bool {
     let Some(child_handle) = ({
         let runtime = unsafe { &mut *runtime_ptr };
@@ -1102,6 +1080,7 @@ fn submit_post_form_to_child_browsing_context(
         scope,
         child_handle,
         ChildBrowsingContextNavigationRequest {
+            initiator,
             url: resolved_url,
             method: "POST".to_owned(),
             body: Some(body),

@@ -63,6 +63,7 @@ mod css_computed_font;
 mod css_computed_map_enumeration;
 mod css_computed_shorthands;
 mod css_variable_fonts;
+mod cssom_realm;
 mod nested_document_invalidation;
 mod properties_and_selectors;
 mod stylesheet_and_document_lifecycle;

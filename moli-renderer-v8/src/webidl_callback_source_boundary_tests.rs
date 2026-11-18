@@ -62,9 +62,11 @@ const RAW_GLOBAL_FUNCTION_ALLOWLIST: &[(&str, usize)] = &[
 const DIRECT_V8_CALL_ALLOWLIST: &[AllowedDirectCallFile] = &[
     // Typed Web IDL callback adapters. API-specific owner/currentness and
     // completion policy remain outside the renderer-neutral callback crate.
+    // The synchronous function adapter moved unchanged to moli-webapi::callbacks;
+    // only the callback-interface adapter remains in this renderer inventory.
     allowed(
         "callback_invocation.rs",
-        2,
+        1,
         DirectCallOwner::TypedWebIdlAdapter,
     ),
     allowed(
@@ -129,18 +131,6 @@ const DIRECT_V8_CALL_ALLOWLIST: &[AllowedDirectCallFile] = &[
         DirectCallOwner::BrowserAlgorithm,
     ),
     allowed(
-        "context_bootstrap/stream_adapter/read_request.rs",
-        2,
-        DirectCallOwner::BrowserAlgorithm,
-    ),
-    allowed(
-        "context_bootstrap/stream_adapter/utils.rs",
-        // Pending promise settlement and cancellation continuations use the
-        // native Promise API; the remaining calls run stream algorithms.
-        4,
-        DirectCallOwner::BrowserAlgorithm,
-    ),
-    allowed(
         "context_bootstrap/websocket/constructor.rs",
         1,
         DirectCallOwner::BrowserAlgorithm,
@@ -184,11 +174,6 @@ const DIRECT_V8_CALL_ALLOWLIST: &[AllowedDirectCallFile] = &[
     allowed(
         "context_bootstrap/constructors/elements.rs",
         6,
-        DirectCallOwner::NativeForwardingOrScript,
-    ),
-    allowed(
-        "context_bootstrap/css_runtime/highlights.rs",
-        1,
         DirectCallOwner::NativeForwardingOrScript,
     ),
     allowed(
@@ -244,20 +229,11 @@ const DIRECT_V8_CALL_ALLOWLIST: &[AllowedDirectCallFile] = &[
         DirectCallOwner::NativeForwardingOrScript,
     ),
     allowed(
-        "native_bridge/element/forms/submission.rs",
-        1,
-        DirectCallOwner::NativeForwardingOrScript,
-    ),
-    allowed(
         "script_vm/frame_script_jobs.rs",
         1,
         DirectCallOwner::NativeForwardingOrScript,
     ),
-    allowed(
-        "webidl_iterator.rs",
-        4,
-        DirectCallOwner::NativeForwardingOrScript,
-    ),
+    // Native collection forwarding moved unchanged to moli_webapi::webidl_iterator.
     allowed(
         "worker/global_scope/console.rs",
         1,
@@ -366,8 +342,12 @@ fn count_shared_microtask_boundaries(source: &str) -> usize {
 
 fn renderer_source_inventory(count: fn(&str) -> usize) -> BTreeMap<String, usize> {
     let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    source_inventory(&source_root, count)
+}
+
+fn source_inventory(source_root: &Path, count: fn(&str) -> usize) -> BTreeMap<String, usize> {
     let mut sources = Vec::new();
-    collect_rust_sources(&source_root, &source_root, &mut sources);
+    collect_rust_sources(source_root, source_root, &mut sources);
     sources
         .into_iter()
         .filter_map(|(path, source)| {
@@ -423,4 +403,32 @@ fn count_direct_v8_calls(source: &str) -> usize {
     source.matches(concat!(".call(", "scope")).count()
         + source.matches(concat!(".call(&", "scope")).count()
         + source.matches(concat!(".call(&mut", "scope")).count()
+}
+
+#[test]
+fn shared_webapi_callback_and_native_forwarding_inventory_is_frozen() {
+    let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../moli-webapi/src");
+    assert_eq!(
+        source_inventory(&source_root, count_direct_v8_calls),
+        BTreeMap::from([
+            // The typed synchronous callback adapter delegates relevant/incumbent
+            // context handling to the existing Web IDL callback kernel.
+            ("callbacks.rs".to_owned(), 1),
+            // Runtime-generated Highlight mapper; retains the native microtask policy.
+            ("highlights/iterators.rs".to_owned(), 1),
+            // The captured Highlight runtime initializer, formerly in the Renderer.
+            ("highlights.rs".to_owned(), 1),
+            // Streams' browser-owned read steps and algorithm calls moved with
+            // their state. Web IDL stream callbacks still enter through the
+            // embedder's typed callback executor.
+            ("streams/adapter/read_request.rs".to_owned(), 2),
+            ("streams/adapter/utils.rs".to_owned(), 4),
+            // Captured native collection intrinsics, not author callback calls.
+            ("webidl_iterator.rs".to_owned(), 4),
+        ])
+    );
+    assert!(
+        source_inventory(&source_root, count_raw_global_functions).is_empty(),
+        "shared bindings must use typed callback tracing rather than raw V8 roots"
+    );
 }

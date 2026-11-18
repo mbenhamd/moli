@@ -1,22 +1,78 @@
 use crate::{
     NodeData, NodeId,
-    native::{Element, NativeDom, Node},
+    forms::InputType,
+    native::{Element, FocusSupport, NativeDom, Node, select_display_size},
 };
 
-pub(super) fn ax_role(node: &Node) -> &'static str {
-    match node.kind() {
+/// Chromium's ui::IsLink classification for computed AX roles.
+pub(super) fn is_link(role: &str) -> bool {
+    matches!(
+        role,
+        "link" | "doc-backlink" | "doc-biblioref" | "doc-glossref" | "doc-noteref"
+    )
+}
+
+/// Blink's AXObject::IsImage excludes canvas from ui::IsImage.
+pub(super) fn is_image(role: &str) -> bool {
+    matches!(role, "image" | "doc-cover" | "graphics-symbol" | "SvgRoot")
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum AxRole {
+    Fixed(&'static str),
+    NamedRegion,
+    Presentational,
+}
+
+impl AxRole {
+    pub(super) fn for_name(self) -> &'static str {
+        match self {
+            Self::Fixed(role) => role,
+            Self::NamedRegion => "region",
+            Self::Presentational => "none",
+        }
+    }
+
+    pub(super) fn with_name(self, name: &str) -> &'static str {
+        if matches!(self, Self::NamedRegion) && name.is_empty() {
+            "generic"
+        } else {
+            self.for_name()
+        }
+    }
+}
+
+/// Resolve native and ARIA semantics before traversing the accessible name.
+pub(super) fn ax_role(document: &NativeDom, node: &Node) -> AxRole {
+    AxRole::Fixed(match node.kind() {
         NodeData::Document(_) => "RootWebArea",
         NodeData::DocumentType(_) => "none",
         NodeData::Element(element) => {
-            explicit_aria_role(element).unwrap_or_else(|| native_ax_role(element))
+            let role = match explicit_aria_role(document, node, element) {
+                Some("none") => return AxRole::Presentational,
+                Some(role) => role,
+                None => native_ax_role(element),
+            };
+            // HTML-AAM maps an unnamed section to generic. Core-AAM also
+            // falls back to the host role for an explicit unnamed region.
+            if role == "region" && element.is_html_element("section") {
+                return AxRole::NamedRegion;
+            }
+            role
         }
         NodeData::Text(_) | NodeData::CDataSection(_) => "StaticText",
         NodeData::Comment(_) | NodeData::ProcessingInstruction(_) => "none",
         NodeData::DocumentFragment(_) => "generic",
-    }
+    })
 }
 
 fn native_ax_role(element: &Element) -> &'static str {
+    if element.hyperlink_href().is_some() {
+        return "link";
+    }
+    if element.namespace() != "http://www.w3.org/1999/xhtml" {
+        return "generic";
+    }
     match element.local_name() {
         "html" | "body" | "div" | "span" => "generic",
         "main" => "main",
@@ -27,30 +83,26 @@ fn native_ax_role(element: &Element) -> &'static str {
         "section" => "region",
         "article" | "hgroup" => "article",
         "address" => "group",
-        "a" => "link",
         "button" => "button",
-        "input" => match element.attribute("type").unwrap_or("text") {
-            "text" | "email" | "tel" | "url" | "password" => "textbox",
-            "search" => "searchbox",
-            "number" => "spinbutton",
-            "checkbox" => "checkbox",
-            "radio" => "radio",
-            "button" | "submit" | "reset" | "image" => "button",
-            "hidden" => "none",
-            "color" => "color",
-            "file" => "file",
-            "month" => "month",
-            "datetime-local" | "week" | "time" | "date" => "combobox",
+        "input" => match element.input_type() {
+            InputType::Search => "searchbox",
+            InputType::Number => "spinbutton",
+            InputType::Checkbox => "checkbox",
+            InputType::Radio => "radio",
+            InputType::Button | InputType::Submit | InputType::Reset | InputType::Image => "button",
+            InputType::Hidden => "none",
+            InputType::Color => "color",
+            InputType::File => "file",
+            InputType::Month => "month",
+            InputType::DatetimeLocal | InputType::Week | InputType::Time | InputType::Date => {
+                "combobox"
+            }
             _ => "textbox",
         },
         "form" => "form",
         "textarea" => "textbox",
         "select" => {
-            if element.has_attribute("multiple")
-                || element
-                    .attribute("size")
-                    .is_some_and(|size| size.trim() != "1")
-            {
+            if element.has_attribute_ns("", "multiple") || select_display_size(element) > 1 {
                 "listbox"
             } else {
                 "combobox"
@@ -104,11 +156,62 @@ fn native_ax_role(element: &Element) -> &'static str {
     }
 }
 
-fn explicit_aria_role(element: &Element) -> Option<&'static str> {
-    element
-        .attribute("role")?
-        .split_whitespace()
-        .find_map(aria_role_to_ax_role)
+fn explicit_aria_role(
+    document: &NativeDom,
+    node: &Node,
+    element: &Element,
+) -> Option<&'static str> {
+    let role = element
+        .attribute_ns("", "role")?
+        .split_ascii_whitespace()
+        .find_map(aria_role_to_ax_role)?;
+    // Blink resolves presentational-role conflicts before selecting the native
+    // role. Explicit semantic overrides such as button keep their precedence.
+    if role == "none"
+        && !element.is_html_element("iframe")
+        && !element.is_html_element("frame")
+        && (has_global_aria_property(element)
+            || document.focus_support(node.id()) == FocusSupport::Supported)
+    {
+        None
+    } else {
+        Some(role)
+    }
+}
+
+fn has_global_aria_property(element: &Element) -> bool {
+    // WAI-ARIA 1.2 sections 3.5 and 6.5: deprecated globals still participate
+    // in presentational-role conflicts. Preserve the supported ARIA 1.3
+    // braille/description globals too. HTML (including XHTML) ARIA attributes
+    // have no namespace; another namespace's matching local name is unrelated.
+    [
+        "aria-atomic",
+        "aria-braillelabel",
+        "aria-brailleroledescription",
+        "aria-busy",
+        "aria-controls",
+        "aria-current",
+        "aria-describedby",
+        "aria-description",
+        "aria-details",
+        "aria-disabled",
+        "aria-dropeffect",
+        "aria-errormessage",
+        "aria-flowto",
+        "aria-grabbed",
+        "aria-haspopup",
+        "aria-hidden",
+        "aria-invalid",
+        "aria-keyshortcuts",
+        "aria-label",
+        "aria-labelledby",
+        "aria-live",
+        "aria-owns",
+        "aria-relevant",
+        "aria-roledescription",
+    ]
+    .into_iter()
+    .any(|name| element.has_attribute_ns("", name))
 }
 
 // Keep this mapping aligned with Blink's generated AriaRoleToInternalRole().
@@ -308,6 +411,172 @@ mod tests {
     use url::Url;
 
     #[test]
+    fn presentation_conflicts_follow_standard_global_aria_properties() {
+        // WAI-ARIA 1.2 section 6.5, including deprecated globals. Preserve the
+        // three supported ARIA 1.3 globals as well.
+        let properties = [
+            "aria-atomic",
+            "aria-busy",
+            "aria-controls",
+            "aria-current",
+            "aria-describedby",
+            "aria-details",
+            "aria-disabled",
+            "aria-dropeffect",
+            "aria-errormessage",
+            "aria-flowto",
+            "aria-grabbed",
+            "aria-haspopup",
+            "aria-hidden",
+            "aria-invalid",
+            "aria-keyshortcuts",
+            "aria-label",
+            "aria-labelledby",
+            "aria-live",
+            "aria-owns",
+            "aria-relevant",
+            "aria-roledescription",
+            "aria-braillelabel",
+            "aria-brailleroledescription",
+            "aria-description",
+        ];
+        let mut document = NativeDom::new_html(Url::parse("https://example.test/").unwrap());
+        let root = document.create_element("main");
+        assert!(document.append_child(document.document_node_id(), root));
+        for role in ["none", "presentation"] {
+            for property in properties {
+                for (namespace, prefix) in [
+                    (None, None),
+                    (Some("urn:test"), None),
+                    (Some("urn:test"), Some("x")),
+                    (Some("http://www.w3.org/ns/wai-aria/"), None),
+                    (Some("http://www.w3.org/ns/wai-aria/"), Some("aria")),
+                ] {
+                    let heading = document.create_element("h2");
+                    assert!(document.append_child(root, heading));
+                    assert!(document.set_attribute(heading, "role", role));
+                    assert!(
+                        document.set_attribute_ns(heading, namespace, prefix, property, "false")
+                    );
+                    assert_eq!(
+                        ax_role(&document, document.node(heading).unwrap()).for_name(),
+                        if namespace.is_none() {
+                            "heading"
+                        } else {
+                            "none"
+                        },
+                        "role={role}, {property}, namespace={namespace:?}, prefix={prefix:?}"
+                    );
+                }
+            }
+            for property in [
+                "aria-labeledby",
+                "aria-checked",
+                "aria-expanded",
+                "aria-level",
+                "aria-selected",
+                "aria-valuenow",
+                "aria-unknown",
+            ] {
+                let heading = document.create_element("h2");
+                assert!(document.append_child(root, heading));
+                assert!(document.set_attribute(heading, "role", role));
+                assert!(document.set_attribute(heading, property, "false"));
+                assert_eq!(
+                    ax_role(&document, document.node(heading).unwrap()).for_name(),
+                    "none",
+                    "{property}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn presentation_focus_conflicts_distinguish_html_spaces_from_vertical_tab() {
+        let mut document = NativeDom::new_html(Url::parse("https://example.test/").unwrap());
+        for role in ["none", "presentation"] {
+            for (tabindex, expected) in [
+                (" 0", "heading"),
+                ("\t0", "heading"),
+                ("\n0", "heading"),
+                ("\r0", "heading"),
+                ("\u{c}0", "heading"),
+                ("\u{b}0", "none"),
+                ("\u{a0}0", "none"),
+                ("0\u{b}", "heading"),
+            ] {
+                let heading = document.create_element("h2");
+                assert!(document.append_child(document.document_node_id(), heading));
+                assert!(document.set_attribute(heading, "role", role));
+                assert!(document.set_attribute(heading, "tabindex", tabindex));
+                assert_eq!(
+                    ax_role(&document, document.node(heading).unwrap()).for_name(),
+                    expected,
+                    "tabindex={tabindex:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn presentation_conflicts_use_focus_support_and_global_aria_properties() {
+        let cases = [
+            ("a", vec![("href", "/go")], "link"),
+            ("a", vec![], "none"),
+            ("a", vec![("tabindex", "-1")], "generic"),
+            ("button", vec![], "button"),
+            ("button", vec![("disabled", ""), ("tabindex", "0")], "none"),
+            ("input", vec![("type", "hidden"), ("tabindex", "0")], "none"),
+            ("img", vec![("tabindex", "-1")], "image"),
+            ("img", vec![("tabindex", "0tail")], "image"),
+            ("img", vec![("tabindex", "invalid")], "none"),
+            ("img", vec![("tabindex", "\u{a0}0")], "none"),
+            ("img", vec![("aria-label", "")], "image"),
+            ("img", vec![("aria-live", "off")], "image"),
+            ("img", vec![("aria-hidden", "false")], "image"),
+            ("img", vec![("aria-disabled", "true")], "image"),
+            ("div", vec![("contenteditable", "true")], "generic"),
+        ];
+        let mut document = NativeDom::new_html(Url::parse("https://example.test/").unwrap());
+        let root = document.create_element("main");
+        assert!(document.append_child(document.document_node_id(), root));
+        for role in ["presentation", "none"] {
+            for (tag, attributes, expected) in &cases {
+                let element = document.create_element(tag);
+                assert!(document.append_child(root, element));
+                for (name, value) in attributes {
+                    assert!(document.set_attribute(element, name, value));
+                }
+                assert!(document.set_attribute(element, "role", role));
+                assert_eq!(
+                    ax_role(&document, document.node(element).unwrap()).for_name(),
+                    *expected,
+                    "{tag} role={role}, attributes={attributes:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn presentation_conflicts_respect_disabled_fieldsets_and_the_first_legend() {
+        let mut document = NativeDom::new_html(Url::parse("https://example.test/").unwrap());
+        let fieldset = document.create_element("fieldset");
+        document.append_child(document.document_node_id(), fieldset);
+        document.set_attribute(fieldset, "disabled", "");
+        let legend = document.create_element("legend");
+        document.append_child(fieldset, legend);
+        for (parent, expected) in [(legend, "button"), (fieldset, "none")] {
+            let button = document.create_element("button");
+            document.append_child(parent, button);
+            document.set_attribute(button, "role", "presentation");
+            assert_eq!(
+                ax_role(&document, document.node(button).unwrap()).for_name(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn explicit_aria_role_uses_chromium_fallback_token_order() {
         let mut document =
             NativeDom::new_html(Url::parse("https://example.test/").expect("valid URL"));
@@ -315,10 +584,16 @@ mod tests {
         assert!(document.append_child(document.document_node_id(), element));
 
         assert!(document.set_attribute(element, "role", "unknown STATUS"));
-        assert_eq!(ax_role(document.node(element).expect("element")), "status");
+        assert_eq!(
+            ax_role(&document, document.node(element).expect("element")).for_name(),
+            "status"
+        );
 
         assert!(document.set_attribute(element, "role", "button status"));
-        assert_eq!(ax_role(document.node(element).expect("element")), "button");
+        assert_eq!(
+            ax_role(&document, document.node(element).expect("element")).for_name(),
+            "button"
+        );
     }
 
     #[test]
@@ -329,13 +604,16 @@ mod tests {
         assert!(document.append_child(document.document_node_id(), password));
         assert!(document.set_attribute(password, "type", "password"));
         assert_eq!(
-            ax_role(document.node(password).expect("element")),
+            ax_role(&document, document.node(password).expect("element")).for_name(),
             "textbox"
         );
 
         let hidden = document.create_element("input");
         assert!(document.append_child(document.document_node_id(), hidden));
         assert!(document.set_attribute(hidden, "type", "hidden"));
-        assert_eq!(ax_role(document.node(hidden).expect("element")), "none");
+        assert_eq!(
+            ax_role(&document, document.node(hidden).expect("element")).for_name(),
+            "none"
+        );
     }
 }

@@ -249,7 +249,16 @@ Dokument und Stil haben genau eine verbindliche Datenquelle: die Integration aus
 
 Die folgenden Messwerte zeigen Molis derzeitigen Funktionsumfang. Sie decken reale Websites, Automatisierungsclients, Prüfungen des Chromium-/WPT-Verhaltens und eine große nextest-Regressionssuite ab.
 
-### Gemischter Crawling-Test im öffentlichen Web
+| Thema | Tests | Moli |
+| --- | --- | --- |
+| [Web-Crawling und Web Fetch](#web-crawling-und-web-fetch) | Gemischter Crawling-Test, 192 URLs; Web Fetch, 430 Aufgaben auf Live-Websites und 545 gespeicherte Seiten | 103 brauchbare Seiten (53,6 %); 89,8 % Erfolgsquote und 39,27 % Extraktionswert, Platz eins von fünf Browsern |
+| [Browser-Automatisierung](#browser-automatisierung) | Lexbench-Headless-Browser, 1.308 vergleichbare Aufgaben | 81,9 % Erfolg; Chrome 99,8 % |
+| [Ressourcenverbrauch](#ressourcenverbrauch) | 557 Aufgaben, die alle vier lokalen Engines abgeschlossen haben; eine Beispiel-Episode eines Agenten | 15 % der CPU-Zeit und 13 % des Spitzenspeichers von Chrome |
+| [Webstandards](#webstandards) | Ausgewählte WPT-Tests | 1,612 Millionen bestandene Tests |
+
+### Web-Crawling und Web Fetch
+
+#### Gemischter Crawling-Test im öffentlichen Web
 
 Getestet wurden 192 öffentliche URLs großer chinesischer und internationaler Websites. Als Erfolg zählte ausschließlich eine Seite, die nach Ausführung von JavaScript inhaltlich verwertbare Ergebnisse lieferte — ein bloßer HTTP-200-Status, eine Verifizierungsseite, eine Anmeldesperre, eine leere Antwort oder eine reine App-Hülle galten nicht als Erfolg.
 
@@ -260,20 +269,65 @@ Getestet wurden 192 öffentliche URLs großer chinesischer und internationaler W
 | Lightpanda | 85 | 44.3% | 0.97 s | 40 MiB |
 | Obscura | 57 | 29.7% | 1.30 s | 39 MiB |
 
-### Beispiel eines Agenten-Workloads
+#### Web Fetch
 
-| Metrik | Moli | Chromium |
-| --- | ---: | ---: |
-| CDP bereit | 34.85 ms | 169.37 ms |
-| Aktive Episodendauer p50 | 33.40 ms | 57.13 ms |
-| PSS-Spitzenwert | 102.46 MiB | 348.82 MiB |
-| Maximale Prozesse / Threads | 1 / 24 | 11 / 123 |
+Moli wird mit vier anderen Browsern auf Live-Websites und auf gespeicherten Seiten verglichen. Klicken Sie auf einen Titel, um zu wechseln; jede Zeile zeigt Moli (grün) im Vergleich zur Spanne der vier anderen. [Vollständiger Bericht](https://browser.lexmount.com/blog/webfetch-benchmark) · reproduzierbar mit [Webstone](https://github.com/lexmount/webstone) ([Anleitung](https://github.com/lexmount/webstone/blob/main/src/harness/web_fetch/README.md)).
 
-### WPT-Tests
+<details name="web-fetch-chart" open>
+<summary><strong>Live-Websites · LexBench-Web-Fetch, 430 Aufgaben</strong></summary>
 
-In der aktuellen WPT-Auswahl zur Überprüfung von Molis Funktionsumfang als Agenten-Browser wurden bei einem vollständigen Lauf **1,612 Millionen Tests bestanden**.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/webfetch-live-dark.svg">
+  <img alt="Erfolgsquote bei 430 Aufgaben auf Live-Websites. Gesamt: Moli 386/430 (89,8 %), Chromium 234, Lightpanda 228, Obscura 223, Kitesurf 192. Bot-Schutz: Moli 88/100, bester anderer Browser 37. Beliebte Websites: Moli 91, bester anderer 58. Dynamische Websites: Moli 90, bester anderer 58. Statisch: Moli 97, Chromium 99. Dokumente und Medien: Moli 20/30, bester anderer 17." src="../assets/webfetch-live-light.svg" width="100%">
+</picture>
 
-### Molis Ergebnisse in Lexbench-Headless-Browser
+Bestehen erfordert sowohl den Zugriff auf die Website als auch korrekte Inhalte ([Datensatz, Edition v1.0.0](https://huggingface.co/datasets/Lexmount/LexBench-Web-Fetch/tree/v1.0.0)).
+
+<details>
+<summary>Genaue Werte</summary>
+
+| Methode | Gesamt | Statisch /100 | Bot-Schutz /100 | Beliebte Websites /100 | Dynamische Websites /100 | Dokumente und Medien /30 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Moli | **386/430 · 89,8 %** | 97 | **88** | **91** | **90** | **20** |
+| Chromium | 234/430 · 54,4 % | **99** | 5 | 58 | 58 | 14 |
+| Lightpanda | 228/430 · 53,0 % | 92 | 37 | 38 | 44 | 17 |
+| Obscura | 223/430 · 51,9 % | 94 | 16 | 53 | 43 | 17 |
+| Kitesurf | 192/430 · 44,7 % | 90 | 10 | 40 | 41 | 11 |
+
+Die Zellen zeigen die Anzahl bestandener Aufgaben. Die letzte Spalte fasst Dokumentinhalte, direkte Mediendateien und in Webseiten eingebettete Medien zusammen.
+
+</details>
+
+</details>
+
+<details name="web-fetch-chart">
+<summary><strong>Gespeicherte Seiten · WebMainBench, 545 Seiten</strong></summary>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/webmainbench-dark.svg">
+  <img alt="Extraktionsqualität auf 545 gespeicherten Seiten. Gesamt: Moli 39,27 %, Lightpanda 35,00 %, Kitesurf 33,43 %, Obscura 31,03 %, Chromium 27,02 %. Code: Moli 91,06 %, beste andere Methode 84,71 %. Bei Text, Formeln, Tabelleninhalt und Tabellenstruktur liegt Moli hinter der jeweils besten anderen Methode." src="../assets/webmainbench-light.svg" width="100%">
+</picture>
+
+Die Extraktion des Hauptinhalts wird gegenüber menschlichen Annotationen bewertet, ohne Live-Zugriff ([Datensatz](https://github.com/lexmount/WebMainBench/tree/lex-main)).
+
+<details>
+<summary>Genaue Werte</summary>
+
+| Methode | Hauptinhalt erzeugt | Gesamt | Text | Code | Formeln | Tabelleninhalt | Tabellenstruktur |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Moli | 545/545 | **39,27 %** | 40,73 % | **91,06 %** | 28,20 % | 22,62 % | 13,75 % |
+| Lightpanda | 545/545 | 35,00 % | 41,52 % | 84,71 % | 12,97 % | 21,81 % | **14,00 %** |
+| Obscura | 543/545 | 31,03 % | **41,88 %** | 81,82 % | **31,39 %** | 0,03 % | 0,00 % |
+| Chromium | 545/545 | 27,02 % | 39,40 % | 35,86 % | 21,12 % | **25,01 %** | 13,73 % |
+| Kitesurf | 524/545 | 33,43 % | 36,99 % | 80,70 % | 19,32 % | 18,25 % | 11,87 % |
+
+</details>
+
+</details>
+
+### Browser-Automatisierung
+
+#### Molis Ergebnisse in Lexbench-Headless-Browser
 
 Der vollständige Aufgabenbestand von [Lexbench-Headless-Browser](https://github.com/lexmount/Lexbench-Headless-Browser) umfasst 1.928 Aufgaben zu rohem CDP, 13 fest versionierten Automatisierungswerkzeugen wie Playwright, Puppeteer und Selenium sowie zur Semantik der Web-Plattform. Da Kitesurf nur als entfernter Endpunkt verfügbar ist, verwendet die folgende Grafik 1.308 vergleichbare Aufgaben. Für alle Browser gelten dieselben Regeln zur Aufgabenauswahl.
 
@@ -284,12 +338,29 @@ Der vollständige Aufgabenbestand von [Lexbench-Headless-Browser](https://github
 
 **Moli 0.1.1 bestand 1.071 Aufgaben und erreichte 81,88 %**. Kitesurf erreichte 62,08 %, Lightpanda 53,29 % und Obscura 44,88 %; Chrome kam als Referenz-Engine auf 99,85 %. Kitesurf lief mit k=1, nicht abgedeckte Aufgaben zählen als nicht bestanden, und die Reproduktionsbedingungen eines entfernten Dienstes unterscheiden sich von denen lokaler Binärdateien. Die vollständigen Ergebnisse stehen im [Fünf-Engine-Bericht](https://github.com/lexmount/Lexbench-Headless-Browser/blob/kitesurf-eval/docs/reports/five-engine-report-20260813.md) des Benchmarks.
 
+### Ressourcenverbrauch
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../assets/lexbench-efficiency-map-dark.jpg">
   <img alt="Aufgaben-Erfolgsquote gegen den Median des Spitzenspeichers pro Aufgabe für die vier lokalen Engines: Chrome bei 99,9 % und 697 MiB, Moli bei 80,7 % und 92 MiB, Lightpanda bei 43,8 % und 34 MiB, Obscura bei 39,5 % und 39 MiB" src="../assets/lexbench-efficiency-map-light.jpg" width="100%">
 </picture>
 
 Kitesurf ist ein entfernter Dienst, dessen CPU, Arbeitsspeicher und Prozessanzahl nicht messbar sind. Der Ressourcenvergleich umfasst daher nur die vier lokalen Engines. Ein separater Lauf mit 557 Aufgaben berücksichtigt nur Arbeiten, die alle vier abgeschlossen haben. Molis Median pro Aufgabe lag bei **100,6 ms CPU-Zeit** und **92 MiB Spitzenspeicher**; Chrome erreichte **687 ms** beziehungsweise **697 MiB**. Damit lag Moli bei rund 15 % der CPU-Zeit und 13 % des Spitzenspeichers von Chrome. Methodik und vollständige Daten stehen in der [Ressourcenübersicht](https://github.com/lexmount/Lexbench-Headless-Browser/blob/main/docs/reports/resource-card-20260812.md) des Benchmarks.
+
+#### Beispiel eines Agenten-Workloads
+
+| Metrik | Moli | Chromium |
+| --- | ---: | ---: |
+| CDP bereit | 34.85 ms | 169.37 ms |
+| Aktive Episodendauer p50 | 33.40 ms | 57.13 ms |
+| PSS-Spitzenwert | 102.46 MiB | 348.82 MiB |
+| Maximale Prozesse / Threads | 1 / 24 | 11 / 123 |
+
+### Webstandards
+
+#### WPT-Tests
+
+In der aktuellen WPT-Auswahl zur Überprüfung von Molis Funktionsumfang als Agenten-Browser wurden bei einem vollständigen Lauf **1,612 Millionen Tests bestanden**.
 
 ## Projektumfang
 

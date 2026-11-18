@@ -181,3 +181,137 @@ fn input_files_accessors_reject_incompatible_receivers() {
         .expect("files getters and setters must validate their HTMLInputElement receivers");
     assert_eq!(result, "ok");
 }
+
+#[cfg(feature = "devtools")]
+#[test]
+fn directory_selected_files_keep_relative_paths_in_wrappers_clones_and_file_lists() {
+    let mut vm = new_parsed_test_vm(
+        "https://directory-upload.test/",
+        "<!doctype html><input id=upload type=file webkitdirectory>",
+    );
+    let handle = vm.document_runtime.get_element_by_id("upload").unwrap();
+    let files = ["folder/a.txt", "folder/sub/b.txt"]
+        .into_iter()
+        .map(|relative_path| crate::dom::native::SelectedFile {
+            data: relative_path.as_bytes().to_vec().into(),
+            mime_type: "text/plain".into(),
+            name: relative_path.rsplit('/').next().unwrap().into(),
+            relative_path: relative_path.into(),
+            last_modified: 7.0,
+        })
+        .collect();
+    assert!(vm.set_file_input_files(handle, files, false).unwrap());
+    assert_eq!(vm.eval(r#"(() => {
+        const assert = (condition, message) => { if (!condition) throw new Error(message); };
+        const input = document.getElementById('upload');
+        assert(input.webkitdirectory && !input.multiple && input.files.length === 2, 'directory permits multiple files');
+        const expected = ['folder/a.txt', 'folder/sub/b.txt'];
+        const files = input.files;
+        assert(Array.from(files, f => f.webkitRelativePath).join('|') === expected.join('|'), 'relative paths');
+        const copy = structuredClone(files[1]);
+        assert(copy.name === 'b.txt' && copy.webkitRelativePath === expected[1], 'structured clone metadata');
+        const transfer = new DataTransfer(); transfer.items.add(files[0]);
+        assert(transfer.files[0].webkitRelativePath === expected[0], 'DataTransfer metadata');
+        input.files = transfer.files;
+        assert(input.files[0].webkitRelativePath === expected[0], 'FileList round trip');
+        assert(new File(['x'], 'ordinary.txt').webkitRelativePath === '', 'ordinary File default');
+        input.webkitdirectory = false; assert(!input.hasAttribute('webkitdirectory'), 'IDL setter removes attribute');
+        input.setAttribute('webkitdirectory', 'false'); assert(input.webkitdirectory, 'boolean attribute presence');
+        globalThis.directoryMultipart = new FormData();
+        directoryMultipart.append('upload', input.files[0]);
+        Object.defineProperty(input.files[0], 'webkitRelativePath', {get() { throw new Error('public path must not be read for upload'); }});
+        return 'ok';
+    })()"#).unwrap(), "ok");
+    let context_ptr: *const v8::Global<v8::Context> =
+        &vm.current_main_world().unwrap().context as *const _;
+    vm.renderer_document_isolate
+        .with_entered_renderer_document_isolate(|isolate| {
+            let scope = std::pin::pin!(v8::HandleScope::new(isolate));
+            let scope = &mut scope.init();
+            let context = unsafe { v8::Local::new(scope, &*context_ptr) };
+            let scope = &mut v8::ContextScope::new(scope, context);
+            let global = context.global(scope);
+            let key = v8::String::new(scope, "directoryMultipart").unwrap();
+            let form = global.get(scope, key.into()).unwrap();
+            let form = v8::Local::<v8::Object>::try_from(form).unwrap();
+            let (body, _) = crate::context_bootstrap::form_data_request_body(scope, form)
+                .unwrap()
+                .unwrap();
+            let body = String::from_utf8(body).unwrap();
+            assert!(body.contains("filename=\"folder/a.txt\""), "{body}");
+            assert!(body.contains("\r\n\r\nfolder/a.txt\r\n"), "{body}");
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn equal_file_values_keep_the_supplied_filelist_identity() {
+    let mut vm = new_parsed_test_vm(
+        "https://file-list.test/",
+        "<!doctype html><input id=upload type=file>",
+    );
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+        const input = document.getElementById('upload');
+        const first = new DataTransfer();
+        first.items.add(new File(['same'], 'file.txt', {lastModified: 1}));
+        input.files = first.files;
+        const second = new DataTransfer();
+        second.items.add(new File(['same'], 'file.txt', {lastModified: 1}));
+        const list = second.files;
+        input.files = list;
+        return input.files === list && input.files[0] === list[0];
+    })()"#
+        )
+        .unwrap(),
+        "true"
+    );
+}
+
+#[test]
+fn file_list_item_uses_native_contents_and_bounds_without_author_getters() {
+    let mut vm = new_parsed_test_vm(
+        "https://file-list-native-item.test/",
+        "<!doctype html><html><head></head><body></body></html>",
+    );
+    assert_eq!(vm.eval(r#"
+(() => {
+  const frame = document.body.appendChild(document.createElement('iframe'));
+  const high = '4294967294';
+  for (const w of [window, frame.contentWindow]) {
+    const transfer = new w.DataTransfer();
+    const file = new w.File(['native'], 'native.txt');
+    transfer.items.add(file);
+    const list = transfer.files, item = w.FileList.prototype.item;
+    let reads = 0;
+    const trap = () => { reads++; throw Error('author numeric getter'); };
+    Object.defineProperty(list, '0', {configurable: true, get: trap});
+    Object.defineProperty(list, 'length', {configurable: true, get: trap});
+    const prototype = Object.create(w.FileList.prototype);
+    Object.defineProperty(prototype, '1', {configurable: true, get: trap});
+    Object.setPrototypeOf(list, prototype);
+    const previous = Object.getOwnPropertyDescriptor(w.Array.prototype, high);
+    Object.defineProperty(w.Array.prototype, high, {configurable: true, get: trap});
+    try {
+      if (item.call(list, 0) !== file) throw Error('native File identity');
+      if (item.call(list, 1) !== null || item.call(list, Number(high)) !== null) throw Error('native item bounds');
+      const input = w.document.createElement('input'); input.type = 'file';
+      const empty = input.files, emptyPrototype = Object.create(w.FileList.prototype);
+      Object.defineProperty(emptyPrototype, '0', {get: trap});
+      Object.setPrototypeOf(empty, emptyPrototype);
+      if (item.call(empty, 0) !== null) throw Error('empty native list bounds');
+      Object.setPrototypeOf(list, null);
+      if (item.call(list, 0) !== file) throw Error('native identity after prototype mutation');
+      if (reads !== 0) throw Error('item consulted author data');
+    } finally {
+      if (previous) Object.defineProperty(w.Array.prototype, high, previous);
+      else delete w.Array.prototype[high];
+    }
+  }
+  frame.remove();
+  return 'ok';
+})()
+"#).expect("FileList.item native data probe"), "ok");
+}

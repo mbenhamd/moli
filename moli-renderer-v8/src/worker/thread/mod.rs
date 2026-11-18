@@ -73,13 +73,11 @@ use runtime_inspector::WorkerRuntimeInspector;
 use super::global_scope::{
     WorkerFetchEvent, WorkerGlobalState, WorkerIsolateTimerQueues, WorkerOpfsCompletion,
     WorkerWebCryptoCompletion, WorkerXhrCompletion, close_worker_owned_broadcast_channels,
-    close_worker_owned_message_ports, continue_pending_worker_csp_report,
-    continue_pending_worker_fetch, continue_pending_worker_fetch_response,
-    continue_pending_worker_xhr, continue_pending_worker_xhr_response,
-    dispatch_nested_worker_event, dispatch_worker_csp_violation_event,
-    dispatch_worker_websocket_event, drain_service_worker_client_focus_result,
-    drain_service_worker_client_navigate_result, drain_service_worker_client_query_result,
-    drain_service_worker_clients_open_window_result, drain_service_worker_get_notifications_result,
+    close_worker_owned_message_ports, dispatch_nested_worker_event,
+    dispatch_worker_csp_violation_event, dispatch_worker_websocket_event,
+    drain_service_worker_client_focus_result, drain_service_worker_client_navigate_result,
+    drain_service_worker_client_query_result, drain_service_worker_clients_open_window_result,
+    drain_service_worker_get_notifications_result,
     drain_service_worker_periodic_sync_get_tags_result,
     drain_service_worker_periodic_sync_registration_result,
     drain_service_worker_periodic_sync_unregistration_result,
@@ -87,19 +85,14 @@ use super::global_scope::{
     drain_service_worker_push_unsubscribe_result, drain_service_worker_show_notification_result,
     drain_service_worker_sync_get_tags_result, drain_service_worker_sync_registration_result,
     drain_worker_fetch_completion, drain_worker_opfs_completion, drain_worker_webcrypto_completion,
-    drain_worker_xhr_completion, fail_pending_worker_csp_report, fail_pending_worker_fetch,
-    fail_pending_worker_fetch_auth, fail_pending_worker_fetch_response, fail_pending_worker_xhr,
-    fail_pending_worker_xhr_auth, fail_pending_worker_xhr_response,
-    fulfill_pending_worker_csp_report, fulfill_pending_worker_fetch,
-    fulfill_pending_worker_fetch_response, fulfill_pending_worker_xhr,
-    fulfill_pending_worker_xhr_response, install_worker_global_scope,
+    drain_worker_xhr_completion, install_worker_global_scope,
     prepare_worker_global_scope_templates, service_worker_fetch_handler_type,
 };
 use super::handle::{
-    WorkerBootstrapCompletion, WorkerBootstrapFailure, WorkerBootstrapSuccess,
-    WorkerDevToolsHandle, WorkerErrorPhase, WorkerErrorSource, WorkerFetchHandlerType,
-    WorkerHandle, WorkerMessage, WorkerNetworkPolicy, WorkerParentErrorEventKind,
-    WorkerRuntimeInspectorMessageBatch, WorkerScriptResource, WorkerToParentMessage,
+    WorkerBootstrapCompletion, WorkerBootstrapFailure, WorkerBootstrapSuccess, WorkerControlHandle,
+    WorkerErrorPhase, WorkerErrorSource, WorkerFetchHandlerType, WorkerHandle, WorkerMessage,
+    WorkerNetworkPolicy, WorkerParentErrorEventKind, WorkerRuntimeInspectorMessageBatch,
+    WorkerScriptResource, WorkerToParentMessage,
 };
 use super::inspector_task_runner::{
     WorkerInspectorTask, WorkerInspectorTaskMode, WorkerInspectorTaskRunner,
@@ -224,6 +217,8 @@ pub(crate) struct WorkerTestHandle {
     handle: Option<WorkerHandle>,
     request_client: ResourceRequestClient,
     _request_client_owner: Option<ResourceRequestClientOwner>,
+    native_pauses:
+        Arc<Mutex<std::collections::HashMap<u64, crate::network::ResourceInterceptionPause>>>,
 }
 
 #[cfg(test)]
@@ -616,6 +611,9 @@ fn worker_has_pending_async(state: &Rc<RefCell<WorkerGlobalState>>) -> bool {
 fn start_worker_module_graph_fetch(
     request: WorkerModuleGraphFetchRequest,
     loader: WorkerResourceLoader,
+    worker_destination: moli_fetch::BrowserRequestMetadata,
+    worker_origin: moli_url::WebOrigin,
+    outside_origin: Option<moli_url::WebOrigin>,
     network_partition_key: Option<String>,
     module_static_import_content_security_policies: Vec<ContentSecurityPolicy>,
     worker_global_content_security_policies: Vec<ContentSecurityPolicy>,
@@ -623,6 +621,14 @@ fn start_worker_module_graph_fetch(
     worker_global_content_security_reporting_endpoints: ContentSecurityPolicyReportingEndpoints,
     completion_tx: mpsc::UnboundedSender<WorkerModuleGraphFetchCompletion>,
 ) {
+    // Bootstrap module graphs use outside settings, including data: workers.
+    // Later dynamic imports belong to the Worker's own execution origin.
+    let request_origin = match request.csp_source() {
+        WorkerModuleGraphFetchCspSource::StaticModuleGraph => {
+            outside_origin.unwrap_or_else(|| moli_url::WebOrigin::from_url(request.initiator_url()))
+        }
+        WorkerModuleGraphFetchCspSource::DynamicImportGraph => worker_origin,
+    };
     let fetch_id = request.fetch_id();
     let completion_key = request.module_key();
     let (enforce, report, endpoints, resource_kind) = match request.csp_source() {
@@ -668,7 +674,10 @@ fn start_worker_module_graph_fetch(
         );
         return;
     }
-    let browser_request_metadata = request.browser_request_metadata();
+    let browser_request_metadata = match request.browser_request_metadata() {
+        moli_fetch::BrowserRequestMetadata::Worker => worker_destination,
+        metadata => metadata,
+    };
     let mut fetch_request =
         match moli_fetch::Request::new("GET", request.url().as_str(), None, vec![]) {
             Ok(request) => request
@@ -697,13 +706,13 @@ fn start_worker_module_graph_fetch(
     fetch_request = csp_context.apply(
         fetch_request
             .with_initiator_url(request.initiator_url())
-            .with_request_origin(moli_url::WebOrigin::from_url(request.initiator_url()))
+            .with_request_origin(request_origin.clone())
             .with_credentials_mode(request.credentials_mode()),
     );
     let requested_url = request.url().clone();
-    let request_initiator_url = request.initiator_url().clone();
     let requested_module_type = request.module_type();
     let request_credentials_mode = request.credentials_mode();
+    let web_security_disabled = loader.request_client().web_security_disabled();
     let response_csp_context = csp_context.clone();
     let completion_tx_for_callback = completion_tx.clone();
     let response_started_at = Instant::now();
@@ -723,11 +732,12 @@ fn start_worker_module_graph_fetch(
                 )
                 .map_err(|error| error.to_string())?;
                 crate::network_host::validate_fetch_response_security_policy(
-                    &request_initiator_url,
+                    &request_origin,
                     &response.head(),
                     moli_fetch::RequestMode::Cors,
                     request_credentials_mode,
                     Default::default(),
+                    web_security_disabled,
                 )?;
                 let response_kind = requested_module_type.response_kind(
                     &response.final_url,
@@ -862,6 +872,15 @@ fn flush_worker_module_fetches(
         start_worker_module_graph_fetch(
             request,
             state.borrow().loader.clone(),
+            match state.borrow().global_kind {
+                WorkerGlobalKind::Dedicated { .. } => moli_fetch::BrowserRequestMetadata::Worker,
+                WorkerGlobalKind::Shared { .. } => moli_fetch::BrowserRequestMetadata::SharedWorker,
+                WorkerGlobalKind::Service { .. } => {
+                    moli_fetch::BrowserRequestMetadata::ServiceWorker
+                }
+            },
+            state.borrow().request_origin(),
+            state.borrow().module_static_import_origin.clone(),
             state.borrow().network_partition_key.clone(),
             state
                 .borrow()
@@ -936,6 +955,7 @@ async fn run_worker_pre_bootstrap_debugger_pause(
             return true;
         }
         match rx.recv().await {
+            Some(WorkerMessage::Start) => return true,
             Some(WorkerMessage::RunEnvironmentNotification) => {
                 if let Some(invalidation) = inspector_task_runner.claim_environment_for_owner() {
                     // Cache invalidation is control work, not a JS turn or a
@@ -1243,8 +1263,76 @@ fn worker_test_request_client() -> ResourceRequestClientOwner {
 pub(crate) fn spawn_test_worker_with_options(mut options: WorkerSpawnOptions) -> WorkerTestHandle {
     let request_client_owner = options.test_request_client_owner.take();
     let request_client = options.request_client.clone();
-    let handle = spawn_worker_with_options(options);
+    let (tx, rx) = mpsc::unbounded_channel();
+    let pauses = Arc::new(Mutex::new(std::collections::HashMap::<
+        u64,
+        crate::network::ResourceInterceptionPause,
+    >::new()));
+    let native_pauses = pauses.clone();
+    let output = tx.clone();
+    let report = Mutex::new(crate::types::ScriptExecutionReport::default());
+    let partition = options.network_policy.network_partition_key.clone();
+    options.interception_context = Some(
+        crate::network::interception_output::ResourceInterceptionContext::worker(
+            None,
+            move |event| {
+                use crate::network::ResourceInterceptionEvent as E;
+                match event {
+                    E::Network(item) => {
+                        for record in
+                            super::resource_output::record_output(&mut report.lock(), *item)
+                        {
+                            let _ = output.send(WorkerToParentMessage::SubresourceNetwork(record));
+                        }
+                    }
+                    E::Request { info, pause } => {
+                        let id = info.internal_id;
+                        pauses.lock().insert(id, pause);
+                        let _ = output.send(WorkerToParentMessage::PendingSubresourceFetch(
+                            crate::worker::WorkerPendingSubresourceFetch {
+                                fetch_id: id,
+                                network_partition_key: partition.clone(),
+                                info: *info,
+                            },
+                        ));
+                    }
+                    E::Continue { event, pause } => {
+                        let id = match event.as_ref() {
+                            crate::types::PendingSubresourceContinueEvent::Completed {
+                                internal_id,
+                            } => *internal_id,
+                            crate::types::PendingSubresourceContinueEvent::ResponsePaused(info) => {
+                                info.internal_id
+                            }
+                            crate::types::PendingSubresourceContinueEvent::AuthRequired(info) => {
+                                info.internal_id
+                            }
+                        };
+                        if let Some(pause) = pause {
+                            pauses.lock().insert(id, pause);
+                        } else {
+                            pauses.lock().remove(&id);
+                            return true;
+                        }
+                        let _ = output.send(WorkerToParentMessage::SubresourceContinue(*event));
+                    }
+                }
+                true
+            },
+        ),
+    );
+    let mut handle = spawn_worker_with_options(options);
+    let mut parent = handle.take_receiver().unwrap();
+    tokio::spawn(async move {
+        while let Some(message) = parent.recv().await {
+            if tx.send(message).is_err() {
+                break;
+            }
+        }
+    });
+    handle.replace_test_receiver(rx);
     WorkerTestHandle {
+        native_pauses,
         handle: Some(handle),
         request_client,
         _request_client_owner: request_client_owner,
@@ -1293,10 +1381,10 @@ pub(crate) fn spawn_worker_with_options(options: WorkerSpawnOptions) -> WorkerHa
     let worker_wake_tx = parent_to_worker_tx.clone();
     let isolate_handle = Arc::new(Mutex::new(None));
     let worker_isolate_handle = Arc::clone(&isolate_handle);
-    let devtools =
-        WorkerDevToolsHandle::new(parent_to_worker_tx.clone(), Arc::clone(&isolate_handle));
-    let worker_inspector_tasks = devtools.inspector_tasks().clone();
-    let network_cancel = devtools.network_cancel_handle();
+    let control =
+        WorkerControlHandle::new(parent_to_worker_tx.clone(), Arc::clone(&isolate_handle));
+    let worker_inspector_tasks = control.inspector_tasks().clone();
+    let network_cancel = control.network_cancel_handle();
     let termination_requested = Arc::new(AtomicBool::new(false));
     let worker_termination_requested = Arc::clone(&termination_requested);
 
@@ -1349,13 +1437,11 @@ pub(crate) fn spawn_worker_with_options(options: WorkerSpawnOptions) -> WorkerHa
         })
         .expect("failed to spawn worker thread");
 
-    WorkerHandle::new_with_termination_requested_and_devtools(
-        parent_to_worker_tx,
+    WorkerHandle::new_with_control(
         worker_to_parent_rx,
         join_handle,
-        isolate_handle,
         termination_requested,
-        devtools,
+        control,
     )
 }
 
@@ -1484,12 +1570,18 @@ async fn worker_main(
     let mut bootstrap_completion = WorkerBootstrapCompletionReporter::new(bootstrap_completion_tx);
     let resource_task_runner = crate::network::RendererResourceTaskRunner::from_current_tokio()
         .expect("Worker owner loop must expose its resource task runner");
+    let interception_context = Some(
+        interception_context
+            .map(|context| context.fork_worker_observer())
+            .unwrap_or_else(|| super::resource_output::unobserved(parent_tx.clone())),
+    );
     let loader = resource_loader_for_worker_context(
         request_client,
         &network_policy,
         &global_kind,
         resource_task_runner,
     );
+    loader.set_interception_context(interception_context.clone());
 
     // ── Create worker-level V8 isolate ─────────────────────────────────────
     let worker_indexed_db_manager = indexed_db_manager.clone();
@@ -1590,6 +1682,10 @@ async fn worker_main(
             crate::structured_clone::RuntimeMessageAgentCluster::ServiceWorker
         }
     };
+    let module_static_import_origin = creator_message_security
+        .as_ref()
+        .and_then(|security| security.serialized_origin())
+        .map(moli_url::WebOrigin::from_serialized);
     let message_source_security = crate::context_bootstrap::RuntimeMessageSourceSecurity::worker(
         current_script_url.as_ref(),
         creator_message_security,
@@ -1615,6 +1711,7 @@ async fn worker_main(
         script_kind,
         current_script_url,
         referrer_policy,
+        module_static_import_origin,
         module_static_import_content_security_policies,
         content_security_policies,
         content_security_report_only_policies,
@@ -1634,7 +1731,6 @@ async fn worker_main(
         xhr_completion_tx,
         pending_xhrs: std::collections::HashMap::new(),
         next_xhr_id: 0,
-        pending_csp_reports: std::collections::HashMap::new(),
         abort: Rc::new(RefCell::new(super::abort::WorkerAbortStore::default())),
         worker_context_runtime,
         service_worker_runtime,
@@ -1650,7 +1746,6 @@ async fn worker_main(
         storage_bucket_store: worker_storage_bucket_store,
         websocket_event_tx,
         websockets: std::collections::HashMap::new(),
-        next_websocket_id: 0,
         next_nested_worker_id: 1,
         nested_worker_wrappers: std::collections::HashMap::new(),
         webcrypto_completion_tx,
@@ -2712,6 +2807,8 @@ async fn worker_main(
                     drain_worker_dynamic_module_imports(scope, &state, &module_graph_fetch_tx);
                 }
             }
+            // An external debugger may already have released bootstrap.
+            WorkerLoopWake::Message(Some(WorkerMessage::Start)) => {}
             WorkerLoopWake::Message(Some(WorkerMessage::RunEnvironmentNotification)) => {
                 if let Some(invalidation) = inspector_task_runner.claim_environment_for_owner() {
                     invalidation.notify_isolate(worker_isolate.worker_isolate_mut());
@@ -2781,151 +2878,6 @@ async fn worker_main(
                 loader
                     .request_client()
                     .set_blocked_url_patterns(&patterns_for_loader);
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::ContinuePendingFetch(request))) => {
-                continue_pending_worker_fetch(&state, request);
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::ContinuePendingXhr(request))) => {
-                continue_pending_worker_xhr(&state, request);
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::ContinuePendingCspReport(request))) => {
-                continue_pending_worker_csp_report(&state, request);
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::ContinuePendingFetchResponse {
-                request,
-                response_code,
-                response_headers,
-            })) => {
-                continue_pending_worker_fetch_response(
-                    &state,
-                    request,
-                    response_code,
-                    response_headers,
-                );
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::ContinuePendingXhrResponse {
-                request,
-                response_code,
-                response_headers,
-            })) => {
-                continue_pending_worker_xhr_response(
-                    &state,
-                    request,
-                    response_code,
-                    response_headers,
-                );
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::FailPendingFetch {
-                request,
-                error_text,
-            })) => {
-                fail_pending_worker_fetch(&state, request, error_text);
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::FailPendingXhr {
-                request,
-                error_text,
-            })) => {
-                fail_pending_worker_xhr(&state, request, error_text);
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::FailPendingCspReport {
-                request,
-                error_text,
-            })) => {
-                fail_pending_worker_csp_report(&state, request, error_text);
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::FailPendingFetchAuth {
-                request,
-                error_text,
-            })) => {
-                fail_pending_worker_fetch_auth(&state, request, error_text);
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::FailPendingXhrAuth {
-                request,
-                error_text,
-            })) => {
-                fail_pending_worker_xhr_auth(&state, request, error_text);
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::FailPendingFetchResponse {
-                request,
-                error_text,
-            })) => {
-                fail_pending_worker_fetch_response(&state, request, error_text);
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::FailPendingXhrResponse {
-                request,
-                error_text,
-            })) => {
-                fail_pending_worker_xhr_response(&state, request, error_text);
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::FulfillPendingFetch {
-                request,
-                response_code,
-                response_headers,
-                response_body,
-            })) => {
-                fulfill_pending_worker_fetch(
-                    &state,
-                    request,
-                    response_code,
-                    response_headers,
-                    response_body,
-                );
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::FulfillPendingXhr {
-                request,
-                response_code,
-                response_headers,
-                response_body,
-            })) => {
-                fulfill_pending_worker_xhr(
-                    &state,
-                    request,
-                    response_code,
-                    response_headers,
-                    response_body,
-                );
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::FulfillPendingCspReport {
-                request,
-                response_code,
-                response_headers,
-                response_body,
-            })) => {
-                fulfill_pending_worker_csp_report(
-                    &state,
-                    request,
-                    response_code,
-                    response_headers,
-                    response_body,
-                );
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::FulfillPendingFetchResponse {
-                request,
-                response_code,
-                response_headers,
-                response_body,
-            })) => {
-                fulfill_pending_worker_fetch_response(
-                    &state,
-                    request,
-                    response_code,
-                    response_headers,
-                    response_body,
-                );
-            }
-            WorkerLoopWake::Message(Some(WorkerMessage::FulfillPendingXhrResponse {
-                request,
-                response_code,
-                response_headers,
-                response_body,
-            })) => {
-                fulfill_pending_worker_xhr_response(
-                    &state,
-                    request,
-                    response_code,
-                    response_headers,
-                    response_body,
-                );
             }
             WorkerLoopWake::Message(Some(WorkerMessage::Terminate)) => {
                 trace!(url = %script_url, "worker terminated by parent");
@@ -3573,6 +3525,8 @@ fn evaluate_classic_worker_bootstrap_script(
     }
 }
 
+#[cfg(test)]
+mod test_resource_driver;
 #[cfg(test)]
 mod tests;
 

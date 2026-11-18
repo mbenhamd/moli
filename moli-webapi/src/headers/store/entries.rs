@@ -1,0 +1,442 @@
+use super::super::*;
+use http::header::HeaderName;
+use moli_v8_util::{get_private_value, set_private_value};
+
+pub(super) const HEADERS_ENTRIES_SLOT: &str = "__lmHeadersEntriesJson";
+pub(super) const HEADERS_IMMUTABLE_SLOT: &str = "__lmHeadersImmutable";
+pub(super) const HEADERS_GUARD_SLOT: &str = "__lmHeadersGuard";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HeadersGuard {
+    None,
+    Request,
+    RequestNoCors,
+    Response,
+}
+
+impl HeadersGuard {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Request => "request",
+            Self::RequestNoCors => "request-no-cors",
+            Self::Response => "response",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "request" => Self::Request,
+            "request-no-cors" => Self::RequestNoCors,
+            "response" => Self::Response,
+            _ => Self::None,
+        }
+    }
+}
+
+pub fn mark_headers_immutable(scope: &mut v8::PinScope<'_, '_>, obj: v8::Local<'_, v8::Object>) {
+    set_private_value(
+        scope,
+        obj,
+        HEADERS_IMMUTABLE_SLOT,
+        v8::Boolean::new(scope, true).into(),
+    );
+}
+
+pub fn headers_are_immutable<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+) -> bool {
+    get_private_value(scope, obj, HEADERS_IMMUTABLE_SLOT)
+        .is_some_and(|value| value.boolean_value(scope))
+}
+
+pub fn headers_guard<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+) -> HeadersGuard {
+    private_string_value(scope, obj, HEADERS_GUARD_SLOT)
+        .as_deref()
+        .map(HeadersGuard::from_str)
+        .unwrap_or(HeadersGuard::None)
+}
+
+pub fn header_allowed_by_guard(guard: HeadersGuard, name: &str, value: &str) -> bool {
+    match guard {
+        HeadersGuard::None => true,
+        HeadersGuard::Request => {
+            !moli_fetch_types::header_policy::is_forbidden_request_header_name(name)
+                && !moli_fetch_types::header_policy::is_forbidden_request_header_override_value(
+                    name, value,
+                )
+        }
+        HeadersGuard::RequestNoCors => {
+            !moli_fetch_types::header_policy::is_forbidden_request_header_name(name)
+                && !moli_fetch_types::header_policy::is_forbidden_request_header_override_value(
+                    name, value,
+                )
+                && moli_fetch_types::header_policy::is_no_cors_safelisted_request_header(
+                    name, value,
+                )
+        }
+        HeadersGuard::Response => {
+            !moli_fetch_types::header_policy::is_forbidden_response_header_name(name)
+        }
+    }
+}
+
+pub fn filter_headers_for_guard(
+    entries: &[(String, String)],
+    guard: HeadersGuard,
+) -> Vec<(String, String)> {
+    let mut filtered = Vec::with_capacity(entries.len());
+    for (name, value) in entries {
+        if header_append_allowed_by_guard(guard, name, value, &filtered) {
+            filtered.push((name.clone(), value.clone()));
+        }
+    }
+    filtered
+}
+
+pub fn header_append_allowed_by_guard(
+    guard: HeadersGuard,
+    name: &str,
+    value: &str,
+    entries: &[(String, String)],
+) -> bool {
+    if guard != HeadersGuard::RequestNoCors {
+        return header_allowed_by_guard(guard, name, value);
+    }
+    // Filling Headers runs append for each entry. The no-cors check applies
+    // to the resulting combined value, including separators and empty values;
+    // a rejected append must leave previously accepted entries intact.
+    let mut combined = None::<String>;
+    for (_, existing) in entries
+        .iter()
+        .filter(|(field, _)| field.eq_ignore_ascii_case(name))
+    {
+        if let Some(combined) = &mut combined {
+            combined.push_str(", ");
+            combined.push_str(existing);
+        } else {
+            combined = Some(existing.clone());
+        }
+    }
+    match combined {
+        Some(mut combined) => {
+            combined.push_str(", ");
+            combined.push_str(value);
+            header_allowed_by_guard(guard, name, &combined)
+        }
+        None => header_allowed_by_guard(guard, name, value),
+    }
+}
+
+pub fn set_headers_entries(
+    scope: &mut v8::PinScope<'_, '_>,
+    obj: v8::Local<'_, v8::Object>,
+    entries: &[(String, String)],
+) {
+    let json = headers_entries_json(entries);
+    let Some(json) = v8_string(scope, &json) else {
+        return;
+    };
+    set_private_value(scope, obj, HEADERS_ENTRIES_SLOT, json.into());
+}
+
+pub fn headers_entries_json(entries: &[(String, String)]) -> String {
+    // Keep the underlying header list intact. Request construction can refill
+    // this list under a different guard, which must see each original entry.
+    let entries = normalized_header_list(entries);
+    serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_owned())
+}
+
+fn normalized_header_list(entries: &[(String, String)]) -> Vec<(String, String)> {
+    let mut normalized = Vec::<(String, String)>::new();
+    let mut first_names = std::collections::HashMap::new();
+    for (name, value) in entries {
+        let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let value = normalize_header_value(value);
+        if !is_valid_header_value(&value) {
+            continue;
+        }
+        let first_name = *first_names.entry(header_name).or_insert(name.as_str());
+        normalized.push((first_name.to_owned(), value));
+    }
+    normalized
+}
+
+/// Combine values for network dispatch without losing the first field spelling.
+/// Keep Set-Cookie separate and retain the existing case-insensitive name order.
+pub fn combined_headers_entries(entries: &[(String, String)]) -> Vec<(String, String)> {
+    let mut normalized = Vec::<(String, String)>::new();
+    for (name, value) in normalized_header_list(entries) {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            normalized.push((name, value));
+            continue;
+        }
+        if let Some((_, existing)) = normalized
+            .iter_mut()
+            .find(|(entry_name, _)| entry_name.eq_ignore_ascii_case(&name))
+        {
+            existing.push_str(", ");
+            existing.push_str(&value);
+        } else {
+            normalized.push((name, value));
+        }
+    }
+    normalized.sort_by_cached_key(|(name, _)| name.to_ascii_lowercase());
+    normalized
+}
+
+// Public iteration and XHR's serialized response headers use sorted-lowercase
+// names; the internal list and network projection retain their original case.
+pub fn normalized_headers_entries(entries: &[(String, String)]) -> Vec<(String, String)> {
+    let mut normalized = combined_headers_entries(entries);
+    for (name, _) in &mut normalized {
+        name.make_ascii_lowercase();
+    }
+    normalized
+}
+
+pub fn normalize_header_value(value: &str) -> String {
+    value.trim_matches(is_http_whitespace).to_owned()
+}
+
+pub fn normalized_header_name_or_throw(
+    scope: &mut v8::PinScope<'_, '_>,
+    name: &str,
+) -> Option<String> {
+    validated_header_name_or_throw(scope, name).map(str::to_ascii_lowercase)
+}
+
+pub fn validated_header_name_or_throw<'a>(
+    scope: &mut v8::PinScope<'_, '_>,
+    name: &'a str,
+) -> Option<&'a str> {
+    if HeaderName::from_bytes(name.as_bytes()).is_ok() {
+        Some(name)
+    } else {
+        throw_type_error(scope, "Invalid header name");
+        None
+    }
+}
+
+pub fn normalized_header_value_or_throw(
+    scope: &mut v8::PinScope<'_, '_>,
+    value: &str,
+) -> Option<String> {
+    let value = normalize_header_value(value);
+    if is_valid_header_value(&value) {
+        Some(value)
+    } else {
+        throw_type_error(scope, "Invalid header value");
+        None
+    }
+}
+
+pub(super) fn validated_header_entry_or_throw(
+    scope: &mut v8::PinScope<'_, '_>,
+    name: String,
+    value: String,
+) -> Option<(String, String)> {
+    validated_header_name_or_throw(scope, &name)?;
+    let value = normalized_header_value_or_throw(scope, &value)?;
+    Some((name, value))
+}
+
+fn is_valid_header_value(value: &str) -> bool {
+    value
+        .chars()
+        .all(|ch| ch as u32 <= 0xff && !matches!(ch, '\0' | '\n' | '\r'))
+}
+
+fn is_http_whitespace(ch: char) -> bool {
+    matches!(ch, '\t' | '\n' | '\r' | ' ')
+}
+
+/// The sorted, combined view used by public iteration and header consumers.
+pub fn headers_entries<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+) -> Vec<(String, String)> {
+    normalized_headers_entries(&headers_list(scope, obj))
+}
+
+/// The internal header list, before the public sort-and-combine projection.
+pub fn headers_list<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+) -> Vec<(String, String)> {
+    private_string_value(scope, obj, HEADERS_ENTRIES_SLOT)
+        .and_then(|json| serde_json::from_str::<Vec<(String, String)>>(&json).ok())
+        .unwrap_or_default()
+}
+
+fn private_string_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    obj: v8::Local<'s, v8::Object>,
+    slot: &str,
+) -> Option<String> {
+    get_private_value(scope, obj, slot)
+        .and_then(|value| value.to_string(scope))
+        .map(|value| value.to_rust_string_lossy(scope))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        HeadersGuard, header_allowed_by_guard, headers_entries_json, normalized_headers_entries,
+    };
+
+    #[test]
+    fn headers_storage_preserves_duplicate_entries_and_order() {
+        let entries = [
+            ("X-Test".to_owned(), " one ".to_owned()),
+            ("Set-Cookie".to_owned(), "a=1".to_owned()),
+            ("x-test".to_owned(), String::new()),
+            ("set-cookie".to_owned(), "b=2".to_owned()),
+            ("X-TEST".to_owned(), "two".to_owned()),
+        ];
+        let stored: Vec<(String, String)> =
+            serde_json::from_str(&headers_entries_json(&entries)).unwrap();
+        assert_eq!(
+            stored,
+            vec![
+                ("X-Test".to_owned(), "one".to_owned()),
+                ("Set-Cookie".to_owned(), "a=1".to_owned()),
+                ("X-Test".to_owned(), String::new()),
+                ("Set-Cookie".to_owned(), "b=2".to_owned()),
+                ("X-Test".to_owned(), "two".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn normalized_headers_entries_keeps_set_cookie_values_separate() {
+        let normalized = normalized_headers_entries(&[
+            ("Set-Cookie".to_owned(), "a=1".to_owned()),
+            ("set-cookie".to_owned(), "b=2".to_owned()),
+            ("X-Test".to_owned(), "one".to_owned()),
+            ("x-test".to_owned(), "two".to_owned()),
+        ]);
+
+        assert_eq!(
+            normalized,
+            vec![
+                ("set-cookie".to_owned(), "a=1".to_owned()),
+                ("set-cookie".to_owned(), "b=2".to_owned()),
+                ("x-test".to_owned(), "one, two".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn normalized_headers_entries_uses_http_header_validation() {
+        let normalized = normalized_headers_entries(&[
+            ("Bad Name".to_owned(), "ignored".to_owned()),
+            ("X-Test".to_owned(), "bad\0value".to_owned()),
+            ("Accept".to_owned(), "text/html".to_owned()),
+        ]);
+
+        assert_eq!(
+            normalized,
+            vec![("accept".to_owned(), "text/html".to_owned())]
+        );
+    }
+
+    #[test]
+    fn normalized_headers_entries_trims_http_whitespace() {
+        let normalized = normalized_headers_entries(&[
+            ("X-Test".to_owned(), "\r\n\tvalue\n".to_owned()),
+            ("X-Form-Feed".to_owned(), "\t\u{c}\tvalue\n".to_owned()),
+        ]);
+
+        assert_eq!(
+            normalized,
+            vec![
+                ("x-form-feed".to_owned(), "\u{c}\tvalue".to_owned()),
+                ("x-test".to_owned(), "value".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn request_guard_filters_forbidden_method_override_values() {
+        assert!(!header_allowed_by_guard(
+            HeadersGuard::Request,
+            "x-http-method-override",
+            "GET, track "
+        ));
+        assert!(!header_allowed_by_guard(
+            HeadersGuard::Request,
+            "x-method-override",
+            "\tTRACE"
+        ));
+        assert!(header_allowed_by_guard(
+            HeadersGuard::Request,
+            "x-http-method",
+            "GETTRACE"
+        ));
+        assert!(header_allowed_by_guard(
+            HeadersGuard::Request,
+            "x-http-method",
+            "\",TRACE\","
+        ));
+    }
+
+    #[test]
+    fn no_cors_guard_checks_safelisted_header_values() {
+        assert!(header_allowed_by_guard(
+            HeadersGuard::RequestNoCors,
+            "accept",
+            "text/html"
+        ));
+        assert!(!header_allowed_by_guard(
+            HeadersGuard::RequestNoCors,
+            "accept",
+            "\""
+        ));
+        assert!(header_allowed_by_guard(
+            HeadersGuard::RequestNoCors,
+            "accept-language",
+            "en-US, zh"
+        ));
+        assert!(!header_allowed_by_guard(
+            HeadersGuard::RequestNoCors,
+            "accept-language",
+            "@"
+        ));
+        assert!(header_allowed_by_guard(
+            HeadersGuard::RequestNoCors,
+            "content-type",
+            "text/plain;charset=UTF-8"
+        ));
+        assert!(!header_allowed_by_guard(
+            HeadersGuard::RequestNoCors,
+            "content-type",
+            "text/html"
+        ));
+    }
+
+    #[test]
+    fn response_guard_filters_forbidden_response_headers() {
+        assert!(!header_allowed_by_guard(
+            HeadersGuard::Response,
+            "set-cookie",
+            "a=b"
+        ));
+        assert!(!header_allowed_by_guard(
+            HeadersGuard::Response,
+            "set-cookie2",
+            "a=b"
+        ));
+        assert!(header_allowed_by_guard(
+            HeadersGuard::Response,
+            "content-type",
+            "text/plain"
+        ));
+    }
+}

@@ -18,7 +18,6 @@ use super::{
         PendingWindowMessage, PendingWindowMessageEndpoint, PendingWindowMessageSource,
         RuntimeObservableContextToken, WindowExecutionContextOwner, WindowTaskTarget,
         active_child_window_handle, active_lightweight_popup_id,
-        current_or_live_delegate_node_arg_handle,
         element::{
             ComputedStyleTargetContext, STYLE_DECLARATION_FORCED_EMPTY_COMPUTED_SLOT,
             STYLE_DECLARATION_PSEUDO_ELEMENT_SLOT, STYLE_DECLARATION_READ_DOCUMENT_SLOT,
@@ -27,8 +26,7 @@ use super::{
             STYLE_DECLARATION_TARGET_EMPTY_COMPUTED_SLOT, STYLE_DECLARATION_VIEWPORT_HEIGHT_SLOT,
             STYLE_DECLARATION_VIEWPORT_WIDTH_SLOT, computed_style_target_context,
             dispatched_click_activation_target, finish_legacy_activation_for_dispatched_click,
-            iframe_handle_viewport, observable_event_offset,
-            perform_click_default_action_for_dispatched_event,
+            observable_event_offset, perform_click_default_action_for_dispatched_event,
             prepare_legacy_activation_for_dispatched_click,
             queue_animation_start_for_listener_target, queue_scroll_observable_effects,
         },
@@ -49,7 +47,8 @@ use crate::event_listener_args::{
 };
 use crate::native_bridge::OwnerDispatchScope;
 use crate::web_api_interfaces;
-use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
+pub(crate) use moli_webapi::idle_deadline::install_idle_deadline_template_bindings;
+use moli_webapi_declare::WebApiObject;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
@@ -59,9 +58,6 @@ const WINDOW_PENDING_ANIMATION_FRAME_TIMESTAMP_SLOT: &str =
     "__moliWindowPendingAnimationFrameTimestamp";
 const WINDOW_LAST_ANIMATION_FRAME_TIMESTAMP_SLOT: &str = "__moliWindowLastAnimationFrameTimestamp";
 const IDLE_CALLBACK_BUDGET_MS: f64 = 50.0;
-const IDLE_DEADLINE_DID_TIMEOUT_SLOT: &str = "__moliIdleDeadlineDidTimeout";
-const IDLE_DEADLINE_MS_SLOT: &str = "__moliIdleDeadlineMs";
-const IDLE_DEADLINE_TIME_ORIGIN_SLOT: &str = "__moliIdleDeadlineTimeOrigin";
 const IDLE_OPPORTUNITY_DELAY_MS: u32 = 1;
 const WINDOW_REQUEST_ANIMATION_FRAME_DELAY_MS: u32 = 16;
 pub(crate) const TOP_WINDOW_MESSAGE_ENDPOINT_SLOT: &str = "__moliTopWindowMessageEndpoint";
@@ -71,17 +67,6 @@ pub(crate) const TOP_WINDOW_MESSAGE_ENDPOINT_SLOT: &str = "__moliTopWindowMessag
 struct WindowDocumentEventInitDeclaration {
     bubbles: bool,
     cancelable: bool,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::IdleDeadline)]
-struct IdleDeadlineDeclaration {
-    #[webapi(slot = IDLE_DEADLINE_MS_SLOT)]
-    deadline_ms: f64,
-    #[webapi(slot = IDLE_DEADLINE_TIME_ORIGIN_SLOT)]
-    time_origin_ms: f64,
-    #[webapi(slot = IDLE_DEADLINE_DID_TIMEOUT_SLOT)]
-    did_timeout: bool,
 }
 
 #[derive(webidl::WebIdlArgs)]
@@ -196,22 +181,6 @@ impl<'s> webidl::WebIdlArguments<'s> for WindowPostMessageArgs<'s> {
             })
         }
     }
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::IdleDeadline, enumerable)]
-struct IdleDeadlinePrototypeDeclaration {
-    #[webapi(
-        accessor_property = "didTimeout",
-        getter = window_idle_deadline_did_timeout_getter
-    )]
-    did_timeout: (),
-    #[webapi(
-        method,
-        length = 0,
-        callback = window_idle_deadline_time_remaining_callback
-    )]
-    time_remaining: (),
 }
 
 pub(super) fn event_target_add_event_listener_callback<'s>(
@@ -1214,26 +1183,41 @@ pub(crate) fn window_get_computed_style_callback<'s>(
         );
         return;
     };
+    // Capture the receiver realm before conversion can run author code. A
+    // discarded Window remains a valid receiver for this synchronous read;
+    // it does not require a live execution-context dispatch binding.
+    let receiver_context = args.this().get_creation_context(scope);
+    let Some(receiver_context) = receiver_context else {
+        rv.set_null();
+        return;
+    };
+    let child_window_handle = object_child_window_handle(scope, args.this());
     let Some(parsed) = webidl::parse_args::<GetComputedStyleArgs>(scope, &args) else {
         return;
     };
-    let Some(handle) =
-        current_or_live_delegate_node_arg_handle(scope, host_ptr, parsed.element.into())
+    let Ok((target_host_ptr, handle)) =
+        crate::native_bridge::node_runtime_and_handle_from_object_or_detached(
+            scope,
+            parsed.element,
+        )
     else {
         rv.set_null();
         return;
     };
     let pseudo_argument = parsed.pseudo_argument();
-    let child_window_handle = object_child_window_handle(scope, args.this())
-        .or_else(|| dom_handle_from_marker_value(scope, args.data()));
-    match build_computed_style_object(
-        scope,
-        host_ptr,
-        handle,
-        child_window_handle,
-        pseudo_argument,
-    ) {
-        Some(style) => rv.set(style.into()),
+    let style = {
+        let scope = &mut v8::ContextScope::new(scope, receiver_context);
+        build_computed_style_object(
+            scope,
+            target_host_ptr,
+            handle,
+            child_window_handle.filter(|_| target_host_ptr == host_ptr),
+            pseudo_argument,
+        )
+        .map(|style| v8::Global::new(scope, style))
+    };
+    match style {
+        Some(style) => rv.set(v8::Local::new(scope, style).into()),
         None => rv.set_null(),
     }
 }
@@ -1261,11 +1245,14 @@ pub(crate) fn build_computed_style_object<'s>(
             Some(target_context.returns_empty_style())
         }
         ComputedStyleTargetContext::ActiveDocument
+        | ComputedStyleTargetContext::PopupDocument { .. }
         | ComputedStyleTargetContext::EmptyForDetached => None,
     };
-    let viewport = child_window_handle
-        .and_then(|child_handle| iframe_handle_viewport(host_ref, child_handle))
-        .unwrap_or_else(|| target_context.viewport(host_ref));
+    let viewport = target_context.viewport(host_ref);
+    let read_document = match target_context {
+        ComputedStyleTargetContext::PopupDocument { document_handle } => Some(document_handle),
+        _ => None,
+    };
     let ComputedStylePseudoArgument {
         forced_empty,
         pseudo_element,
@@ -1318,7 +1305,9 @@ pub(crate) fn build_computed_style_object<'s>(
         scope,
         style,
         STYLE_DECLARATION_READ_DOCUMENT_SLOT,
-        v8::undefined(scope).into(),
+        read_document
+            .map(|document| v8::Integer::new_from_unsigned(scope, document.index_u32()).into())
+            .unwrap_or_else(|| v8::undefined(scope).into()),
     );
     let pseudo_value = pseudo_element
         .as_deref()
@@ -1367,6 +1356,9 @@ fn computed_style_target_key(target_context: ComputedStyleTargetContext) -> Comp
     match target_context {
         ComputedStyleTargetContext::ChildFrameDocument { frame_handle, .. } => {
             ComputedStyleTargetKey::ChildFrame(frame_handle)
+        }
+        ComputedStyleTargetContext::PopupDocument { document_handle } => {
+            ComputedStyleTargetKey::PopupDocument(document_handle)
         }
         ComputedStyleTargetContext::ActiveDocument
         | ComputedStyleTargetContext::EmptyForDetached => ComputedStyleTargetKey::Dynamic,
@@ -2026,69 +2018,7 @@ pub(crate) fn build_window_idle_deadline<'s>(
         now_ms + IDLE_CALLBACK_BUDGET_MS
     };
     let time_origin_ms = current_performance_time_origin(scope);
-    IdleDeadlineDeclaration::new(deadline_ms, time_origin_ms, did_timeout)
-        .bind(scope)
-        .ok()
-}
-
-pub(crate) fn install_idle_deadline_template_bindings<'s>(
-    scope: &mut v8::PinScope<'s, '_, ()>,
-    template: v8::Local<'s, v8::FunctionTemplate>,
-) {
-    IdleDeadlinePrototypeDeclaration::initialize_prototype_template(
-        scope,
-        template.prototype_template(scope),
-    );
-}
-
-fn idle_deadline_receiver<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    receiver: v8::Local<'s, v8::Object>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    if web_api_interfaces::IdleDeadline::is_instance(scope, receiver) {
-        return Some(receiver);
-    }
-    throw_type_error(scope, "Illegal invocation");
-    None
-}
-
-fn window_idle_deadline_did_timeout_getter<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
-) {
-    let Some(deadline) = idle_deadline_receiver(scope, args.this()) else {
-        return;
-    };
-    let did_timeout = get_private_value(scope, deadline, IDLE_DEADLINE_DID_TIMEOUT_SLOT)
-        .is_some_and(|value| value.boolean_value(scope));
-    rv.set_bool(did_timeout);
-}
-
-fn window_idle_deadline_time_remaining_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
-) {
-    let Some(deadline) = idle_deadline_receiver(scope, args.this()) else {
-        return;
-    };
-    let now_ms = current_time_ms();
-    let time_origin_ms = get_private_value(scope, deadline, IDLE_DEADLINE_TIME_ORIGIN_SLOT)
-        .and_then(|value| value.number_value(scope))
-        .unwrap_or(0.0);
-    let remaining_ms = get_private_value(scope, deadline, IDLE_DEADLINE_MS_SLOT)
-        .and_then(|value| value.number_value(scope))
-        .map_or(0.0, |deadline_ms| {
-            // Use the captured origin even if timeRemaining is borrowed from
-            // another realm. Both timestamps must match performance.now()'s
-            // relative clock and precision rather than the raw wall clock.
-            moli_time::coarsened_dom_time_remaining_millis(
-                (deadline_ms - time_origin_ms).max(0.0),
-                (now_ms - time_origin_ms).max(0.0),
-            )
-        });
-    rv.set(v8::Number::new(scope, remaining_ms).into());
+    moli_webapi::idle_deadline::build(scope, deadline_ms, time_origin_ms, did_timeout)
 }
 
 pub(crate) fn current_time_ms() -> f64 {

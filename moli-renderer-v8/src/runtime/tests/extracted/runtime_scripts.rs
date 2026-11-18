@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn typed_attributes_resolve_scoped_references_against_live_nodes() {
     use super::{RendererDocumentNodeAttributesResolution as Attributes, RendererDomNodeReference};
@@ -9,10 +10,15 @@ async fn typed_attributes_resolve_scoped_references_against_live_nodes() {
         reference: RendererDomNodeReference,
     ) -> Attributes {
         let (reply, _) = page
-            .run_async_command(RendererPageCommand::DocumentNodeAttributes { reference })
+            .run_async_command(RendererPageCommand::DevTools(
+                RendererDevToolsPageCommand::DocumentNodeAttributes { reference },
+            ))
             .await
             .expect("typed attributes query completes");
-        let RendererPageReply::DocumentNodeAttributesResolution(result) = reply else {
+        let RendererPageReply::DevTools(
+            RendererDevToolsPageReply::DocumentNodeAttributesResolution(result),
+        ) = reply
+        else {
             panic!("expected typed attribute resolution");
         };
         result
@@ -28,26 +34,30 @@ async fn typed_attributes_resolve_scoped_references_against_live_nodes() {
         "<!doctype html><html><body><input id='probe' data-state='before'></body></html>",
     )
     .await;
-    page.run_async_command(RendererPageCommand::DocumentNodeSnapshotForDocument {
-        inspector_session_id: Some("attributes-a".to_owned()),
-        include_whitespace: false,
-        depth: 1,
-        pierce: false,
-    })
+    page.run_async_command(RendererPageCommand::DevTools(
+        RendererDevToolsPageCommand::DocumentNodeSnapshotForDocument {
+            inspector_session_id: Some("attributes-a".to_owned()),
+            include_whitespace: false,
+            depth: 1,
+            pierce: false,
+        },
+    ))
     .await
     .expect("publish a shallow frontend tree");
     let (reply, _) = page
-        .run_async_command(RendererPageCommand::DocumentQuerySelectorForDocument {
-            inspector_session_id: Some("attributes-a".to_owned()),
-            include_whitespace: false,
-            selector: "#probe".to_owned(),
-            multiple: false,
-        })
+        .run_async_command(RendererPageCommand::DevTools(
+            RendererDevToolsPageCommand::DocumentQuerySelectorForDocument {
+                inspector_session_id: Some("attributes-a".to_owned()),
+                include_whitespace: false,
+                selector: "#probe".to_owned(),
+                multiple: false,
+            },
+        ))
         .await
         .expect("bind the frontend node in session A");
-    let RendererPageReply::DocumentQuerySelectorResolution(
+    let RendererPageReply::DevTools(RendererDevToolsPageReply::DocumentQuerySelectorResolution(
         RendererDocumentQuerySelectorResolution::Found(nodes),
-    ) = reply
+    )) = reply
     else {
         panic!("expected probe node");
     };
@@ -80,12 +90,12 @@ async fn typed_attributes_resolve_scoped_references_against_live_nodes() {
         ),
         "backend references remain independent of frontend publication"
     );
-    page.run_async_command(
-        RendererPageCommand::DocumentFrontendNodeIdsForBackendNodeIds {
+    page.run_async_command(RendererPageCommand::DevTools(
+        RendererDevToolsPageCommand::DocumentFrontendNodeIdsForBackendNodeIds {
             inspector_session_id: Some("attributes-a".to_owned()),
             backend_node_ids: vec![node.backend_node_id],
         },
-    )
+    ))
     .await
     .expect("publish the frontend tree");
     assert_eq!(
@@ -123,9 +133,11 @@ async fn typed_attributes_resolve_scoped_references_against_live_nodes() {
         attributes(&page, backend.clone()).await,
         Attributes::Found(values) if values.contains(&("data-state".to_owned(), "after".to_owned()))
     ));
-    page.run_async_command(RendererPageCommand::DiscardDomAgentFrontendBindings {
-        inspector_session_id: Some("attributes-a".to_owned()),
-    })
+    page.run_async_command(RendererPageCommand::DevTools(
+        RendererDevToolsPageCommand::DiscardDomAgentFrontendBindings {
+            inspector_session_id: Some("attributes-a".to_owned()),
+        },
+    ))
     .await
     .expect("discard session A's frontend bindings");
     assert_eq!(attributes(&page, frontend).await, Attributes::MissingNode);
@@ -580,6 +592,7 @@ customElements.define("wpt-parser-microtask-mutates", globalThis.__ParserMicrota
         .await
         .expect("parser microtask mutation page should close");
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_binding_replay_cannot_consume_same_id_frontend_deferred_response() {
     let runtime = JsRuntime::initialize();
@@ -734,6 +747,7 @@ async fn page_document_isolate_completes_real_v8_foreground_task() {
         "the Page isolate must remain routable while V8 completes foreground work"
     );
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn child_default_runtime_evaluate_pending_await_promise_does_not_leak_internal_token() {
     let runtime = JsRuntime::initialize();
@@ -844,6 +858,7 @@ async fn child_default_runtime_evaluate_pending_await_promise_does_not_leak_inte
         .await
         .expect("child runtime awaitPromise page should close");
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_enable_waits_for_queued_child_realm_before_reporting_contexts() {
     let runtime = JsRuntime::initialize();
@@ -922,6 +937,7 @@ async fn runtime_enable_waits_for_queued_child_realm_before_reporting_contexts()
         .await
         .expect("Runtime.enable child barrier page should close");
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_enable_events_for_new_inspector_session_replays_existing_isolated_worlds() {
     let runtime = JsRuntime::initialize();
@@ -966,6 +982,7 @@ async fn runtime_enable_events_for_new_inspector_session_replays_existing_isolat
         "new inspector session Runtime.enable should replay existing isolated world: {events:?}"
     );
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_enable_events_include_renderer_root_frame_id_for_default_context() {
     let runtime = JsRuntime::initialize();
@@ -1029,6 +1046,7 @@ async fn runtime_enable_events_include_renderer_root_frame_id_for_default_contex
         .await
         .expect("root-frame test page should close");
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn set_runtime_binding_state_updates_renderer_inspector_session_store() {
     let runtime = JsRuntime::initialize();
@@ -1124,6 +1142,7 @@ async fn set_runtime_binding_state_updates_renderer_inspector_session_store() {
         .await
         .expect("renderer binding clearing test page should close");
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn apply_runtime_protocol_state_keeps_session_binding_replay_scoped() {
     let runtime = JsRuntime::initialize();
@@ -1184,6 +1203,7 @@ async fn apply_runtime_protocol_state_keeps_session_binding_replay_scoped() {
         .await
         .expect("renderer protocol-state session binding test page should close");
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn inspector_output_flushes_v8_state_for_commands_and_notifications() {
     let runtime = JsRuntime::initialize();
@@ -1267,6 +1287,7 @@ async fn inspector_output_flushes_v8_state_for_commands_and_notifications() {
         .await
         .expect("inspector state output page should close");
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owner_command_fences_exact_cursor_when_later_output_is_already_published() {
     let runtime = JsRuntime::initialize();
@@ -1364,6 +1385,7 @@ async fn owner_command_fences_exact_cursor_when_later_output_is_already_publishe
         .await
         .expect("concurrent command output page should close");
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn page_diagnostics_snapshot_is_read_only_for_current_inspector_output() {
     let runtime = JsRuntime::initialize();
@@ -1455,6 +1477,7 @@ async fn page_diagnostics_snapshot_is_read_only_for_current_inspector_output() {
         .await
         .expect("read-only Inspector diagnostics page should close");
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_stateful_inspector_command_preserves_v8_state() {
     let runtime = JsRuntime::initialize();
@@ -1524,6 +1547,7 @@ async fn failed_stateful_inspector_command_preserves_v8_state() {
         .await
         .expect("failed inspector state page should close");
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn stored_document_start_script_remove_uses_registry_key_namespace() {
     let runtime = JsRuntime::initialize();
@@ -1576,8 +1600,10 @@ async fn stored_document_start_script_remove_uses_registry_key_namespace() {
     .expect("stored document-start scripts should install");
 
     let (remove_reply, _) = page
-        .run_async_command(RendererPageCommand::RemoveDocumentStartScriptByRegistryKey(
-            "target:TID-1:1".to_owned(),
+        .run_async_command(RendererPageCommand::DevTools(
+            RendererDevToolsPageCommand::RemoveDocumentStartScriptByRegistryKey(
+                "target:TID-1:1".to_owned(),
+            ),
         ))
         .await
         .expect("registry-key remove should run");
@@ -1629,6 +1655,7 @@ async fn stored_document_start_script_remove_uses_registry_key_namespace() {
         .await
         .expect("registry-key stored-preload page should close");
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn webcrypto_checkpoint_reconciles_document_replacement_before_restoring_page_residence() {
     let runtime = JsRuntime::initialize();
@@ -2774,6 +2801,7 @@ __lm_snapshot_revocable_array.revoke();
         .await
         .expect("unsupported globals snapshot test page should close");
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn native_terminals_publish_before_waiters_are_polled() {
     use super::{RendererCdpCall, RendererNativeOperation, RendererNativeProtocolResponse};
@@ -2817,7 +2845,7 @@ async fn native_terminals_publish_before_waiters_are_polled() {
         pending.push((
             command_id,
             page.enqueue_protocol_command_in_inspector_session(
-                RendererPageCommand::Native(command),
+                RendererPageCommand::DevTools(RendererDevToolsPageCommand::Native(command)),
                 Some("session-a".to_owned()),
             )
             .expect("enqueue native terminal"),
@@ -2916,10 +2944,14 @@ async fn native_terminals_publish_before_waiters_are_polled() {
             "retirement must retain the exact committed terminal boundary",
         );
         let reply = completion.into_reply_and_state().0;
-        assert!(matches!(reply, RendererPageReply::NativeCommandPublished));
+        assert!(matches!(
+            reply,
+            RendererPageReply::DevTools(RendererDevToolsPageReply::NativeCommandPublished)
+        ));
     }
 }
 
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn projected_native_success_and_error_publish_without_adapter_receipt() {
     use super::{RendererCdpCall, RendererNativeOperation, RendererNativeProtocolResponse};
@@ -2945,16 +2977,20 @@ async fn projected_native_success_and_error_publish_without_adapter_receipt() {
             DevToolsSessionKey::Attached("native".to_owned()),
             attachment,
             RendererNativeOperation::new(
-                RendererPageCommand::ComputedStyleProperties {
-                    reference:
-                        crate::runtime::page_surface::RendererDomNodeReference::BackendNodeId(
-                            u32::MAX,
-                        ),
-                },
+                RendererPageCommand::DevTools(
+                    RendererDevToolsPageCommand::ComputedStyleProperties {
+                        reference:
+                            crate::runtime::page_surface::RendererDomNodeReference::BackendNodeId(
+                                u32::MAX,
+                            ),
+                    },
+                ),
                 move |reply| {
                     assert!(matches!(
                         reply.unwrap(),
-                        RendererPageReply::ComputedStyleProperties(None)
+                        RendererPageReply::DevTools(
+                            RendererDevToolsPageReply::ComputedStyleProperties(None)
+                        )
                     ));
                     if id == 1 {
                         RendererNativeProtocolResponse::success(serde_json::json!({"found": false}))
@@ -2970,7 +3006,7 @@ async fn projected_native_success_and_error_publish_without_adapter_receipt() {
         guards.push(guard);
         waiters.push(
             page.enqueue_protocol_command_in_inspector_session(
-                RendererPageCommand::Native(command),
+                RendererPageCommand::DevTools(RendererDevToolsPageCommand::Native(command)),
                 Some("native".to_owned()),
             )
             .unwrap(),
@@ -3019,7 +3055,7 @@ async fn projected_native_success_and_error_publish_without_adapter_receipt() {
         tokio::task::yield_now().await;
         assert!(matches!(
             waiter.wait().await.unwrap().into_reply_and_state().0,
-            RendererPageReply::NativeCommandPublished
+            RendererPageReply::DevTools(RendererDevToolsPageReply::NativeCommandPublished)
         ));
     }
     page.close_async().await.unwrap();
@@ -3566,6 +3602,7 @@ async fn document_commit_release_runs_parser_script_location_handoff_in_backgrou
         .await
         .expect("parser location handoff page should close");
 }
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn command_turn_output_scope_is_removed_after_command_error() {
     let runtime = JsRuntime::initialize();
@@ -4121,6 +4158,7 @@ fn parse_time_scaffold_lane_is_rejected_on_named_executor_lane() {
     });
 }
 
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_expression_publishes_console_output_before_settlement() {
     let runtime = JsRuntime::initialize();
@@ -4209,6 +4247,7 @@ async fn pending_expression_publishes_console_output_before_settlement() {
         .expect("close pending-expression page");
 }
 
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "multi_thread")]
 async fn navigation_follow_publishes_command_output_before_replacing_document() {
     let runtime = JsRuntime::initialize();

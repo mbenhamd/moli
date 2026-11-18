@@ -202,6 +202,12 @@ impl ResourceRequestClient {
         client
     }
 
+    pub(crate) fn fork_for_shared_worker_target(&self) -> Self {
+        let mut client = self.fork_with_isolated_page_network_policy();
+        client.browser_site_context = self.browser_site_context.clone();
+        client
+    }
+
     /// Materializes a text response at callers that require a buffered body.
     ///
     /// New renderer resource loads should prefer `fetch_text_stream()` or
@@ -996,6 +1002,10 @@ impl ResourceRequestClient {
         self.resource_runtime.client().tls_verify_host()
     }
 
+    pub fn web_security_disabled(&self) -> bool {
+        self.resource_runtime.client().web_security_disabled()
+    }
+
     pub fn websocket_connector(&self) -> moli_fetch::CurlWebSocketConnector {
         self.resource_runtime.client().websocket_connector()
     }
@@ -1113,7 +1123,7 @@ impl ResourceRequestClient {
             .page_network_policy
             .snapshot()
             .apply_to_request(request)?;
-        request.admit_request_url(&request.url)?;
+        request.admit_request_url_with_web_security(&request.url, self.web_security_disabled())?;
         self.resource_runtime.client().prepare_request(&mut request);
         Ok(request)
     }

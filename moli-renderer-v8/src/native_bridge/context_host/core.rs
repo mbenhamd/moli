@@ -512,7 +512,6 @@ impl PageScriptHost {
                 super::document_script_ready_inputs::ChildDocumentScriptReadyTaskLedger::default(),
             pending_child_external_classic_document_scripts: HashMap::new(),
             pending_child_modulepreload_work_awaiting_realm: VecDeque::new(),
-            active_child_browsing_context_host_loads: Vec::new(),
             character_data_utf16_overrides: HashMap::new(),
             child_meta_refresh_navigations: HashMap::new(),
             disconnected_shadow_roots: HashSet::new(),
@@ -610,7 +609,6 @@ impl PageScriptHost {
             pending_subresource_fetch_infos: Vec::new(),
             running_subresource_fetches: HashMap::new(),
             streaming_subresource_fetches: HashMap::new(),
-            in_flight_worker_subresource_fetches: HashMap::new(),
             #[cfg(test)]
             pending_subresource_continue_events: Vec::new(),
             pending_network_body_sources: HashMap::new(),

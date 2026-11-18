@@ -1,30 +1,25 @@
+pub(super) use moli_webapi::media_cue_values::vtt_cue_constructor_callback;
+pub(crate) use moli_webapi::media_cue_values::{
+    TEXT_TRACK_CUE_ALIGN_SLOT, TEXT_TRACK_CUE_END_TIME_SLOT, TEXT_TRACK_CUE_ID_SLOT,
+    TEXT_TRACK_CUE_LINE_SLOT, TEXT_TRACK_CUE_ONENTER_SLOT, TEXT_TRACK_CUE_ONEXIT_SLOT,
+    TEXT_TRACK_CUE_PAUSE_ON_EXIT_SLOT, TEXT_TRACK_CUE_POSITION_SLOT, TEXT_TRACK_CUE_SIZE_SLOT,
+    TEXT_TRACK_CUE_SNAP_TO_LINES_SLOT, TEXT_TRACK_CUE_START_TIME_SLOT, TEXT_TRACK_CUE_TEXT_SLOT,
+    TEXT_TRACK_CUE_TRACK_SLOT, TEXT_TRACK_CUE_VERTICAL_SLOT,
+};
+pub(crate) use moli_webapi::media_error::{
+    media_error_constructor_callback, new_media_error_value,
+};
+
 use super::super::util::{throw_type_error, v8_string};
 use super::context_host_ptr_from_global_bridge;
-use super::{initialize_simple_event_target, simple_object_event_set_handler};
+use super::simple_object_event_set_handler;
 use crate::document_runtime::DomHandle;
 use crate::native_bridge::PageScriptHost;
 use crate::native_bridge::throw_dom_exception;
 use crate::util::{get_private_value, set_private_value, v8str};
 use crate::web_api_interfaces;
 use crate::webidl;
-use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
-
-pub(crate) const TEXT_TRACK_CUE_TRACK_SLOT: &str = "__moliTextTrackCueTrack";
-const TEXT_TRACK_CUE_START_TIME_SLOT: &str = "__moliTextTrackCueStartTime";
-const TEXT_TRACK_CUE_END_TIME_SLOT: &str = "__moliTextTrackCueEndTime";
-const TEXT_TRACK_CUE_ID_SLOT: &str = "__moliTextTrackCueId";
-const TEXT_TRACK_CUE_PAUSE_ON_EXIT_SLOT: &str = "__moliTextTrackCuePauseOnExit";
-const TEXT_TRACK_CUE_VERTICAL_SLOT: &str = "__moliTextTrackCueVertical";
-const TEXT_TRACK_CUE_SNAP_TO_LINES_SLOT: &str = "__moliTextTrackCueSnapToLines";
-const TEXT_TRACK_CUE_LINE_SLOT: &str = "__moliTextTrackCueLine";
-const TEXT_TRACK_CUE_POSITION_SLOT: &str = "__moliTextTrackCuePosition";
-const TEXT_TRACK_CUE_SIZE_SLOT: &str = "__moliTextTrackCueSize";
-const TEXT_TRACK_CUE_ALIGN_SLOT: &str = "__moliTextTrackCueAlign";
-const TEXT_TRACK_CUE_ONENTER_SLOT: &str = "__moliTextTrackCueOnEnter";
-const TEXT_TRACK_CUE_ONEXIT_SLOT: &str = "__moliTextTrackCueOnExit";
-const TEXT_TRACK_CUE_TEXT_SLOT: &str = "__moliTextTrackCueText";
-const MEDIA_ERROR_CODE_SLOT: &str = "__moliMediaErrorCode";
-const MEDIA_ERROR_MESSAGE_SLOT: &str = "__moliMediaErrorMessage";
+use moli_webapi_declare::WebApiFunctionTemplate;
 
 pub(crate) fn text_track_cue_times<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -57,63 +52,6 @@ pub(crate) fn text_track_cue_id<'s>(
     get_private_value(scope, cue, TEXT_TRACK_CUE_ID_SLOT)
         .and_then(|value| v8::Local::<v8::String>::try_from(value).ok())
         .map(|value| value.to_rust_string_lossy(scope))
-}
-
-#[derive(webidl::WebIdlArgs)]
-#[webidl(prefix = "VTTCue")]
-struct VttCueConstructorArgs {
-    #[webidl(required, name = "startTime", converter = "double")]
-    start_time: f64,
-    #[webidl(required, name = "endTime", converter = "double")]
-    end_time: f64,
-    #[webidl(required)]
-    text: String,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::VTTCue)]
-struct VttCuePrivateStateDeclaration {
-    #[webapi(slot = TEXT_TRACK_CUE_START_TIME_SLOT)]
-    _start_time: f64,
-
-    #[webapi(slot = TEXT_TRACK_CUE_END_TIME_SLOT)]
-    _end_time: f64,
-
-    #[webapi(slot = TEXT_TRACK_CUE_ID_SLOT, constructor_default = "")]
-    _id: &'static str,
-
-    #[webapi(slot = TEXT_TRACK_CUE_PAUSE_ON_EXIT_SLOT, constructor_default = false)]
-    _pause_on_exit: bool,
-
-    #[webapi(slot = TEXT_TRACK_CUE_VERTICAL_SLOT, constructor_default = "")]
-    _vertical: &'static str,
-
-    #[webapi(slot = TEXT_TRACK_CUE_SNAP_TO_LINES_SLOT, constructor_default = true)]
-    _snap_to_lines: bool,
-
-    #[webapi(slot = TEXT_TRACK_CUE_LINE_SLOT, constructor_default = "auto")]
-    _line: &'static str,
-
-    #[webapi(slot = TEXT_TRACK_CUE_POSITION_SLOT, constructor_default = "auto")]
-    _position: &'static str,
-
-    #[webapi(slot = TEXT_TRACK_CUE_SIZE_SLOT, constructor_default = 100.0)]
-    _size: f64,
-
-    #[webapi(slot = TEXT_TRACK_CUE_ALIGN_SLOT, constructor_default = "center")]
-    _align: &'static str,
-
-    #[webapi(slot = TEXT_TRACK_CUE_ONENTER_SLOT, init = "null")]
-    _onenter_slot: (),
-
-    #[webapi(slot = TEXT_TRACK_CUE_ONEXIT_SLOT, init = "null")]
-    _onexit_slot: (),
-
-    #[webapi(slot = TEXT_TRACK_CUE_TRACK_SLOT, init = "null")]
-    _track_slot: (),
-
-    #[webapi(slot = TEXT_TRACK_CUE_TEXT_SLOT)]
-    text: String,
 }
 
 #[derive(WebApiFunctionTemplate)]
@@ -226,85 +164,6 @@ struct VttCueTemplateDeclaration {
     text: (),
 }
 
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::MediaError, enumerable)]
-struct MediaErrorConstantsDeclaration {
-    #[webapi(constant = "MEDIA_ERR_ABORTED", value = 1u32)]
-    media_err_aborted: (),
-    #[webapi(constant = "MEDIA_ERR_NETWORK", value = 2u32)]
-    media_err_network: (),
-    #[webapi(constant = "MEDIA_ERR_DECODE", value = 3u32)]
-    media_err_decode: (),
-    #[webapi(constant = "MEDIA_ERR_SRC_NOT_SUPPORTED", value = 4u32)]
-    media_err_src_not_supported: (),
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::MediaError, enumerable)]
-struct MediaErrorPrototypeDeclaration {
-    #[webapi(
-        accessor_property,
-        getter = media_error_code_getter_callback,
-        enumerable
-    )]
-    code: (),
-    #[webapi(
-        accessor_property,
-        getter = media_error_message_getter_callback,
-        enumerable
-    )]
-    message: (),
-}
-
-fn media_error_code_getter_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'s, v8::Value>,
-) {
-    let Some(code) = get_private_value(scope, args.this(), MEDIA_ERROR_CODE_SLOT) else {
-        throw_type_error(scope, "Illegal invocation");
-        return;
-    };
-    rv.set(code);
-}
-
-fn media_error_message_getter_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'s, v8::Value>,
-) {
-    let Some(message) = get_private_value(scope, args.this(), MEDIA_ERROR_MESSAGE_SLOT) else {
-        throw_type_error(scope, "Illegal invocation");
-        return;
-    };
-    rv.set(message);
-}
-
-pub(crate) fn new_media_error_value<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    code: u32,
-    message: &str,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let prototype = super::ensure_intrinsic_interface_prototype(scope, "MediaError").ok()?;
-    let object = v8::Object::new(scope);
-    if object.set_prototype(scope, prototype.into()) != Some(true) {
-        return None;
-    }
-    set_private_value(
-        scope,
-        object,
-        MEDIA_ERROR_CODE_SLOT,
-        v8::Integer::new_from_unsigned(scope, code).into(),
-    );
-    set_private_value(
-        scope,
-        object,
-        MEDIA_ERROR_MESSAGE_SLOT,
-        v8_string(scope, message)?.into(),
-    );
-    Some(object)
-}
-
 pub(super) fn text_track_cue_constructor_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     _args: v8::FunctionCallbackArguments<'s>,
@@ -314,31 +173,6 @@ pub(super) fn text_track_cue_constructor_callback<'s>(
         scope,
         "Failed to construct 'TextTrackCue': Illegal constructor.",
     );
-}
-
-pub(super) fn vtt_cue_constructor_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
-) {
-    if !args.is_construct_call() {
-        throw_type_error(
-            scope,
-            "Failed to construct 'VTTCue': Please use the 'new' operator.",
-        );
-        return;
-    }
-
-    let Some(parsed) = webidl::parse_args::<VttCueConstructorArgs>(scope, &args) else {
-        return;
-    };
-
-    initialize_simple_event_target(scope, args.this());
-    VttCuePrivateStateDeclaration::new(parsed.start_time, parsed.end_time, parsed.text)
-        .initialize(scope, args.this())
-        .expect("VTTCue private state declaration should initialize");
-
-    rv.set(args.this().into());
 }
 
 pub(crate) fn set_text_track_cue_track<'s>(
@@ -1155,17 +989,6 @@ fn set_private_bool(
     set_private_value(scope, object, slot, v8::Boolean::new(scope, value).into());
 }
 
-pub(super) fn media_error_constructor_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    _args: v8::FunctionCallbackArguments<'s>,
-    _rv: v8::ReturnValue<'_, v8::Value>,
-) {
-    throw_type_error(
-        scope,
-        "Failed to construct 'MediaError': Illegal constructor.",
-    );
-}
-
 pub(super) fn install_media_cue_template_bindings<'s>(
     scope: &mut v8::PinScope<'s, '_, ()>,
     template: v8::Local<'s, v8::FunctionTemplate>,
@@ -1174,9 +997,7 @@ pub(super) fn install_media_cue_template_bindings<'s>(
     let prototype = template.prototype_template(scope);
     match interface_name {
         "MediaError" => {
-            MediaErrorConstantsDeclaration::initialize_template(scope, template);
-            MediaErrorConstantsDeclaration::initialize_prototype_template(scope, prototype);
-            MediaErrorPrototypeDeclaration::initialize_prototype_template(scope, prototype);
+            moli_webapi::media_error::install(scope, template);
         }
         "TextTrackCue" => {
             TextTrackCueTemplateDeclaration::initialize_prototype_template(scope, prototype)

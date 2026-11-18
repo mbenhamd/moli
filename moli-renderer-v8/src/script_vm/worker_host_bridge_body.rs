@@ -10,16 +10,12 @@
 use std::{cell::RefCell, rc::Rc};
 
 use anyhow::{Result, bail};
-use moli_shared_worker::SharedWorkerInstanceId;
 
 use super::ScriptVm;
 use crate::{
     native_bridge::PageScriptHost,
-    types::{DedicatedWorkerId, PendingSubresourceContinueEvent, SubresourceResourceType},
-    worker::{
-        WorkerPendingSubresourceFetch, WorkerRuntimeEvent, WorkerToParentMessage,
-        WorkerWebSocketFrameEvent, WorkerWebSocketLifecycleEvent,
-    },
+    types::DedicatedWorkerId,
+    worker::{WorkerRuntimeEvent, WorkerToParentMessage},
 };
 
 /// What an authorized Worker host-bridge body actually did.
@@ -42,176 +38,10 @@ pub(crate) enum WorkerHostBridgeBodyEffect {
     ExactTargetUnavailable,
 }
 
-/// Exact Worker namespace used while translating one host/control record.
-///
-/// It is deliberately separate from `WorkerRuntimeEvent`: by the time this
-/// value exists, the caller has already selected the right V8 context. The
-/// common record dispatcher can therefore match each message kind once while
-/// still choosing the owner-specific pending-fetch and WebSocket identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkerHostRecordOwner {
-    Dedicated(DedicatedWorkerId),
-    Shared(SharedWorkerInstanceId),
-}
-
-impl WorkerHostRecordOwner {
-    fn record_pending_fetch(
-        self,
-        scope: &mut v8::PinScope<'_, '_>,
-        context_host: &Rc<RefCell<PageScriptHost>>,
-        pending: WorkerPendingSubresourceFetch,
-    ) {
-        let context = v8::Global::new(scope, scope.get_current_context());
-        match (self, pending.info.resource_type) {
-            (Self::Dedicated(worker_id), SubresourceResourceType::Xhr) => {
-                context_host
-                    .borrow_mut()
-                    .record_pending_worker_subresource_xhr(
-                        context,
-                        worker_id,
-                        pending.fetch_id,
-                        pending.load,
-                        pending.credentials_mode,
-                        pending.network_partition_key,
-                        pending.info,
-                    );
-            }
-            (Self::Dedicated(worker_id), SubresourceResourceType::CspReport) => {
-                context_host
-                    .borrow_mut()
-                    .record_pending_worker_subresource_csp_report(
-                        context,
-                        worker_id,
-                        pending.fetch_id,
-                        pending.load,
-                        pending.credentials_mode,
-                        pending.request_mode,
-                        pending.network_partition_key,
-                        pending.info,
-                    );
-            }
-            (Self::Dedicated(worker_id), _) => {
-                context_host
-                    .borrow_mut()
-                    .record_pending_worker_subresource_fetch(
-                        context,
-                        worker_id,
-                        pending.fetch_id,
-                        pending.load,
-                        pending.credentials_mode,
-                        pending.request_mode,
-                        pending.network_partition_key,
-                        pending.info,
-                    );
-            }
-            (Self::Shared(instance_id), SubresourceResourceType::Xhr) => {
-                context_host
-                    .borrow_mut()
-                    .record_pending_shared_worker_subresource_xhr(
-                        context,
-                        instance_id,
-                        pending.fetch_id,
-                        pending.load,
-                        pending.credentials_mode,
-                        pending.network_partition_key,
-                        pending.info,
-                    );
-            }
-            (Self::Shared(instance_id), SubresourceResourceType::CspReport) => {
-                context_host
-                    .borrow_mut()
-                    .record_pending_shared_worker_subresource_csp_report(
-                        context,
-                        instance_id,
-                        pending.fetch_id,
-                        pending.load,
-                        pending.credentials_mode,
-                        pending.request_mode,
-                        pending.network_partition_key,
-                        pending.info,
-                    );
-            }
-            (Self::Shared(instance_id), _) => {
-                context_host
-                    .borrow_mut()
-                    .record_pending_shared_worker_subresource_fetch(
-                        context,
-                        instance_id,
-                        pending.fetch_id,
-                        pending.load,
-                        pending.credentials_mode,
-                        pending.request_mode,
-                        pending.network_partition_key,
-                        pending.info,
-                    );
-            }
-        }
-    }
-
-    fn cancel_pending_fetch(
-        self,
-        context_host: &Rc<RefCell<PageScriptHost>>,
-        fetch_id: u32,
-        error_text: String,
-    ) {
-        match self {
-            Self::Dedicated(worker_id) => {
-                context_host
-                    .borrow_mut()
-                    .cancel_pending_worker_subresource_fetch(worker_id, fetch_id, error_text);
-            }
-            Self::Shared(instance_id) => {
-                context_host
-                    .borrow_mut()
-                    .cancel_pending_shared_worker_subresource_fetch(
-                        instance_id,
-                        fetch_id,
-                        error_text,
-                    );
-            }
-        }
-    }
-
-    fn encoded_websocket_id(self, local_socket_id: u64) -> u64 {
-        match self {
-            Self::Dedicated(worker_id) => {
-                ScriptVm::worker_websocket_socket_id(worker_id, local_socket_id).as_u64()
-            }
-            Self::Shared(instance_id) => {
-                ScriptVm::shared_worker_websocket_socket_id(instance_id, local_socket_id).as_u64()
-            }
-        }
-    }
-
-    fn websocket_lifecycle_event(
-        self,
-        event: &WorkerWebSocketLifecycleEvent,
-    ) -> crate::types::WebSocketLifecycleEvent {
-        match self {
-            Self::Dedicated(worker_id) => {
-                ScriptVm::worker_websocket_lifecycle_event(worker_id, event)
-            }
-            Self::Shared(instance_id) => {
-                ScriptVm::shared_worker_websocket_lifecycle_event(instance_id, event)
-            }
-        }
-    }
-
-    fn websocket_frame_event(
-        self,
-        event: &WorkerWebSocketFrameEvent,
-    ) -> crate::types::WebSocketNetworkEvent {
-        match self {
-            Self::Dedicated(worker_id) => ScriptVm::worker_websocket_frame_event(worker_id, event),
-            Self::Shared(instance_id) => {
-                ScriptVm::shared_worker_websocket_frame_event(instance_id, event)
-            }
-        }
-    }
-
-    fn rejects_client_facing_record(self) -> bool {
-        matches!(self, Self::Dedicated(_))
-    }
+    Dedicated,
+    Shared,
 }
 
 impl ScriptVm {
@@ -282,10 +112,9 @@ impl ScriptVm {
                     WorkerHostBridgeBodyEffect::ExactTargetUnavailable
                 })
             }
-            WorkerRuntimeEvent::SharedWorkerMessage {
-                instance_id,
-                message,
-            } => self.apply_shared_worker_host_bridge_record_body(instance_id, *message),
+            WorkerRuntimeEvent::SharedWorkerMessage { message, .. } => {
+                self.apply_shared_worker_host_bridge_record_body(*message)
+            }
             WorkerRuntimeEvent::Message {
                 message,
                 worker_id: _,
@@ -339,15 +168,13 @@ impl ScriptVm {
 
     fn apply_shared_worker_host_bridge_record_body(
         &mut self,
-        instance_id: SharedWorkerInstanceId,
         message: WorkerToParentMessage,
     ) -> Result<WorkerHostBridgeBodyEffect> {
         let context_host = self._context_host.clone();
-        self.with_default_context_scope(|scope, _host_ptr| {
-            Self::apply_worker_host_bridge_record_in_scope(
-                scope,
+        self.with_default_context_scope(|_scope, _host_ptr| {
+            Self::apply_worker_host_bridge_record(
                 &context_host,
-                WorkerHostRecordOwner::Shared(instance_id),
+                WorkerHostRecordOwner::Shared,
                 message,
             )
         })?;
@@ -383,10 +210,9 @@ impl ScriptVm {
                     return Ok(false);
                 }
 
-                Self::apply_worker_host_bridge_record_in_scope(
-                    scope,
+                Self::apply_worker_host_bridge_record(
                     &context_host,
-                    WorkerHostRecordOwner::Dedicated(worker_id),
+                    WorkerHostRecordOwner::Dedicated,
                     message,
                 )?;
                 Ok(true)
@@ -399,62 +225,21 @@ impl ScriptVm {
         })
     }
 
-    fn apply_worker_host_bridge_record_in_scope(
-        scope: &mut v8::PinScope<'_, '_>,
+    fn apply_worker_host_bridge_record(
         context_host: &Rc<RefCell<PageScriptHost>>,
         owner: WorkerHostRecordOwner,
         message: WorkerToParentMessage,
     ) -> Result<()> {
         match message {
+            #[cfg(test)]
+            WorkerToParentMessage::PendingSubresourceFetch(_)
+            | WorkerToParentMessage::SubresourceContinue(_) => {}
             WorkerToParentMessage::SubresourceNetwork(record) => {
                 context_host.borrow_mut().record_subresource_network(record);
             }
-            WorkerToParentMessage::PendingSubresourceFetch(pending) => {
-                owner.record_pending_fetch(scope, context_host, pending);
-            }
-            WorkerToParentMessage::PendingSubresourceFetchCanceled {
-                fetch_id,
-                error_text,
-            } => {
-                owner.cancel_pending_fetch(context_host, fetch_id, error_text);
-            }
-            WorkerToParentMessage::SubresourceContinue(event) => match event {
-                PendingSubresourceContinueEvent::ResponsePaused(info) => {
-                    context_host
-                        .borrow_mut()
-                        .record_worker_subresource_response_pause(info);
-                }
-                PendingSubresourceContinueEvent::AuthRequired(info) => {
-                    context_host
-                        .borrow_mut()
-                        .record_worker_subresource_auth_pause(info);
-                }
-                PendingSubresourceContinueEvent::Completed { internal_id } => {
-                    context_host
-                        .borrow_mut()
-                        .record_worker_subresource_completed(internal_id);
-                }
-            },
-            WorkerToParentMessage::WebSocketSubresource(record) => {
-                let Some(local_socket_id) = record.websocket_socket_id() else {
-                    return Ok(());
-                };
-                context_host.borrow_mut().record_subresource_network(
-                    record.with_websocket_socket_id(owner.encoded_websocket_id(local_socket_id)),
-                );
-            }
-            WorkerToParentMessage::WebSocketLifecycle(event) => {
-                context_host
-                    .borrow_mut()
-                    .record_websocket_lifecycle_event(owner.websocket_lifecycle_event(&event));
-            }
-            WorkerToParentMessage::WebSocketFrame(event) => {
-                context_host
-                    .borrow_mut()
-                    .record_websocket_network_event(owner.websocket_frame_event(&event));
-            }
+
             WorkerToParentMessage::Post(_) | WorkerToParentMessage::Error { .. }
-                if owner.rejects_client_facing_record() =>
+                if owner == WorkerHostRecordOwner::Dedicated =>
             {
                 bail!("client-facing DedicatedWorker event entered the host-bridge source");
             }

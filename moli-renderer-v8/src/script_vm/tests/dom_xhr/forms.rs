@@ -637,6 +637,80 @@ fn detached_select_and_option_track_selection_state() {
 }
 
 #[test]
+fn option_nearest_ancestor_select_controls_list_form_index_and_selectedness() {
+    let mut vm = new_storage_test_vm("https://option-nearest-select.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const root = document.documentElement || document.appendChild(document.createElement('html'));
+  const body = document.body || root.appendChild(document.createElement('body'));
+  const form = document.createElement('form');
+  const parentSelect = document.createElement('select');
+  const childSelect = document.createElement('select');
+  form.append(parentSelect);
+  parentSelect.append(childSelect);
+  body.append(form);
+
+  const normalOption = document.createElement('option');
+  childSelect.append(normalOption);
+  const nestedOption = document.createElement('option');
+  normalOption.append(nestedOption);
+
+  const div = document.createElement('div');
+  childSelect.append(div);
+  const divOption = document.createElement('option');
+  div.append(divOption);
+
+  const hr = document.createElement('hr');
+  childSelect.append(hr);
+  const hrOption = document.createElement('option');
+  hr.append(hrOption);
+
+  const datalist = document.createElement('datalist');
+  childSelect.append(datalist);
+  const datalistOption = document.createElement('option');
+  datalist.append(datalistOption);
+
+  const optgroup = document.createElement('optgroup');
+  childSelect.append(optgroup);
+  const optgroupOption = document.createElement('option');
+  optgroup.append(optgroupOption);
+  const nestedOptgroup = document.createElement('optgroup');
+  optgroup.append(nestedOptgroup);
+  const nestedOptgroupOption = document.createElement('option');
+  nestedOptgroup.append(nestedOptgroupOption);
+
+  normalOption.selected = true;
+  datalistOption.selected = true;
+
+  return JSON.stringify({
+    parentLength: parentSelect.length,
+    childLength: childSelect.length,
+    options: Array.from(childSelect.options, option =>
+      option === normalOption ? 'normal' :
+      option === divOption ? 'div' :
+      option === optgroupOption ? 'optgroup' : 'unexpected'),
+    validForms: [normalOption, divOption, optgroupOption].map(option => option.form === form),
+    invalidForms: [nestedOption, hrOption, datalistOption, nestedOptgroupOption]
+      .map(option => option.form === null),
+    indices: [normalOption, divOption, optgroupOption, nestedOption, hrOption,
+      datalistOption, nestedOptgroupOption].map(option => option.index),
+    normalStillSelected: normalOption.selected
+  });
+})()
+"#,
+        )
+        .expect("option nearest ancestor select behavior should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"parentLength":0,"childLength":3,"options":["normal","div","optgroup"],"validForms":[true,true,true],"invalidForms":[true,true,true,true],"indices":[0,1,2,0,0,0,0],"normalStillSelected":true}"#
+    );
+}
+
+#[test]
 fn child_document_select_exposes_detached_mutation_surface() {
     let mut vm = new_storage_test_vm("https://child-select-options-surface.test/");
 
@@ -3749,6 +3823,7 @@ fn anchor_top_and_parent_targets_queue_plain_top_level_navigation() {
         );
     }
 }
+#[cfg(feature = "devtools")]
 #[test]
 fn anchor_download_click_returns_pending_download_without_navigation() {
     let mut vm = new_parsed_test_vm(
@@ -3815,6 +3890,7 @@ fn anchor_download_synthetic_click_records_pending_download_without_navigation()
     );
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn trusted_alt_click_downloads_an_anchor_without_a_download_attribute() {
     let mut vm = new_rendered_test_vm(
@@ -3872,6 +3948,7 @@ fn trusted_alt_click_downloads_an_anchor_without_a_download_attribute() {
     assert!(vm.take_pending_popup_activations().is_empty());
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn alt_input_does_not_turn_window_open_into_a_download_or_background_popup() {
     let mut vm = new_storage_test_vm("https://alt-window-open.test/path/index.html");
@@ -3931,6 +4008,7 @@ fn alt_input_does_not_turn_window_open_into_a_download_or_background_popup() {
     );
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn window_open_in_click_listener_uses_current_input_event() {
     #[cfg(target_os = "macos")]
@@ -4032,6 +4110,7 @@ fn window_open_in_click_listener_uses_current_input_event() {
     );
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn current_mouseup_input_covers_pointer_mouse_click_and_microtask_callbacks() {
     #[cfg(target_os = "macos")]
@@ -4125,6 +4204,7 @@ fn current_mouseup_input_covers_pointer_mouse_click_and_microtask_callbacks() {
     );
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn middle_auxclick_runs_the_anchor_default_action_in_the_background() {
     let mut vm = new_storage_test_vm("https://middle-auxclick.test/path/index.html");
@@ -4178,6 +4258,7 @@ fn middle_auxclick_runs_the_anchor_default_action_in_the_background() {
     assert!(vm.take_pending_location_navigation_with_seed().is_none());
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn canceling_middle_auxclick_suppresses_the_anchor_default_action() {
     let mut vm = new_storage_test_vm("https://middle-auxclick-canceled.test/path/index.html");
@@ -4208,6 +4289,7 @@ fn canceling_middle_auxclick_suppresses_the_anchor_default_action() {
     assert!(vm.take_pending_location_navigation_with_seed().is_none());
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn enter_key_window_open_inherits_the_real_input_modifiers() {
     #[cfg(target_os = "macos")]
@@ -4248,6 +4330,7 @@ fn enter_key_window_open_inherits_the_real_input_modifiers() {
     );
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn keyboard_activation_click_preserves_modifiers() {
     let mut vm = new_parsed_test_vm(
@@ -4321,6 +4404,7 @@ fn keyboard_activation_click_preserves_modifiers() {
     );
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn image_submit_click_coordinates_use_live_layout_geometry() {
     let mut vm = new_rendered_test_vm(
@@ -4369,6 +4453,7 @@ form.addEventListener('submit', event => {
     assert_eq!(entries, r#"[["photo.x","25"],["photo.y","19"]]"#);
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn button_click_listener_window_open_self_reports_top_level_navigation() {
     let mut vm = new_rendered_test_vm(
@@ -4476,6 +4561,7 @@ anchor.click();
 
     assert_eq!(result, "false:push|");
 }
+#[cfg(feature = "devtools")]
 #[test]
 fn file_input_click_returns_pending_file_chooser_activation() {
     const FILE_INPUT_HIT_X: f64 = 20.0;
@@ -4623,6 +4709,7 @@ picker.click();
     }
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn webdriver_bidi_file_prompt_handler_dispatches_trusted_cancel_without_pending_chooser() {
     let mut vm = new_parsed_test_vm(
@@ -4669,6 +4756,7 @@ fn webdriver_bidi_file_prompt_handler_dispatches_trusted_cancel_without_pending_
     );
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn label_click_for_file_input_returns_pending_file_chooser_activation() {
     const LABEL_HIT_X: f64 = 20.0;
@@ -4823,6 +4911,7 @@ async fn summary_activation_toggles_details_and_queues_toggle_event() {
     assert_eq!(result, "closed:open:true");
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn pointer_click_enters_shadow_root_for_label_activation() {
     const LABEL_HIT_X: f64 = 10.0;
@@ -4910,6 +4999,7 @@ fn submit_button_click_queues_pending_top_level_location_navigation() {
     );
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn enter_implicitly_submits_single_search_input_without_a_submit_button() {
     let mut vm = new_parsed_test_vm(
@@ -4952,6 +5042,7 @@ document.getElementById('query').focus();
     );
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn enter_implicitly_clicks_the_default_submit_button() {
     let mut vm = new_parsed_test_vm(
@@ -4998,6 +5089,7 @@ document.getElementById('query').focus();
     );
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn enter_does_not_implicitly_submit_multiple_blocking_inputs_without_a_submit_button() {
     let mut vm = new_parsed_test_vm(
@@ -5032,6 +5124,7 @@ document.getElementById('query').focus();
     assert!(vm.take_pending_location_navigation_with_seed().is_none());
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn canceling_an_implicit_submit_event_prevents_navigation() {
     let mut vm = new_parsed_test_vm(
@@ -5068,6 +5161,7 @@ document.getElementById('query').focus();
     assert!(vm.take_pending_location_navigation_with_seed().is_none());
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn disabled_default_submit_button_suppresses_implicit_submission() {
     let mut vm = new_parsed_test_vm(
@@ -5101,6 +5195,7 @@ document.getElementById('query').focus();
     assert!(vm.take_pending_location_navigation_with_seed().is_none());
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn external_form_owned_submit_button_participates_in_document_tree_order() {
     let mut vm = new_parsed_test_vm(
@@ -5141,6 +5236,7 @@ document.getElementById('query').focus();
     assert!(vm.take_pending_location_navigation_with_seed().is_none());
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn image_input_is_the_default_submit_button_and_serializes_click_coordinates() {
     let mut vm = new_parsed_test_vm(
@@ -5184,6 +5280,7 @@ document.getElementById('query').focus();
     );
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn raw_keydown_waits_for_the_character_phase_before_implicit_submission() {
     let mut vm = new_parsed_test_vm(
@@ -5220,6 +5317,7 @@ document.getElementById('query').focus();
     assert!(vm.take_pending_location_navigation_with_seed().is_none());
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn canceling_keydown_or_keypress_prevents_implicit_submission() {
     for canceled_event in ["keydown", "keypress"] {
@@ -5251,6 +5349,7 @@ query.focus();
     }
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn enter_beforeinput_precedes_implicit_submission_and_can_cancel_it() {
     for with_button in [false, true] {
@@ -5335,6 +5434,7 @@ query.focus();
     }
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn canceled_raw_keydown_suppresses_only_its_following_implicit_submit_char_phase() {
     let mut vm = new_parsed_test_vm(
@@ -5382,6 +5482,7 @@ query.focus();
     assert!(vm.take_pending_location_navigation_with_seed().is_none());
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn implicit_submission_runs_constraint_validation() {
     let mut vm = new_parsed_test_vm(
@@ -5413,6 +5514,7 @@ document.getElementById('query').focus();
     assert!(vm.take_pending_location_navigation_with_seed().is_none());
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn textarea_enter_inserts_one_newline_during_the_character_phase_without_submitting() {
     let mut vm = new_parsed_test_vm(
@@ -5448,6 +5550,7 @@ editor.setSelectionRange(1, 1);
     assert!(vm.take_pending_location_navigation_with_seed().is_none());
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn carriage_return_in_character_text_preserves_text_without_implicit_submission() {
     for (control, expected_value) in [
@@ -5508,6 +5611,7 @@ editor.focus();
     }
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn standalone_carriage_return_character_preserves_enter_default_actions() {
     for (control, expected_value, expected_submit_count) in [
