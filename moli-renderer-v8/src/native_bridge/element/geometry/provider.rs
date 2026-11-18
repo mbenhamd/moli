@@ -127,6 +127,32 @@ fn read_svg_content_client_rects(
     ))
 }
 
+/// The client stroke bounds of SVG content below an outermost `<svg>`, which
+/// has no CSS box model of its own. `None` when `source` is not such content
+/// or is not rendered.
+pub(crate) fn read_svg_content_stroke_bounds(
+    runtime: &PageScriptHost,
+    source: DomHandle,
+) -> Result<Option<[f64; 4]>, LayoutError> {
+    use crate::context_bootstrap::svg_runtime::screen;
+    let Some(root) = screen::svg_layout_viewport_root(runtime, source) else {
+        return Ok(None);
+    };
+    runtime.ensure_current_layout()?;
+    let Some(root_box) = read_css_box_client_rects(runtime, root)?
+        .into_iter()
+        .reduce(union_client_rect)
+    else {
+        return Ok(None);
+    };
+    Ok(screen::svg_client_stroke_bounds(
+        runtime,
+        source,
+        root,
+        [root_box.left, root_box.top, root_box.width, root_box.height],
+    ))
+}
+
 /// The outermost `<svg>` hosting `source` (`source` itself when it is one),
 /// with that root's rendered viewport when it has a CSS box: its
 /// untransformed content size and the affine map from its content box to

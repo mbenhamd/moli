@@ -135,6 +135,30 @@ pub(crate) fn svg_client_bounds(
     Some([screen_ctm.e, screen_ctm.f, 0.0, 0.0])
 }
 
+/// Client stroke bounds `[x, y, width, height]` of `handle`: its client
+/// bounds grown by half its painted stroke width, scaled by the screen CTM.
+/// DevTools reports these as an SVG element's box model and content quad.
+pub(crate) fn svg_client_stroke_bounds(
+    runtime: &PageScriptHost,
+    handle: DomHandle,
+    root: DomHandle,
+    root_border_box: [f64; 4],
+) -> Option<[f64; 4]> {
+    let [x, y, width, height] = svg_client_bounds(runtime, handle, root, root_border_box)?;
+    let screen_ctm = svg_root_content_transform(runtime, root, root_border_box)
+        .multiply(svg_ctm_below_root(runtime, handle, Some(root)));
+    let scale = (screen_ctm.a * screen_ctm.d - screen_ctm.b * screen_ctm.c)
+        .abs()
+        .sqrt();
+    let outset = super::hit_test::svg_shape_stroke_outset(runtime, handle) * scale;
+    Some([
+        x - outset,
+        y - outset,
+        width + 2.0 * outset,
+        height + 2.0 * outset,
+    ])
+}
+
 /// Transform from `handle`'s local user space (including its own transform)
 /// to the user space established by `root`. Without a `root` the walk stops
 /// at the first non-SVG ancestor (or the top of a detached tree).
