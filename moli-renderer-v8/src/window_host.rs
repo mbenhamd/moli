@@ -793,7 +793,9 @@ pub(super) fn window_request_animation_frame_callback<'s>(
                 let timestamp =
                     get_private_value(scope, global, WINDOW_LAST_ANIMATION_FRAME_TIMESTAMP_SLOT)
                         .and_then(|value| value.number_value(scope))
-                        .map_or(now, |last| now.max(last + frame_interval));
+                        .map_or(now, |last| {
+                            now.max(next_frame_timestamp(last, frame_interval))
+                        });
                 set_private_value(
                     scope,
                     global,
@@ -2103,6 +2105,17 @@ pub(crate) fn current_time_ms() -> f64 {
         * 1000.0
 }
 
+/// The earliest timestamp of the frame after `last`. Rounding `last +
+/// interval` down would show script a frame gap below the interval.
+fn next_frame_timestamp(last: f64, interval: f64) -> f64 {
+    let next = last + interval;
+    if next - last < interval {
+        next.next_up()
+    } else {
+        next
+    }
+}
+
 fn current_animation_frame_time_ms(scope: &mut v8::PinScope<'_, '_>) -> f64 {
     let global = scope.get_current_context().global(scope);
     global
@@ -2312,6 +2325,15 @@ mod tests {
     use crate::structured_clone::{
         RuntimeMessageAgentCluster, StructuredCloneMetadata, V8StructuredClonePayload,
     };
+
+    #[test]
+    fn next_frame_timestamp_never_shows_a_gap_below_the_interval() {
+        for tenths in 0..20_000 {
+            let last = f64::from(tenths) / 10.0;
+            let next = next_frame_timestamp(last, 16.0);
+            assert!(next - last >= 16.0, "{last} -> {next}");
+        }
+    }
 
     #[test]
     fn iframe_width_attribute_uses_html_dimension_rules() {
