@@ -1,6 +1,6 @@
 use super::backing_store::{
-    canvas_like_pixels_copy, canvas_owner_from_context, html_canvas_identity,
-    with_canvas_like_pixels_mut,
+    canvas_is_origin_tainted, canvas_like_pixels_copy, canvas_owner_from_context,
+    html_canvas_identity, mark_canvas_origin_tainted, with_canvas_like_pixels_mut,
 };
 use super::font::{CanvasFont, CanvasFontSizeBasis, CanvasTextMetrics};
 use super::helpers::{canonical_canvas_fill_style, canvas_unrestricted_double_arg};
@@ -12,18 +12,19 @@ use crate::context_bootstrap::image_data::{
 };
 use crate::context_bootstrap::shared::with_font_services;
 use crate::native_bridge::element::image_selected_source;
+use crate::native_bridge::throw_dom_exception;
 use crate::util::{get_private_value, set_private_value};
 use crate::web_api_interfaces;
 use crate::webidl;
 use crate::webidl::dom_string_property_value as canvas_context_dom_string_value;
 use moli_canvas::{
     DEFAULT_FILL_STYLE, DEFAULT_FONT, DrawImageBlit, ScaleFilter, blit_draw_image_filtered,
-    blit_image_data, byte_len, data_image_rgba8_pixels, draw_text, extract_image_data,
-    fill_style_rgba, normalize_rect as canvas_normalize_rect, paint_rect,
+    blit_image_data, byte_len, data_image_rgba8_pixels, data_image_svg_bytes, draw_text,
+    extract_image_data, fill_style_rgba, normalize_rect as canvas_normalize_rect, paint_rect,
 };
 use moli_layout::{
-    PaintBrush, PaintColor, PaintFragment, PaintLineCap, PaintLineJoin, PaintShape, PaintSnapshot,
-    PaintStroke, PaintTransform2D, PaintViewport,
+    PaintBrush, PaintColor, PaintFragment, PaintLineCap, PaintLineJoin, PaintRect, PaintShape,
+    PaintSnapshot, PaintStroke, PaintSvgImage, PaintTransform2D, PaintViewport,
 };
 use moli_webapi_declare::WebApiObject;
 use std::str::FromStr;
@@ -1948,10 +1949,30 @@ pub(crate) fn canvas_context_draw_image_callback<'s>(
     let Ok(source) = v8::Local::<v8::Object>::try_from(args.get(0)) else {
         return;
     };
-    let Some((source_pixels, source_width, source_height)) =
-        html_image_pixels_copy(scope, source).or_else(|| canvas_like_pixels_copy(scope, source))
-    else {
-        return;
+    let (source_pixels, source_width, source_height) = match html_image_draw_source(scope, source) {
+        HtmlImageDrawSource::Broken => {
+            throw_dom_exception(
+                scope,
+                "InvalidStateError",
+                11,
+                "Failed to execute 'drawImage' on 'CanvasRenderingContext2D': The HTMLImageElement provided is in the 'broken' state.",
+            );
+            return;
+        }
+        HtmlImageDrawSource::Svg(image) => {
+            draw_svg_image(scope, &args, canvas, image);
+            return;
+        }
+        HtmlImageDrawSource::Raster(pixels, width, height) => (pixels, width, height),
+        HtmlImageDrawSource::None => {
+            let Some(copy) = canvas_like_pixels_copy(scope, source) else {
+                return;
+            };
+            if canvas_is_origin_tainted(scope, source) {
+                mark_canvas_origin_tainted(scope, canvas);
+            }
+            copy
+        }
     };
     let Some(blit) =
         normalized_draw_image_args(scope, &args, source_width as f64, source_height as f64)
@@ -1984,22 +2005,156 @@ pub(crate) fn canvas_context_draw_image_callback<'s>(
     });
 }
 
-fn html_image_pixels_copy<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    source: v8::Local<'s, v8::Object>,
-) -> Option<(Vec<u8>, u32, u32)> {
-    let src = native_html_image_data_src(scope, source)?;
-    data_image_rgba8_pixels(&src)
+enum HtmlImageDrawSource {
+    /// Not an image element, or an image without decoded content yet.
+    None,
+    Broken,
+    Raster(Vec<u8>, u32, u32),
+    Svg(SvgDrawImage),
 }
 
-fn native_html_image_data_src<'s>(
+struct SvgDrawImage {
+    image: std::sync::Arc<moli_image::SvgImage>,
+    natural_width: f64,
+    natural_height: f64,
+    from_blob: bool,
+}
+
+fn html_image_draw_source<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     source: v8::Local<'s, v8::Object>,
-) -> Option<String> {
-    let (runtime_ptr, handle) =
-        crate::native_bridge::node_runtime_and_handle_from_object(scope, source).ok()?;
+) -> HtmlImageDrawSource {
+    let Ok((runtime_ptr, handle)) =
+        crate::native_bridge::node_runtime_and_handle_from_object(scope, source)
+    else {
+        return HtmlImageDrawSource::None;
+    };
     let runtime = unsafe { &*runtime_ptr };
-    image_selected_source(runtime, handle)
+    let Some(src) = image_selected_source(runtime, handle) else {
+        return HtmlImageDrawSource::None;
+    };
+    if runtime.image_resource_is_broken(handle) {
+        return HtmlImageDrawSource::Broken;
+    }
+    let scheme = url::Url::parse(&src).ok();
+    let scheme = scheme.as_ref().map(url::Url::scheme);
+    // Other schemes stay undrawn: their pixels may be cross-origin.
+    if matches!(scheme, Some("data" | "blob"))
+        && let Some(ready) = runtime.ready_image_for_layout(handle)
+    {
+        if let Some(image) = ready.svg {
+            return HtmlImageDrawSource::Svg(SvgDrawImage {
+                image,
+                natural_width: f64::from(ready.intrinsic_width),
+                natural_height: f64::from(ready.intrinsic_height),
+                from_blob: scheme == Some("blob"),
+            });
+        }
+        if let Some(image) = ready.pixels {
+            return HtmlImageDrawSource::Raster(image.rgba.clone(), image.width, image.height);
+        }
+    }
+    if let Some((pixels, width, height)) = data_image_rgba8_pixels(&src) {
+        return HtmlImageDrawSource::Raster(pixels, width, height);
+    }
+    // Without decoded resources (no real layout), `data:` still carries the document.
+    data_image_svg_bytes(&src)
+        .and_then(|bytes| moli_image::decode_svg_image(&bytes).ok())
+        .and_then(|image| {
+            let metadata = image.metadata();
+            Some(HtmlImageDrawSource::Svg(SvgDrawImage {
+                natural_width: f64::from(metadata.concrete_dimensions()?.0),
+                natural_height: f64::from(metadata.concrete_dimensions()?.1),
+                image: std::sync::Arc::new(image),
+                from_blob: false,
+            }))
+        })
+        .unwrap_or(HtmlImageDrawSource::None)
+}
+
+/// Draws an SVG image as vector content at the destination's resolution, the
+/// way Blink replays an SVGImage, so scaling up stays sharp.
+fn draw_svg_image<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: &v8::FunctionCallbackArguments<'s>,
+    canvas: v8::Local<'s, v8::Object>,
+    source: SvgDrawImage,
+) {
+    let Some(blit) =
+        normalized_draw_image_args(scope, args, source.natural_width, source.natural_height)
+    else {
+        return;
+    };
+    if blit.source_width == 0.0
+        || blit.source_height == 0.0
+        || blit.dest_width == 0.0
+        || blit.dest_height == 0.0
+        || source.natural_width <= 0.0
+        || source.natural_height <= 0.0
+    {
+        return;
+    }
+    // Blink treats `<foreignObject>` in a non-`data:` image as a second
+    // security origin, even for a same-origin blob.
+    if source.from_blob && source.image.contains_foreign_object() {
+        mark_canvas_origin_tainted(scope, canvas);
+    }
+    let context_transform = PaintTransform2D::new(
+        canvas_path_state(scope, args.this())
+            .borrow()
+            .transform()
+            .coefficients,
+    );
+    let (scale_x, scale_y) = (
+        blit.dest_width / blit.source_width,
+        blit.dest_height / blit.source_height,
+    );
+    let image_to_canvas = context_transform.concatenate(PaintTransform2D::new([
+        scale_x,
+        0.0,
+        0.0,
+        scale_y,
+        blit.dest_x - blit.source_x * scale_x,
+        blit.dest_y - blit.source_y * scale_y,
+    ]));
+    let destination = PaintRect::new(
+        blit.dest_x.min(blit.dest_x + blit.dest_width) as f32,
+        blit.dest_y.min(blit.dest_y + blit.dest_height) as f32,
+        blit.dest_width.abs() as f32,
+        blit.dest_height.abs() as f32,
+    );
+    let image_rect = PaintRect::new(
+        0.0,
+        0.0,
+        source.natural_width as f32,
+        source.natural_height as f32,
+    );
+    let _ = with_canvas_like_pixels_mut(scope, canvas, |pixels, width, height| {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let mut snapshot = PaintSnapshot::new(
+            PaintViewport::new(width, height, 1.0),
+            PaintColor::TRANSPARENT,
+        );
+        let image = snapshot.add_svg_image(source.image);
+        snapshot.push_fragment(PaintFragment::PushClip {
+            shape: PaintShape::Rect(destination),
+            transform: context_transform,
+        });
+        snapshot.push_fragment(PaintFragment::SvgImage(PaintSvgImage {
+            image,
+            destination: image_rect,
+            transform: image_to_canvas,
+        }));
+        snapshot.push_fragment(PaintFragment::PopLayer);
+        if let Ok(raster) = moli_paint::raster_snapshot(&snapshot)
+            && raster.width == width
+            && raster.height == height
+        {
+            composite_rgba8_over(pixels, &raster.rgba);
+        }
+    });
 }
 
 pub(crate) fn canvas_context_noop_callback(
@@ -2282,6 +2437,17 @@ pub(crate) fn canvas_context_get_image_data_callback<'s>(
     let (width, height) = (rect.width(), rect.height());
     if width == 0 || height == 0 {
         webidl::throw_index_size_error(scope);
+        return;
+    }
+    if canvas_owner_from_context(scope, args.this())
+        .is_some_and(|canvas| canvas_is_origin_tainted(scope, canvas))
+    {
+        throw_dom_exception(
+            scope,
+            "SecurityError",
+            18,
+            "Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The canvas has been tainted by cross-origin data.",
+        );
         return;
     }
     if byte_len(width, height).is_none() {

@@ -72,6 +72,13 @@ pub fn data_image_rgba8_pixels(src: &str) -> Option<(Vec<u8>, u32, u32)> {
     Some((decoded.rgba, decoded.width, decoded.height))
 }
 
+/// The encoded document of an SVG `data:` image.
+pub fn data_image_svg_bytes(src: &str) -> Option<Vec<u8>> {
+    let (bytes, computed_mime_type) =
+        data_url_body_and_computed_mime_type(src, MimeSniffingContext::Image)?;
+    is_svg_image_mime_essence(&computed_mime_type).then_some(bytes)
+}
+
 pub fn image_dimensions_from_bytes(bytes: &[u8]) -> Option<(u32, u32)> {
     moli_image::raster_image_dimensions(bytes).ok()
 }

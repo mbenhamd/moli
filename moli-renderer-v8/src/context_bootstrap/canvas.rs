@@ -202,8 +202,8 @@ mod webgl;
 pub(crate) use transform::install_canvas_transform_bindings;
 
 pub(crate) use backing_store::{
-    attach_canvas_like_context_object, canvas_like_to_data_url, canvas_like_to_image_file,
-    reset_html_canvas_backing_store_for_dimension_assignment,
+    attach_canvas_like_context_object, canvas_is_origin_tainted, canvas_like_to_data_url,
+    canvas_like_to_image_file, reset_html_canvas_backing_store_for_dimension_assignment,
 };
 pub(crate) use constructors::{
     canvas_rendering_context_2d_constructor_callback, offscreen_canvas_constructor_callback,

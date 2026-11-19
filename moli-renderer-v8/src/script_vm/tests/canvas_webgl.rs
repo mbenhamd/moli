@@ -2429,6 +2429,74 @@ async fn html_canvas_draw_image_reads_data_url_image_pixels() {
 }
 
 #[test]
+fn html_canvas_draw_image_paints_svg_data_url_images_as_vectors() {
+    let mut vm = new_storage_test_vm("https://canvas-draw-svg-image.test/");
+
+    let result = vm
+        .eval(
+            r##"
+(() => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 40 20">'
+    + '<rect width="20" height="20" fill="#00f"/></svg>';
+  const image = new Image();
+  image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  const canvas = document.createElement('canvas');
+  canvas.width = 80;
+  canvas.height = 40;
+  const context = canvas.getContext('2d');
+  context.drawImage(image, 0, 0, 80, 40);
+  return JSON.stringify({
+    size: [image.naturalWidth, image.naturalHeight],
+    inside: Array.from(context.getImageData(39, 20, 1, 1).data),
+    outside: Array.from(context.getImageData(41, 20, 1, 1).data),
+    exportable: canvas.toDataURL().startsWith('data:image/png')
+  });
+})()
+"##,
+        )
+        .expect("SVG image draw should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"size":[40,20],"inside":[0,0,255,255],"outside":[0,0,0,0],"exportable":true}"#
+    );
+}
+
+#[tokio::test]
+async fn html_canvas_draw_image_rejects_a_broken_svg_image() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_storage_page_task_executor_test_vm("https://canvas-draw-broken-svg.test/");
+
+    vm.eval(
+        r#"
+(() => {
+  const image = new Image();
+  globalThis.__lmBrokenSvg = { image, result: 'pending' };
+  image.onerror = () => {
+    const context = document.createElement('canvas').getContext('2d');
+    try {
+      context.drawImage(image, 0, 0);
+      globalThis.__lmBrokenSvg.result = 'drawn';
+    } catch (error) {
+      globalThis.__lmBrokenSvg.result = error.name;
+    }
+  };
+  image.src = 'data:image/svg+xml,%3Csvg';
+})()
+"#,
+    )
+    .expect("broken SVG image setup should evaluate");
+
+    drain_canvas_image_load_event_tasks(&mut vm, &loader).await;
+
+    assert_eq!(
+        vm.eval("globalThis.__lmBrokenSvg.result")
+            .expect("broken SVG image result should be readable"),
+        "InvalidStateError"
+    );
+}
+
+#[test]
 fn html_canvas_image_smoothing_controls_draw_image_filter() {
     let mut vm = new_storage_test_vm("https://canvas-image-smoothing.test/");
 

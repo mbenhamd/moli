@@ -13,6 +13,7 @@ const CANVAS_BACKING_STORE_SLOT: &str = "__moliCanvasBackingStore";
 const CANVAS_OWNER_SLOT: &str = "__moliCanvasOwner";
 const CANVAS_HAS_CONTEXT_SLOT: &str = "__moliCanvasHasContext";
 const CANVAS_2D_CONTEXT_SLOT: &str = "__moliCanvas2DContext";
+const CANVAS_ORIGIN_TAINTED_SLOT: &str = "__moliCanvasOriginTainted";
 
 #[derive(WebApiObject)]
 #[webapi(plain)]
@@ -105,6 +106,23 @@ pub(crate) fn reset_html_canvas_backing_store_for_dimension_assignment<'s>(
         return;
     }
     reset_canvas_like_backing_store(scope, canvas);
+}
+
+/// Clears the bitmap's origin-clean flag. It stays clear for the canvas's life.
+pub(super) fn mark_canvas_origin_tainted<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    canvas: v8::Local<'s, v8::Object>,
+) {
+    let tainted = v8::Boolean::new(scope, true);
+    set_private_value(scope, canvas, CANVAS_ORIGIN_TAINTED_SLOT, tainted.into());
+}
+
+pub(crate) fn canvas_is_origin_tainted<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    canvas: v8::Local<'s, v8::Object>,
+) -> bool {
+    get_private_value(scope, canvas, CANVAS_ORIGIN_TAINTED_SLOT)
+        .is_some_and(|value| value.is_true())
 }
 
 pub(crate) fn canvas_like_to_data_url<'s>(
