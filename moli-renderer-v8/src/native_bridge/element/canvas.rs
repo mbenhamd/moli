@@ -2,8 +2,8 @@ use crate::{
     context_bootstrap::{
         CanvasContextKind, attach_canvas_like_context_object,
         build_canvas_rendering_context_2d_object, build_offscreen_canvas_object,
-        build_webgl_context_object, build_webgl2_context_object, canvas_like_to_data_url,
-        canvas_like_to_image_file,
+        build_webgl_context_object, build_webgl2_context_object, canvas_is_origin_tainted,
+        canvas_like_to_data_url, canvas_like_to_image_file,
     },
     util::{
         context_host_ptr_from_global_bridge, get_own_static_property,
@@ -264,6 +264,10 @@ pub(crate) fn canvas_transfer_control_to_offscreen_callback<'s>(
     rv.set(value);
 }
 
+fn throw_tainted_canvas_export(scope: &mut v8::PinScope<'_, '_>, message: &'static str) {
+    crate::native_bridge::throw_dom_exception(scope, "SecurityError", 18, message);
+}
+
 pub(crate) fn canvas_to_data_url_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
@@ -275,6 +279,13 @@ pub(crate) fn canvas_to_data_url_callback<'s>(
         rv.set(v8::undefined(scope).into());
         return;
     };
+    if canvas_is_origin_tainted(scope, args.this()) {
+        throw_tainted_canvas_export(
+            scope,
+            "Failed to execute 'toDataURL' on 'HTMLCanvasElement': Tainted canvases may not be exported.",
+        );
+        return;
+    }
     let Some(data_url) = canvas_like_to_data_url(scope, args.this()) else {
         rv.set(v8::undefined(scope).into());
         return;
@@ -291,8 +302,7 @@ pub(crate) fn canvas_to_data_url_callback<'s>(
 /// The bitmap is copied and serialized with the `toDataURL` encoder before
 /// returning; the callback then runs from a queued task in the canvas's
 /// relevant realm with that Blob, or with null when the bitmap has no pixels
-/// or serialization fails. Moli does not model the bitmap origin-clean flag
-/// (no canvas operation taints it), so the SecurityError step never applies.
+/// or serialization fails. A tainted bitmap throws SecurityError instead.
 pub(crate) fn canvas_to_blob_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
@@ -305,6 +315,13 @@ pub(crate) fn canvas_to_blob_callback<'s>(
         return;
     };
     let canvas = args.this();
+    if canvas_is_origin_tainted(scope, canvas) {
+        throw_tainted_canvas_export(
+            scope,
+            "Failed to execute 'toBlob' on 'HTMLCanvasElement': Tainted canvases may not be exported.",
+        );
+        return;
+    }
     let image_file = canvas_like_to_image_file(scope, canvas);
     let Some(context) = canvas.get_creation_context(scope) else {
         return;

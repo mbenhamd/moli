@@ -307,6 +307,11 @@ impl super::PageScriptHost {
         self.image_resources.is_ready(element)
     }
 
+    /// Whether this element's current request ended in the HTML "broken" state.
+    pub(crate) fn image_resource_is_broken(&self, element: DomHandle) -> bool {
+        self.image_resources.is_failed(element)
+    }
+
     pub(crate) fn has_ready_image_request(&self, request_key: &ImageRequestKey) -> bool {
         self.image_resources.has_ready_request(request_key)
     }
