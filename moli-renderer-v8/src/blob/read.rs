@@ -1,3 +1,4 @@
+use crate::util::v8_string;
 use std::{io, sync::Arc};
 
 use moli_file_api::BlobReadCompletion;
@@ -87,7 +88,7 @@ fn settle<'s>(
             let error = crate::context_bootstrap::new_dom_exception_value(
                 scope,
                 &error.to_string(),
-                "NotReadableError",
+                moli_file_api::file::read_error_name(&error),
             );
             let _ = resolver.reject(scope, error);
             return;

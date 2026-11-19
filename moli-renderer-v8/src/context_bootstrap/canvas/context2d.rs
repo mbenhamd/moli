@@ -26,23 +26,11 @@ use moli_layout::{
     PaintBrush, PaintColor, PaintFragment, PaintLineCap, PaintLineJoin, PaintRect, PaintShape,
     PaintSnapshot, PaintStroke, PaintSvgImage, PaintTransform2D, PaintViewport,
 };
-use moli_webapi_declare::WebApiObject;
+use moli_webapi::text_metrics::CanvasTextMetricsDeclaration;
 use std::str::FromStr;
 
 const DEFAULT_IMAGE_SMOOTHING_QUALITY: &str = "low";
 const CANVAS_CONTEXT_LINE_DASH_SLOT: &str = "__moliCanvasContextLineDash";
-const TEXT_METRICS_WIDTH_SLOT: &str = "__moliTextMetricsWidth";
-const TEXT_METRICS_ACTUAL_BOUNDING_BOX_LEFT_SLOT: &str = "__moliTextMetricsActualBoundingBoxLeft";
-const TEXT_METRICS_ACTUAL_BOUNDING_BOX_RIGHT_SLOT: &str = "__moliTextMetricsActualBoundingBoxRight";
-const TEXT_METRICS_FONT_BOUNDING_BOX_ASCENT_SLOT: &str = "__moliTextMetricsFontBoundingBoxAscent";
-const TEXT_METRICS_FONT_BOUNDING_BOX_DESCENT_SLOT: &str = "__moliTextMetricsFontBoundingBoxDescent";
-const TEXT_METRICS_ACTUAL_BOUNDING_BOX_ASCENT_SLOT: &str =
-    "__moliTextMetricsActualBoundingBoxAscent";
-const TEXT_METRICS_ACTUAL_BOUNDING_BOX_DESCENT_SLOT: &str =
-    "__moliTextMetricsActualBoundingBoxDescent";
-const TEXT_METRICS_HANGING_BASELINE_SLOT: &str = "__moliTextMetricsHangingBaseline";
-const TEXT_METRICS_ALPHABETIC_BASELINE_SLOT: &str = "__moliTextMetricsAlphabeticBaseline";
-const TEXT_METRICS_IDEOGRAPHIC_BASELINE_SLOT: &str = "__moliTextMetricsIdeographicBaseline";
 
 pub(super) fn reset_canvas_context_state<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -54,70 +42,10 @@ pub(super) fn reset_canvas_context_state<'s>(
     super::state::reset_canvas_path_state(scope, context);
 }
 
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::TextMetrics)]
-struct CanvasTextMetricsDeclaration {
-    #[webapi(slot = TEXT_METRICS_WIDTH_SLOT)]
-    width: f64,
-    #[webapi(slot = TEXT_METRICS_ACTUAL_BOUNDING_BOX_LEFT_SLOT)]
-    actual_bounding_box_left: f64,
-    #[webapi(slot = TEXT_METRICS_ACTUAL_BOUNDING_BOX_RIGHT_SLOT)]
-    actual_bounding_box_right: f64,
-    #[webapi(slot = TEXT_METRICS_FONT_BOUNDING_BOX_ASCENT_SLOT)]
-    font_bounding_box_ascent: f64,
-    #[webapi(slot = TEXT_METRICS_FONT_BOUNDING_BOX_DESCENT_SLOT)]
-    font_bounding_box_descent: f64,
-    #[webapi(slot = TEXT_METRICS_ACTUAL_BOUNDING_BOX_ASCENT_SLOT)]
-    actual_bounding_box_ascent: f64,
-    #[webapi(slot = TEXT_METRICS_ACTUAL_BOUNDING_BOX_DESCENT_SLOT)]
-    actual_bounding_box_descent: f64,
-    #[webapi(slot = TEXT_METRICS_HANGING_BASELINE_SLOT)]
-    hanging_baseline: f64,
-    #[webapi(slot = TEXT_METRICS_ALPHABETIC_BASELINE_SLOT)]
-    alphabetic_baseline: f64,
-    #[webapi(slot = TEXT_METRICS_IDEOGRAPHIC_BASELINE_SLOT)]
-    ideographic_baseline: f64,
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::TextMetrics, enumerable)]
-struct TextMetricsPrototypeDeclaration {
-    #[webapi(accessor_property, getter = text_metrics_width_getter)]
-    width: (),
-    #[webapi(accessor_property, getter = text_metrics_actual_bounding_box_left_getter)]
-    actual_bounding_box_left: (),
-    #[webapi(accessor_property, getter = text_metrics_actual_bounding_box_right_getter)]
-    actual_bounding_box_right: (),
-    #[webapi(accessor_property, getter = text_metrics_font_bounding_box_ascent_getter)]
-    font_bounding_box_ascent: (),
-    #[webapi(accessor_property, getter = text_metrics_font_bounding_box_descent_getter)]
-    font_bounding_box_descent: (),
-    #[webapi(accessor_property, getter = text_metrics_actual_bounding_box_ascent_getter)]
-    actual_bounding_box_ascent: (),
-    #[webapi(accessor_property, getter = text_metrics_actual_bounding_box_descent_getter)]
-    actual_bounding_box_descent: (),
-    #[webapi(accessor_property, getter = text_metrics_hanging_baseline_getter)]
-    hanging_baseline: (),
-    #[webapi(accessor_property, getter = text_metrics_alphabetic_baseline_getter)]
-    alphabetic_baseline: (),
-    #[webapi(accessor_property, getter = text_metrics_ideographic_baseline_getter)]
-    ideographic_baseline: (),
-}
-
-pub(super) fn install_text_metrics_template_bindings<'s>(
-    scope: &mut v8::PinScope<'s, '_, ()>,
-    template: v8::Local<'s, v8::FunctionTemplate>,
-) {
-    TextMetricsPrototypeDeclaration::initialize_prototype_template(
-        scope,
-        template.prototype_template(scope),
-    );
-}
-
 macro_rules! canvas_rect_declaration {
     ($name:ident, $interface:path) => {
         #[derive(WebApiFunctionTemplate)]
-        #[webapi(interface = $interface, enumerable, receiver)]
+        #[webapi(interface = $interface, enumerable)]
         struct $name {
             #[webapi(method = "fillRect", length = 4, callback = canvas_context_fill_rect_callback)]
             fill_rect: (),
@@ -151,72 +79,6 @@ pub(crate) fn install_canvas_rect_bindings<'s>(
         _ => unreachable!("only Canvas 2D contexts have rectangle bindings"),
     }
 }
-
-macro_rules! text_metrics_getter {
-    ($getter:ident, $slot:ident, $name:literal) => {
-        fn $getter<'s>(
-            scope: &mut v8::PinScope<'s, '_>,
-            args: v8::FunctionCallbackArguments<'s>,
-            mut rv: v8::ReturnValue<'_, v8::Value>,
-        ) {
-            let Some(value) = get_private_value(scope, args.this(), $slot) else {
-                throw_type_error(
-                    scope,
-                    concat!("TextMetrics.", $name, " called on incompatible receiver."),
-                );
-                return;
-            };
-            rv.set(value);
-        }
-    };
-}
-
-text_metrics_getter!(text_metrics_width_getter, TEXT_METRICS_WIDTH_SLOT, "width");
-text_metrics_getter!(
-    text_metrics_actual_bounding_box_left_getter,
-    TEXT_METRICS_ACTUAL_BOUNDING_BOX_LEFT_SLOT,
-    "actualBoundingBoxLeft"
-);
-text_metrics_getter!(
-    text_metrics_actual_bounding_box_right_getter,
-    TEXT_METRICS_ACTUAL_BOUNDING_BOX_RIGHT_SLOT,
-    "actualBoundingBoxRight"
-);
-text_metrics_getter!(
-    text_metrics_font_bounding_box_ascent_getter,
-    TEXT_METRICS_FONT_BOUNDING_BOX_ASCENT_SLOT,
-    "fontBoundingBoxAscent"
-);
-text_metrics_getter!(
-    text_metrics_font_bounding_box_descent_getter,
-    TEXT_METRICS_FONT_BOUNDING_BOX_DESCENT_SLOT,
-    "fontBoundingBoxDescent"
-);
-text_metrics_getter!(
-    text_metrics_actual_bounding_box_ascent_getter,
-    TEXT_METRICS_ACTUAL_BOUNDING_BOX_ASCENT_SLOT,
-    "actualBoundingBoxAscent"
-);
-text_metrics_getter!(
-    text_metrics_actual_bounding_box_descent_getter,
-    TEXT_METRICS_ACTUAL_BOUNDING_BOX_DESCENT_SLOT,
-    "actualBoundingBoxDescent"
-);
-text_metrics_getter!(
-    text_metrics_hanging_baseline_getter,
-    TEXT_METRICS_HANGING_BASELINE_SLOT,
-    "hangingBaseline"
-);
-text_metrics_getter!(
-    text_metrics_alphabetic_baseline_getter,
-    TEXT_METRICS_ALPHABETIC_BASELINE_SLOT,
-    "alphabeticBaseline"
-);
-text_metrics_getter!(
-    text_metrics_ideographic_baseline_getter,
-    TEXT_METRICS_IDEOGRAPHIC_BASELINE_SLOT,
-    "ideographicBaseline"
-);
 
 #[derive(
     Clone, Copy, Debug, Eq, PartialEq, strum::EnumString, strum::IntoStaticStr, webidl::WebIdlEnum,
@@ -270,15 +132,6 @@ struct CanvasContextStrokeTextArgs {
 struct CanvasContextMeasureTextArgs {
     #[webidl(required)]
     text: String,
-}
-
-#[derive(webidl::WebIdlArgs)]
-#[webidl(prefix = "CanvasGradient.addColorStop")]
-struct CanvasGradientAddColorStopArgs {
-    #[webidl(required)]
-    offset: f64,
-    #[webidl(required)]
-    _color: String,
 }
 
 #[derive(webidl::WebIdlArgs)]
@@ -473,14 +326,20 @@ struct CanvasContextEllipseArgs {
     counterclockwise: bool,
 }
 
+pub(crate) fn is_canvas_context_receiver<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    receiver: v8::Local<'s, v8::Object>,
+) -> bool {
+    web_api_interfaces::CanvasRenderingContext2D::is_instance(scope, receiver)
+        || web_api_interfaces::OffscreenCanvasRenderingContext2D::is_instance(scope, receiver)
+}
+
 fn require_canvas_context_receiver<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     receiver: v8::Local<'s, v8::Object>,
     member: &str,
 ) -> bool {
-    if web_api_interfaces::CanvasRenderingContext2D::is_instance(scope, receiver)
-        || web_api_interfaces::OffscreenCanvasRenderingContext2D::is_instance(scope, receiver)
-    {
+    if is_canvas_context_receiver(scope, receiver) {
         return true;
     }
     throw_type_error(
@@ -2267,26 +2126,8 @@ pub(crate) fn canvas_context_create_linear_gradient_callback<'s>(
         return;
     }
 
-    let gradient = v8::Object::new(scope);
-    if let Some(prototype) = global_constructor_prototype(scope, "CanvasGradient") {
-        let _ = gradient.set_prototype(scope, prototype.into());
-    }
+    let gradient = moli_webapi::canvas_gradient::build(scope);
     rv.set(gradient.into());
-}
-
-pub(crate) fn canvas_gradient_add_color_stop_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
-) {
-    let Some(parsed) = webidl::parse_args::<CanvasGradientAddColorStopArgs>(scope, &args) else {
-        return;
-    };
-    if !(0.0..=1.0).contains(&parsed.offset) {
-        webidl::throw_index_size_error(scope);
-        return;
-    }
-    rv.set_undefined();
 }
 
 pub(crate) fn canvas_context_measure_text_callback<'s>(

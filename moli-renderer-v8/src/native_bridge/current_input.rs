@@ -61,6 +61,7 @@ impl CurrentInputEvent {
         }
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn keyboard(key: &str, modifiers: u8) -> Self {
         Self {
             kind: if key.eq_ignore_ascii_case("enter") {
@@ -258,6 +259,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "devtools")]
     #[test]
     fn only_navigation_capable_real_input_supplies_an_input_policy() {
         assert_eq!(

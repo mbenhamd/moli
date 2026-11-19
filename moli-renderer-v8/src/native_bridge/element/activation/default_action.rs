@@ -25,7 +25,10 @@ use crate::{
 };
 
 use super::super::super::PageScriptHost;
-use super::super::forms::{FormAssociatedResetCallbackTiming, reset_form_default_action};
+use super::super::forms::{
+    FormAssociatedResetCallbackTiming, dispatch_form_reset_event, reset_form_default_action,
+};
+use super::super::url_attributes::parsed_hyperlink_url;
 use super::super::{
     ClickEventSource, InputEventCoordinates, NodePublicEventDispatchOutcome, TextEditInputType,
     cache_input_files_from_selected_files, closed_details_ancestors_to_reveal,
@@ -35,10 +38,9 @@ use super::super::{
     element_has_attribute, form_associated_form_owner, is_disabled_form_control, is_focusable,
     is_valid_submit_button, label_activation_control_handle,
     perform_popover_invoker_default_action, perform_summary_click_default_action,
-    replace_text_control_selection, resolve_url_like_attribute,
-    resolved_reflected_element_attribute_handle, scroll_node_into_view_at_start,
-    set_reflected_boolean_attribute, submit_form_with_submit_event, update_focus,
-    update_focus_preserving_selection,
+    replace_text_control_selection, resolved_reflected_element_attribute_handle,
+    scroll_node_into_view_at_start, set_reflected_boolean_attribute, submit_form_with_submit_event,
+    update_focus, update_focus_preserving_selection,
 };
 use super::targets::{
     SpecialBrowsingContextTarget, browsing_context_window_for_dispatch_scope,
@@ -583,6 +585,7 @@ pub(super) fn replace_contenteditable_selection_after_beforeinput(
     true
 }
 
+#[cfg(feature = "devtools")]
 pub(crate) fn select_contenteditable_contents(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
@@ -1583,7 +1586,7 @@ fn element_has_activation_behavior(runtime: &PageScriptHost, handle: DomHandle) 
         || element.is_html_label()
         || element.is_html_element("summary")
         || element_is_anchor_with_href(runtime, handle)
-        || (element.is_html_element("link") && element_has_attribute(runtime, handle, "href"))
+        || (element.is_html_element("link") && element.has_attribute_ns("", "href"))
 }
 
 pub(crate) fn dispatched_click_activation_target(
@@ -1669,6 +1672,7 @@ pub(crate) fn activate_handle_via_click_with_detail_and_modifiers(
     )
 }
 
+#[cfg(feature = "devtools")]
 pub(crate) fn activate_handle_via_keyboard(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
@@ -1718,6 +1722,7 @@ pub(crate) fn activate_handle_after_pointer_release(
     )
 }
 
+#[cfg(feature = "devtools")]
 pub(crate) fn activate_handle_after_touch_release(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
@@ -2204,9 +2209,7 @@ fn perform_click_default_action(
     if is_valid_reset_button(runtime, handle)
         && let Some(form_handle) = form_handle
     {
-        if let Some(event) = construct_simple_event(scope, "reset", true, true, false)
-            && dispatch_public_event(scope, runtime_ptr, form_handle, event).allows_default()
-        {
+        if dispatch_form_reset_event(scope, runtime_ptr, form_handle).allows_default() {
             let _ = reset_form_default_action(
                 scope,
                 runtime_ptr,
@@ -2243,7 +2246,7 @@ fn perform_option_click_default_action(
     handle: DomHandle,
 ) -> bool {
     let runtime = unsafe { &*runtime_ptr };
-    let Some(select_handle) = owner_select_for_option(runtime, handle) else {
+    let Some(select_handle) = runtime.dom_host().option_nearest_ancestor_select(handle) else {
         return false;
     };
     if is_disabled_form_control(runtime, handle) || is_disabled_form_control(runtime, select_handle)
@@ -2278,25 +2281,6 @@ fn perform_option_click_default_action(
     true
 }
 
-fn owner_select_for_option(runtime: &PageScriptHost, handle: DomHandle) -> Option<DomHandle> {
-    if !is_html_option_element(runtime, handle) {
-        return None;
-    }
-    let mut current = runtime.dom_host().parent_node(handle);
-    while let Some(parent) = current {
-        if runtime
-            .dom_host()
-            .node(parent)
-            .and_then(Node::as_element)
-            .is_some_and(Element::is_html_select)
-        {
-            return Some(parent);
-        }
-        current = runtime.dom_host().parent_node(parent);
-    }
-    None
-}
-
 fn is_html_option_element(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     runtime
         .dom_host()
@@ -2306,16 +2290,12 @@ fn is_html_option_element(runtime: &PageScriptHost, handle: DomHandle) -> bool {
 }
 
 fn element_is_anchor_with_href(runtime: &PageScriptHost, handle: DomHandle) -> bool {
-    if !element_has_attribute(runtime, handle, "href") {
-        return false;
-    }
-    let Some(element) = runtime.dom_host().node(handle).and_then(Node::as_element) else {
-        return false;
-    };
-    matches!(
-        (element.namespace(), element.local_name()),
-        ("http://www.w3.org/1999/xhtml", "a" | "area") | ("http://www.w3.org/2000/svg", "a")
-    )
+    runtime
+        .dom_host()
+        .node(handle)
+        .and_then(Node::as_element)
+        .and_then(Element::hyperlink_href)
+        .is_some()
 }
 
 fn dispatch_button_command_event_if_needed(
@@ -2554,10 +2534,7 @@ fn anchor_click_default_action(
     user_initiated: bool,
     pending_child_navigations_before_default: &[(DomHandle, ChildBrowsingContextBootstrap)],
 ) -> Option<RendererPendingDownloadActivation> {
-    let resolved = resolve_url_like_attribute(unsafe { &*runtime_ptr }, handle, "href");
-    if resolved.is_empty() || url::Url::parse(&resolved).is_err() {
-        return None;
-    }
+    let resolved = parsed_hyperlink_url(unsafe { &*runtime_ptr }, handle)?.to_string();
     send_anchor_ping_requests(runtime_ptr, handle, &resolved);
     let runtime = unsafe { &*runtime_ptr };
     if element_has_attribute(runtime, handle, "download") {

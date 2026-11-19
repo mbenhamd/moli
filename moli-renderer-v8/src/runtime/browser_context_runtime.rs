@@ -1,3 +1,4 @@
+pub(crate) use moli_webapi::clipboard_item::{ClipboardPresentationStyle, ClipboardSnapshot};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -162,6 +163,8 @@ impl RendererProducerRegistrar {
 #[derive(Clone, Debug)]
 pub(crate) struct RendererWorkerContextRuntime {
     debugger_enabled: bool,
+    #[cfg(feature = "devtools")]
+    shared_worker_pause_on_start: Arc<AtomicBool>,
     message_port_registry: crate::message_port_runtime::SharedMessagePortRegistry,
     broadcast_channel_registry: crate::broadcast_channel_runtime::SharedBroadcastChannelRegistry,
     storage_partition_identity: RendererStoragePartitionIdentity,
@@ -173,21 +176,6 @@ pub(crate) struct RendererWorkerContextRuntime {
 pub(crate) struct RendererStoragePartitionIdentity {
     browser_context_id: String,
     profile_partition_id: String,
-}
-
-#[derive(Clone, Copy, Debug, Default, moli_webidl::WebIdlEnum)]
-#[webidl(name = "PresentationStyle", rename_all = "kebab-case")]
-pub(crate) enum ClipboardPresentationStyle {
-    #[default]
-    Unspecified,
-    Inline,
-    Attachment,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct ClipboardSnapshot {
-    pub(crate) presentation_style: ClipboardPresentationStyle,
-    pub(crate) representations: Vec<(String, Vec<u8>)>,
 }
 
 #[derive(Debug)]
@@ -209,20 +197,25 @@ struct RendererBrowserContextRuntimeInner {
     next_child_document_loader_id: AtomicU64,
     next_detached_parser_script_fetch_id: AtomicU64,
     next_dedicated_worker_instance_id: AtomicU64,
-    dedicated_worker_devtools_targets: Mutex<HashMap<u64, DedicatedWorkerDevToolsTarget>>,
+    dedicated_worker_targets: Mutex<HashMap<u64, DedicatedWorkerTarget>>,
+    #[cfg(feature = "devtools")]
     dedicated_worker_pause_on_start_for_devtools: AtomicBool,
+    #[cfg(feature = "devtools")]
+    shared_worker_pause_on_start_for_devtools: Arc<AtomicBool>,
     javascript_dialog_handler_enabled: AtomicBool,
     browser_owns_auxiliary_document_responses: AtomicBool,
     renderer_output_transport_tx: RendererOutputTransportSenderSlot,
 }
 
 #[derive(Clone, Debug)]
-enum DedicatedWorkerDevToolsTarget {
+enum DedicatedWorkerTarget {
     Loading {
+        #[cfg(feature = "devtools")]
         inspector_sessions: Vec<Option<String>>,
     },
     Running {
-        handle: crate::worker::WorkerDevToolsHandle,
+        handle: crate::worker::WorkerControlHandle,
+        #[cfg(feature = "devtools")]
         output_journal: Option<super::RendererTurnOutputJournal>,
     },
 }
@@ -255,6 +248,7 @@ pub(crate) struct DetachedChildClassicScriptFetch {
     script: PreparedScript,
     request_origin: moli_url::WebOrigin,
     document_character_set: Option<String>,
+    web_security_disabled: bool,
     start: Option<ChildClassicScriptSourceLoadStart>,
     finish: Option<ChildClassicScriptSourceLoadFinish>,
 }
@@ -268,6 +262,7 @@ impl DetachedChildClassicScriptFetch {
         script: PreparedScript,
         request_origin: moli_url::WebOrigin,
         document_character_set: Option<String>,
+        web_security_disabled: bool,
         start: ChildClassicScriptSourceLoadStart,
         finish: ChildClassicScriptSourceLoadFinish,
     ) -> Self {
@@ -275,6 +270,7 @@ impl DetachedChildClassicScriptFetch {
             script,
             request_origin,
             document_character_set,
+            web_security_disabled,
             start: Some(start),
             finish: Some(finish),
         }
@@ -289,6 +285,7 @@ impl DetachedChildClassicScriptFetch {
             &self.request_origin,
             result,
             self.document_character_set.as_deref(),
+            self.web_security_disabled,
         );
         if let Some(finish) = self.finish.take() {
             finish(outcome);
@@ -429,6 +426,7 @@ impl DetachedParserScriptFetchContinuation {
                         &inner.request_origin,
                         Err(error_text),
                         inner.document_character_set.as_deref(),
+                        inner.request_client.web_security_disabled(),
                     ));
             }
             Some(DetachedScriptFetch::ChildClassicScript(fetch)) => {
@@ -463,6 +461,7 @@ impl DetachedParserScriptFetchContinuation {
                         &inner.request_origin,
                         Ok(response),
                         inner.document_character_set.as_deref(),
+                        inner.request_client.web_security_disabled(),
                     ));
             }
             Some(DetachedScriptFetch::ChildClassicScript(fetch)) => {
@@ -517,11 +516,10 @@ impl Drop for RendererBrowserContextRuntimeInner {
 }
 
 fn terminate_browser_context_resource_producers(inner: &RendererBrowserContextRuntimeInner) {
-    let dedicated_worker_targets =
-        std::mem::take(&mut *inner.dedicated_worker_devtools_targets.lock());
+    let dedicated_worker_targets = std::mem::take(&mut *inner.dedicated_worker_targets.lock());
     for target in dedicated_worker_targets.into_values() {
-        if let DedicatedWorkerDevToolsTarget::Running { handle, .. } = target {
-            let _ = handle.terminate_for_devtools();
+        if let DedicatedWorkerTarget::Running { handle, .. } = target {
+            let _ = handle.terminate();
         }
     }
     if let Some(shared_worker_runtime) = inner.shared_worker_runtime.get() {
@@ -774,8 +772,11 @@ impl RendererBrowserContextRuntime {
                 next_child_document_loader_id: AtomicU64::default(),
                 next_detached_parser_script_fetch_id: AtomicU64::default(),
                 next_dedicated_worker_instance_id: AtomicU64::default(),
-                dedicated_worker_devtools_targets: Mutex::new(HashMap::new()),
+                dedicated_worker_targets: Mutex::new(HashMap::new()),
+                #[cfg(feature = "devtools")]
                 dedicated_worker_pause_on_start_for_devtools: AtomicBool::new(false),
+                #[cfg(feature = "devtools")]
+                shared_worker_pause_on_start_for_devtools: Arc::new(AtomicBool::new(false)),
                 javascript_dialog_handler_enabled: AtomicBool::new(false),
                 browser_owns_auxiliary_document_responses: AtomicBool::new(false),
                 renderer_output_transport_tx,
@@ -949,6 +950,11 @@ impl RendererBrowserContextRuntime {
     pub(crate) fn worker_context_runtime(&self) -> RendererWorkerContextRuntime {
         RendererWorkerContextRuntime {
             debugger_enabled: self.inner.debugger_enabled,
+            #[cfg(feature = "devtools")]
+            shared_worker_pause_on_start: self
+                .inner
+                .shared_worker_pause_on_start_for_devtools
+                .clone(),
             message_port_registry: self.message_port_registry(),
             broadcast_channel_registry: self.broadcast_channel_registry(),
             storage_partition_identity: self.storage_partition_identity(),
@@ -1255,6 +1261,8 @@ impl RendererWorkerContextRuntime {
     ) -> Self {
         Self {
             debugger_enabled,
+            #[cfg(feature = "devtools")]
+            shared_worker_pause_on_start: Arc::new(AtomicBool::new(false)),
             message_port_registry,
             broadcast_channel_registry,
             storage_partition_identity,
@@ -1267,6 +1275,16 @@ impl RendererWorkerContextRuntime {
         self.message_port_registry.clone()
     }
 
+    pub(crate) fn shared_worker_pause_on_start_for_devtools(&self) -> bool {
+        #[cfg(feature = "devtools")]
+        {
+            self.shared_worker_pause_on_start.load(Ordering::Acquire)
+        }
+        #[cfg(not(feature = "devtools"))]
+        {
+            false
+        }
+    }
     pub(crate) fn debugger_enabled(&self) -> bool {
         self.debugger_enabled
     }
@@ -1325,6 +1343,7 @@ mod tests {
                 script,
                 moli_url::WebOrigin::from_url(&url),
                 None,
+                false,
                 Box::new(|_, _| panic!("a discarded pause must not start the network load")),
                 Box::new(move |outcome| {
                     let _ = tx.send(outcome);
@@ -1426,6 +1445,7 @@ mod tests {
         let (service_wake_tx, _service_wake_rx) =
             crate::service_worker_runtime::service_worker_owner_wake_channel();
         runtime.add_service_worker_owner_wake_sender(service_wake_tx);
+        #[cfg(feature = "devtools")]
         runtime.set_service_worker_pause_on_start_for_devtools(true);
 
         assert!(!runtime.ensure_service_worker_runtime_for_navigation());
@@ -1463,7 +1483,10 @@ mod tests {
                 .live_client_count,
             1
         );
-        assert!(runtime.service_worker_pause_on_start_for_devtools());
+        assert_eq!(
+            runtime.service_worker_pause_on_start_for_devtools(),
+            cfg!(feature = "devtools")
+        );
     }
 
     #[test]

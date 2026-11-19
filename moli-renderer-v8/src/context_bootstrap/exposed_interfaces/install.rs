@@ -68,6 +68,10 @@ pub(in crate::context_bootstrap) fn install_worker_exposed_interfaces<'s>(
 ) -> Result<()> {
     let registry = worker_interface_template_registry(scope, realm_kind, specs)?;
     IntrinsicInterfaceRegistry::initialize_for_current_context(scope, registry.len(), realm_kind)?;
+    // Worker eager objects must exist before the intrinsic resolver is enabled
+    // by capture_eager_intrinsic_interfaces. Event constructors can run as soon
+    // as they are exposed, including in embedders without that capture step.
+    install_event_runtime(scope);
 
     for metadata in registry.metadata_entries() {
         if metadata.installation != GlobalInstallation::Lazy
@@ -197,7 +201,35 @@ pub(crate) fn initialize_realm_interface_registry(
     let registry = ExposedInterfaceTemplateRegistry::current(scope)
         .ok_or_else(|| anyhow!("exposed interface template registry is unavailable"))?;
     IntrinsicInterfaceRegistry::initialize_for_current_context(scope, registry.len(), realm_kind)?;
+    // Native values can be built during Window bootstrap, before eager
+    // capture. Resolve through the realm cache from the start so an exception
+    // never re-enters the Window's public lazy property or access checks.
+    install_web_api_intrinsic_resolver(scope, resolve_web_api_intrinsic);
+    install_event_runtime(scope);
     Ok(())
+}
+
+fn install_event_runtime(scope: &mut v8::PinScope<'_, '_>) {
+    moli_webapi::event_target::install_runtime(
+        scope,
+        moli_webapi::event_target::EventTargetRuntime {
+            initialize: crate::context_bootstrap::media_queries::initialize_simple_event_target,
+            set_handler: crate::context_bootstrap::media_queries::simple_object_event_set_handler,
+        },
+    );
+    crate::context_bootstrap::web_audio_runtime::install_audio_runtime(scope);
+    moli_webapi::events::install_runtime(
+        scope,
+        moli_webapi::events::EventRuntime {
+            timestamp: |scope| {
+                crate::context_bootstrap::dom_time_since_origin_millis(
+                    crate::context_bootstrap::current_performance_time_origin(scope),
+                )
+            },
+            is_window_receiver: crate::context_bootstrap::is_window_receiver,
+            initialize_wrapper: crate::context_bootstrap::events::initialize_event_wrapper,
+        },
+    );
 }
 
 /// Captures trusted eager constructor/prototype identities after realm
@@ -207,6 +239,7 @@ pub(crate) fn capture_eager_intrinsic_interfaces<'s>(
     global: v8::Local<'s, v8::Object>,
     realm_kind: RealmKind,
 ) -> Result<()> {
+    install_event_runtime(scope);
     let registry = ExposedInterfaceTemplateRegistry::current(scope)
         .ok_or_else(|| anyhow!("exposed interface template registry is unavailable"))?;
     initialize_ecmascript_intrinsic_registry(scope, global);
@@ -254,6 +287,26 @@ pub(crate) fn capture_eager_intrinsic_interfaces<'s>(
         realm.publish_ready(scope, metadata.id, constructor, prototype, constructor)?;
     }
     install_web_api_intrinsic_resolver(scope, resolve_web_api_intrinsic);
+    moli_webapi::install_realm_callbacks(
+        scope,
+        moli_webapi::RealmCallbacks {
+            point_mutated: crate::context_bootstrap::svg_runtime::reflect_svg_point_mutation,
+            runtime: Some(&moli_webapi::RealmRuntime {
+                abort_signal_owner: crate::abort_signal_route::resolve_abort_signal_owner,
+                structured_clone_value: crate::context_bootstrap::structured_clone_value,
+                owner_terminating: crate::worker::worker_termination_requested,
+                trace_callback: |scope, callback| {
+                    crate::v8_traced_webidl_callback::V8TracedWebIdlCallbackFunction::new(
+                        scope, callback,
+                    )
+                    .into_object()
+                },
+                invoke_traced_callback: crate::webidl_callback_execution::invoke_traced_callback,
+                blob: crate::blob::RUNTIME,
+                form_data: super::super::form_data_runtime::RUNTIME,
+            }),
+        },
+    );
     Ok(())
 }
 

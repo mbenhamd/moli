@@ -9,7 +9,7 @@ use crate::{
 use moli_canvas::{byte_len as canvas_byte_len, encode_data_url, encode_image_file};
 use moli_webapi_declare::WebApiObject;
 
-const CANVAS_BACKING_STORE_SLOT: &str = "__moliCanvasBackingStore";
+use moli_webapi::canvas_context_values::CANVAS_BACKING_STORE_SLOT;
 const CANVAS_OWNER_SLOT: &str = "__moliCanvasOwner";
 const CANVAS_HAS_CONTEXT_SLOT: &str = "__moliCanvasHasContext";
 const CANVAS_2D_CONTEXT_SLOT: &str = "__moliCanvas2DContext";
@@ -27,8 +27,12 @@ pub(crate) fn attach_canvas_like_context_object<'s>(
     canvas: v8::Local<'s, v8::Object>,
     context: v8::Local<'s, v8::Object>,
 ) {
-    if canvas_owner_from_context(scope, context).is_none() {
-        super::webgl::initialize_attached_webgl_viewport(scope, canvas, context);
+    if canvas_owner_from_context(scope, context).is_none()
+        && (moli_webapi::interfaces::WebGLRenderingContext::is_instance(scope, context)
+            || moli_webapi::interfaces::WebGL2RenderingContext::is_instance(scope, context))
+    {
+        let dimensions = canvas_like_dimensions(scope, canvas);
+        super::webgl::initialize_viewport(scope, dimensions, context);
     }
     let _ = CanvasContextOwnerDeclaration::new(canvas).initialize(scope, context);
     set_private_value(scope, context, CANVAS_OWNER_SLOT, canvas.into());

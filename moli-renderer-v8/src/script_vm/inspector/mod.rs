@@ -3,6 +3,8 @@ mod agent_sessions;
 mod context_registration;
 mod context_registry;
 mod document_backend;
+#[cfg(feature = "devtools")]
+mod frontend;
 mod input_state;
 mod outbound;
 mod remote_objects;
@@ -13,13 +15,18 @@ pub(crate) use self::agent::{
     RendererDomDebuggerPauseScheduler, RendererDomDebuggerScheduledPause,
     RendererInspectorObjectWrapper,
 };
+#[cfg(not(feature = "devtools"))]
 pub(super) use self::agent_sessions::PageInspectorSessionTarget;
-use self::agent_sessions::inspector_session_key;
 use self::context_registration::DocumentInspectorContextRegistrations;
 #[cfg(test)]
 use self::context_registry::DocumentInspectorContextGroupId;
 pub(in crate::script_vm) use self::context_registry::DocumentInspectorContextRegistrationId;
 use self::document_backend::DocumentInspectorBackendState;
+#[cfg(feature = "devtools")]
+pub(super) use self::frontend::PageInspectorSessionTarget;
+#[cfg(feature = "devtools")]
+use self::frontend::inspector_session_key;
+#[cfg(feature = "devtools")]
 pub(super) use self::input_state::{
     current_selection_state, is_space_key, key_target_info, keyboard_event_target,
     option_is_disabled, radio_group_members,
@@ -29,10 +36,11 @@ pub(super) use self::outbound::ScriptVmInspectorCommandTurnOutputScope;
 #[cfg(test)]
 use self::v8_backend::RendererInspectorClientUniqueIdState;
 pub(in crate::script_vm) use self::v8_backend::RendererInspectorIsolateBackend;
+#[cfg(feature = "devtools")]
+pub(crate) use self::v8_backend::dispatch_inspector_main_owner_wake;
 pub(in crate::script_vm) use self::v8_backend::finish_page_close_termination;
 pub(crate) use self::v8_backend::{
     RendererInspectorIsolateBackendHandle, dispatch_inspector_io_owner_wake,
-    dispatch_inspector_main_owner_wake,
 };
 use crate::devtools::target::RendererDevToolsTargetHandle;
 #[cfg(test)]
@@ -44,13 +52,17 @@ use crate::{
     {document_runtime::DomHandle, runtime::RendererCommandTurnOutputRecorder},
 };
 use anyhow::Result;
+#[cfg(feature = "devtools")]
 use moli_inspector_json::InspectorJson;
+use moli_page_types::RendererDevToolsAgentToken;
+#[cfg(feature = "devtools")]
 use moli_page_types::{
-    DevToolsSessionKey, RendererDevToolsAgentToken, RendererInspectorSessionRestoreSnapshot,
-    V8InspectorSessionState,
+    DevToolsSessionKey, RendererInspectorSessionRestoreSnapshot, V8InspectorSessionState,
 };
 use serde_json::{Value, json};
-use std::{cell::RefCell, collections::HashMap};
+use std::cell::RefCell;
+#[cfg(feature = "devtools")]
+use std::collections::HashMap;
 use url::Url;
 
 pub(crate) struct DocumentInspectorBinding {
@@ -119,6 +131,7 @@ impl DocumentInspectorBinding {
         self,
         output_journal: crate::runtime::RendererTurnOutputJournal,
     ) -> Self {
+        #[cfg(feature = "devtools")]
         self.isolate_backend_handle()
             .bind_native_output_journal(output_journal.clone());
         self.agent.bind_output_journal(output_journal);
@@ -155,6 +168,7 @@ impl DocumentInspectorBinding {
             PageInspectorSessionTarget::InternalRuntimeEvaluate => {
                 self.agent.with_internal_runtime_evaluate(backend, op)
             }
+            #[cfg(feature = "devtools")]
             PageInspectorSessionTarget::Frontend(inspector_session_id) => {
                 let session_key = inspector_session_key(inspector_session_id);
                 self.agent.with_frontend(backend, session_key, op)
@@ -162,6 +176,7 @@ impl DocumentInspectorBinding {
         }
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn v8_session_state(
         &self,
         inspector_session_id: Option<&str>,
@@ -170,10 +185,12 @@ impl DocumentInspectorBinding {
         self.agent.v8_state(&session_key)
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn v8_session_states(&self) -> Vec<(DevToolsSessionKey, V8InspectorSessionState)> {
         self.agent.v8_states()
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn reattach_v8_sessions(
         &self,
         backend: &mut RendererInspectorIsolateBackend,
@@ -188,6 +205,7 @@ impl DocumentInspectorBinding {
         }
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn ensure_frontend_session(
         &self,
         backend: &mut RendererInspectorIsolateBackend,
@@ -197,10 +215,12 @@ impl DocumentInspectorBinding {
             .ensure_frontend(backend, inspector_session_key(inspector_session_id));
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn object_wrapper(&self) -> RendererInspectorObjectWrapper {
         self.agent.object_wrapper()
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn end_runtime_command_output_for_session(
         &self,
         inspector_session_id: Option<&str>,
@@ -213,12 +233,14 @@ impl DocumentInspectorBinding {
         &self,
         recorder: RendererCommandTurnOutputRecorder,
     ) -> Result<ScriptVmInspectorCommandTurnOutputScope> {
-        ScriptVmInspectorCommandTurnOutputScope::begin(
-            self.agent.frontend_routes().into_iter(),
-            recorder,
-        )
+        #[cfg(feature = "devtools")]
+        let routes = self.agent.frontend_routes();
+        #[cfg(not(feature = "devtools"))]
+        let routes = Vec::new();
+        ScriptVmInspectorCommandTurnOutputScope::begin(routes.into_iter(), recorder)
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn set_runtime_bindings_for_session(
         &self,
         inspector_session_id: Option<&str>,
@@ -228,6 +250,7 @@ impl DocumentInspectorBinding {
         self.agent.set_runtime_bindings(session_key, bindings);
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn runtime_bindings_for_session(
         &self,
         inspector_session_id: Option<&str>,
@@ -236,11 +259,13 @@ impl DocumentInspectorBinding {
         self.agent.runtime_bindings(&session_key)
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn detach_session(&self, inspector_session_id: Option<&str>) -> bool {
         let session_key = inspector_session_key(inspector_session_id);
         self.agent.remove_frontend(&session_key)
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn outbound_len(&self) -> usize {
         self.observable_outbound_routes()
             .into_iter()
@@ -294,6 +319,7 @@ impl DocumentInspectorBinding {
         self.context_registrations.len()
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn take_outbound_messages_for_session(
         &self,
         inspector_session_id: Option<&str>,
@@ -306,6 +332,7 @@ impl DocumentInspectorBinding {
             .unwrap_or_default()
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn cancel_response_callback_for_session(
         &self,
         inspector_session_id: Option<&str>,
@@ -335,6 +362,7 @@ impl DocumentInspectorBinding {
         if backend.reset_default_context_group_before_replacement(context_group_id) {
             self.backend.borrow_mut().runtime_realms.clear();
         }
+        #[cfg(feature = "devtools")]
         self.agent
             .ensure_frontend(backend, DevToolsSessionKey::Primary);
         let mut aux_data = serde_json::Map::new();
@@ -416,6 +444,7 @@ impl DocumentInspectorBinding {
         )>,
     > {
         self.agent.assert_isolate_backend(backend);
+        #[cfg(feature = "devtools")]
         let snap = self.outbound_snapshots();
         let mut aux_data = serde_json::Map::new();
         aux_data.insert("isDefault".to_owned(), json!(false));
@@ -437,7 +466,9 @@ impl DocumentInspectorBinding {
             aux_data.as_bytes(),
         );
         let v8_context_id = v8::inspector::V8Inspector::execution_context_id(context);
+        #[cfg(feature = "devtools")]
         let messages = self.outbound_after_snapshots(&snap);
+        #[cfg(feature = "devtools")]
         let mut reported_context =
             reported_execution_context_created(&messages).unwrap_or_else(|| {
                 ReportedExecutionContext {
@@ -445,6 +476,11 @@ impl DocumentInspectorBinding {
                     unique_id: None,
                 }
             });
+        #[cfg(not(feature = "devtools"))]
+        let mut reported_context = ReportedExecutionContext {
+            id: i64::from(v8_context_id),
+            unique_id: None,
+        };
         if reported_context.unique_id.is_none() {
             reported_context.unique_id = context_unique_id;
         }
@@ -470,6 +506,7 @@ impl DocumentInspectorBinding {
         DocumentInspectorContextRegistrationId,
     )> {
         self.agent.assert_isolate_backend(backend);
+        #[cfg(feature = "devtools")]
         let snap = self.outbound_snapshots();
         let aux_data = serde_json::to_string(&json!({
             "isDefault": true,
@@ -486,7 +523,9 @@ impl DocumentInspectorBinding {
             aux_data.as_bytes(),
         );
         let v8_context_id = v8::inspector::V8Inspector::execution_context_id(context);
+        #[cfg(feature = "devtools")]
         let messages = self.outbound_after_snapshots(&snap);
+        #[cfg(feature = "devtools")]
         let mut reported_context =
             reported_execution_context_created(&messages).unwrap_or_else(|| {
                 ReportedExecutionContext {
@@ -494,6 +533,11 @@ impl DocumentInspectorBinding {
                     unique_id: None,
                 }
             });
+        #[cfg(not(feature = "devtools"))]
+        let mut reported_context = ReportedExecutionContext {
+            id: i64::from(v8_context_id),
+            unique_id: None,
+        };
         if reported_context.unique_id.is_none() {
             reported_context.unique_id = context_unique_id;
         }
@@ -517,6 +561,7 @@ impl DocumentInspectorBinding {
             .record_execution_context_state(event, root_frame_id);
     }
 
+    #[cfg(feature = "devtools")]
     fn outbound_snapshots(&self) -> HashMap<DevToolsSessionKey, usize> {
         self.observable_outbound_routes()
             .into_iter()
@@ -524,6 +569,7 @@ impl DocumentInspectorBinding {
             .collect()
     }
 
+    #[cfg(feature = "devtools")]
     fn outbound_after_snapshots(
         &self,
         snapshots: &HashMap<DevToolsSessionKey, usize>,
@@ -540,6 +586,7 @@ impl DocumentInspectorBinding {
     ///
     /// Protocol attachment identity, not a renderer target queue, decides
     /// whether these messages are frontend-visible.
+    #[cfg(feature = "devtools")]
     fn observable_outbound_routes(&self) -> Vec<(DevToolsSessionKey, InspectorOutbound)> {
         self.agent.frontend_routes()
     }
@@ -554,6 +601,7 @@ fn inspector_execution_context_origin(url: &Url) -> String {
     }
 }
 
+#[cfg(feature = "devtools")]
 fn reported_execution_context_created(
     messages: &[InspectorJson],
 ) -> Option<ReportedExecutionContext> {
@@ -569,3 +617,10 @@ fn reported_execution_context_created(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(not(feature = "devtools"))]
+impl DocumentInspectorBinding {
+    pub(super) fn outbound_len(&self) -> usize {
+        0
+    }
+}

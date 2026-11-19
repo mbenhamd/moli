@@ -1,0 +1,752 @@
+use crate::interfaces as web_api_interfaces;
+use moli_v8_util::{
+    get_private_value, global_constructor_prototype, throw_type_error, v8_string, v8str,
+};
+use moli_web_errors::{DOM_EXCEPTION_CONSTANTS, dom_exception_legacy_code};
+use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject, WebApiTemplateValue};
+use moli_webidl as webidl;
+use webidl::WebIdlDictionarySerialize;
+
+mod rtc_error;
+mod web_transport_error;
+pub use rtc_error::rtc_error_constructor_callback;
+pub use web_transport_error::{
+    WebTransportErrorClonePayload, WebTransportErrorSource,
+    build_web_transport_error_from_clone_payload, web_transport_error_clone_payload_from_object,
+    web_transport_error_constructor_callback,
+};
+
+const DOM_EXCEPTION_MESSAGE_SLOT: &str = "__lmDomExceptionMessage";
+const DOM_EXCEPTION_NAME_SLOT: &str = "__lmDomExceptionName";
+const DOM_EXCEPTION_CODE_SLOT: &str = "__lmDomExceptionCode";
+const DOM_ERROR_MESSAGE_SLOT: &str = "__lmDomErrorMessage";
+const DOM_ERROR_NAME_SLOT: &str = "__lmDomErrorName";
+const QUOTA_EXCEEDED_ERROR_QUOTA_SLOT: &str = "__lmQuotaExceededErrorQuota";
+const QUOTA_EXCEEDED_ERROR_REQUESTED_SLOT: &str = "__lmQuotaExceededErrorRequested";
+const WEBSOCKET_ERROR_CLOSE_CODE_SLOT: &str = "__lmWebSocketErrorCloseCode";
+const WEBSOCKET_ERROR_REASON_SLOT: &str = "__lmWebSocketErrorReason";
+
+#[derive(webidl::WebIdlArgs)]
+#[webidl(prefix = "DOMException")]
+struct DomExceptionConstructorArgs {
+    #[webidl(default = Vec::new(), converter = "dom_string16")]
+    message: Vec<u16>,
+    #[webidl(default = "Error".encode_utf16().collect::<Vec<u16>>(), converter = "dom_string16")]
+    name: Vec<u16>,
+}
+
+#[derive(webidl::WebIdlArgs)]
+#[webidl(prefix = "DOMError")]
+struct DomErrorConstructorArgs {
+    #[webidl(required)]
+    name: String,
+    #[webidl(default = "")]
+    message: String,
+}
+
+#[derive(Default, webidl::WebIdlDictionary)]
+#[webidl(prefix = "QuotaExceededErrorOptions", snapshot)]
+struct QuotaExceededErrorOptions {
+    #[webidl(converter = "double")]
+    #[webidl(snapshot_slot = QUOTA_EXCEEDED_ERROR_QUOTA_SLOT, snapshot_default = v8::null(scope).into())]
+    quota: Option<f64>,
+    #[webidl(converter = "double")]
+    #[webidl(snapshot_slot = QUOTA_EXCEEDED_ERROR_REQUESTED_SLOT, snapshot_default = v8::null(scope).into())]
+    requested: Option<f64>,
+}
+
+#[derive(webidl::WebIdlArgs)]
+#[webidl(prefix = "QuotaExceededError")]
+struct QuotaExceededErrorConstructorArgs {
+    #[webidl(default = Vec::new(), converter = "dom_string16")]
+    message: Vec<u16>,
+    #[webidl(dictionary)]
+    options: QuotaExceededErrorOptions,
+}
+
+#[derive(WebApiObject)]
+#[webapi(interface = web_api_interfaces::DOMException)]
+struct DomExceptionObjectDeclaration<'scope> {
+    #[webapi(slot = DOM_EXCEPTION_MESSAGE_SLOT)]
+    message: Option<v8::Local<'scope, v8::String>>,
+    #[webapi(slot = DOM_EXCEPTION_NAME_SLOT)]
+    name: Option<v8::Local<'scope, v8::String>>,
+    #[webapi(slot = DOM_EXCEPTION_CODE_SLOT)]
+    code: f64,
+}
+
+#[derive(WebApiObject)]
+#[webapi(interface = web_api_interfaces::DOMError, fallback_to_string_tag = "DOMError")]
+struct DomErrorObjectDeclaration<'scope> {
+    #[webapi(slot = DOM_ERROR_NAME_SLOT)]
+    name: Option<v8::Local<'scope, v8::String>>,
+    #[webapi(slot = DOM_ERROR_MESSAGE_SLOT)]
+    message: Option<v8::Local<'scope, v8::String>>,
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(
+    interface = web_api_interfaces::DOMException,
+    intrinsic_prototype_parent = v8::Intrinsic::ErrorPrototype
+)]
+struct DomExceptionPrototypeAccessorsDeclaration {
+    #[webapi(accessor_property, getter = dom_exception_message_getter_callback, enumerable)]
+    message: (),
+    #[webapi(accessor_property, getter = dom_exception_name_getter_callback, enumerable)]
+    name: (),
+    #[webapi(accessor_property, getter = dom_exception_code_getter_callback, enumerable)]
+    code: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::DOMError)]
+struct DomErrorPrototypeAccessorsDeclaration {
+    #[webapi(accessor_property, getter = dom_error_name_getter_callback, enumerable)]
+    name: (),
+    #[webapi(accessor_property, getter = dom_error_message_getter_callback, enumerable)]
+    message: (),
+}
+
+#[derive(WebApiObject)]
+#[webapi(interface = web_api_interfaces::QuotaExceededError)]
+struct QuotaExceededErrorObjectDeclaration<'scope> {
+    #[webapi(slot = DOM_EXCEPTION_MESSAGE_SLOT)]
+    message: Option<v8::Local<'scope, v8::String>>,
+    #[webapi(slot = DOM_EXCEPTION_NAME_SLOT, init = string("QuotaExceededError"))]
+    name: (),
+    #[webapi(slot = DOM_EXCEPTION_CODE_SLOT, value = f64::from(dom_exception_legacy_code("QuotaExceededError")))]
+    code: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::QuotaExceededError)]
+struct QuotaExceededErrorPrototypeAccessorsDeclaration {
+    #[webapi(accessor_property, getter = quota_exceeded_error_quota_getter_callback, enumerable)]
+    quota: (),
+    #[webapi(
+        accessor_property,
+        getter = quota_exceeded_error_requested_getter_callback,
+        enumerable
+    )]
+    requested: (),
+}
+
+#[derive(WebApiObject)]
+#[webapi(interface = web_api_interfaces::WebSocketError)]
+struct WebSocketErrorObjectDeclaration<'scope> {
+    #[webapi(slot = DOM_EXCEPTION_MESSAGE_SLOT)]
+    message: Option<v8::Local<'scope, v8::String>>,
+    #[webapi(slot = DOM_EXCEPTION_NAME_SLOT, init = string("WebSocketError"))]
+    name: (),
+    #[webapi(slot = DOM_EXCEPTION_CODE_SLOT, value = f64::from(dom_exception_legacy_code("WebSocketError")))]
+    code: (),
+    #[webapi(slot = WEBSOCKET_ERROR_CLOSE_CODE_SLOT)]
+    close_code: v8::Local<'scope, v8::Value>,
+    #[webapi(slot = WEBSOCKET_ERROR_REASON_SLOT)]
+    reason: v8::Local<'scope, v8::String>,
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::WebSocketError)]
+struct WebSocketErrorPrototypeAccessorsDeclaration {
+    #[webapi(accessor_property, getter = websocket_error_close_code_getter_callback, enumerable)]
+    close_code: (),
+    #[webapi(accessor_property, getter = websocket_error_reason_getter_callback, enumerable)]
+    reason: (),
+}
+
+pub fn install_dom_exception_template_bindings<'s>(
+    scope: &mut v8::PinScope<'s, '_, ()>,
+    template: v8::Local<'s, v8::FunctionTemplate>,
+    interface_name: &str,
+) {
+    let prototype = template.prototype_template(scope);
+    match interface_name {
+        "DOMException" => {
+            DomExceptionPrototypeAccessorsDeclaration::initialize_template(scope, template);
+            for constant in DOM_EXCEPTION_CONSTANTS {
+                let value = u32::from(constant.value);
+                let value = WebApiTemplateValue::to_v8_template_value(&value, scope)
+                    .expect("DOMException constant should convert to a template value");
+                let key = v8str(scope, constant.property);
+                template.set_with_attr(
+                    key.into(),
+                    value.into(),
+                    v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_DELETE,
+                );
+                prototype.set_with_attr(
+                    key.into(),
+                    value.into(),
+                    v8::PropertyAttribute::READ_ONLY | v8::PropertyAttribute::DONT_DELETE,
+                );
+            }
+            DomExceptionPrototypeAccessorsDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
+        "DOMError" => {
+            DomErrorPrototypeAccessorsDeclaration::initialize_prototype_template(scope, prototype);
+        }
+        "QuotaExceededError" => {
+            QuotaExceededErrorPrototypeAccessorsDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
+        "WebSocketError" => {
+            WebSocketErrorPrototypeAccessorsDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
+        "RTCError" => rtc_error::install(scope, prototype),
+        "WebTransportError" => web_transport_error::install(scope, prototype),
+        _ => {}
+    }
+}
+
+fn dom_exception_receiver<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    receiver: v8::Local<'s, v8::Object>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    if web_api_interfaces::DOMException::is_instance(scope, receiver) {
+        moli_webapi_declare::web_api_object_target(scope, receiver)
+    } else {
+        throw_type_error(
+            scope,
+            "DOMException getter called on incompatible receiver.",
+        );
+        None
+    }
+}
+
+fn dom_error_receiver<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    receiver: v8::Local<'s, v8::Object>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    if web_api_interfaces::DOMError::is_instance(scope, receiver) {
+        Some(receiver)
+    } else {
+        throw_type_error(scope, "DOMError getter called on incompatible receiver.");
+        None
+    }
+}
+
+pub fn dom_exception_clone_fields<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+) -> Option<(String, String)> {
+    web_api_interfaces::DOMException::is_instance(scope, object).then_some(())?;
+    let message = get_private_value(scope, object, DOM_EXCEPTION_MESSAGE_SLOT)
+        .and_then(|value| value.to_string(scope))
+        .map(|value| value.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+    let name = get_private_value(scope, object, DOM_EXCEPTION_NAME_SLOT)
+        .and_then(|value| value.to_string(scope))
+        .map(|value| value.to_rust_string_lossy(scope))
+        .unwrap_or_else(|| "Error".to_owned());
+    Some((message, name))
+}
+
+pub fn quota_exceeded_error_clone_fields<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+) -> Option<(String, Option<f64>, Option<f64>)> {
+    web_api_interfaces::QuotaExceededError::is_instance(scope, object).then_some(())?;
+    let (message, _) = dom_exception_clone_fields(scope, object)?;
+    let quota = nullable_double_clone_slot(scope, object, QUOTA_EXCEEDED_ERROR_QUOTA_SLOT)?;
+    let requested = nullable_double_clone_slot(scope, object, QUOTA_EXCEEDED_ERROR_REQUESTED_SLOT)?;
+    Some((message, quota, requested))
+}
+
+fn nullable_double_clone_slot<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    slot: &'static str,
+) -> Option<Option<f64>> {
+    let value = get_private_value(scope, object, slot)?;
+    if value.is_null() {
+        Some(None)
+    } else {
+        value.number_value(scope).map(Some)
+    }
+}
+
+fn dom_exception_message_getter_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let Some(receiver) = dom_exception_receiver(scope, args.this()) else {
+        return;
+    };
+    if let Some(message) = get_private_value(scope, receiver, DOM_EXCEPTION_MESSAGE_SLOT)
+        .and_then(|value| v8::Local::<v8::String>::try_from(value).ok())
+    {
+        rv.set(message.into());
+    } else {
+        rv.set_empty_string();
+    }
+}
+
+fn dom_exception_name_getter_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let Some(receiver) = dom_exception_receiver(scope, args.this()) else {
+        return;
+    };
+    let name = get_private_value(scope, receiver, DOM_EXCEPTION_NAME_SLOT)
+        .and_then(|value| v8::Local::<v8::String>::try_from(value).ok())
+        .unwrap_or_else(|| v8str(scope, "Error"));
+    rv.set(name.into());
+}
+
+fn dom_exception_code_getter_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let Some(receiver) = dom_exception_receiver(scope, args.this()) else {
+        return;
+    };
+    let code = get_private_value(scope, receiver, DOM_EXCEPTION_CODE_SLOT)
+        .and_then(|value| value.number_value(scope))
+        .unwrap_or(0.0);
+    rv.set(v8::Number::new(scope, code).into());
+}
+
+fn dom_error_name_getter_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let Some(receiver) = dom_error_receiver(scope, args.this()) else {
+        return;
+    };
+    let name = get_private_value(scope, receiver, DOM_ERROR_NAME_SLOT)
+        .and_then(|value| value.to_string(scope))
+        .map(|value| value.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+    if let Some(name) = v8_string(scope, &name) {
+        rv.set(name.into());
+    } else {
+        rv.set_empty_string();
+    }
+}
+
+fn dom_error_message_getter_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let Some(receiver) = dom_error_receiver(scope, args.this()) else {
+        return;
+    };
+    let message = get_private_value(scope, receiver, DOM_ERROR_MESSAGE_SLOT)
+        .and_then(|value| value.to_string(scope))
+        .map(|value| value.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+    if let Some(message) = v8_string(scope, &message) {
+        rv.set(message.into());
+    } else {
+        rv.set_empty_string();
+    }
+}
+
+fn quota_exceeded_error_receiver<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    receiver: v8::Local<'s, v8::Object>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    dom_exception_subclass_receiver(scope, receiver, "QuotaExceededError")
+}
+
+fn websocket_error_receiver<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    receiver: v8::Local<'s, v8::Object>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    dom_exception_subclass_receiver(scope, receiver, "WebSocketError")
+}
+
+fn dom_exception_subclass_receiver<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    receiver: v8::Local<'s, v8::Object>,
+    interface_name: &'static str,
+) -> Option<v8::Local<'s, v8::Object>> {
+    if web_api_interfaces::descriptor(interface_name)
+        .is_some_and(|interface| interface.is_instance(scope, receiver))
+    {
+        moli_webapi_declare::web_api_object_target(scope, receiver)
+    } else {
+        throw_type_error(
+            scope,
+            &format!("{interface_name} getter called on incompatible receiver."),
+        );
+        None
+    }
+}
+
+fn quota_exceeded_error_slot_getter<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+    slot: &'static str,
+) {
+    let Some(receiver) = quota_exceeded_error_receiver(scope, args.this()) else {
+        return;
+    };
+    match get_private_value(scope, receiver, slot) {
+        Some(value) => rv.set(value),
+        None => rv.set_null(),
+    }
+}
+
+fn quota_exceeded_error_quota_getter_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    quota_exceeded_error_slot_getter(scope, args, rv, QUOTA_EXCEEDED_ERROR_QUOTA_SLOT);
+}
+
+fn quota_exceeded_error_requested_getter_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    quota_exceeded_error_slot_getter(scope, args, rv, QUOTA_EXCEEDED_ERROR_REQUESTED_SLOT);
+}
+
+fn websocket_error_slot_getter<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+    slot: &'static str,
+) {
+    let Some(receiver) = websocket_error_receiver(scope, args.this()) else {
+        return;
+    };
+    match get_private_value(scope, receiver, slot) {
+        Some(value) => rv.set(value),
+        None => rv.set_null(),
+    }
+}
+
+fn websocket_error_close_code_getter_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    websocket_error_slot_getter(scope, args, rv, WEBSOCKET_ERROR_CLOSE_CODE_SLOT);
+}
+
+fn websocket_error_reason_getter_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let Some(receiver) = websocket_error_receiver(scope, args.this()) else {
+        return;
+    };
+    let reason = get_private_value(scope, receiver, WEBSOCKET_ERROR_REASON_SLOT)
+        .and_then(|value| value.to_string(scope))
+        .map(|value| value.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+    if let Some(reason) = v8_string(scope, &reason) {
+        rv.set(reason.into());
+    } else {
+        rv.set_empty_string();
+    }
+}
+
+fn initialize_dom_exception<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    exception: v8::Local<'s, v8::Object>,
+    message: &str,
+    name: &str,
+) {
+    dom_exception_declaration(scope, message, name)
+        .initialize(scope, exception)
+        .expect("DOMException declaration should initialize");
+}
+
+pub(super) fn capture_dom_exception_stack(
+    scope: &mut v8::PinScope<'_, '_>,
+    exception: v8::Local<'_, v8::Object>,
+) {
+    // V8 captures lazily formatted stack data on the native object, without
+    // looking up the mutable Error.captureStackTrace function in JavaScript.
+    let _ = v8::Exception::capture_stack_trace(scope.get_current_context(), exception);
+}
+
+fn dom_exception_declaration<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    message: &str,
+    name: &str,
+) -> DomExceptionObjectDeclaration<'s> {
+    DomExceptionObjectDeclaration::new(
+        v8_string(scope, message),
+        v8_string(scope, name),
+        f64::from(dom_exception_legacy_code(name)),
+    )
+}
+
+fn nullable_double_slot_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: Option<f64>,
+) -> v8::Local<'s, v8::Value> {
+    match value {
+        Some(value) => v8::Number::new(scope, value).into(),
+        None => v8::null(scope).into(),
+    }
+}
+
+fn initialize_quota_exceeded_error<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    exception: v8::Local<'s, v8::Object>,
+    message: v8::Local<'s, v8::String>,
+    quota: Option<f64>,
+    requested: Option<f64>,
+) {
+    QuotaExceededErrorObjectDeclaration::new(Some(message))
+        .initialize(scope, exception)
+        .expect("QuotaExceededError declaration should initialize");
+    QuotaExceededErrorOptions { quota, requested }
+        .initialize_snapshot(scope, exception)
+        .expect("QuotaExceededError options");
+}
+
+fn websocket_error_declaration<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    message: Option<v8::Local<'s, v8::String>>,
+    close_code: Option<u16>,
+    reason: &str,
+) -> WebSocketErrorObjectDeclaration<'s> {
+    let close_code = nullable_double_slot_value(scope, close_code.map(f64::from));
+    let reason = v8_string(scope, reason).unwrap_or_else(|| v8::String::empty(scope));
+    WebSocketErrorObjectDeclaration::new(message, close_code, reason)
+}
+
+pub fn build_dom_exception_object<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    message: &str,
+    name: &str,
+) -> v8::Local<'s, v8::Object> {
+    // The embedding resolver uses its canonical realm cache. It must not
+    // consult an author-controlled Window property, including after detach.
+    if let Some(prototype) = global_constructor_prototype(scope, "DOMException") {
+        let exception = v8::Object::new(scope);
+        initialize_dom_exception(scope, exception, message, name);
+        let _ = exception.set_prototype(scope, prototype.into());
+        return exception;
+    }
+    dom_exception_declaration(scope, message, name)
+        .bind(scope)
+        .expect("DOMException declaration should bind")
+}
+
+pub fn new_dom_exception_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    message: &str,
+    name: &str,
+) -> v8::Local<'s, v8::Value> {
+    let exception = build_dom_exception_object(scope, message, name);
+    capture_dom_exception_stack(scope, exception);
+    exception.into()
+}
+
+pub fn throw_dom_exception_value(scope: &mut v8::PinScope<'_, '_>, message: &str, name: &str) {
+    let exception = new_dom_exception_value(scope, message, name);
+    scope.throw_exception(exception);
+}
+
+pub fn new_most_derived_dom_exception_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    message: &str,
+    name: &str,
+) -> v8::Local<'s, v8::Value> {
+    match name {
+        "QuotaExceededError" => new_quota_exceeded_error_value(scope, message, None, None),
+        "WebSocketError" => new_websocket_error_value(scope, message, None, ""),
+        _ => new_dom_exception_value(scope, message, name),
+    }
+}
+
+pub fn dom_exception_constructor_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    if !args.is_construct_call() {
+        throw_type_error(
+            scope,
+            "Failed to construct 'DOMException': Please use the 'new' operator.",
+        );
+        return;
+    }
+
+    let Some(parsed) = webidl::parse_args::<DomExceptionConstructorArgs>(scope, &args) else {
+        rv.set_undefined();
+        return;
+    };
+    let code = String::from_utf16(&parsed.name).map_or(0, |name| dom_exception_legacy_code(&name));
+    let Some(message) =
+        v8::String::new_from_two_byte(scope, &parsed.message, v8::NewStringType::Normal)
+    else {
+        return;
+    };
+    let Some(name) = v8::String::new_from_two_byte(scope, &parsed.name, v8::NewStringType::Normal)
+    else {
+        return;
+    };
+    DomExceptionObjectDeclaration::new(Some(message), Some(name), f64::from(code))
+        .initialize(scope, args.this())
+        .expect("DOMException declaration should initialize");
+    rv.set(args.this().into());
+}
+
+pub fn dom_error_constructor_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    if !args.is_construct_call() {
+        throw_type_error(
+            scope,
+            "Failed to construct 'DOMError': Please use the 'new' operator.",
+        );
+        return;
+    }
+
+    let Some(parsed) = webidl::parse_args::<DomErrorConstructorArgs>(scope, &args) else {
+        rv.set_undefined();
+        return;
+    };
+    DomErrorObjectDeclaration::new(
+        v8_string(scope, &parsed.name),
+        v8_string(scope, &parsed.message),
+    )
+    .initialize(scope, args.this())
+    .expect("DOMError declaration should initialize");
+    rv.set(args.this().into());
+}
+
+pub fn new_dom_error_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    name: &str,
+    message: &str,
+) -> v8::Local<'s, v8::Value> {
+    global_constructor_prototype(scope, "DOMError")
+        .expect("DOMError prototype should materialize before callback delivery");
+    DomErrorObjectDeclaration::new(v8_string(scope, name), v8_string(scope, message))
+        .bind(scope)
+        .expect("DOMError declaration should bind")
+        .into()
+}
+
+pub fn quota_exceeded_error_constructor_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    if !args.is_construct_call() {
+        throw_type_error(
+            scope,
+            "Failed to construct 'QuotaExceededError': Please use the 'new' operator.",
+        );
+        return;
+    }
+
+    let Some(parsed) = webidl::parse_args::<QuotaExceededErrorConstructorArgs>(scope, &args) else {
+        rv.set_undefined();
+        return;
+    };
+    let Some(message) =
+        v8::String::new_from_two_byte(scope, &parsed.message, v8::NewStringType::Normal)
+    else {
+        return;
+    };
+    let exception = args.this();
+    initialize_quota_exceeded_error(
+        scope,
+        exception,
+        message,
+        parsed.options.quota,
+        parsed.options.requested,
+    );
+    rv.set(exception.into());
+}
+
+pub fn build_quota_exceeded_error_object<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    message: &str,
+    quota: Option<f64>,
+    requested: Option<f64>,
+) -> v8::Local<'s, v8::Object> {
+    let exception = QuotaExceededErrorObjectDeclaration::new(v8_string(scope, message))
+        .bind(scope)
+        .expect("QuotaExceededError declaration should bind");
+    QuotaExceededErrorOptions { quota, requested }
+        .initialize_snapshot(scope, exception)
+        .expect("QuotaExceededError options");
+    exception
+}
+
+pub fn new_quota_exceeded_error_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    message: &str,
+    quota: Option<f64>,
+    requested: Option<f64>,
+) -> v8::Local<'s, v8::Value> {
+    let exception = build_quota_exceeded_error_object(scope, message, quota, requested);
+    capture_dom_exception_stack(scope, exception);
+    exception.into()
+}
+
+pub fn initialize_websocket_error<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    exception: v8::Local<'s, v8::Object>,
+    message: v8::Local<'s, v8::String>,
+    close_code: Option<u16>,
+    reason: &str,
+) {
+    websocket_error_declaration(scope, Some(message), close_code, reason)
+        .initialize(scope, exception)
+        .expect("WebSocketError declaration should initialize");
+}
+
+pub fn new_websocket_error_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    message: &str,
+    close_code: Option<u16>,
+    reason: &str,
+) -> v8::Local<'s, v8::Value> {
+    let message = v8_string(scope, message);
+    let exception = websocket_error_declaration(scope, message, close_code, reason)
+        .bind(scope)
+        .expect("WebSocketError declaration should bind");
+    capture_dom_exception_stack(scope, exception);
+    exception.into()
+}
+
+pub fn websocket_error_close_info<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+) -> Option<(Option<u16>, String)> {
+    let object = v8::Local::<v8::Object>::try_from(value).ok()?;
+    web_api_interfaces::WebSocketError::is_instance(scope, object).then_some(())?;
+    let close_code_value = get_private_value(scope, object, WEBSOCKET_ERROR_CLOSE_CODE_SLOT)?;
+    let reason_value = get_private_value(scope, object, WEBSOCKET_ERROR_REASON_SLOT)?;
+    let close_code = if close_code_value.is_null_or_undefined() {
+        None
+    } else {
+        close_code_value
+            .number_value(scope)
+            .filter(|value| value.is_finite() && value.fract() == 0.0)
+            .map(|value| value as u16)
+    };
+    let reason = reason_value
+        .to_string(scope)
+        .map(|value| value.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+    Some((close_code, reason))
+}

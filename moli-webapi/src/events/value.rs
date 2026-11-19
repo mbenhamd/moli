@@ -1,0 +1,619 @@
+//! Constructible event payloads that do not require an animation or recording backend.
+
+use super::EventInit;
+use super::{
+    define_event_property, event_private_value, initialize_event_object_with_type,
+    initialize_event_wrapper, new_event_state, set_event_private_value,
+};
+use crate::interfaces as web_api_interfaces;
+use moli_v8_util::{new_null_prototype_object, throw_type_error, v8str};
+use moli_webapi_declare::WebApiFunctionTemplate;
+use moli_webidl as webidl;
+use webidl::WebIdlDictionarySerialize;
+
+const NAME_SLOT: &str = "__moliValueEventName";
+const ELAPSED_TIME_SLOT: &str = "__moliValueEventElapsedTime";
+const ANIMATION_SLOT: &str = "__moliValueEventAnimation";
+const PSEUDO_ELEMENT_SLOT: &str = "__moliValueEventPseudoElement";
+const BLOB_SLOT: &str = "__moliValueEventBlob";
+const STATUS_MESSAGE_SLOT: &str = "__moliWebGlContextEventStatusMessage";
+const TIMECODE_SLOT: &str = "__moliValueEventTimecode";
+const TOOL_NAME_SLOT: &str = "__moliToolEventName";
+const GAMEPAD_SLOT: &str = "__moliValueEventGamepad";
+const PICTURE_IN_PICTURE_WINDOW_SLOT: &str = "__moliPictureInPictureEventWindow";
+
+const PAYMENT_METHOD_NAME_SLOT: &str = "__moliPaymentMethodChangeEventMethodName";
+const PAYMENT_METHOD_DETAILS_SLOT: &str = "__moliPaymentMethodChangeEventMethodDetails";
+
+const MIDI_DATA_SLOT: &str = "__moliMIDIMessageEventData";
+const MIDI_PORT_SLOT: &str = "__moliMIDIConnectionEventPort";
+
+#[derive(Clone, Copy)]
+pub enum ValueEventKind {
+    Animation,
+    Transition,
+    Blob,
+    WebGlContext,
+    ToolActivated,
+    ToolCancel,
+    Gamepad,
+    PictureInPicture,
+    PaymentRequestUpdate,
+    PaymentMethodChange,
+    MidiMessage = 10,
+    MidiConnection = 11,
+}
+
+impl ValueEventKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Animation => "AnimationEvent",
+            Self::Transition => "TransitionEvent",
+            Self::Blob => "BlobEvent",
+            Self::WebGlContext => "WebGLContextEvent",
+            Self::ToolActivated => "ToolActivatedEvent",
+            Self::ToolCancel => "ToolCancelEvent",
+            Self::Gamepad => "GamepadEvent",
+            Self::PictureInPicture => "PictureInPictureEvent",
+            Self::PaymentRequestUpdate => "PaymentRequestUpdateEvent",
+            Self::PaymentMethodChange => "PaymentMethodChangeEvent",
+            Self::MidiMessage => "MIDIMessageEvent",
+            Self::MidiConnection => "MIDIConnectionEvent",
+        }
+    }
+
+    fn length(self) -> i32 {
+        match self {
+            Self::Blob | Self::PictureInPicture => 2,
+            _ => 1,
+        }
+    }
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::AnimationEvent, enumerable)]
+struct AnimationEventPrototypeDeclaration {
+    #[webapi(accessor_property, getter = payload_getter, data = v8str(scope, ANIMATION_SLOT))]
+    animation: (),
+    #[webapi(accessor_property = "animationName", getter = payload_getter, data = v8str(scope, NAME_SLOT))]
+    animation_name: (),
+    #[webapi(accessor_property = "elapsedTime", getter = payload_getter, data = v8str(scope, ELAPSED_TIME_SLOT))]
+    elapsed_time: (),
+    #[webapi(accessor_property = "pseudoElement", getter = payload_getter, data = v8str(scope, PSEUDO_ELEMENT_SLOT))]
+    pseudo_element: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::TransitionEvent, enumerable)]
+struct TransitionEventPrototypeDeclaration {
+    #[webapi(accessor_property, getter = payload_getter, data = v8str(scope, ANIMATION_SLOT))]
+    animation: (),
+    #[webapi(accessor_property = "propertyName", getter = payload_getter, data = v8str(scope, NAME_SLOT))]
+    property_name: (),
+    #[webapi(accessor_property = "elapsedTime", getter = payload_getter, data = v8str(scope, ELAPSED_TIME_SLOT))]
+    elapsed_time: (),
+    #[webapi(accessor_property = "pseudoElement", getter = payload_getter, data = v8str(scope, PSEUDO_ELEMENT_SLOT))]
+    pseudo_element: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::BlobEvent, enumerable)]
+struct BlobEventPrototypeDeclaration {
+    #[webapi(accessor_property, getter = payload_getter, data = v8str(scope, BLOB_SLOT))]
+    data: (),
+    #[webapi(accessor_property, getter = payload_getter, data = v8str(scope, TIMECODE_SLOT))]
+    timecode: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::WebGLContextEvent, enumerable)]
+struct WebGlContextEventPrototypeDeclaration {
+    #[webapi(accessor_property, getter = payload_getter, data = v8str(scope, STATUS_MESSAGE_SLOT))]
+    status_message: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::ToolActivatedEvent, enumerable)]
+struct ToolActivatedEventPrototypeDeclaration {
+    #[webapi(accessor_property = "toolName", getter = payload_getter, data = v8str(scope, TOOL_NAME_SLOT))]
+    tool_name: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::ToolCancelEvent, enumerable)]
+struct ToolCancelEventPrototypeDeclaration {
+    #[webapi(accessor_property = "toolName", getter = payload_getter, data = v8str(scope, TOOL_NAME_SLOT))]
+    tool_name: (),
+}
+
+#[derive(webidl::WebIdlDictionary)]
+#[webidl(prefix = "ToolEventInit", snapshot)]
+struct ToolEventInit<'s> {
+    #[webidl(inherit)]
+    base: EventInit,
+    #[webidl(name = "toolName", with = string_member)]
+    #[webidl(snapshot_slot = TOOL_NAME_SLOT)]
+    tool_name: v8::Local<'s, v8::String>,
+}
+
+#[derive(webidl::WebIdlDictionary)]
+#[webidl(prefix = "WebGLContextEventInit", snapshot)]
+struct WebGlContextEventInit<'s> {
+    #[webidl(inherit)]
+    base: EventInit,
+    #[webidl(with = string_member)]
+    #[webidl(snapshot_slot = STATUS_MESSAGE_SLOT)]
+    status_message: v8::Local<'s, v8::String>,
+}
+
+// Inherited dictionary members precede derived members, whose declaration order
+// follows Web IDL's lexicographic conversion order. Preserve DOMString code units.
+#[derive(webidl::WebIdlDictionary)]
+#[webidl(prefix = "AnimationEventInit", snapshot)]
+struct AnimationEventInit<'s> {
+    #[webidl(inherit)]
+    base: EventInit,
+    #[webidl(nullable, interface = web_api_interfaces::CSSAnimation)]
+    #[webidl(snapshot_slot = ANIMATION_SLOT)]
+    animation: Option<v8::Local<'s, v8::Object>>,
+    #[webidl(name = "animationName", with = string_member)]
+    #[webidl(snapshot_slot = NAME_SLOT)]
+    animation_name: v8::Local<'s, v8::String>,
+    #[webidl(name = "elapsedTime", converter = "double", default = 0.0)]
+    #[webidl(snapshot_slot = ELAPSED_TIME_SLOT)]
+    elapsed_time: f64,
+    #[webidl(name = "pseudoElement", with = string_member)]
+    #[webidl(snapshot_slot = PSEUDO_ELEMENT_SLOT)]
+    pseudo_element: v8::Local<'s, v8::String>,
+}
+
+#[derive(webidl::WebIdlDictionary)]
+#[webidl(prefix = "TransitionEventInit", snapshot)]
+struct TransitionEventInit<'s> {
+    #[webidl(inherit)]
+    base: EventInit,
+    #[webidl(nullable, interface = web_api_interfaces::CSSTransition)]
+    #[webidl(snapshot_slot = ANIMATION_SLOT)]
+    animation: Option<v8::Local<'s, v8::Object>>,
+    #[webidl(name = "elapsedTime", converter = "double", default = 0.0)]
+    #[webidl(snapshot_slot = ELAPSED_TIME_SLOT)]
+    elapsed_time: f64,
+    #[webidl(name = "propertyName", with = string_member)]
+    #[webidl(snapshot_slot = NAME_SLOT)]
+    property_name: v8::Local<'s, v8::String>,
+    #[webidl(name = "pseudoElement", with = string_member)]
+    #[webidl(snapshot_slot = PSEUDO_ELEMENT_SLOT)]
+    pseudo_element: v8::Local<'s, v8::String>,
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::GamepadEvent, enumerable)]
+struct GamepadEventPrototypeDeclaration {
+    #[webapi(accessor_property, getter = payload_getter, data = v8str(scope, GAMEPAD_SLOT))]
+    gamepad: (),
+}
+
+#[derive(webidl::WebIdlDictionary)]
+#[webidl(prefix = "GamepadEventInit", snapshot)]
+struct GamepadEventInit<'s> {
+    #[webidl(inherit)]
+    base: EventInit,
+    #[webidl(with = gamepad_member)]
+    #[webidl(snapshot_slot = GAMEPAD_SLOT, snapshot_default = v8::null(scope).into())]
+    gamepad: Option<v8::Local<'s, v8::Object>>,
+}
+
+fn gamepad_member<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    name: &'static str,
+) -> Result<Option<v8::Local<'s, v8::Object>>, webidl::WebIdlError> {
+    let context = webidl::Context::member("GamepadEventInit", name);
+    let value = webidl::property_result(scope, object, name, context)?
+        .unwrap_or_else(|| v8::undefined(scope).into());
+    if value.is_null_or_undefined() {
+        return Ok(None);
+    }
+    let gamepad = v8::Local::<v8::Object>::try_from(value)
+        .map_err(|_| webidl::WebIdlError::cannot_convert(context, "Gamepad"))?;
+    if !web_api_interfaces::Gamepad::is_instance(scope, gamepad) {
+        return Err(webidl::WebIdlError::cannot_convert(context, "Gamepad"));
+    }
+    Ok(Some(gamepad))
+}
+
+#[derive(webidl::WebIdlDictionary)]
+#[webidl(prefix = "BlobEventInit", snapshot)]
+struct BlobEventInit<'s> {
+    #[webidl(inherit)]
+    base: EventInit,
+    #[webidl(required, interface = web_api_interfaces::Blob)]
+    #[webidl(snapshot_slot = BLOB_SLOT)]
+    data: v8::Local<'s, v8::Object>,
+    #[webidl(converter = "double")]
+    #[webidl(snapshot_slot = TIMECODE_SLOT, snapshot_default = v8::Number::new(scope, f64::NAN).into())]
+    timecode: Option<f64>,
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::PictureInPictureEvent, enumerable)]
+struct PictureInPictureEventPrototype {
+    #[webapi(accessor_property, getter = payload_getter, data = v8str(scope, PICTURE_IN_PICTURE_WINDOW_SLOT))]
+    picture_in_picture_window: (),
+}
+
+#[derive(webidl::WebIdlDictionary)]
+#[webidl(prefix = "PictureInPictureEventInit", snapshot)]
+struct PictureInPictureEventInit<'s> {
+    #[webidl(inherit)]
+    base: EventInit,
+    #[webidl(required, interface = web_api_interfaces::PictureInPictureWindow)]
+    #[webidl(snapshot_slot = PICTURE_IN_PICTURE_WINDOW_SLOT)]
+    picture_in_picture_window: v8::Local<'s, v8::Object>,
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::PaymentMethodChangeEvent, enumerable)]
+struct PaymentMethodChangeEventPrototypeDeclaration {
+    #[webapi(accessor_property = "methodName", getter = payload_getter, data = v8str(scope, PAYMENT_METHOD_NAME_SLOT))]
+    method_name: (),
+    #[webapi(accessor_property = "methodDetails", getter = payload_getter, data = v8str(scope, PAYMENT_METHOD_DETAILS_SLOT))]
+    method_details: (),
+}
+
+#[derive(webidl::WebIdlDictionary)]
+#[webidl(prefix = "PaymentMethodChangeEventInit", snapshot)]
+struct PaymentMethodChangeEventInit<'s> {
+    #[webidl(inherit)]
+    base: EventInit,
+    #[webidl(nullable)]
+    #[webidl(snapshot_slot = PAYMENT_METHOD_DETAILS_SLOT)]
+    method_details: Option<v8::Local<'s, v8::Object>>,
+    #[webidl(with = string_member)]
+    #[webidl(snapshot_slot = PAYMENT_METHOD_NAME_SLOT)]
+    method_name: v8::Local<'s, v8::String>,
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::PaymentRequestUpdateEvent, enumerable)]
+struct PaymentRequestUpdateEventPrototypeDeclaration {
+    #[webapi(method, length = 1, callback = payment_update_with_callback)]
+    update_with: (),
+}
+
+#[derive(webidl::WebIdlArgs)]
+#[webidl(prefix = "PaymentRequestUpdateEvent.updateWith")]
+struct PaymentUpdateWithArgs<'s> {
+    #[webidl(required)]
+    _details_promise: v8::Local<'s, v8::Promise>,
+}
+
+fn payment_update_with_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    _rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    if webidl::parse_args::<PaymentUpdateWithArgs>(scope, &args).is_none() {
+        return;
+    }
+    // Only author-created payment events are currently produced. They must
+    // reject updates even during dispatch, after Web IDL Promise conversion.
+    // Trusted payment events require an interactive PaymentRequest backend.
+    crate::embedding::throw_dom_exception_value(
+        scope,
+        "updateWith requires a trusted event associated with an interactive payment request",
+        "InvalidStateError",
+    );
+}
+
+fn string_member<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    name: &'static str,
+) -> Result<v8::Local<'s, v8::String>, webidl::WebIdlError> {
+    let context = webidl::Context::member("EventInit", name);
+    let value = webidl::property_result(scope, object, name, context)?;
+    match value.filter(|value| !value.is_undefined()) {
+        Some(value) => value
+            .to_string(scope)
+            .ok_or_else(|| webidl::WebIdlError::pending_exception(context)),
+        None => Ok(v8str(scope, "")),
+    }
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::MIDIMessageEvent, enumerable)]
+struct MidiMessageEventPrototypeDeclaration {
+    #[webapi(accessor_property, getter = payload_getter, data = v8str(scope, MIDI_DATA_SLOT))]
+    data: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::MIDIConnectionEvent, enumerable)]
+struct MidiConnectionEventPrototypeDeclaration {
+    #[webapi(accessor_property, getter = payload_getter, data = v8str(scope, MIDI_PORT_SLOT))]
+    port: (),
+}
+
+#[derive(webidl::WebIdlDictionary)]
+#[webidl(prefix = "MIDIMessageEventInit")]
+struct MidiMessageEventInit<'s> {
+    #[webidl(default = false)]
+    bubbles: bool,
+    #[webidl(default = false)]
+    cancelable: bool,
+    #[webidl(default = false)]
+    composed: bool,
+    data: Option<v8::Local<'s, v8::Uint8Array>>,
+}
+
+#[derive(webidl::WebIdlDictionary)]
+#[webidl(prefix = "MIDIConnectionEventInit")]
+struct MidiConnectionEventInit<'s> {
+    #[webidl(default = false)]
+    bubbles: bool,
+    #[webidl(default = false)]
+    cancelable: bool,
+    #[webidl(default = false)]
+    composed: bool,
+    #[webidl(interface = web_api_interfaces::MIDIPort)]
+    port: Option<v8::Local<'s, v8::Object>>,
+}
+
+pub fn install_value_event_template_bindings<'s>(
+    scope: &mut v8::PinScope<'s, '_, ()>,
+    template: v8::Local<'s, v8::FunctionTemplate>,
+    name: &str,
+) {
+    let prototype = template.prototype_template(scope);
+    match name {
+        "AnimationEvent" => {
+            AnimationEventPrototypeDeclaration::initialize_prototype_template(scope, prototype)
+        }
+        "TransitionEvent" => {
+            TransitionEventPrototypeDeclaration::initialize_prototype_template(scope, prototype)
+        }
+        "WebGLContextEvent" => {
+            WebGlContextEventPrototypeDeclaration::initialize_prototype_template(scope, prototype)
+        }
+        "BlobEvent" => {
+            BlobEventPrototypeDeclaration::initialize_prototype_template(scope, prototype)
+        }
+        "ToolActivatedEvent" => {
+            ToolActivatedEventPrototypeDeclaration::initialize_prototype_template(scope, prototype)
+        }
+        "ToolCancelEvent" => {
+            ToolCancelEventPrototypeDeclaration::initialize_prototype_template(scope, prototype)
+        }
+        "PictureInPictureEvent" => {
+            PictureInPictureEventPrototype::initialize_prototype_template(scope, prototype)
+        }
+        "GamepadEvent" => {
+            GamepadEventPrototypeDeclaration::initialize_prototype_template(scope, prototype)
+        }
+        "PaymentRequestUpdateEvent" => {
+            PaymentRequestUpdateEventPrototypeDeclaration::initialize_prototype_template(
+                scope, prototype,
+            )
+        }
+        "PaymentMethodChangeEvent" => {
+            PaymentMethodChangeEventPrototypeDeclaration::initialize_prototype_template(
+                scope, prototype,
+            )
+        }
+        "MIDIMessageEvent" => {
+            MidiMessageEventPrototypeDeclaration::initialize_prototype_template(scope, prototype)
+        }
+        "MIDIConnectionEvent" => {
+            MidiConnectionEventPrototypeDeclaration::initialize_prototype_template(scope, prototype)
+        }
+        _ => {}
+    }
+}
+
+fn payload_getter<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    let key = args.data().to_rust_string_lossy(scope);
+    let target = moli_webapi_declare::web_api_object_target(scope, args.this())
+        .expect("validated value event receiver");
+    if let Some(value) = event_private_value(scope, target, &key) {
+        rv.set(value);
+    }
+}
+
+pub fn build_value_event_template<'s>(
+    scope: &mut v8::PinScope<'s, '_, ()>,
+    kind: ValueEventKind,
+) -> v8::Local<'s, v8::FunctionTemplate> {
+    v8::FunctionTemplate::builder(value_event_constructor)
+        .data(v8::Integer::new(scope, kind as i32).into())
+        .length(kind.length())
+        .build(scope)
+}
+
+fn value_event_constructor<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    let kind = match args.data().int32_value(scope) {
+        Some(0) => ValueEventKind::Animation,
+        Some(1) => ValueEventKind::Transition,
+        Some(2) => ValueEventKind::Blob,
+        Some(3) => ValueEventKind::WebGlContext,
+        Some(4) => ValueEventKind::ToolActivated,
+        Some(5) => ValueEventKind::ToolCancel,
+        Some(6) => ValueEventKind::Gamepad,
+        Some(7) => ValueEventKind::PictureInPicture,
+        Some(8) => ValueEventKind::PaymentRequestUpdate,
+        Some(9) => ValueEventKind::PaymentMethodChange,
+        Some(10) => ValueEventKind::MidiMessage,
+        Some(11) => ValueEventKind::MidiConnection,
+        _ => return,
+    };
+    if !args.is_construct_call() {
+        throw_type_error(scope, &format!("{} requires 'new'.", kind.name()));
+        return;
+    }
+    if args.length() < kind.length() {
+        throw_type_error(
+            scope,
+            &format!("{} requires {} arguments.", kind.name(), kind.length()),
+        );
+        return;
+    }
+    let Some(event_type) = args.get(0).to_string(scope) else {
+        return;
+    };
+    let state = new_event_state(scope);
+    let result = (|| -> Result<(), webidl::WebIdlError> {
+        let dictionary =
+            webidl::dictionary_arg(&args, 1, webidl::Context::argument(kind.name(), 2))?
+                .unwrap_or_else(|| new_null_prototype_object(scope));
+        let (bubbles, cancelable, composed) = match kind {
+            ValueEventKind::Animation => {
+                let parsed =
+                    webidl::parse_dictionary_object::<AnimationEventInit>(scope, dictionary)?;
+                parsed
+                    .initialize_snapshot(scope, state)
+                    .expect("value event state");
+                (
+                    parsed.base.bubbles,
+                    parsed.base.cancelable,
+                    parsed.base.composed,
+                )
+            }
+            ValueEventKind::Transition => {
+                let parsed =
+                    webidl::parse_dictionary_object::<TransitionEventInit>(scope, dictionary)?;
+                parsed
+                    .initialize_snapshot(scope, state)
+                    .expect("value event state");
+                (
+                    parsed.base.bubbles,
+                    parsed.base.cancelable,
+                    parsed.base.composed,
+                )
+            }
+            ValueEventKind::WebGlContext => {
+                let parsed =
+                    webidl::parse_dictionary_object::<WebGlContextEventInit>(scope, dictionary)?;
+                parsed
+                    .initialize_snapshot(scope, state)
+                    .expect("value event state");
+                (
+                    parsed.base.bubbles,
+                    parsed.base.cancelable,
+                    parsed.base.composed,
+                )
+            }
+            ValueEventKind::Blob => {
+                let parsed = webidl::parse_dictionary_object::<BlobEventInit>(scope, dictionary)?;
+                parsed
+                    .initialize_snapshot(scope, state)
+                    .expect("value event state");
+                (
+                    parsed.base.bubbles,
+                    parsed.base.cancelable,
+                    parsed.base.composed,
+                )
+            }
+            ValueEventKind::ToolActivated | ValueEventKind::ToolCancel => {
+                let parsed = webidl::parse_dictionary_object::<ToolEventInit>(scope, dictionary)?;
+                parsed
+                    .initialize_snapshot(scope, state)
+                    .expect("value event state");
+                (
+                    parsed.base.bubbles,
+                    parsed.base.cancelable,
+                    parsed.base.composed,
+                )
+            }
+            ValueEventKind::PictureInPicture => {
+                let parsed = webidl::parse_dictionary_object::<PictureInPictureEventInit>(
+                    scope, dictionary,
+                )?;
+                parsed
+                    .initialize_snapshot(scope, state)
+                    .expect("value event state");
+                (
+                    parsed.base.bubbles,
+                    parsed.base.cancelable,
+                    parsed.base.composed,
+                )
+            }
+            ValueEventKind::PaymentRequestUpdate => {
+                let parsed = webidl::parse_dictionary_object::<EventInit>(scope, dictionary)?;
+                parsed
+                    .initialize_snapshot(scope, state)
+                    .expect("value event state");
+                (parsed.bubbles, parsed.cancelable, parsed.composed)
+            }
+            ValueEventKind::PaymentMethodChange => {
+                let parsed = webidl::parse_dictionary_object::<PaymentMethodChangeEventInit>(
+                    scope, dictionary,
+                )?;
+                parsed
+                    .initialize_snapshot(scope, state)
+                    .expect("value event state");
+                (
+                    parsed.base.bubbles,
+                    parsed.base.cancelable,
+                    parsed.base.composed,
+                )
+            }
+            ValueEventKind::Gamepad => {
+                let parsed =
+                    webidl::parse_dictionary_object::<GamepadEventInit>(scope, dictionary)?;
+                parsed
+                    .initialize_snapshot(scope, state)
+                    .expect("value event state");
+                (
+                    parsed.base.bubbles,
+                    parsed.base.cancelable,
+                    parsed.base.composed,
+                )
+            }
+            ValueEventKind::MidiMessage => {
+                let parsed =
+                    webidl::parse_dictionary_object::<MidiMessageEventInit>(scope, dictionary)?;
+                let data = parsed
+                    .data
+                    .map(Into::into)
+                    .unwrap_or_else(|| v8::null(scope).into());
+                set_event_private_value(scope, state, MIDI_DATA_SLOT, data);
+                (parsed.bubbles, parsed.cancelable, parsed.composed)
+            }
+            ValueEventKind::MidiConnection => {
+                let parsed =
+                    webidl::parse_dictionary_object::<MidiConnectionEventInit>(scope, dictionary)?;
+                let port = parsed
+                    .port
+                    .map(Into::into)
+                    .unwrap_or_else(|| v8::null(scope).into());
+                set_event_private_value(scope, state, MIDI_PORT_SLOT, port);
+                (parsed.bubbles, parsed.cancelable, parsed.composed)
+            }
+        };
+        initialize_event_object_with_type(scope, state, event_type, bubbles, cancelable);
+        define_event_property(
+            scope,
+            state,
+            "composed",
+            v8::Boolean::new(scope, composed).into(),
+        );
+        Ok(())
+    })();
+    if let Err(error) = result {
+        webidl::throw_error(scope, &error);
+        return;
+    }
+    web_api_interfaces::initialize(scope, state, kind.name())
+        .expect("value event brand should initialize");
+    if initialize_event_wrapper(scope, args.this(), state).is_some() {
+        rv.set(args.this().into());
+    }
+}

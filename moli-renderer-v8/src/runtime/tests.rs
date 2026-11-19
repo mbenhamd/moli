@@ -9,6 +9,8 @@ use super::{
 };
 use crate::local_executor::{is_on_script_execution_lane_for, scope_on_scaffold_js_local_executor};
 use crate::network::ResourceRequestClient;
+#[cfg(feature = "devtools")]
+use crate::runtime::{RendererDevToolsPageCommand, RendererDevToolsPageReply};
 use crate::{
     RendererDocumentLifecycleEventKind, RendererDocumentLifecycleMilestone,
     RendererNavigationReplyPolicy, RendererReplyBoundary, RendererTopLevelNavigationDispatch,
@@ -347,28 +349,33 @@ fn mouse_input_json_witness(reply: &RendererPageReply) -> serde_json::Value {
     })
 }
 
+#[cfg(feature = "devtools")]
 async fn dispatch_wheel_for_action_window_test(
     page: &RendererPageHandle,
     delta_y: f64,
 ) -> RendererInputDispatchOutcome {
     let (reply, _) = page
-        .run_async_command(RendererPageCommand::DispatchMouseEventAtPoint {
-            x: 10.0,
-            y: 10.0,
-            event_name: "wheel".to_owned(),
-            button: -1,
-            buttons: Some(0),
-            click_count: 0,
-            delta_x: 0.0,
-            delta_y,
-            pointer: RendererPointerEventProperties::default(),
-            modifiers: 0,
-            intercept_drags: false,
-        })
+        .run_async_command(RendererPageCommand::DevTools(
+            RendererDevToolsPageCommand::DispatchMouseEventAtPoint {
+                x: 10.0,
+                y: 10.0,
+                event_name: "wheel".to_owned(),
+                button: -1,
+                buttons: Some(0),
+                click_count: 0,
+                delta_x: 0.0,
+                delta_y,
+                pointer: RendererPointerEventProperties::default(),
+                modifiers: 0,
+                intercept_drags: false,
+            },
+        ))
         .await
         .expect("wheel action should enter the renderer action window");
     match reply {
-        RendererPageReply::InputDispatchOutcome(outcome) => outcome,
+        RendererPageReply::DevTools(RendererDevToolsPageReply::InputDispatchOutcome(outcome)) => {
+            outcome
+        }
         _ => panic!("wheel action should return an input dispatch outcome"),
     }
 }
@@ -389,18 +396,21 @@ async fn capture_screenshot_with_request(
     }
 }
 
+#[cfg(feature = "devtools")]
 async fn capture_screencast_frame_with_request(
     page: &RendererPageHandle,
     request: super::RendererCaptureScreencastFrameRequest,
 ) -> super::RendererCapturedScreencastFrame {
     let (reply, _) = page
-        .run_async_command(RendererPageCommand::CaptureScreencastFrame(request))
+        .run_async_command(RendererPageCommand::DevTools(
+            RendererDevToolsPageCommand::CaptureScreencastFrame(request),
+        ))
         .await
         .expect("renderer page should capture a screencast frame");
     match reply {
-        RendererPageReply::CaptureScreencastFrame(
+        RendererPageReply::DevTools(RendererDevToolsPageReply::CaptureScreencastFrame(
             super::RendererCaptureScreencastFrameReply::Captured(frame),
-        ) => frame,
+        )) => frame,
         _ => panic!("expected captured screencast frame reply"),
     }
 }
@@ -552,6 +562,7 @@ async fn assert_window_performance_surface_for_test(page: &RendererPageHandle, p
     );
 }
 
+#[cfg(any(test, feature = "devtools"))]
 async fn runtime_heap_usage_for_test(page: &RendererPageHandle) -> serde_json::Value {
     let (reply, _) = page
         .run_async_command(RendererPageCommand::RuntimeHeapUsage)
@@ -641,60 +652,75 @@ fn runtime_indexed_db_test_root(label: &str) -> std::path::PathBuf {
     ))
 }
 
+#[cfg(feature = "devtools")]
 async fn create_isolated_world_for_test(
     page: &RendererPageHandle,
     name: &str,
 ) -> anyhow::Result<i64> {
     let (reply, _) = page
-        .run_async_command(RendererPageCommand::CreateIsolatedWorld {
-            name: name.to_owned(),
-            grant_universal_access: false,
-            frame_id: None,
-        })
+        .run_async_command(RendererPageCommand::DevTools(
+            RendererDevToolsPageCommand::CreateIsolatedWorld {
+                name: name.to_owned(),
+                grant_universal_access: false,
+                frame_id: None,
+            },
+        ))
         .await?;
     match reply {
-        RendererPageReply::ExecutionContextId(execution_context_id) => Ok(execution_context_id),
+        RendererPageReply::DevTools(RendererDevToolsPageReply::ExecutionContextId(
+            execution_context_id,
+        )) => Ok(execution_context_id),
         _ => Err(anyhow::anyhow!(
             "expected CreateIsolatedWorld to return an execution context id"
         )),
     }
 }
 
+#[cfg(feature = "devtools")]
 async fn create_isolated_world_runtime_activity_for_test(
     page: &RendererPageHandle,
     inspector_session_id: Option<&str>,
     name: &str,
 ) -> anyhow::Result<i64> {
     let (reply, _) = page
-        .run_async_command(RendererPageCommand::CreateIsolatedWorldRuntimeActivity {
-            inspector_session_id: inspector_session_id.map(str::to_owned),
-            frame_id: None,
-            name: name.to_owned(),
-            grant_universal_access: false,
-        })
+        .run_async_command(RendererPageCommand::DevTools(
+            RendererDevToolsPageCommand::CreateIsolatedWorldRuntimeActivity {
+                inspector_session_id: inspector_session_id.map(str::to_owned),
+                frame_id: None,
+                name: name.to_owned(),
+                grant_universal_access: false,
+            },
+        ))
         .await?;
     match reply {
-        RendererPageReply::ExecutionContextId(execution_context_id) => Ok(execution_context_id),
+        RendererPageReply::DevTools(RendererDevToolsPageReply::ExecutionContextId(
+            execution_context_id,
+        )) => Ok(execution_context_id),
         _ => Err(anyhow::anyhow!(
             "expected CreateIsolatedWorldRuntimeActivity to return an execution context id"
         )),
     }
 }
 
+#[cfg(feature = "devtools")]
 async fn create_isolated_world_for_frame_for_test(
     page: &RendererPageHandle,
     frame_id: &str,
     name: &str,
 ) -> anyhow::Result<i64> {
     let (reply, _) = page
-        .run_async_command(RendererPageCommand::CreateIsolatedWorld {
-            name: name.to_owned(),
-            grant_universal_access: false,
-            frame_id: Some(frame_id.to_owned()),
-        })
+        .run_async_command(RendererPageCommand::DevTools(
+            RendererDevToolsPageCommand::CreateIsolatedWorld {
+                name: name.to_owned(),
+                grant_universal_access: false,
+                frame_id: Some(frame_id.to_owned()),
+            },
+        ))
         .await?;
     match reply {
-        RendererPageReply::ExecutionContextId(execution_context_id) => Ok(execution_context_id),
+        RendererPageReply::DevTools(RendererDevToolsPageReply::ExecutionContextId(
+            execution_context_id,
+        )) => Ok(execution_context_id),
         _ => Err(anyhow::anyhow!(
             "expected frame CreateIsolatedWorld to return an execution context id"
         )),
@@ -1046,6 +1072,7 @@ async fn shared_worker_probe_messages(page: &RendererPageHandle) -> anyhow::Resu
         .ok_or_else(|| anyhow::anyhow!("expected SharedWorker probe messages string"))
 }
 
+#[cfg(feature = "devtools")]
 async fn runtime_protocol_object_id(
     page: &RendererPageHandle,
     request: serde_json::Value,
@@ -1058,6 +1085,7 @@ async fn runtime_protocol_object_id(
         .ok_or_else(|| anyhow::anyhow!("expected Runtime response {response_id} to carry objectId"))
 }
 
+#[cfg(feature = "devtools")]
 async fn dispatch_runtime_protocol_for_test(
     page: &RendererPageHandle,
     request: serde_json::Value,
@@ -1067,6 +1095,7 @@ async fn dispatch_runtime_protocol_for_test(
         .map(|(messages, _)| messages)
 }
 
+#[cfg(feature = "devtools")]
 async fn dispatch_runtime_protocol_with_output_for_test(
     page: &RendererPageHandle,
     request: serde_json::Value,
@@ -1092,6 +1121,7 @@ async fn dispatch_runtime_protocol_with_output_for_test(
     Ok((messages, output))
 }
 
+#[cfg(feature = "devtools")]
 async fn dispatch_runtime_protocol_with_context_resolution_for_test(
     page: &RendererPageHandle,
     action: &str,
@@ -1128,12 +1158,14 @@ fn runtime_protocol_response_by_id(
         .find(|message| message.get("id").and_then(serde_json::Value::as_i64) == Some(response_id))
 }
 
+#[cfg(feature = "devtools")]
 async fn runtime_enable_events_for_test(
     page: &RendererPageHandle,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     runtime_enable_events_for_inspector_session_for_test(page, None).await
 }
 
+#[cfg(feature = "devtools")]
 async fn runtime_enable_events_for_inspector_session_for_test(
     page: &RendererPageHandle,
     inspector_session_id: Option<&str>,
@@ -1276,6 +1308,7 @@ fn runtime_default_context_count(messages: &[serde_json::Value]) -> usize {
         .count()
 }
 
+#[cfg(feature = "devtools")]
 async fn add_runtime_binding_for_test(
     page: &RendererPageHandle,
     name: &str,
@@ -1298,12 +1331,15 @@ async fn add_runtime_binding_for_test(
     }
 }
 
+#[cfg(feature = "devtools")]
 async fn remove_runtime_binding_for_test(
     page: &RendererPageHandle,
     name: &str,
 ) -> anyhow::Result<()> {
     let (reply, _) = page
-        .run_async_command(RendererPageCommand::RemoveRuntimeBinding(name.to_owned()))
+        .run_async_command(RendererPageCommand::DevTools(
+            RendererDevToolsPageCommand::RemoveRuntimeBinding(name.to_owned()),
+        ))
         .await?;
     match reply {
         RendererPageReply::Unit => Ok(()),
@@ -1328,6 +1364,7 @@ async fn set_stored_document_start_scripts_for_test(
     }
 }
 
+#[cfg(feature = "devtools")]
 async fn set_runtime_binding_state_for_test(
     page: &RendererPageHandle,
     inspector_session_id: Option<String>,
@@ -1335,11 +1372,13 @@ async fn set_runtime_binding_state_for_test(
     session_runtime_bindings: Vec<crate::protocol_types::RuntimeBindingRegistration>,
 ) -> anyhow::Result<()> {
     let (reply, _) = page
-        .run_async_command(RendererPageCommand::SetRuntimeBindingState {
-            inspector_session_id,
-            stored_runtime_bindings,
-            session_runtime_bindings,
-        })
+        .run_async_command(RendererPageCommand::DevTools(
+            RendererDevToolsPageCommand::SetRuntimeBindingState {
+                inspector_session_id,
+                stored_runtime_bindings,
+                session_runtime_bindings,
+            },
+        ))
         .await?;
     match reply {
         RendererPageReply::Unit => Ok(()),

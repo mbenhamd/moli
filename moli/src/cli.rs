@@ -487,6 +487,11 @@ pub struct ServeArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args)]
 pub struct CommonArgs {
+    /// Disable same-origin access checks, CORS and ORB for this browser instance.
+    /// CSP, CORP, TLS verification and credentials policies remain enforced.
+    #[arg(long)]
+    pub disable_web_security: bool,
+
     #[arg(long)]
     pub insecure_disable_tls_host_verification: bool,
 

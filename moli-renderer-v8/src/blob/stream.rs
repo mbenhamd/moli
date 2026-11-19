@@ -1,7 +1,8 @@
 use std::io;
 
 use super::*;
-use crate::util::set_private_value;
+use crate::util::{get_private_value, set_private_value};
+use moli_webapi_declare::WebApiObject;
 
 const BLOB: &str = "__moliBlobStreamBlob";
 const STREAM: &str = "__moliBlobStream";
@@ -131,7 +132,7 @@ pub(super) fn finish_read<'s>(
             let error = crate::context_bootstrap::new_dom_exception_value(
                 scope,
                 &error.to_string(),
-                "NotReadableError",
+                moli_file_api::file::read_error_name(&error),
             );
             crate::context_bootstrap::error_stream(scope, stream, error);
             set_private_value(scope, source, BLOB, v8::null(scope).into());

@@ -5,7 +5,6 @@ use super::{
     WorkerConnectionState, WorkerExecutionState, WorkerModuleStaticImportPolicySnapshot,
     WorkerRelayTerminalState,
 };
-use crate::RendererSyntheticResponseBody;
 use crate::network::loads::{ResourceLoadDisposition, ResourceLoadKind, ResourceLoadLease};
 use crate::page_task_queue::{
     RendererDedicatedWorkerClientEvent, RendererDedicatedWorkerMessageEvent,
@@ -16,9 +15,8 @@ use crate::service_worker_runtime::{ServiceWorkerClientId, ServiceWorkerRequestD
 use crate::structured_clone::V8StructuredClonePayload;
 use crate::types::{DedicatedWorkerId, SubresourcePolicyContext};
 use crate::worker::{
-    WorkerGlobalKind, WorkerHandle, WorkerNetworkPolicy, WorkerPendingFetchContinue,
-    WorkerPendingXhrContinue, WorkerRuntimeEvent, WorkerScriptKind, WorkerScriptSource,
-    WorkerSecureContextPolicy, WorkerSpawnOptions, spawn_worker_with_options,
+    WorkerGlobalKind, WorkerHandle, WorkerNetworkPolicy, WorkerRuntimeEvent, WorkerScriptKind,
+    WorkerScriptSource, WorkerSecureContextPolicy, WorkerSpawnOptions, spawn_worker_with_options,
 };
 use moli_storage_key::MoliStorageKey;
 use url::Url;
@@ -150,20 +148,34 @@ impl PageScriptHost {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn register_worker(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
         wrapper: v8::Local<'_, v8::Object>,
-        mut worker_handle: WorkerHandle,
+        options: WorkerSpawnOptions,
         owner: super::super::WindowExecutionContextBinding,
+        document_url: Url,
+        request_url: Url,
+        name: String,
     ) -> DedicatedWorkerId {
         let worker_id = DedicatedWorkerId::new(self.next_worker_id);
         self.next_worker_id += 1;
         let renderer_instance_id = self
             .browser_context_runtime()
             .allocate_dedicated_worker_instance_id();
+        let page_token = self
+            .page_dedicated_worker_client_event_sender()
+            .page_token();
+        self.publish_live_turn_output_prefix();
+        let context = self.dedicated_worker_interception_context_for_instance(renderer_instance_id);
+        let mut worker_handle = spawn_worker_with_options(
+            options
+                .with_interception_context(context)
+                .with_pause_evaluation_until_debugger(true),
+        );
         self.browser_context_runtime()
-            .attach_dedicated_worker_devtools_handle(
+            .attach_dedicated_worker_control(
                 renderer_instance_id,
                 &worker_handle,
                 self.renderer_output_journal(),
@@ -179,7 +191,7 @@ impl PageScriptHost {
             worker_id,
             WorkerConnectionState {
                 renderer_instance_id,
-                target_created: false,
+                target_created: true,
                 wrapper: v8::Global::new(scope, wrapper),
                 owner,
                 client_event_producer,
@@ -189,7 +201,34 @@ impl PageScriptHost {
                 },
             },
         );
+        self.append_dedicated_worker_target_lifecycle(
+            crate::runtime::RendererDedicatedWorkerTargetEvent::Created(
+                crate::runtime::RendererDedicatedWorkerTargetInfo {
+                    owner_local_host_id: page_token.local_host_id(),
+                    page_id: page_token.page_id(),
+                    instance_id: renderer_instance_id,
+                    request_url: request_url.to_string(),
+                    document_url: document_url.to_string(),
+                    name,
+                },
+            ),
+        );
+        self.publish_live_turn_output_prefix();
         worker_id
+    }
+
+    pub(crate) fn start_registered_local_worker(&self, worker_id: DedicatedWorkerId) {
+        let worker = self
+            .workers
+            .get(&worker_id)
+            .expect("registered local Worker");
+        let WorkerExecutionState::Running { handle } = &worker.execution else {
+            unreachable!("a registered local Worker owns its running handle");
+        };
+        assert!(
+            handle.start_evaluation(),
+            "registered local Worker has its native startup channel"
+        );
     }
 
     pub(crate) fn register_loading_worker(
@@ -428,6 +467,7 @@ impl PageScriptHost {
         worker_id: DedicatedWorkerId,
         script_url: String,
         script_source: WorkerScriptSource,
+        network_response: Option<Box<crate::protocol_types::NavigationResponse>>,
         script_kind: WorkerScriptKind,
         secure_context: bool,
         response_referrer_policy: Option<String>,
@@ -522,10 +562,10 @@ impl PageScriptHost {
         };
         let mut spawn_options = WorkerSpawnOptions::with_source_and_request_client(
             script_source,
-            script_url,
+            script_url.clone(),
             request_client,
         )
-        .with_interception_context(self.native_interception_context())
+        .with_interception_context(self.dedicated_worker_interception_context(worker_id))
         .with_script_kind(script_kind)
         .with_module_credentials_mode(module_credentials_mode)
         .with_referrer_policy(response_referrer_policy)
@@ -542,10 +582,7 @@ impl PageScriptHost {
         .with_creator_message_security(creator_message_security)
         .with_storage_bucket_store(Some(self.storage_bucket_store()))
         .with_indexed_db_manager(self.indexed_db_manager())
-        .with_pause_evaluation_until_debugger(
-            self.browser_context_runtime()
-                .dedicated_worker_pause_on_start_for_devtools(),
-        );
+        .with_pause_evaluation_until_debugger(true);
         if let Some(policy) = module_static_import_policy {
             spawn_options = spawn_options
                 .with_module_static_import_initiator_url(policy.initiator_url)
@@ -563,7 +600,7 @@ impl PageScriptHost {
             .map(|state| state.renderer_instance_id)
             .expect("loading DedicatedWorker must retain its renderer instance identity");
         self.browser_context_runtime()
-            .attach_dedicated_worker_devtools_handle(
+            .attach_dedicated_worker_control(
                 renderer_instance_id,
                 &worker_handle,
                 self.renderer_output_journal(),
@@ -590,6 +627,16 @@ impl PageScriptHost {
         state.execution = WorkerExecutionState::Running {
             handle: worker_handle,
         };
+        if let Some(response) = network_response {
+            self.record_dedicated_worker_target_script_loaded(worker_id, script_url, response);
+            self.publish_live_turn_output_prefix();
+        }
+        if !self
+            .browser_context_runtime()
+            .dedicated_worker_waits_for_debugger()
+        {
+            self.start_registered_local_worker(worker_id);
+        }
         true
     }
 
@@ -626,6 +673,40 @@ impl PageScriptHost {
             ),
         );
         true
+    }
+
+    pub(crate) fn dedicated_worker_interception_context(
+        &mut self,
+        worker_id: DedicatedWorkerId,
+    ) -> Option<crate::network::interception_output::ResourceInterceptionContext> {
+        let instance_id = self.workers.get(&worker_id)?.renderer_instance_id;
+        self.dedicated_worker_interception_context_for_instance(instance_id)
+    }
+    fn dedicated_worker_interception_context_for_instance(
+        &mut self,
+        instance_id: u64,
+    ) -> Option<crate::network::interception_output::ResourceInterceptionContext> {
+        self.publish_live_turn_output_prefix();
+        let journal = self.renderer_output_journal()?;
+        Some(
+            crate::network::interception_output::ResourceInterceptionContext::worker(
+                self.native_interception_context(),
+                move |event| {
+                    let record = crate::runtime::PendingRendererOutputRecord::owner_action(
+                        None,
+                        crate::runtime::RendererOwnerAction::DedicatedWorkerTargetLifecycle(
+                            crate::runtime::RendererDedicatedWorkerTargetEvent::Resource {
+                                instance_id,
+                                event,
+                            },
+                        ),
+                    )
+                    .resolve()
+                    .expect("Worker target has a resolved source identity");
+                    journal.try_publish_record(record)
+                },
+            ),
+        )
     }
 
     /// Publishes one Worker lifecycle fact without conflating a test-only
@@ -767,350 +848,6 @@ impl PageScriptHost {
                     }
                 }
                 true
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn continue_worker_fetch(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingFetchContinue,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.continue_pending_fetch(request);
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn continue_worker_xhr(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingXhrContinue,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.continue_pending_xhr(request);
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn continue_worker_csp_report(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingFetchContinue,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.continue_pending_csp_report(request);
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn continue_worker_fetch_response(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingFetchContinue,
-        response_code: Option<u16>,
-        response_headers: Option<Vec<(String, Vec<u8>)>>,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.continue_pending_fetch_response(
-                        request,
-                        response_code,
-                        response_headers,
-                    );
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn continue_worker_xhr_response(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingXhrContinue,
-        response_code: Option<u16>,
-        response_headers: Option<Vec<(String, Vec<u8>)>>,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.continue_pending_xhr_response(request, response_code, response_headers);
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn fail_worker_fetch(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingFetchContinue,
-        error_text: String,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.fail_pending_fetch(request, error_text);
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn fail_worker_xhr(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingXhrContinue,
-        error_text: String,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.fail_pending_xhr(request, error_text);
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn fail_worker_csp_report(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingFetchContinue,
-        error_text: String,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.fail_pending_csp_report(request, error_text);
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn fail_worker_fetch_response(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingFetchContinue,
-        error_text: String,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.fail_pending_fetch_response(request, error_text);
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn fail_worker_xhr_response(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingXhrContinue,
-        error_text: String,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.fail_pending_xhr_response(request, error_text);
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn fail_worker_fetch_auth(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingFetchContinue,
-        error_text: String,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.fail_pending_fetch_auth(request, error_text);
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn fail_worker_xhr_auth(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingXhrContinue,
-        error_text: String,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.fail_pending_xhr_auth(request, error_text);
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn fulfill_worker_fetch(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingFetchContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.fulfill_pending_fetch(
-                        request,
-                        response_code,
-                        response_headers,
-                        response_body,
-                    );
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn fulfill_worker_xhr(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingXhrContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.fulfill_pending_xhr(
-                        request,
-                        response_code,
-                        response_headers,
-                        response_body,
-                    );
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn fulfill_worker_csp_report(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingFetchContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.fulfill_pending_csp_report(
-                        request,
-                        response_code,
-                        response_headers,
-                        response_body,
-                    );
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn fulfill_worker_fetch_response(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingFetchContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.fulfill_pending_fetch_response(
-                        request,
-                        response_code,
-                        response_headers,
-                        response_body,
-                    );
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
-            })
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn fulfill_worker_xhr_response(
-        &mut self,
-        worker_id: DedicatedWorkerId,
-        request: WorkerPendingXhrContinue,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    ) -> bool {
-        self.workers
-            .get_mut(&worker_id)
-            .map(|state| match &mut state.execution {
-                WorkerExecutionState::Running { handle } => {
-                    handle.fulfill_pending_xhr_response(
-                        request,
-                        response_code,
-                        response_headers,
-                        response_body,
-                    );
-                    true
-                }
-                WorkerExecutionState::Loading { .. } => false,
             })
             .unwrap_or(false)
     }
@@ -1356,11 +1093,10 @@ impl PageScriptHost {
     }
 
     pub(crate) fn forget_worker(&mut self, worker_id: DedicatedWorkerId) {
-        let retired_subresource_count = self.cancel_subresource_fetches_for_worker(worker_id);
         let browser_context_runtime = self.browser_context_runtime();
         if let Some(state) = self.workers.remove(&worker_id) {
             self.browser_context_runtime()
-                .unregister_dedicated_worker_devtools_handle(state.renderer_instance_id);
+                .unregister_dedicated_worker(state.renderer_instance_id);
             if state.target_created {
                 self.append_dedicated_worker_target_lifecycle(
                     crate::runtime::RendererDedicatedWorkerTargetEvent::Destroyed {
@@ -1394,7 +1130,6 @@ impl PageScriptHost {
                 ?owner,
                 ?realm_token,
                 execution_state,
-                retired_subresource_count,
                 "forgot DedicatedWorker execution-context state"
             );
         }
@@ -1404,8 +1139,7 @@ impl PageScriptHost {
         let browser_context_runtime = self.browser_context_runtime();
         let workers = std::mem::take(&mut self.workers);
         for (_, state) in workers {
-            browser_context_runtime
-                .unregister_dedicated_worker_devtools_handle(state.renderer_instance_id);
+            browser_context_runtime.unregister_dedicated_worker(state.renderer_instance_id);
             match state.execution {
                 WorkerExecutionState::Loading {
                     load_task,
@@ -1483,6 +1217,7 @@ async fn fetch_worker_script_source(
             network_partition_key,
             creator_policy_context,
             script_kind,
+            request_client.web_security_disabled(),
         );
     }
     let observed = request_client
@@ -1504,6 +1239,7 @@ async fn fetch_worker_script_source(
         network_partition_key,
         creator_policy_context,
         script_kind,
+        request_client.web_security_disabled(),
     )
 }
 
@@ -1513,13 +1249,16 @@ fn loaded_worker_script_from_navigation_response(
     network_partition_key: Option<String>,
     creator_policy_context: SubresourcePolicyContext,
     script_kind: WorkerScriptKind,
+    web_security_disabled: bool,
 ) -> Result<LoadedWorkerScript, WorkerScriptLoadFailure> {
     let response_head = response.head();
-    if let Err(error) = crate::worker::ensure_worker_script_redirect_chain_same_origin(
-        initiator_url,
-        &response_head.redirect_chain,
-        &response.final_url,
-    ) {
+    if !web_security_disabled
+        && let Err(error) = crate::worker::ensure_worker_script_redirect_chain_same_origin(
+            initiator_url,
+            &response_head.redirect_chain,
+            &response.final_url,
+        )
+    {
         return Err(WorkerScriptLoadFailure::with_response(error, response));
     }
     if let Err(error) =

@@ -37,6 +37,7 @@ pub struct FetchConfig {
     request_timeout_ms: u64,
     http_connect_timeout_ms: Option<u64>,
     obey_robots: bool,
+    web_security_disabled: bool,
     http_proxy: Option<String>,
     http_no_proxy: Option<String>,
     http_cache_dir: Option<String>,
@@ -185,6 +186,16 @@ impl FetchConfig {
 
     pub fn set_obey_robots(&mut self, obey_robots: bool) {
         self.obey_robots = obey_robots;
+    }
+
+    /// Instance policy for browser origin access, CORS and ORB enforcement.
+    /// CSP, CORP, credentials and origin/storage identities remain independent.
+    pub fn web_security_disabled(&self) -> bool {
+        self.web_security_disabled
+    }
+
+    pub fn set_web_security_disabled(&mut self, disabled: bool) {
+        self.web_security_disabled = disabled;
     }
 
     pub fn set_proxy_options(
@@ -396,6 +407,7 @@ impl Default for FetchConfig {
             request_timeout_ms: 30_000,
             http_connect_timeout_ms: None,
             obey_robots: false,
+            web_security_disabled: false,
             http_proxy: None,
             http_no_proxy: None,
             http_cache_dir: None,

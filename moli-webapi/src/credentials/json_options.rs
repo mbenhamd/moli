@@ -1,0 +1,59 @@
+//! WebAuthn JSON option conversion is independent of authenticator availability.
+//!
+//! Finish WebIDL conversion (including nested getters and iterable/record
+//! conversion) before decoding any base64url values. Conversion errors retain
+//! their TypeError/original JavaScript exception; decoding errors are EncodingError.
+
+mod encode;
+mod schema;
+
+use moli_webidl as webidl;
+use webidl::{SnapshotPrototype, WebIdlDictionarySerialize};
+
+use schema::{CreationJson, RequestJson};
+
+#[derive(webidl::WebIdlArgs)]
+#[webidl(prefix = "PublicKeyCredential.parseCreationOptionsFromJSON")]
+struct CreationArgs {
+    #[webidl(required, dictionary)]
+    options: CreationJson,
+}
+
+#[derive(webidl::WebIdlArgs)]
+#[webidl(prefix = "PublicKeyCredential.parseRequestOptionsFromJSON")]
+struct RequestArgs {
+    #[webidl(required, dictionary)]
+    options: RequestJson,
+}
+
+pub fn parse_creation<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s>,
+) {
+    let Some(parsed) = webidl::parse_args::<CreationArgs>(scope, &args) else {
+        return;
+    };
+    if let Some(result) = parsed
+        .options
+        .to_js_snapshot(scope, SnapshotPrototype::Ordinary)
+    {
+        rv.set(result.into());
+    }
+}
+
+pub fn parse_request<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s>,
+) {
+    let Some(parsed) = webidl::parse_args::<RequestArgs>(scope, &args) else {
+        return;
+    };
+    if let Some(result) = parsed
+        .options
+        .to_js_snapshot(scope, SnapshotPrototype::Ordinary)
+    {
+        rv.set(result.into());
+    }
+}

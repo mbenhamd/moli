@@ -1,7 +1,7 @@
 use super::*;
 
-mod escape;
-mod highlights;
+use moli_webapi::css_escape as escape;
+use moli_webapi::highlights;
 mod install;
 mod lazy_state;
 mod promise;

@@ -71,7 +71,8 @@ struct SelectionPrototypeMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Selection)]
+// These getters return empty selection values when no native selection is present.
+#[webapi(interface = web_api_interfaces::Selection, receiver = false)]
 struct SelectionPrototypeAccessorsDeclaration {
     #[webapi(
         accessor_property,
@@ -200,6 +201,7 @@ fn new_selection_object<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v
 }
 
 /// Read native Selection state without consulting author-replaced accessors.
+#[cfg(feature = "devtools")]
 pub(crate) fn window_selection_is_collapsed<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     window: v8::Local<'s, v8::Object>,

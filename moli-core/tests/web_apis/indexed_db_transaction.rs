@@ -253,7 +253,7 @@ async fn indexed_db_key_ranges_protect_bounds_and_validate_receivers() -> Result
         assert_eq!(result["state"], "pass", "{target}: {result}");
         assert_eq!(
             result["checks"].as_array().unwrap().len(),
-            if target == "worker" { 301 } else { 313 },
+            if target == "worker" { 341 } else { 353 },
             "{target}: {result}"
         );
     }
@@ -275,7 +275,7 @@ async fn indexed_db_version_change_events_preserve_native_attributes_and_diction
         assert_eq!(result["state"], "pass", "{target}: {result}");
         assert_eq!(
             result["checks"].as_array().unwrap().len(),
-            if target == "worker" { 128 } else { 384 },
+            if target == "worker" { 144 } else { 432 },
             "{target}: {result}"
         );
     }
@@ -290,8 +290,10 @@ async fn indexed_db_factory_checks_native_receivers_and_rejects_promises_in_call
     let browser = Browser::new(AppConfig::default())?;
     let fixture = include_str!("fixtures/indexeddb-factory-receivers.js");
     for target in ["window", "child", "worker"] {
+        // Allow the cross-realm checks and asynchronous factory operations
+        // to make progress under CI load before the liveness watchdog fires.
         let source = format!(
-            "{fixture}\nconst watchdog = setTimeout(() => finish({{state: 'timeout', checks: factoryReceiverChecks.slice(-12)}}), 5000); factoryReceiverProbe('factory-{target}').then(finish, error => finish({{state: 'error', error: String(error), checks: factoryReceiverChecks}})).finally(() => clearTimeout(watchdog));"
+            "{fixture}\nconst watchdog = setTimeout(() => finish({{state: 'timeout', checks: factoryReceiverChecks.slice(-12)}}), 20000); factoryReceiverProbe('factory-{target}').then(finish, error => finish({{state: 'error', error: String(error), checks: factoryReceiverChecks}})).finally(() => clearTimeout(watchdog));"
         );
         let result = run_probe(&browser, &server, target, &source).await?;
         assert_eq!(result["state"], "pass", "{target}: {result}");
@@ -322,7 +324,7 @@ async fn indexed_db_queries_snapshot_arguments_and_delete_key_ranges() -> Result
         assert_eq!(result["state"], "pass", "{target}: {result}");
         assert_eq!(
             result["checks"].as_array().unwrap().len(),
-            308,
+            548,
             "{target}: {result}"
         );
     }

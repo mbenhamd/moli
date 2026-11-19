@@ -1,11 +1,13 @@
-use super::{
-    Page, RendererAgentAttachmentId, RendererCommandTurnOutput, RendererPageCommand,
-    RendererPageCommandPending, RendererPageReply, RendererRuntimeInspectorIoCommandClaim,
-    RendererRuntimeInspectorIoCommandRoute, RendererRuntimeInspectorMainCommandCompletion,
-    RendererRuntimeInspectorMainCommandRoute, RendererRuntimeInspectorMessage,
-};
+use super::Page;
+use super::RendererAgentAttachmentId;
+use super::RendererCommandTurnOutput;
+use super::RendererPageCommand;
+use super::RendererPageCommandPending;
+use super::RendererPageReply;
+use super::RendererRuntimeInspectorMessage;
 use crate::RendererOutputFence;
-use anyhow::{Result, bail};
+use anyhow::Result;
+use anyhow::bail;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageDocumentCommandTarget {
@@ -33,8 +35,8 @@ impl PageDocumentCommandTarget {
 }
 
 pub struct PendingPageCommand {
-    pending: RendererPageCommandPending,
-    renderer_agent_attachment_id: Option<RendererAgentAttachmentId>,
+    pub(in crate::page) pending: RendererPageCommandPending,
+    pub(in crate::page) renderer_agent_attachment_id: Option<RendererAgentAttachmentId>,
 }
 
 impl PendingPageCommand {
@@ -50,70 +52,14 @@ impl PendingPageCommand {
     }
 }
 
-pub struct PendingRuntimeInspectorCommandDispatch {
-    kind: PendingRuntimeInspectorCommandDispatchKind,
-}
-
-/// One non-V8 renderer agent command admitted through the Page IO
-/// `DevToolsSession` receiver.
-pub struct PendingDevToolsIoCommandDispatch {
-    route: RendererRuntimeInspectorIoCommandRoute,
-}
-
-enum PendingRuntimeInspectorCommandDispatchKind {
-    MainIngress(Box<RendererRuntimeInspectorMainCommandRoute>),
-    Io(PendingDevToolsIoCommandDispatch),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CompletedDevToolsIoCommandDispatch {
-    Dispatched,
-    SessionResponse {
-        predecessor: RendererOutputFence,
-        response_succeeded: bool,
-    },
-}
-
-/// Identifies which execution owner consumed one routable Inspector command.
-///
-/// `Inspector` claims complete either in V8's interrupt callback or its nested
-/// message loop while the Page actor is blocked. Callers must not synchronously
-/// re-enter that Page before exposing the Inspector response.
-pub enum CompletedRuntimeInspectorCommandDispatch {
-    Owner(Box<CompletedPageCommand>),
-    OwnerSessionResponse {
-        completion: Box<CompletedPageCommand>,
-        response_succeeded: bool,
-    },
-    OwnerSessionErrorSettled(RendererOutputFence),
-    Inspector,
-    InspectorSessionResponse {
-        predecessor: RendererOutputFence,
-        response_succeeded: bool,
-    },
-}
-
-impl CompletedRuntimeInspectorCommandDispatch {
-    pub fn renderer_output_predecessor(&self) -> Option<RendererOutputFence> {
-        match self {
-            Self::Owner(completion) | Self::OwnerSessionResponse { completion, .. } => {
-                completion.renderer_output_predecessor()
-            }
-            Self::OwnerSessionErrorSettled(predecessor)
-            | Self::InspectorSessionResponse { predecessor, .. } => Some(predecessor.clone()),
-            Self::Inspector => None,
-        }
-    }
-}
-
 pub struct CompletedPageCommand {
-    output: RendererCommandTurnOutput,
-    renderer_agent_attachment_id: Option<RendererAgentAttachmentId>,
+    pub(in crate::page) output: RendererCommandTurnOutput,
+    pub(in crate::page) renderer_agent_attachment_id: Option<RendererAgentAttachmentId>,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("Document command returned an unexpected renderer reply")]
-struct UnexpectedDocumentCommandReply;
+pub(super) struct UnexpectedDocumentCommandReply;
 
 impl CompletedPageCommand {
     /// Fetch settlement owns its exact renderer output; Page adoption is not
@@ -127,22 +73,6 @@ impl CompletedPageCommand {
     ) -> Result<crate::page::PendingSubresourceContinueOutcome> {
         match self.output.into_reply_and_state().0 {
             RendererPageReply::PendingSubresourceContinueOutcome(outcome) => Ok(outcome),
-            _ => Err(UnexpectedDocumentCommandReply.into()),
-        }
-    }
-
-    pub fn into_document_bidi_node_shared_id(
-        self,
-    ) -> Result<crate::page::RendererDomBidiNodeSharedIdResolution> {
-        match self.output.into_reply_and_state().0 {
-            RendererPageReply::DocumentBidiNodeSharedId(result) => Ok(result),
-            _ => Err(UnexpectedDocumentCommandReply.into()),
-        }
-    }
-
-    pub fn into_document_bidi_node_binding(self) -> Result<()> {
-        match self.output.into_reply_and_state().0 {
-            RendererPageReply::DocumentBidiNodeBindingRegistered => Ok(()),
             _ => Err(UnexpectedDocumentCommandReply.into()),
         }
     }
@@ -221,11 +151,15 @@ impl Page {
 
     pub(crate) fn start_page_command(
         &self,
-        mut command: RendererPageCommand,
+        command: RendererPageCommand,
     ) -> Result<PendingPageCommand> {
+        #[cfg(feature = "devtools")]
+        let mut command = command;
+        #[cfg(feature = "devtools")]
         if let Some(attachment_id) = self.renderer_agent_attachment_id {
             command.bind_inspector_attachment(attachment_id);
         }
+        #[cfg(feature = "devtools")]
         let pending = if self.renderer_agent_attachment_id.is_some() {
             self.handle.enqueue_protocol_command_in_inspector_session(
                 command,
@@ -238,6 +172,8 @@ impl Page {
             // lane that is scoped to a renderer attachment.
             self.handle.enqueue_protocol_command(command)?
         };
+        #[cfg(not(feature = "devtools"))]
+        let pending = self.handle.enqueue_protocol_command(command)?;
         Ok(PendingPageCommand {
             pending,
             renderer_agent_attachment_id: self.renderer_agent_attachment_id,
@@ -250,8 +186,11 @@ impl Page {
 
     pub(super) fn start_full_page_command(
         &self,
-        mut command: RendererPageCommand,
+        command: RendererPageCommand,
     ) -> Result<PendingPageCommand> {
+        #[cfg(feature = "devtools")]
+        let mut command = command;
+        #[cfg(feature = "devtools")]
         if let Some(attachment_id) = self.renderer_agent_attachment_id {
             command.bind_inspector_attachment(attachment_id);
         }
@@ -267,36 +206,6 @@ impl Page {
     ) -> RendererCommandTurnOutput {
         self.replace_page_state(completion.output.completion().page_state().clone());
         completion.output
-    }
-
-    fn pending_runtime_inspector_command_dispatch(
-        kind: PendingRuntimeInspectorCommandDispatchKind,
-    ) -> PendingRuntimeInspectorCommandDispatch {
-        PendingRuntimeInspectorCommandDispatch { kind }
-    }
-
-    pub(crate) fn pending_io_runtime_inspector_command_dispatch(
-        route: RendererRuntimeInspectorIoCommandRoute,
-    ) -> PendingRuntimeInspectorCommandDispatch {
-        Self::pending_runtime_inspector_command_dispatch(
-            PendingRuntimeInspectorCommandDispatchKind::Io(
-                Self::pending_devtools_io_command_dispatch(route),
-            ),
-        )
-    }
-
-    pub(crate) fn pending_devtools_io_command_dispatch(
-        route: RendererRuntimeInspectorIoCommandRoute,
-    ) -> PendingDevToolsIoCommandDispatch {
-        PendingDevToolsIoCommandDispatch { route }
-    }
-
-    pub(crate) fn pending_main_ingress_runtime_inspector_command_dispatch(
-        route: RendererRuntimeInspectorMainCommandRoute,
-    ) -> PendingRuntimeInspectorCommandDispatch {
-        Self::pending_runtime_inspector_command_dispatch(
-            PendingRuntimeInspectorCommandDispatchKind::MainIngress(Box::new(route)),
-        )
     }
 
     pub(crate) fn finish_page_command(
@@ -363,29 +272,20 @@ impl Page {
 
     pub(super) fn page_reply_kind(reply: &RendererPageReply) -> &'static str {
         match reply {
-            RendererPageReply::WebMcp(_) => "a WebMCP command result",
+            #[cfg(feature = "devtools")]
+            RendererPageReply::DevTools(reply) => super::devtools::devtools_page_reply_kind(reply),
             RendererPageReply::RuntimeEvaluationResult(_) => "a runtime evaluation result reply",
+            #[cfg(feature = "devtools")]
+            RendererPageReply::RuntimeHeapUsage(_) => "runtime heap usage",
             RendererPageReply::ElementClickPreparation(_) => "an element click preparation reply",
-            RendererPageReply::ElementClickDispatch(_) => "an element click dispatch reply",
             RendererPageReply::Bool(_) => "a bool reply",
-            RendererPageReply::OptionalBool(_) => "an optional bool reply",
             #[cfg(feature = "ace-protocol")]
             RendererPageReply::AcePageTask(_) => "AcePageTask",
-            RendererPageReply::InputDispatchOutcome(_) => "an input dispatch outcome reply",
             RendererPageReply::RuntimeInspectorProtocolMessages(_) => {
                 "runtime inspector protocol messages"
             }
             RendererPageReply::RuntimeConsoleMessageSnapshots(_) => "runtime console snapshots",
-            RendererPageReply::RuntimeHeapUsage(_) => "runtime heap usage",
-            RendererPageReply::PerformanceMetricSnapshot(_) => "performance metric snapshot",
-            RendererPageReply::DomDebuggerEventListeners(_) => {
-                "a DOMDebugger event listeners resolution"
-            }
-            RendererPageReply::DomDebuggerDomBreakpoint(_) => {
-                "a DOMDebugger DOM breakpoint resolution"
-            }
             RendererPageReply::RuntimeRealmInventory(_) => "runtime realm inventory",
-            RendererPageReply::ExecutionContextId(_) => "an execution context reply",
             RendererPageReply::ExecutionContextIds(_) => "execution context replies",
             RendererPageReply::OptionalExecutionContextId(_) => {
                 "an optional execution context reply"
@@ -394,96 +294,24 @@ impl Page {
             RendererPageReply::OptionalDocumentNodeObjectSnapshot(_) => {
                 "an optional document node object snapshot"
             }
-            RendererPageReply::OptionalDomSnapshotCapturePayload(_) => {
-                "an optional DOMSnapshot capture payload"
-            }
             RendererPageReply::OptionalDocumentChildNodeSnapshots(_) => {
                 "optional document child node snapshots"
             }
             RendererPageReply::OptionalDocumentChildNodeSnapshotEvents(_) => {
                 "optional document child node snapshot events"
             }
-            RendererPageReply::DocumentNodeAttributesResolution(_) => {
-                "a document node attributes resolution"
-            }
-            RendererPageReply::DocumentNodeTextResolution(_) => "a document node text resolution",
-            RendererPageReply::DocumentNodePropertyResolution(_) => {
-                "a document node property resolution"
-            }
             RendererPageReply::OptionalAccessibilityNodes(_) => "optional accessibility nodes",
-            RendererPageReply::OptionalAccessibilityPayloads(_) => {
-                "optional accessibility payloads"
-            }
-            RendererPageReply::OptionalAccessibilityPayload(_) => {
-                "an optional accessibility payload"
-            }
-            RendererPageReply::OptionalAccessibilityPayloadsForObjectId(_) => {
-                "optional accessibility payloads for object id"
-            }
-            RendererPageReply::DocumentQuerySelectorResolution(_) => {
-                "a document query selector resolution"
-            }
             RendererPageReply::DocumentQuerySelectorNode(_) => "a document query selector node",
-            RendererPageReply::DocumentQuerySelectorWithChildNodeSnapshotEvents(_) => {
-                "a document query selector with child node snapshot events reply"
-            }
-            RendererPageReply::DocumentPerformSearch(_) => {
-                "a document perform search registration reply"
-            }
-            RendererPageReply::DocumentSearchResults { .. } => "a document search results reply",
-            RendererPageReply::DocumentSearchResultsDiscarded => {
-                "a document search results discarded reply"
-            }
-            RendererPageReply::DocumentNodeStackTracesEnabled => {
-                "a document node stack traces enabled reply"
-            }
-            RendererPageReply::DocumentNodeStackTrace(_) => "a document node stack trace reply",
-            RendererPageReply::DocumentFrontendNodeBinding(_) => {
-                "a document frontend node binding reply"
-            }
-            RendererPageReply::DocumentBidiNodeBinding(_) => "a document BiDi node binding reply",
-            RendererPageReply::DocumentBidiNodeSharedId(_) => {
-                "a document BiDi node shared id reply"
-            }
-            RendererPageReply::DocumentBidiNodeBindingRegistered => {
-                "a document BiDi node binding registered reply"
-            }
-            RendererPageReply::OptionalStyleSheetPayload(_) => "an optional stylesheet payload",
-            RendererPageReply::StyleSheetInventory(_) => "stylesheet inventory update",
             RendererPageReply::RuntimeRemoteObjectResolution(_) => {
                 "a runtime remote object resolution reply"
             }
             RendererPageReply::BlobUuid(_) => "a Blob UUID reply",
             RendererPageReply::OptionalBlobBytes(_) => "optional Blob bytes",
-            RendererPageReply::DocumentFrontendNodeIds(_) => {
-                "a document frontend node ids resolution reply"
-            }
             RendererPageReply::OptionalDocumentNodeReference(_) => {
                 "an optional document node reference reply"
             }
             RendererPageReply::OptionalClientRect(_) => "a client rect reply",
-            RendererPageReply::OptionalDocumentNodeClientRect(_) => {
-                "an optional document node client rect reply"
-            }
-            RendererPageReply::OptionalDocumentNodeGeometry(_) => {
-                "an optional document node geometry reply"
-            }
-            RendererPageReply::OptionalDocumentHitTest(_) => "an optional document hit-test reply",
-            RendererPageReply::ScrollIntoViewResult(_) => "a scroll-into-view reply",
-            RendererPageReply::ComputedStyleProperties(_) => "computed style properties",
-            RendererPageReply::DomAttributeMutationOutcome(_) => {
-                "a DOM attribute mutation outcome reply"
-            }
-            RendererPageReply::DomEditOutcome(_) => "a DOM edit outcome reply",
-            RendererPageReply::DomFocusOutcome(_) => "a DOM focus outcome reply",
-            RendererPageReply::AutofillTriggerOutcome(_) => "an Autofill trigger outcome reply",
             RendererPageReply::DocumentStorageKey(_) => "a document storage key reply",
-            RendererPageReply::ResourceTextSearchOutcome(_) => {
-                "a resource text search outcome reply"
-            }
-            RendererPageReply::NetworkResourceLoadPreparation(_) => {
-                "a network resource load preparation"
-            }
             RendererPageReply::AppManifestLoadPreparation(_) => "an app manifest load preparation",
             RendererPageReply::ChildFrameTreeSnapshots(_) => "child frame tree snapshots",
             RendererPageReply::OptionalString(_) => "an optional string reply",
@@ -498,15 +326,9 @@ impl Page {
             RendererPageReply::LayoutMetrics(_) => "a layout metrics reply",
             RendererPageReply::PrintToPdf(_) => "a print to PDF reply",
             RendererPageReply::CaptureScreenshot(_) => "a capture screenshot reply",
-            RendererPageReply::CaptureScreencastFrame(_) => "a capture screencast frame reply",
             RendererPageReply::Unit => "a unit reply",
-            RendererPageReply::NativeCommandReady(_) => "an unsettled native frontend reply",
-            RendererPageReply::NativeCommandPublished => "a published native frontend reply",
-            // Another dependency may enable the renderer's ACE feature without
-            // enabling this crate's feature. Keep normal replies exhaustive when
-            // ACE is enabled here, and tolerate that mixed configuration otherwise.
-            #[cfg(not(feature = "ace-protocol"))]
-            #[allow(unreachable_patterns)]
+            // Backend capabilities may be enabled by another dependency while
+            // the corresponding facade feature remains disabled.
             _ => "an unknown renderer reply",
         }
     }
@@ -533,111 +355,5 @@ impl PendingPageCommand {
             output,
             renderer_agent_attachment_id: self.renderer_agent_attachment_id,
         })
-    }
-}
-
-impl PendingRuntimeInspectorCommandDispatch {
-    pub async fn wait(self) -> Result<CompletedRuntimeInspectorCommandDispatch> {
-        match self.kind {
-            PendingRuntimeInspectorCommandDispatchKind::MainIngress(route) => {
-                let renderer_agent_attachment_id = route.ticket().attachment();
-                match route.wait_for_completion().await? {
-                    RendererRuntimeInspectorMainCommandCompletion::Owner(mut output) => {
-                        if let Some(attachment_id) = renderer_agent_attachment_id {
-                            output.bind_renderer_agent_attachment(attachment_id);
-                        }
-                        Ok(CompletedRuntimeInspectorCommandDispatch::Owner(Box::new(
-                            CompletedPageCommand {
-                                output: *output,
-                                renderer_agent_attachment_id,
-                            },
-                        )))
-                    }
-                    RendererRuntimeInspectorMainCommandCompletion::Inspector => {
-                        Ok(CompletedRuntimeInspectorCommandDispatch::Inspector)
-                    }
-                    RendererRuntimeInspectorMainCommandCompletion::InspectorSessionResponse {
-                        predecessor,
-                        response_succeeded,
-                    } => Ok(
-                        CompletedRuntimeInspectorCommandDispatch::InspectorSessionResponse {
-                            predecessor,
-                            response_succeeded,
-                        },
-                    ),
-                    RendererRuntimeInspectorMainCommandCompletion::OwnerSessionResponse {
-                        mut output,
-                        response_succeeded,
-                    } => {
-                        if let Some(attachment_id) = renderer_agent_attachment_id {
-                            output.bind_renderer_agent_attachment(attachment_id);
-                        }
-                        Ok(
-                            CompletedRuntimeInspectorCommandDispatch::OwnerSessionResponse {
-                                completion: Box::new(CompletedPageCommand {
-                                    output: *output,
-                                    renderer_agent_attachment_id,
-                                }),
-                                response_succeeded,
-                            },
-                        )
-                    }
-                    RendererRuntimeInspectorMainCommandCompletion::OwnerSessionErrorSettled(
-                        predecessor,
-                    ) => Ok(
-                        CompletedRuntimeInspectorCommandDispatch::OwnerSessionErrorSettled(
-                            predecessor,
-                        ),
-                    ),
-                    RendererRuntimeInspectorMainCommandCompletion::Page(_) => Err(anyhow::anyhow!(
-                        "a Runtime Inspector command entered nested non-V8 Page dispatch"
-                    )),
-                    RendererRuntimeInspectorMainCommandCompletion::Canceled(message) => {
-                        Err(anyhow::anyhow!(message))
-                    }
-                }
-            }
-            PendingRuntimeInspectorCommandDispatchKind::Io(pending) => {
-                match pending.wait().await? {
-                    CompletedDevToolsIoCommandDispatch::Dispatched => {
-                        Ok(CompletedRuntimeInspectorCommandDispatch::Inspector)
-                    }
-                    CompletedDevToolsIoCommandDispatch::SessionResponse {
-                        predecessor,
-                        response_succeeded,
-                    } => Ok(
-                        CompletedRuntimeInspectorCommandDispatch::InspectorSessionResponse {
-                            predecessor,
-                            response_succeeded,
-                        },
-                    ),
-                }
-            }
-        }
-    }
-}
-
-impl PendingDevToolsIoCommandDispatch {
-    pub async fn wait(self) -> Result<CompletedDevToolsIoCommandDispatch> {
-        match self
-            .route
-            .wait_for_first_dispatch()
-            .await
-            .map_err(anyhow::Error::msg)?
-        {
-            RendererRuntimeInspectorIoCommandClaim::Dispatched => {
-                Ok(CompletedDevToolsIoCommandDispatch::Dispatched)
-            }
-            RendererRuntimeInspectorIoCommandClaim::SessionResponse {
-                predecessor,
-                response_succeeded,
-            } => Ok(CompletedDevToolsIoCommandDispatch::SessionResponse {
-                predecessor,
-                response_succeeded,
-            }),
-            RendererRuntimeInspectorIoCommandClaim::Canceled(message) => {
-                Err(anyhow::anyhow!(message))
-            }
-        }
     }
 }

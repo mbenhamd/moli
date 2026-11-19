@@ -83,10 +83,13 @@ from .groups.target_semantics import run_target_semantics_group
 from .groups.target_lifecycle import run_target_lifecycle_group
 from .groups.tracing import run_raw_tracing_group, run_tracing_group
 from .groups.url_policy import run_url_policy_group
+from .groups.web_security import browser_args as web_security_browser_args, run_web_security_group
+from .groups.web_security_upstream import run_web_security_upstream_group
 from .groups.webgl_viewport import run_webgl_viewport_group
 from .groups.font_face import run_font_face_payload_group
 from .groups.media_error import run_media_error_group
 from .groups.workers import run_workers_group
+from .groups.workers_native import run_native_worker_loading_group
 from .groups.xhr_sync_semantics import run_xhr_sync_semantics_group
 from .helpers import attach_cdp_event_collector
 from .progress import await_with_progress
@@ -374,6 +377,12 @@ PAGE_GROUPS: tuple[SmokeGroup, ...] = (
         run_workers_group,
     ),
     SmokeGroup(
+        "worker-loading",
+        "Worker native request identity, independent abort/body delivery, redirect modes and target/client lifetime.",
+        "page",
+        run_native_worker_loading_group,
+    ),
+    SmokeGroup(
         "websocket",
         "WebSocket runtime and Network.webSocket* event coverage.",
         "page",
@@ -538,6 +547,12 @@ OPTIONAL_EXTERNAL_GROUPS: tuple[SmokeGroup, ...] = (
 
 
 PROCESS_GROUPS: tuple[SmokeGroup, ...] = (
+    SmokeGroup(
+        "web-security",
+        "Pinned desktop Chromium default/disabled web-security network and document contracts.",
+        "process",
+        run_web_security_group,
+    ),
     SmokeGroup("target-lifecycle", "Managed-process endpoint rotation, target churn, FD bounds, and post-close navigation.",
                "process", run_target_lifecycle_group),
 )
@@ -545,7 +560,15 @@ PROCESS_GROUPS: tuple[SmokeGroup, ...] = (
 DEFAULT_GROUPS: tuple[SmokeGroup, ...] = (
     RAW_GROUPS + PAGE_GROUPS + BROWSER_GROUPS + MANAGED_EXTERNAL_GROUPS + PROCESS_GROUPS
 )
-ALL_GROUPS: tuple[SmokeGroup, ...] = DEFAULT_GROUPS + OPTIONAL_EXTERNAL_GROUPS
+OPTIONAL_PROCESS_GROUPS: tuple[SmokeGroup, ...] = (
+    SmokeGroup(
+        "web-security-upstream",
+        "Strict ports of Chromium web-security tests, including unsupported Moli capabilities.",
+        "process",
+        run_web_security_upstream_group,
+    ),
+)
+ALL_GROUPS: tuple[SmokeGroup, ...] = DEFAULT_GROUPS + OPTIONAL_EXTERNAL_GROUPS + OPTIONAL_PROCESS_GROUPS
 DEFAULT_GROUP_NAMES: tuple[str, ...] = tuple(group.name for group in DEFAULT_GROUPS)
 DEFAULT_GROUP_NAME_SET = frozenset(DEFAULT_GROUP_NAMES)
 GROUPS_BY_NAME: dict[str, SmokeGroup] = {group.name: group for group in ALL_GROUPS}
@@ -807,7 +830,9 @@ async def _run_worker(args: argparse.Namespace) -> int:
                 raise RuntimeError(f"invalid MOLI_CDP_PORT: {port_env}")
             serve = await start_browser(
                 port,
-                extra_args=("--scrollbars",)
+                extra_args=web_security_browser_args(fixture.url, False)
+                if selected_group.name in ("web-security", "web-security-upstream")
+                else ("--scrollbars",)
                 if args.browser != "chromium" and selected_group.name in {"classic-scrollbar", "iframe-input"}
                 else (),
             )

@@ -1,0 +1,48 @@
+use super::IndexedDbError;
+
+fn backend_error_name(error: &IndexedDbError) -> &'static str {
+    match error {
+        IndexedDbError::Constraint(_) => "ConstraintError",
+        IndexedDbError::Data(_) => "DataError",
+        IndexedDbError::InvalidAccess(_) => "InvalidAccessError",
+        IndexedDbError::InvalidState(message)
+            if message == "StorageBucket IndexedDB bucket is no longer current" =>
+        {
+            "UnknownError"
+        }
+        IndexedDbError::InvalidState(_) => "InvalidStateError",
+        IndexedDbError::NotFound(_) => "NotFoundError",
+        IndexedDbError::QuotaExceeded { .. } => "QuotaExceededError",
+        IndexedDbError::ReadOnly(_) => "ReadOnlyError",
+        IndexedDbError::Syntax(_) => "SyntaxError",
+        IndexedDbError::TransactionInactive(_) => "TransactionInactiveError",
+        IndexedDbError::Version(_) => "VersionError",
+        IndexedDbError::Io(_)
+        | IndexedDbError::Resource(_)
+        | IndexedDbError::Corruption(_)
+        | IndexedDbError::Serialization(_) => "UnknownError",
+    }
+}
+
+pub fn dom_exception_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    message: &str,
+    name: &str,
+) -> v8::Local<'s, v8::Value> {
+    crate::dom_exception::new_dom_exception_value(scope, message, name)
+}
+
+pub fn request_error_object<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    error: &IndexedDbError,
+) -> v8::Local<'s, v8::Value> {
+    if let IndexedDbError::QuotaExceeded { quota, requested } = error {
+        return crate::dom_exception::new_quota_exceeded_error_value(
+            scope,
+            &error.to_string(),
+            Some(*quota as f64),
+            Some(*requested as f64),
+        );
+    }
+    dom_exception_value(scope, &error.to_string(), backend_error_name(error))
+}

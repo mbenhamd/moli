@@ -1,7 +1,7 @@
 use crate::content_security_policy::ContentSecurityPolicy;
 
 use super::{OwnerDispatchScope, PageScriptHost};
-use crate::network_host::controlled_xhr::{ControlledXhrContext, XhrInterceptionRoute};
+use crate::network_host::controlled_resource::{ControlledXhrContext, XhrInterceptionRoute};
 use crate::types::SubresourceResourceType;
 use crate::{
     content_security_policy::{
@@ -141,6 +141,23 @@ impl PageScriptHost {
     ) -> &crate::document_runtime::DocumentPolicyContainer {
         // SAFETY: PageScriptHost is owned by the ScriptVm that owns this DocumentRuntime.
         unsafe { &*self.document_runtime }.document_policy_container()
+    }
+
+    pub(crate) fn document_policy_container_for_inheritance(
+        &self,
+        owner: OwnerDispatchScope,
+    ) -> Option<crate::document_runtime::DocumentPolicyContainer> {
+        let snapshot = self.owner_document_policy_snapshot(owner)?;
+        let mut policy = snapshot.policy_container;
+        if let Some(document) = snapshot.document_handle {
+            // Capture the creator's effective meta policy at Document creation.
+            // Subsequent mutations of the creator must not change the child.
+            policy.referrer_policy =
+                crate::context_bootstrap::document_referrer_policy_for_native_document(
+                    self, document,
+                );
+        }
+        Some(policy)
     }
 
     pub(crate) fn document_connect_policy_snapshot_for_owner(
@@ -805,6 +822,7 @@ impl PageScriptHost {
         }
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn document_connect_csp_allows_for_owner(
         &self,
         owner: OwnerDispatchScope,

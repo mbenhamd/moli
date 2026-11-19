@@ -333,9 +333,9 @@ impl SiteHistoryTrack {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CookieSiteHistory {
-    /// None until a policy or a followed redirect establishes a site limit.
-    /// These limits never include a restriction from the HTTP method.
-    limits: Option<NetworkSiteContext>,
+    /// Once policy or a followed redirect establishes a limit, the current
+    /// method-independent site relation also caps future recomputations.
+    site_is_limit: bool,
     context: SiteHistoryTrack,
     schemeful_context: SiteHistoryTrack,
 }
@@ -343,7 +343,7 @@ struct CookieSiteHistory {
 impl CookieSiteHistory {
     fn initial() -> Self {
         Self {
-            limits: None,
+            site_is_limit: false,
             context: SiteHistoryTrack::initial(),
             schemeful_context: SiteHistoryTrack::initial(),
         }
@@ -380,6 +380,19 @@ impl NetworkCookieRequestContext {
 
     pub fn top_level_navigation(method: &str) -> Self {
         Self::new(method, NetworkCookieRequestType::TopLevelNavigation)
+    }
+
+    /// Builds the initial cookie context for a top-level navigation.
+    pub fn top_level_navigation_for_request(
+        request_url: &Url,
+        method: &str,
+        initiator_url: Option<&Url>,
+    ) -> Self {
+        let context = Self::top_level_navigation(method);
+        match initiator_url {
+            Some(initiator) => context.with_initiator_url(request_url, initiator),
+            None => context,
+        }
     }
 
     /// Computes this hop's result from the site relation and current method.
@@ -444,8 +457,8 @@ impl NetworkCookieRequestContext {
     }
 
     pub fn with_cross_site_context(mut self) -> Self {
-        self.history.limits = Some(NetworkSiteContext::cross_site());
         self.replace_site(NetworkSiteContext::cross_site());
+        self.history.site_is_limit = true;
         self
     }
 
@@ -535,9 +548,10 @@ impl NetworkCookieRequestContext {
     }
 
     fn replace_site(&mut self, site: NetworkSiteContext) {
-        let site = match self.history.limits {
-            Some(limit) => limit.restricted_to(site),
-            None => site,
+        let site = if self.history.site_is_limit {
+            self.site.restricted_to(site)
+        } else {
+            site
         };
         // Leaving Lax closes the method-dependent classification of that
         // historical transition. A later method cannot rewrite a real Cross.
@@ -560,9 +574,6 @@ impl NetworkCookieRequestContext {
                 .downgrade_type;
         }
         self.site = site;
-        if self.history.limits.is_some() {
-            self.history.limits = Some(site);
-        }
     }
 
     fn site_context_for_request(&self, request_url: &Url) -> NetworkSiteContext {
@@ -785,28 +796,6 @@ fn normalized_network_same_site_scheme(scheme: &str) -> &str {
     }
 }
 
-/// Classifies whether a SameSite context transition became less permissive.
-pub fn site_context_downgrade_type(
-    previous: NetworkSameSiteContext,
-    current: NetworkSameSiteContext,
-) -> Option<NetworkSameSiteContextDowngradeType> {
-    match (
-        same_site_inclusion_class(previous),
-        same_site_inclusion_class(current),
-    ) {
-        (NetworkSameSiteInclusionClass::Strict, NetworkSameSiteInclusionClass::Lax) => {
-            Some(NetworkSameSiteContextDowngradeType::StrictToLax)
-        }
-        (NetworkSameSiteInclusionClass::Strict, NetworkSameSiteInclusionClass::Cross) => {
-            Some(NetworkSameSiteContextDowngradeType::StrictToCross)
-        }
-        (NetworkSameSiteInclusionClass::Lax, NetworkSameSiteInclusionClass::Cross) => {
-            Some(NetworkSameSiteContextDowngradeType::LaxToCross)
-        }
-        _ => None,
-    }
-}
-
 fn approximate_is_same_site(request_url: &Url, initiator_url: &Url, schemeful: bool) -> bool {
     let Some(request_host) = request_url.host_str() else {
         return false;
@@ -837,7 +826,7 @@ fn redirect_type_for_track(
 }
 
 /// Computes schemeless and schemeful redirect diagnostics for a request chain.
-pub fn redirect_types_for_request(
+fn redirect_types_for_request(
     original_request_url: &Url,
     current_request_url: &Url,
     initiator_url: Option<&Url>,
@@ -955,10 +944,7 @@ pub fn advance_cookie_request_context(
 ) -> NetworkCookieRequestContext {
     previous_context.set_request_method(current_request_method);
     let previous_site = previous_context.site;
-    previous_context.history.limits = Some(match previous_context.history.limits {
-        Some(limit) => limit.restricted_to(previous_site),
-        None => previous_site,
-    });
+    previous_context.history.site_is_limit = true;
     let mut context = previous_context.recompute_site_context_for_request(current_request_url);
     let redirect_types = redirect_types_for_request(
         original_request_url,
@@ -979,23 +965,6 @@ pub fn advance_cookie_request_context(
         redirect_types.schemeful_context.redirect_type,
     );
     context
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NetworkSameSiteInclusionClass {
-    Strict,
-    Lax,
-    Cross,
-}
-
-fn same_site_inclusion_class(context: NetworkSameSiteContext) -> NetworkSameSiteInclusionClass {
-    match context {
-        NetworkSameSiteContext::SameSiteStrict => NetworkSameSiteInclusionClass::Strict,
-        NetworkSameSiteContext::SameSiteLax => NetworkSameSiteInclusionClass::Lax,
-        NetworkSameSiteContext::SameSiteLaxMethodUnsafe | NetworkSameSiteContext::CrossSite => {
-            NetworkSameSiteInclusionClass::Cross
-        }
-    }
 }
 
 /// Converts Moli SameSite metadata into the canonical store type.
@@ -1138,9 +1107,10 @@ mod tests {
             .with_initiator_url(&original, &original);
         let mut context = advance_cookie_request_context(initial, &original, &next, "POST");
         let history = context.history;
+        assert!(history.site_is_limit);
         assert_eq!(
-            history.limits,
-            Some(NetworkSiteContext::new(SameSiteLax, SameSiteLax))
+            context.site,
+            NetworkSiteContext::new(SameSiteLax, SameSiteLax)
         );
         for (method, site, downgrade, http_method) in [
             (
@@ -1195,11 +1165,8 @@ mod tests {
                 advance_cookie_request_context(initial, &original, &next, initial_method)
                     .with_site_for_cookies_url(&next, &parse("about:blank"));
             context.set_request_method(method);
+            assert!(context.history.site_is_limit);
             assert_eq!(context.site_context(), NetworkSiteContext::cross_site());
-            assert_eq!(
-                context.history.limits,
-                Some(NetworkSiteContext::cross_site())
-            );
             let metadata = context.site_context_metadata();
             for track in [metadata.context, metadata.schemeful_context] {
                 assert_eq!(track.downgrade_type, Some(expected_downgrade));

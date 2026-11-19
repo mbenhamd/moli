@@ -5,23 +5,23 @@ use super::{
         font_face_set_entries_callback, font_face_set_for_each_callback,
         font_face_set_has_callback, font_face_set_keys_callback, font_face_set_load_callback,
         font_face_set_values_callback, install_font_face_set_event_handler_accessors,
-        install_font_face_set_load_event_template_accessors,
         install_font_face_set_template_accessors, install_font_face_template_accessors,
     },
     specs::ConstructorSpec,
 };
 use crate::web_api_interfaces;
+use moli_webapi::events::subclasses::font::install_font_face_set_load_event_template_accessors;
 use moli_webapi_declare::WebApiFunctionTemplate;
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::FontFace, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::FontFace, enumerable)]
 struct FontFaceTemplateMethodsDeclaration {
     #[webapi(method, length = 0, callback = font_face_load_callback, returns_promise)]
     load: (),
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::FontFaceSet, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::FontFaceSet, enumerable)]
 struct FontFaceSetTemplateMethodsDeclaration {
     #[webapi(method, length = 1, callback = font_face_set_add_callback)]
     add: (),

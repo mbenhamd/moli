@@ -20,13 +20,14 @@ CANCEL_WORKFLOW = WORKFLOW.with_name("cancel-pr-ci.yml")
 
 
 class CiExecutionPolicyTests(unittest.TestCase):
-    def chromium_step(self) -> str:
+    def chromium_step(self, name: str = "Run full CDP smoke on Chromium") -> str:
         step = WORKFLOW.read_text().split(
-            "      - name: Run full CDP smoke on Chromium\n", 1
+            "      - name: " + name + "\n", 1
         )[1].split("\n      - ", 1)[0]
         return textwrap.dedent(step.split("        run: |\n", 1)[1])
 
-    def run_chromium_step(self, groups: list[str], *, enumeration_exit: int = 0):
+    def run_chromium_step(self, groups: list[str], *, enumeration_exit: int = 0,
+                         step: str = "Run full CDP smoke on Chromium"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             invocation = root / "invocation.json"
@@ -47,7 +48,7 @@ class CiExecutionPolicyTests(unittest.TestCase):
                 """))
             uv.chmod(0o755)
             result = subprocess.run(
-                ["bash", "-euo", "pipefail", "-c", self.chromium_step()],
+                ["bash", "-euo", "pipefail", "-c", self.chromium_step(step)],
                 env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
                      "CHROMIUM_CURRENT_ORACLE_BIN": "/tmp/oracle with spaces=156/chrome",
                      "TEST_GROUPS": " ".join(groups),
@@ -59,7 +60,8 @@ class CiExecutionPolicyTests(unittest.TestCase):
 
     def test_chromium_overrides_follow_the_checked_out_group_registry(self) -> None:
         current = [group["name"] for group in group_listing()]
-        for groups in (current, [name for name in current if name != "fetch-headers"], ["network"]):
+        for groups in (current, [name for name in current if name != "fetch-headers"],
+                       [name for name in current if name != "worker-loading"], ["network"]):
             with self.subTest(groups=groups):
                 result, invocation = self.run_chromium_step(groups)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -70,7 +72,7 @@ class CiExecutionPolicyTests(unittest.TestCase):
                     args = parse_args(invocation)
                 self.assertEqual(args.chromium_bin_for_group, {
                     name: "/tmp/oracle with spaces=156/chrome"
-                    for name in ("dom-input", "fetch-headers") if name in groups
+                    for name in ("dom-input", "fetch-headers", "worker-loading", "web-security") if name in groups
                 })
                 self.assertEqual(args.group, [])
                 self.assertTrue(args.strict_full_suite)
@@ -78,6 +80,22 @@ class CiExecutionPolicyTests(unittest.TestCase):
 
     def test_chromium_registry_failure_does_not_start_a_partial_suite(self) -> None:
         result, invocation = self.run_chromium_step(["dom-input"], enumeration_exit=42)
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertIsNone(invocation)
+
+    def test_upstream_conformance_runs_on_the_pinned_binary_without_retrying_differences(self) -> None:
+        step = "Run upstream web-security contracts on Chromium"
+        result, invocation = self.run_chromium_step(["web-security-upstream"], step=step)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNotNone(invocation)
+        args = parse_args(invocation)
+        self.assertEqual(args.group, ["web-security-upstream"])
+        self.assertEqual(args.chromium_bin, "/tmp/oracle with spaces=156/chrome")
+        self.assertEqual((args.repeat, args.retries, args.jobs), (2, 0, 4))
+        result, invocation = self.run_chromium_step(["network"], step=step)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNone(invocation)
+        result, invocation = self.run_chromium_step([], enumeration_exit=42, step=step)
         self.assertEqual(result.returncode, 42, result.stderr)
         self.assertIsNone(invocation)
 

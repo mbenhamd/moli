@@ -1,6 +1,6 @@
 use super::*;
 use crate::context_bootstrap::navigator_runtime::{
-    SERVICE_WORKER_OWNER_TOKEN_SLOT, service_worker_container_for_window,
+    SERVICE_WORKER_OWNER_TOKEN_SLOT, service_worker_container_for_client,
     service_worker_owner_token_value,
 };
 use crate::document_runtime::DomHandle;
@@ -47,8 +47,7 @@ struct ServiceWorkerRegistrationObjectDeclaration<'scope> {
         setter = simple_event_target_handler_setter_callback,
         data = v8str(scope, "onupdatefound"),
         setter_data = v8str(scope, "onupdatefound"),
-        enumerable,
-        receiver = web_api_interfaces::ServiceWorkerRegistration::is_instance
+        enumerable
     )]
     onupdatefound: (),
 
@@ -73,7 +72,6 @@ struct ServiceWorkerRegistrationObjectDeclaration<'scope> {
     #[webapi(
         method = "showNotification",
         returns_promise,
-        receiver = web_api_interfaces::ServiceWorkerRegistration::is_instance,
         callback = service_worker_registration_show_notification_callback,
         length = 1
     )]
@@ -82,7 +80,6 @@ struct ServiceWorkerRegistrationObjectDeclaration<'scope> {
     #[webapi(
         method = "getNotifications",
         returns_promise,
-        receiver = web_api_interfaces::ServiceWorkerRegistration::is_instance,
         callback = service_worker_registration_get_notifications_callback,
         length = 0
     )]
@@ -109,16 +106,6 @@ struct ServiceWorkerNavigationPreloadStateDeclaration {
 
     #[webapi(data_property = "headerValue", enumerable)]
     header_value: String,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::PushSubscriptionOptions, prototype = "Object")]
-struct ServiceWorkerPushSubscriptionOptionsDeclaration<'scope> {
-    #[webapi(data_property = "userVisibleOnly", readonly)]
-    user_visible_only: bool,
-
-    #[webapi(data_property = "applicationServerKey", readonly)]
-    application_server_key: v8::Local<'scope, v8::Value>,
 }
 
 #[derive(WebApiObject)]
@@ -253,8 +240,7 @@ struct ServiceWorkerObjectDeclaration {
         setter = simple_event_target_handler_setter_callback,
         data = v8str(scope, "onstatechange"),
         setter_data = v8str(scope, "onstatechange"),
-        enumerable,
-        receiver = web_api_interfaces::ServiceWorker::is_instance
+        enumerable
     )]
     onstatechange: (),
     #[webapi(
@@ -263,8 +249,7 @@ struct ServiceWorkerObjectDeclaration {
         setter = simple_event_target_handler_setter_callback,
         data = v8str(scope, "onerror"),
         setter_data = v8str(scope, "onerror"),
-        enumerable,
-        receiver = web_api_interfaces::ServiceWorker::is_instance
+        enumerable
     )]
     onerror: (),
 
@@ -820,7 +805,7 @@ fn service_worker_container_for_owner<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     owner: crate::native_bridge::OwnerDispatchScope,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let window = match owner {
+    let client = match owner {
         crate::native_bridge::OwnerDispatchScope::Top => scope.get_current_context().global(scope),
         crate::native_bridge::OwnerDispatchScope::Child(handle) => {
             let host_ptr = context_host_ptr_from_global_bridge(scope)?;
@@ -831,14 +816,7 @@ fn service_worker_container_for_owner<'s>(
             unsafe { &*host_ptr }.lightweight_popup_window(scope, popup_id)?
         }
     };
-    service_worker_container_from_window(scope, window)
-}
-
-fn service_worker_container_from_window<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    window: v8::Local<'s, v8::Object>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    service_worker_container_for_window(scope, window)
+    service_worker_container_for_client(scope, client)
 }
 
 fn service_worker_container_registration_cache<'s>(
@@ -2465,12 +2443,11 @@ fn build_service_worker_push_subscription_object<'s>(
     scope_url: &url::Url,
     snapshot: &crate::service_worker_runtime::ServiceWorkerPushSubscriptionSnapshot,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let options = ServiceWorkerPushSubscriptionOptionsDeclaration::new(
+    let options = moli_webapi::push_values::new_subscription_options(
+        scope,
         snapshot.user_visible_only,
         v8::null(scope).into(),
-    )
-    .bind(scope)
-    .ok()?;
+    )?;
     let subscription = ServiceWorkerPushSubscriptionDeclaration {
         endpoint: snapshot.endpoint.clone(),
         expiration_time: v8::null(scope).into(),

@@ -191,6 +191,7 @@ fn read_target_scroll_into_view_geometry(
     Ok(Some(geometry))
 }
 
+#[cfg(feature = "devtools")]
 pub(crate) fn scroll_node_into_view_at_center(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,

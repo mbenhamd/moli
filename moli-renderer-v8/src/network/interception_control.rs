@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Result, anyhow};
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 use url::Url;
 
-use crate::{
-    RendererPageCommand, RendererSyntheticResponseBody, types::SubresourceRequestInitiatorType,
-};
+use crate::RendererSyntheticResponseBody;
+use crate::types::SubresourceRequestInitiatorType;
+
+#[cfg(feature = "devtools")]
+mod devtools;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InterceptionPhase {
@@ -21,6 +23,7 @@ pub(crate) enum InterceptionPhase {
 #[derive(Clone, Debug)]
 pub struct ResourceInterceptionPause {
     internal_id: u64,
+    worker_network: bool,
     phase: InterceptionPhase,
     target_policy: crate::network::PageNetworkPolicy,
     request_redirect: Option<Arc<moli_fetch::RedirectInfo>>,
@@ -78,6 +81,7 @@ impl ResourceInterceptionPause {
         (
             Self {
                 internal_id,
+                worker_network: false,
                 phase,
                 target_policy,
                 request_redirect: None,
@@ -97,6 +101,13 @@ impl ResourceInterceptionPause {
         self
     }
 
+    pub(crate) fn with_worker_network(mut self, worker: bool) -> Self {
+        self.worker_network = worker;
+        self
+    }
+    pub fn observes_worker_network(&self) -> bool {
+        self.worker_network
+    }
     pub fn request_redirect(&self) -> Option<&moli_fetch::RedirectInfo> {
         self.request_redirect.as_deref()
     }
@@ -122,136 +133,46 @@ impl ResourceInterceptionPause {
         self.response_body.as_ref()
     }
 
-    /// Releasing an interceptor changes native eligibility immediately. It
-    /// must not enqueue a Page policy turn behind another session's pause.
-    pub fn set_target_interception(&self, classes: crate::SubresourceInterceptionClasses) {
-        self.target_policy.set_subresource_interception(classes);
+    /// Resume an unobserved native load without constructing a protocol command.
+    pub(crate) fn resume_unobserved(&self) -> bool {
+        let decision = match self.phase {
+            InterceptionPhase::Request => ResourceInterceptionDecision::ContinueRequest {
+                url: None,
+                method: None,
+                body: None,
+                headers: None,
+                intercept_response: false,
+                handle_auth_requests: false,
+            },
+            InterceptionPhase::Response => ResourceInterceptionDecision::ContinueResponse {
+                status: None,
+                headers: None,
+            },
+            InterceptionPhase::Auth => ResourceInterceptionDecision::CancelAuth,
+        };
+        self.send_decision(decision).is_ok()
     }
 
-    /// Adapter for the existing Fetch command surface. Only the exhaustive
-    /// native network command subset is accepted; other Page work stays queued.
-    pub fn dispatch(&self, command: RendererPageCommand) -> Result<ResourceInterceptionReply> {
-        use RendererPageCommand as C;
-        use ResourceInterceptionDecision as D;
-        use ResourceInterceptionReply as R;
-        let (id, phase, decision, reply) = match command {
-            C::ContinuePendingSubresourceFetch {
-                internal_id,
-                url,
-                method,
-                body,
-                headers,
-                intercept_response,
-                handle_auth_requests,
-            } => (
-                internal_id,
-                InterceptionPhase::Request,
-                D::ContinueRequest {
-                    url,
-                    method,
-                    body,
-                    headers,
-                    intercept_response,
-                    handle_auth_requests,
-                },
-                R::Started,
-            ),
-            C::FailPendingSubresourceFetch {
-                internal_id,
-                error_text,
-            } => (
-                internal_id,
-                InterceptionPhase::Request,
-                D::Fail(error_text),
-                R::Unit,
-            ),
-            C::FulfillPendingSubresourceFetch {
-                internal_id,
-                request_overrides,
-                response_code,
-                response_headers,
-                response_body,
-            } => (
-                internal_id,
-                InterceptionPhase::Request,
-                D::Fulfill {
-                    request_overrides,
-                    status: response_code,
-                    headers: response_headers,
-                    body: response_body,
-                },
-                R::Unit,
-            ),
-            C::ContinuePendingSubresourceResponse {
-                internal_id,
-                response_code,
-                response_headers,
-            } => (
-                internal_id,
-                InterceptionPhase::Response,
-                D::ContinueResponse {
-                    status: response_code,
-                    headers: response_headers,
-                },
-                R::Unit,
-            ),
-            C::FailPendingSubresourceResponse {
-                internal_id,
-                error_text,
-            } => (
-                internal_id,
-                InterceptionPhase::Response,
-                D::Fail(error_text),
-                R::Unit,
-            ),
-            C::FulfillPendingSubresourceResponse {
-                internal_id,
-                response_code,
-                response_headers,
-                response_body,
-            } => (
-                internal_id,
-                InterceptionPhase::Response,
-                D::Fulfill {
-                    request_overrides: None,
-                    status: response_code,
-                    headers: response_headers,
-                    body: response_body,
-                },
-                R::Unit,
-            ),
-            C::ContinuePendingSubresourceAuth { internal_id, auth } => (
-                internal_id,
-                InterceptionPhase::Auth,
-                D::Auth(auth),
-                R::Started,
-            ),
-            C::CancelPendingSubresourceAuth { internal_id } => {
-                (internal_id, InterceptionPhase::Auth, D::CancelAuth, R::Unit)
-            }
-            C::FailPendingSubresourceAuth {
-                internal_id,
-                error_text,
-            } => (
-                internal_id,
-                InterceptionPhase::Auth,
-                D::Fail(error_text),
-                R::Unit,
-            ),
-            _ => bail!("command cannot run through a native network pause"),
-        };
-        ensure!(
-            id == self.internal_id && phase == self.phase,
-            "network pause identity or phase does not match"
-        );
-        let tx = self
+    fn send_decision(&self, decision: ResourceInterceptionDecision) -> Result<()> {
+        let sender = self
             .sender
             .lock()
             .take()
             .ok_or_else(|| anyhow!("network pause was already resumed"))?;
-        tx.send(decision)
-            .map_err(|_| anyhow!("network load is no longer waiting"))?;
-        Ok(reply)
+        sender
+            .send(decision)
+            .map_err(|_| anyhow!("network load is no longer waiting"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn send_test_decision(
+        &self,
+        internal_id: u64,
+        phase: InterceptionPhase,
+        decision: ResourceInterceptionDecision,
+    ) {
+        assert_eq!((self.internal_id, self.phase), (internal_id, phase));
+        self.send_decision(decision).expect("native test decision");
     }
 }
 
@@ -272,8 +193,52 @@ pub(crate) fn next_subresource_network_handle() -> crate::types::SubresourceNetw
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "devtools")]
+    use crate::{RendererDevToolsPageCommand, RendererPageCommand};
 
     #[tokio::test]
+    async fn unobserved_pauses_resume_natively_and_only_once() {
+        for phase in [
+            InterceptionPhase::Request,
+            InterceptionPhase::Response,
+            InterceptionPhase::Auth,
+        ] {
+            let (pause, receiver) = ResourceInterceptionPause::new(
+                7,
+                phase,
+                crate::network::PageNetworkPolicy::default(),
+            );
+            let clone = pause.clone();
+            assert!(pause.resume_unobserved());
+            assert!(!clone.resume_unobserved());
+            assert!(matches!(
+                (phase, receiver.await.unwrap()),
+                (
+                    InterceptionPhase::Request,
+                    ResourceInterceptionDecision::ContinueRequest {
+                        url: None,
+                        method: None,
+                        body: None,
+                        headers: None,
+                        intercept_response: false,
+                        handle_auth_requests: false,
+                    }
+                ) | (
+                    InterceptionPhase::Response,
+                    ResourceInterceptionDecision::ContinueResponse {
+                        status: None,
+                        headers: None,
+                    }
+                ) | (
+                    InterceptionPhase::Auth,
+                    ResourceInterceptionDecision::CancelAuth
+                )
+            ));
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "devtools")]
     async fn decisions_are_native_one_shot_and_phase_scoped() {
         let (pause, rx) = ResourceInterceptionPause::new(
             7,
@@ -282,35 +247,43 @@ mod tests {
         );
         assert!(
             pause
-                .dispatch(RendererPageCommand::FailPendingSubresourceResponse {
-                    internal_id: 7,
-                    error_text: "wrong phase".into(),
-                })
+                .dispatch(RendererPageCommand::DevTools(
+                    RendererDevToolsPageCommand::FailPendingSubresourceResponse {
+                        internal_id: 7,
+                        error_text: "wrong phase".into(),
+                    }
+                ))
                 .is_err()
         );
         assert!(
             pause
-                .dispatch(RendererPageCommand::FailPendingSubresourceFetch {
-                    internal_id: 8,
-                    error_text: "wrong request".into(),
-                })
+                .dispatch(RendererPageCommand::DevTools(
+                    RendererDevToolsPageCommand::FailPendingSubresourceFetch {
+                        internal_id: 8,
+                        error_text: "wrong request".into(),
+                    }
+                ))
                 .is_err()
         );
         pause
-            .dispatch(RendererPageCommand::FailPendingSubresourceFetch {
-                internal_id: 7,
-                error_text: "blocked".into(),
-            })
+            .dispatch(RendererPageCommand::DevTools(
+                RendererDevToolsPageCommand::FailPendingSubresourceFetch {
+                    internal_id: 7,
+                    error_text: "blocked".into(),
+                },
+            ))
             .unwrap();
         assert!(
             matches!(rx.await.unwrap(), ResourceInterceptionDecision::Fail(reason) if reason == "blocked")
         );
         assert!(
             pause
-                .dispatch(RendererPageCommand::FailPendingSubresourceFetch {
-                    internal_id: 7,
-                    error_text: "late".into(),
-                })
+                .dispatch(RendererPageCommand::DevTools(
+                    RendererDevToolsPageCommand::FailPendingSubresourceFetch {
+                        internal_id: 7,
+                        error_text: "late".into(),
+                    }
+                ))
                 .is_err()
         );
     }
