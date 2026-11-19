@@ -93,6 +93,9 @@ pub(super) struct StyleDocumentState {
     /// How much of `visual_input_generation` cannot change layout.
     paint_only_visual_inputs: Cell<u64>,
     pub(super) lazy_invalidation_roots: LazyStyleInvalidationRoots,
+    /// The roots of the subtrees whose styles changed since the last frame's
+    /// style update, which runs their style change events.
+    transition_style_roots: RefCell<indexmap::IndexSet<DomHandle>>,
     #[cfg(debug_assertions)]
     completed_style_observation: RefCell<Option<CompletedStyleObservation>>,
     #[cfg(all(test, debug_assertions))]
@@ -120,6 +123,7 @@ impl StyleDocumentState {
             visual_input_generation: Cell::new(0),
             paint_only_visual_inputs: Cell::new(0),
             lazy_invalidation_roots: LazyStyleInvalidationRoots::default(),
+            transition_style_roots: RefCell::default(),
             #[cfg(debug_assertions)]
             completed_style_observation: RefCell::new(None),
             #[cfg(all(test, debug_assertions))]
@@ -246,6 +250,22 @@ impl StyleDocumentState {
     #[cfg(all(test, debug_assertions))]
     pub(super) fn completed_style_observation_stability_check_count(&self) -> u64 {
         self.completed_style_observation_stability_checks.get()
+    }
+
+    /// Notes subtrees whose styles changed, for the next frame's style
+    /// update, which takes them all.
+    pub(super) fn note_transition_style_roots(&self, roots: impl IntoIterator<Item = DomHandle>) {
+        self.transition_style_roots.borrow_mut().extend(roots);
+    }
+
+    pub(super) fn has_transition_style_roots(&self) -> bool {
+        !self.transition_style_roots.borrow().is_empty()
+    }
+
+    pub(super) fn take_transition_style_roots(&self) -> Vec<DomHandle> {
+        std::mem::take(&mut *self.transition_style_roots.borrow_mut())
+            .into_iter()
+            .collect()
     }
 
     pub(super) fn clear_retained_style_system(&self) {

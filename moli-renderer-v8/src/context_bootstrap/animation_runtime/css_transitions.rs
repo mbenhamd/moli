@@ -316,6 +316,11 @@ pub(crate) fn queue_css_transition_task_if_due(scope: &mut v8::PinScope<'_, '_>)
         return;
     };
     let host = unsafe { &mut *host_ptr };
+    // A queued animation frame runs the transitions' frame work and queues
+    // the task after it.
+    if host.has_pending_animation_frame() {
+        return;
+    }
     let engine = host.style_engine_ref();
     let Some(delay_ms) = engine.css_transition_task_delay_ms() else {
         return;
@@ -420,6 +425,14 @@ pub(crate) fn end_css_transition_animation_frame(host: &PageScriptHost) {
     if !engine.css_transition_animation_frame_open() {
         return;
     }
+    // Later callbacks of the same frame still run first: the style update
+    // follows the frame's last callback.
+    if engine
+        .css_transition_frame_timestamp()
+        .is_some_and(|timestamp| host.has_pending_animation_frame_at(timestamp))
+    {
+        return;
+    }
     update_css_transition_styles(host);
     engine.note_css_transition_style_update();
     engine.end_css_transition_animation_frame();
@@ -431,11 +444,23 @@ pub(crate) fn end_css_transition_animation_frame(host: &PageScriptHost) {
 /// rendering.
 pub(crate) fn update_css_transition_styles(host: &PageScriptHost) {
     let engine = host.style_engine_ref();
-    let targets = engine.css_transition_style_update_targets(host.dom_host());
-    if targets.is_empty() {
+    let dom = host.dom_host();
+    // The frame's DOM changes become invalidation roots before the update
+    // takes them, so a node inserted during this frame is styled now.
+    host.drain_pending_style_invalidations_for_computed_style_read();
+    let targets = engine.css_transition_style_update_targets(dom);
+    let mut roots = engine.take_css_transition_style_roots();
+    if let Some(document) = engine.take_unstyled_css_transition_document(host.document_handle()) {
+        let mut child = dom.first_child(document);
+        while let Some(current) = child {
+            roots.push(current);
+            child = dom.next_sibling(current);
+        }
+    }
+    if targets.is_empty() && roots.is_empty() {
         return;
     }
-    let dom = host.dom_host();
+    update_changed_subtree_styles(host, roots);
     for handle in targets {
         if dom.is_connected(handle) {
             let _ = crate::native_bridge::element::computed_style_property_for_handle(
@@ -448,6 +473,49 @@ pub(crate) fn update_css_transition_styles(host: &PageScriptHost) {
     for target in engine.css_transition_running_targets() {
         if has_undisplayed_ancestor(host, target) {
             engine.cancel_css_transitions_for_element(dom, target);
+        }
+    }
+}
+
+/// Resolves the styles of the subtrees whose styles changed, as the
+/// rendering update's style recalc does, so their elements have a
+/// before-change style for later style changes. Subtrees that are not
+/// rendered (`display: none`) stay unstyled, as in Chromium. Style only: no
+/// layout runs. One update resolves at most `MAX_ELEMENTS_PER_UPDATE`
+/// elements; the nodes it did not reach carry over to the next frame's
+/// update as roots, so a large insertion is styled over several frames
+/// rather than dropped.
+fn update_changed_subtree_styles(host: &PageScriptHost, roots: Vec<DomHandle>) {
+    const MAX_ELEMENTS_PER_UPDATE: usize = 4096;
+    let dom = host.dom_host();
+    let mut pending = roots
+        .into_iter()
+        .filter(|&root| dom.is_connected(root))
+        .collect::<Vec<_>>();
+    let mut budget = MAX_ELEMENTS_PER_UPDATE;
+    while let Some(handle) = pending.pop() {
+        let Some(node) = dom.node(handle) else {
+            continue;
+        };
+        if node.is_element() {
+            if budget == 0 {
+                pending.push(handle);
+                host.style_engine_ref()
+                    .defer_css_transition_style_roots(dom, pending);
+                return;
+            }
+            budget -= 1;
+            if crate::native_bridge::element::computed_style_property_for_handle(
+                host, handle, "display",
+            ) == "none"
+            {
+                continue;
+            }
+        }
+        let mut child = dom.first_child(handle);
+        while let Some(current) = child {
+            pending.push(current);
+            child = dom.next_sibling(current);
         }
     }
 }

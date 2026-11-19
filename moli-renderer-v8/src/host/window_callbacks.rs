@@ -88,6 +88,14 @@ impl ScheduledWindowWebIdlCallback {
         }
     }
 
+    /// The frame timestamp of an animation-frame callback.
+    pub(super) const fn animation_frame_timestamp(&self) -> Option<f64> {
+        match self.kind {
+            WindowWebIdlCallbackTaskKind::AnimationFrame { timestamp } => Some(timestamp),
+            _ => None,
+        }
+    }
+
     pub(super) const fn is_animation_frame(&self) -> bool {
         matches!(
             self.kind,
@@ -138,9 +146,13 @@ impl ScheduledWindowWebIdlCallback {
             if frame_started {
                 crate::context_bootstrap::run_css_transition_frame(scope, host_ptr, false);
             }
-            unsafe { &*host_ptr }
-                .style_engine_ref()
-                .begin_css_transition_animation_frame();
+            // The frame's callbacks share one style update after the last
+            // of them (HTML "update the rendering": run the animation frame
+            // callbacks, then update style), so it opens once per frame.
+            let engine = unsafe { &*host_ptr }.style_engine_ref();
+            if !engine.css_transition_animation_frame_open() {
+                engine.begin_css_transition_animation_frame(timestamp);
+            }
             if self.cancelled.get() {
                 return WebIdlCallbackExecutionOutcome::Unavailable;
             }

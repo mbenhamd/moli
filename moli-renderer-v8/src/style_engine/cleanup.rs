@@ -262,6 +262,8 @@ impl<'a> StyleInvalidationCleanup<'a> {
             self.document,
             roots.iter().copied(),
         );
+        self.document_state
+            .note_transition_style_roots(roots.iter().copied());
 
         // Dirty the roots themselves immediately. Descendants are handled
         // lazily from the retained root generation, avoiding O(P * depth)

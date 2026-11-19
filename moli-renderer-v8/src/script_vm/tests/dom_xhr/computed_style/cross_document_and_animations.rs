@@ -1016,7 +1016,6 @@ async fn css_color_transition_samples_keep_the_published_layout() {
     };
 
     let builds = start(&mut vm, "c");
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     vm.advance_timers_until_deadline_for_test(&loader)
         .await
         .expect("color transition frames should run");
@@ -1030,7 +1029,6 @@ async fn css_color_transition_samples_keep_the_published_layout() {
     assert_eq!(vm.layout_pass_observability_for_test().1, builds);
 
     let builds = start(&mut vm, "l");
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     vm.advance_timers_until_deadline_for_test(&loader)
         .await
         .expect("left transition frames should run");
@@ -1039,6 +1037,119 @@ async fn css_color_transition_samples_keep_the_published_layout() {
         .expect("settled left transition should be readable");
     assert_eq!(x, "400");
     assert!(vm.layout_pass_observability_for_test().1 > builds);
+}
+
+/// An ancestor's `display: none` stops rendering the element and cancels its
+/// running transition at the next frame, with no style read in between. As in
+/// Chromium 156, that frame first sends the queued run and start events.
+#[tokio::test]
+async fn css_transition_cancels_when_an_ancestor_stops_rendering() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-ancestor-display.test/",
+        r#"<html><head><style>
+#t { position: absolute; left: 0; width: 10px; height: 10px; transition: left 3600s linear; }
+#t.on { left: 400px; }
+</style></head><body><div id="p"><div id="t"></div></div></body></html>"#,
+    );
+    vm.eval(
+        r#"
+(() => {
+  const t = document.getElementById('t');
+  globalThis.__events = [];
+  for (const type of ['transitionrun', 'transitionstart', 'transitioncancel']) {
+    t.addEventListener(type, (event) => __events.push(`${type}:${event.propertyName}`));
+  }
+  getComputedStyle(t).left;
+  t.classList.add('on');
+  globalThis.__transition = t.getAnimations()[0];
+  document.getElementById('p').style.display = 'none';
+})()
+"#,
+    )
+    .expect("transition start should evaluate");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    vm.advance_timers_until_deadline_for_test_with_deadline(&loader, deadline)
+        .await
+        .expect("transition frames should run");
+    let canceled = vm
+        .eval("[__transition.playState, __events.join(',')].join('|')")
+        .expect("transition state should be readable");
+    assert_eq!(
+        canceled,
+        "idle|transitionrun:left,transitionstart:left,transitioncancel:left"
+    );
+}
+
+/// The style changes of a frame's animation frame callbacks share one style
+/// update after the last callback: a transition one callback starts runs from
+/// the frame's time, and one that a later callback undoes never starts. That
+/// update also styles an element a callback inserted, so a class added at the
+/// next frame transitions although no script read its style.
+#[tokio::test]
+async fn css_transition_style_changes_in_animation_frame_callbacks_start_at_that_frame() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-animation-frame.test/",
+        r#"<html><head><style>
+#a, #b, .c { position: absolute; left: 0; width: 10px; height: 10px;
+             transition: left 1000ms linear; }
+#a.on, #b.on, .c.on { left: 1000px; }
+</style></head><body><div id="a"></div><div id="b"></div></body></html>"#,
+    );
+    vm.eval(
+        r#"
+(() => {
+  const a = document.getElementById('a'), b = document.getElementById('b');
+  globalThis.__bEvents = [];
+  for (const type of ['transitionrun', 'transitioncancel']) {
+    b.addEventListener(type, (event) => __bEvents.push(type));
+  }
+  getComputedStyle(a).left;
+  getComputedStyle(b).left;
+  const c = document.createElement('div');
+  c.className = 'c';
+  globalThis.__order = [];
+  requestAnimationFrame(() => {
+    __order.push('f0');
+    requestAnimationFrame(() => {
+      __order.push('f1a');
+      a.classList.add('on');
+      b.classList.add('on');
+      document.body.append(c);
+      requestAnimationFrame(() => {
+        __order.push('f2');
+        globalThis.__next = [
+          parseFloat(getComputedStyle(a).left) > 0,
+          b.getAnimations().length,
+        ].join('|');
+        c.classList.add('on');
+        requestAnimationFrame(() => {
+          __order.push('f3');
+          globalThis.__inserted = c.getAnimations().length;
+        });
+      });
+    });
+    requestAnimationFrame(() => {
+      __order.push('f1b');
+      b.classList.remove('on');
+    });
+  });
+})()
+"#,
+    )
+    .expect("animation frame callbacks should be requested");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    vm.advance_timers_until_deadline_for_test_with_deadline(&loader, deadline)
+        .await
+        .expect("animation frames should run");
+    let observed = vm
+        .eval(
+            "[__order.join(','), globalThis.__next, __bEvents.join(','), \
+             globalThis.__inserted].join('|')",
+        )
+        .expect("frame observations should be readable");
+    assert_eq!(observed, "f0,f1a,f1b,f2,f3|true|0||1");
 }
 
 #[tokio::test]

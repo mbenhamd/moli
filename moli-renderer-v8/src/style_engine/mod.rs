@@ -176,6 +176,7 @@ pub(crate) struct MoliStyleEngine {
     linked_stylesheet_owner_documents: RefCell<HashMap<DomHandle, DomHandle>>,
     inline_style_metadata_documents: RefCell<HashMap<DomHandle, DomHandle>>,
     css_transition_task_due: Cell<Option<f64>>,
+    css_transition_frame_timestamp: Cell<Option<f64>>,
 }
 
 impl Default for MoliStyleEngine {
@@ -201,6 +202,7 @@ impl MoliStyleEngine {
             linked_stylesheet_owner_documents: RefCell::new(HashMap::new()),
             inline_style_metadata_documents: RefCell::new(HashMap::new()),
             css_transition_task_due: Cell::new(None),
+            css_transition_frame_timestamp: Cell::new(None),
         }
     }
 
@@ -793,6 +795,7 @@ impl MoliStyleEngine {
 
     pub(crate) fn clear_for_document_replacement(&mut self, document: DomHandle) {
         self.css_transition_task_due.set(None);
+        self.css_transition_frame_timestamp.set(None);
         self.clear_owner_document_indexes_for_document(document);
         self.dom_adapter.clear_element_data_for_document(document);
         self.dom_adapter
@@ -1024,10 +1027,59 @@ impl MoliStyleEngine {
 
     fn css_transition_style_update_due_for_world(&self, world: &DocumentStyleWorld) -> bool {
         let transitions = &world.css_transitions;
-        transitions.has_candidates()
-            && (world.pending_invalidations.has_work()
-                || transitions.updated_generation()
-                    != Some(Self::css_transition_style_generation(world)))
+        world.document_state.has_transition_style_roots()
+            || (transitions.has_candidates()
+                && (world.pending_invalidations.has_work()
+                    || transitions.updated_generation()
+                        != Some(Self::css_transition_style_generation(world))))
+    }
+
+    /// Returns subtrees a frame's style update did not reach to their
+    /// documents, for the next frame's update.
+    pub(crate) fn defer_css_transition_style_roots(
+        &self,
+        host: &DomHost,
+        roots: impl IntoIterator<Item = DomHandle>,
+    ) {
+        for root in roots {
+            if let Some(world) = self.active_owner_document_world(host, root) {
+                world.document_state.note_transition_style_roots([root]);
+            }
+        }
+    }
+
+    /// Takes the roots of the subtrees whose styles changed since the last
+    /// frame's style update. Elements whose transitions run are left out:
+    /// their samples restyle them, and their style changes are updated as
+    /// transition targets.
+    pub(crate) fn take_css_transition_style_roots(&self) -> Vec<DomHandle> {
+        let mut roots = Vec::new();
+        for world in self.document_worlds.active_worlds() {
+            let taken = world.document_state.take_transition_style_roots();
+            if taken.is_empty() {
+                continue;
+            }
+            let running = world
+                .css_transitions
+                .running_targets()
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>();
+            roots.extend(taken.into_iter().filter(|root| !running.contains(root)));
+        }
+        roots
+    }
+
+    /// `document` when no frame's style update has resolved its initial
+    /// content yet: its parsed content is dirty, as the first rendering
+    /// update's style recalc treats it.
+    pub(crate) fn take_unstyled_css_transition_document(
+        &self,
+        document: DomHandle,
+    ) -> Option<DomHandle> {
+        self.world_for_document(document)
+            .css_transitions
+            .take_unstyled_document()
+            .then_some(document)
     }
 
     /// The elements whose style change events the next frame must run, or
@@ -1065,7 +1117,9 @@ impl MoliStyleEngine {
 
     /// An animation frame callback runs: transitions its style changes start
     /// begin at this frame.
-    pub(crate) fn begin_css_transition_animation_frame(&self) {
+    /// Opens the animation frame at `timestamp` for its callbacks.
+    pub(crate) fn begin_css_transition_animation_frame(&self, timestamp: f64) {
+        self.css_transition_frame_timestamp.set(Some(timestamp));
         for world in self.document_worlds.active_worlds() {
             world.css_transitions.begin_animation_frame();
         }
@@ -1080,7 +1134,13 @@ impl MoliStyleEngine {
 
     /// Ends the animation frame callbacks' part of a frame after its style
     /// update: the transitions they started start at the frame's time.
+    /// The timestamp of the open animation frame.
+    pub(crate) fn css_transition_frame_timestamp(&self) -> Option<f64> {
+        self.css_transition_frame_timestamp.get()
+    }
+
     pub(crate) fn end_css_transition_animation_frame(&self) {
+        self.css_transition_frame_timestamp.set(None);
         for world in self.document_worlds.active_worlds() {
             world.css_transitions.end_animation_frame();
         }

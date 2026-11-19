@@ -245,6 +245,8 @@ pub(crate) struct DocumentCssTransitions {
     /// An animation frame callback batch ran since the last style update, so
     /// transitions that start now belong to that frame.
     in_frame: Cell<bool>,
+    /// A frame's style update has resolved the document's initial content.
+    document_styled: Cell<bool>,
 }
 
 impl Default for DocumentCssTransitions {
@@ -256,6 +258,7 @@ impl Default for DocumentCssTransitions {
             candidates: RefCell::default(),
             updated_generation: Cell::new(None),
             in_frame: Cell::new(false),
+            document_styled: Cell::new(false),
         }
     }
 }
@@ -279,6 +282,13 @@ impl DocumentCssTransitions {
         self.candidates.borrow_mut().clear();
         self.updated_generation.set(None);
         self.in_frame.set(false);
+        self.document_styled.set(false);
+    }
+
+    /// Whether the document's initial content still awaits its first frame
+    /// style update; marks it as taken.
+    pub(super) fn take_unstyled_document(&self) -> bool {
+        !self.document_styled.replace(true)
     }
 
     /// Notes `target` when its newly resolved style specifies transitions.
