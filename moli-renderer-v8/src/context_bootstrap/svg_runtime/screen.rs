@@ -113,6 +113,91 @@ pub(crate) fn svg_foreign_object_content_transform(
         .multiply(SvgMatrixComponents::translate(offset("x"), offset("y")))
 }
 
+/// One rendered `<foreignObject>` of an SVG image document.
+pub(crate) struct SvgImageForeignObject {
+    pub(crate) handle: DomHandle,
+    pub(crate) width: f64,
+    pub(crate) height: f64,
+    /// From the CSS content space (origin at `x`/`y`) to image pixels.
+    pub(crate) content_to_image: SvgMatrixComponents,
+}
+
+/// The size percentages resolve against in an SVG image document: the root
+/// viewBox when it has one, otherwise the image's own size.
+pub(crate) fn svg_image_user_viewport(
+    runtime: &PageScriptHost,
+    root: DomHandle,
+    image_size: (f64, f64),
+) -> (f64, f64) {
+    runtime
+        .dom_host()
+        .get_attribute(root, "viewBox")
+        .as_deref()
+        .and_then(parse_svg_view_box_value)
+        .filter(|[_, _, width, height]| *width > 0.0 && *height > 0.0)
+        .map_or(image_size, |[_, _, width, height]| (width, height))
+}
+
+/// Every rendered `<foreignObject>` below the root `<svg>` of an image
+/// document, in document order. Percentages use the root's user viewport, also
+/// below a nested `<svg>`.
+pub(crate) fn svg_image_foreign_objects(
+    runtime: &PageScriptHost,
+    root: DomHandle,
+    image_size: (f64, f64),
+) -> Vec<SvgImageForeignObject> {
+    let (viewport_width, viewport_height) = svg_image_user_viewport(runtime, root, image_size);
+    let root_transform = svg_view_box_transform(runtime, root, image_size.0, image_size.1);
+    let length = |handle: DomHandle, attribute: &str, reference: f64| {
+        let parsed = runtime
+            .dom_host()
+            .get_attribute(handle, attribute)
+            .as_deref()
+            .and_then(moli_svg::parse_length)
+            .filter(|length| length.value.is_finite())?;
+        Some(if parsed.unit == moli_svg::SvgLengthUnit::Percentage {
+            parsed.value / 100.0 * reference
+        } else {
+            parsed.value
+        })
+    };
+    let mut found = Vec::new();
+    let mut pending = runtime.dom_host().child_handles(root).collect::<Vec<_>>();
+    pending.reverse();
+    while let Some(handle) = pending.pop() {
+        if !is_svg_element(runtime, handle) {
+            continue;
+        }
+        let is_foreign_object = runtime
+            .dom_host()
+            .node(handle)
+            .and_then(|node| node.local_name())
+            == Some("foreignObject");
+        if !is_foreign_object {
+            let start = pending.len();
+            pending.extend(runtime.dom_host().child_handles(handle));
+            pending[start..].reverse();
+            continue;
+        }
+        let width = length(handle, "width", viewport_width).unwrap_or(0.0);
+        let height = length(handle, "height", viewport_height).unwrap_or(0.0);
+        if width <= 0.0 || height <= 0.0 || svg_bbox_has_non_rendered_ancestor(runtime, handle) {
+            continue;
+        }
+        let x = length(handle, "x", viewport_width).unwrap_or(0.0);
+        let y = length(handle, "y", viewport_height).unwrap_or(0.0);
+        found.push(SvgImageForeignObject {
+            handle,
+            width,
+            height,
+            content_to_image: root_transform
+                .multiply(svg_ctm_below_root(runtime, handle, Some(root)))
+                .multiply(SvgMatrixComponents::translate(x, y)),
+        });
+    }
+    found
+}
+
 /// Client bounds `[x, y, width, height]` of `handle`, given the client
 /// border box of its outermost `<svg>` (`root`). `None` when `handle` is not
 /// rendered (inside `<defs>`-like containers or `display: none`).

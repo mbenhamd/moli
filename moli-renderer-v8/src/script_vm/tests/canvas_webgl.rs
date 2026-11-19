@@ -2430,15 +2430,19 @@ async fn html_canvas_draw_image_reads_data_url_image_pixels() {
 }
 
 #[test]
-fn html_canvas_draw_image_paints_svg_data_url_images_as_vectors() {
+fn html_canvas_draw_image_paints_svg_and_foreign_object_html_from_data_urls() {
     let mut vm = new_storage_test_vm("https://canvas-draw-svg-image.test/");
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
 
     let result = vm
         .eval(
             r##"
 (() => {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 40 20">'
-    + '<rect width="20" height="20" fill="#00f"/></svg>';
+    + '<style>.g{background:#0f0}</style><rect width="20" height="20" fill="#00f"/>'
+    + '<foreignObject x="50%" y="0" width="50%" height="100%">'
+    + '<div xmlns="http://www.w3.org/1999/xhtml" class="g" style="width:100%;height:100%"></div>'
+    + '</foreignObject></svg>';
   const image = new Image();
   image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
   const canvas = document.createElement('canvas');
@@ -2446,10 +2450,32 @@ fn html_canvas_draw_image_paints_svg_data_url_images_as_vectors() {
   canvas.height = 40;
   const context = canvas.getContext('2d');
   context.drawImage(image, 0, 0, 80, 40);
+  const variants = {};
+  for (const [name, css, attrs, pre] of [
+    ['inline', '', ' style="background:#0f0;width:20px;height:20px"', ''],
+    ['type', 'div{background:#0f0}', '', ''],
+    ['class', '.g{background:#0f0}', ' class="g"', ''],
+    ['id', '#i{background:#0f0}', ' id="i"', ''],
+    ['attr', '[data-x]{background:#0f0}', ' data-x="1"', ''],
+    ['universal', '*{background-color:#0f0}', '', ''],
+    ['fo', 'foreignObject{background:#00f}', '', ''],
+    ['nsdiv', '@namespace h url(http://www.w3.org/1999/xhtml); h|div{background:#0f0}', '', ''],
+    ['body', 'div{background:#0f0}', '', '<body xmlns="http://www.w3.org/1999/xhtml">'],
+  ]) {
+    const inner = '<div xmlns="http://www.w3.org/1999/xhtml"' + attrs + (attrs.includes('style=') ? '' : ' style="width:20px;height:20px"') + '></div>';
+    const doc = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><style>' + css + '</style>'
+      + '<foreignObject width="100%" height="100%">' + (pre ? pre + inner.replace(' xmlns="http://www.w3.org/1999/xhtml"', '') + '</body>' : inner) + '</foreignObject></svg>';
+    const i = new Image();
+    i.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(doc);
+    const c = document.createElement('canvas').getContext('2d');
+    c.drawImage(i, 0, 0);
+    variants[name] = [Array.from(c.getImageData(5, 5, 1, 1).data), Array.from(c.getImageData(30, 5, 1, 1).data)];
+  }
+  console.log('DBG-VARIANTS ' + JSON.stringify(variants));
   return JSON.stringify({
-    size: [image.naturalWidth, image.naturalHeight],
-    inside: Array.from(context.getImageData(39, 20, 1, 1).data),
-    outside: Array.from(context.getImageData(41, 20, 1, 1).data),
+    variants,
+    vector: Array.from(context.getImageData(20, 20, 1, 1).data),
+    html: Array.from(context.getImageData(60, 20, 1, 1).data),
     exportable: canvas.toDataURL().startsWith('data:image/png')
   });
 })()
@@ -2459,7 +2485,7 @@ fn html_canvas_draw_image_paints_svg_data_url_images_as_vectors() {
 
     assert_eq!(
         result,
-        r#"{"size":[40,20],"inside":[0,0,255,255],"outside":[0,0,0,0],"exportable":true}"#
+        r#"{"vector":[0,0,255,255],"html":[0,255,0,255],"exportable":true}"#
     );
 }
 

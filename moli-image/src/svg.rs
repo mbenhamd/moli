@@ -313,7 +313,7 @@ impl SvgImageMetadata {
 pub struct SvgImage {
     tree: usvg::Tree,
     metadata: SvgImageMetadata,
-    contains_foreign_object: bool,
+    foreign_object_source: Option<Arc<[u8]>>,
 }
 
 impl SvgImage {
@@ -325,10 +325,12 @@ impl SvgImage {
         self.metadata
     }
 
-    /// Whether the encoded document may hold `<foreignObject>` content, which
-    /// [`Self::tree`] omits. Canvas origin tainting depends on it.
-    pub const fn contains_foreign_object(&self) -> bool {
-        self.contains_foreign_object
+    /// The encoded document when it may hold `<foreignObject>` content.
+    ///
+    /// `usvg` omits that content from [`Self::tree`]. CSS layout and paint own
+    /// it, so a consumer drawing the whole image needs the original XML.
+    pub fn foreign_object_source(&self) -> Option<&Arc<[u8]>> {
+        self.foreign_object_source.as_ref()
     }
 }
 
@@ -501,7 +503,7 @@ pub fn decode_inline_svg_scene(
         image: SvgImage {
             tree,
             metadata,
-            contains_foreign_object: false,
+            foreign_object_source: None,
         },
         objects,
     })
@@ -541,13 +543,14 @@ fn decode_svg_image_with_fonts(
         ..Default::default()
     };
     let tree = usvg::Tree::from_data(bytes, &options)?;
-    let contains_foreign_object = bytes
+    let foreign_object_source = bytes
         .windows(FOREIGN_OBJECT_NAME.len())
-        .any(|window| window == FOREIGN_OBJECT_NAME);
+        .any(|window| window == FOREIGN_OBJECT_NAME)
+        .then(|| Arc::from(bytes));
     Ok(SvgImage {
         tree,
         metadata,
-        contains_foreign_object,
+        foreign_object_source,
     })
 }
 

@@ -145,7 +145,17 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
     }
 
     fn flat_children(&self, node: Self::NodeId) -> Self::ChildIter<'_> {
-        flat_children(self.host(), self.root, node).into_iter()
+        let host = self.host();
+        let mut children = flat_children(host, self.root, node);
+        // Outside SVG content only an outermost `<svg>` renders, as in Blink:
+        // an SVG `<style>` or `<rect>` in HTML or `<foreignObject>` makes no box.
+        if !is_svg_namespace_element(host, node) {
+            children.retain(|&child| {
+                !is_svg_namespace_element(host, child)
+                    || host.node(child).and_then(Node::local_name) == Some("svg")
+            });
+        }
+        children.into_iter()
     }
 
     fn details_slots(&self, node: Self::NodeId) -> Option<LayoutDetailsSlots<Self::NodeId>> {
@@ -329,6 +339,11 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
             self.paint_resources,
         )
     }
+}
+
+fn is_svg_namespace_element(host: &DomHost, node: DomHandle) -> bool {
+    host.node(node)
+        .is_some_and(|node| node.is_element() && node.namespace() == Some(LayoutNamespace::SVG_URI))
 }
 
 fn document_text_selections(
