@@ -8,7 +8,7 @@ use std::num::NonZeroU32;
 
 use super::ax_projection::{AxIgnoredReason, AxTreeProjection};
 use super::ax_properties::{ax_name, ax_properties, ax_value};
-use super::ax_roles::{ax_role, ordered_list_item_index};
+use super::ax_roles::ordered_list_item_index;
 use super::{AccessibilityInput, AccessibilityNode, AccessibilityNodeId};
 
 /// The semantic traversal requested by one synchronous AX command.
@@ -256,10 +256,11 @@ fn ax_node_payload(
     let ignored_reasons = projected.ignored_reason.map(|reason| {
         ax_ignored_reasons_payload(document, node_id, reason, backend_node_id_for_node)
     });
-    let name = if ignored {
-        String::new()
+    let (role, name) = if ignored {
+        ("none", String::new())
     } else {
-        ax_name(document, projection, node).ok()?
+        let name = ax_name(document, projection, node).ok()?;
+        (projected.role.with_name(&name), name)
     };
     let value = if ignored {
         None
@@ -269,7 +270,7 @@ fn ax_node_payload(
     let properties = if ignored {
         Vec::new()
     } else {
-        ax_properties(document, node_id, node)
+        ax_properties(document, node_id, node, role)
     };
     let parent_id = match projected.parent {
         Some(parent) => Some(AccessibilityNodeId::Dom(NonZeroU32::new(
@@ -291,10 +292,7 @@ fn ax_node_payload(
         }
         Some(child_ids)
     };
-    let mut payload = AccessibilityNode::new(
-        AccessibilityNodeId::Dom(backend_node_id),
-        if ignored { "none" } else { ax_role(node) },
-    );
+    let mut payload = AccessibilityNode::new(AccessibilityNodeId::Dom(backend_node_id), role);
     payload.ignored = ignored;
     payload.name = (!name.is_empty()).then_some(name);
     payload.parent_id = parent_id;
@@ -311,6 +309,7 @@ fn ax_ignored_reasons_payload(
 ) -> Value {
     match reason {
         AxIgnoredReason::Uninteresting
+        | AxIgnoredReason::PresentationalRole
         | AxIgnoredReason::NotRendered
         | AxIgnoredReason::InertFrame
         | AxIgnoredReason::NotVisible => json!([{
@@ -318,6 +317,7 @@ fn ax_ignored_reasons_payload(
                 AxIgnoredReason::NotRendered => "notRendered",
                 AxIgnoredReason::InertFrame => "inertSubtree",
                 AxIgnoredReason::NotVisible => "notVisible",
+                AxIgnoredReason::PresentationalRole => "presentationalRole",
                 _ => "uninteresting",
             },
             "value": {

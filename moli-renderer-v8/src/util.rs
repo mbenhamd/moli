@@ -1,21 +1,20 @@
 use super::document_runtime::DomHandle;
 use super::native_bridge::PageScriptHost;
+pub(crate) use moli_v8_util::v8_string_from_utf16_units;
 pub use moli_v8_util::{
     array_contains_strict, array_push_value, call_object_method, callback_data_index_value,
     callback_data_item, constructor_object, constructor_prototype, constructor_prototype_object,
     define_non_enumerable_static_bool_property, define_non_enumerable_static_number_property,
     define_non_enumerable_static_property, define_non_enumerable_static_string_property,
-    ecmascript_promise_resolve, get_own_static_property, get_private_object, get_private_value,
-    get_property, global_constructor_object, global_constructor_prototype,
+    get_own_static_property, get_private_object, get_private_value, get_property,
+    global_constructor_object, global_constructor_prototype,
     initialize_ecmascript_intrinsic_registry, new_null_prototype_object, object_bool_property,
     object_chain_contains, object_defined_string_property, object_non_empty_string_property,
-    object_number_property, object_own_static_property_as_array, object_own_static_string_property,
-    object_property_as_array, object_property_as_object, object_string_property, private_key,
-    register_ecmascript_intrinsic, registered_ecmascript_constructor,
-    registered_ecmascript_prototype, set_null_prototype, set_private_value, throw_range_error,
-    throw_type_error, v8_string, v8str, walk_object_chain,
+    object_number_property, object_own_static_string_property, object_property_as_array,
+    object_property_as_object, object_string_property, private_key, register_ecmascript_intrinsic,
+    registered_ecmascript_constructor, registered_ecmascript_prototype, set_null_prototype,
+    set_private_value, throw_range_error, throw_type_error, v8_string, v8str, walk_object_chain,
 };
-use moli_webapi_declare::WebApiValue;
 pub(crate) use moli_webapi_declare::define_array_data_property as define_v8_array_data_property;
 use std::{
     cell::{Cell, RefCell},
@@ -278,21 +277,7 @@ impl RealmValueHandle {
     }
 }
 
-/// Materializes the unexposed prototype described by a WebIDL iterator
-/// FunctionTemplate. The temporary constructor is an implementation detail, so
-/// its back-reference must not leak onto the iterator prototype.
-pub(crate) fn materialize_hidden_function_template_prototype<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    template: v8::Local<'s, v8::FunctionTemplate>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let constructor = template.get_function(scope)?;
-    let prototype = constructor
-        .get(scope, v8str(scope, "prototype").into())
-        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())?;
-    let constructor_key = v8str(scope, "constructor");
-    let _ = prototype.delete(scope, constructor_key.into());
-    Some(prototype)
-}
+pub(crate) use moli_v8_util::materialize_hidden_function_template_prototype;
 
 // # Why V8 callbacks use `RefCell::as_ptr()` instead of `borrow_mut()`
 //
@@ -323,96 +308,12 @@ pub(crate) fn materialize_hidden_function_template_prototype<'s>(
 // `replace_document_resource_runtime`, `take_network_output`) which are called from Rust code
 // outside V8 callback context, where re-entrancy cannot occur.
 
-pub(crate) fn serialize_v8_array<'s, T>(
-    scope: &mut v8::PinScope<'s, '_>,
-    value: T,
-) -> Option<v8::Local<'s, v8::Array>>
-where
-    T: WebApiValue<'s>,
-{
-    let value = value.to_v8_value(scope)?;
-    v8::Local::<v8::Array>::try_from(value).ok()
-}
+pub(crate) use moli_webapi_declare::{serialize_v8_array, serialize_v8_iter_array};
 
-pub(crate) fn serialize_v8_iter_array<'s, I, T>(
-    scope: &mut v8::PinScope<'s, '_>,
-    values: I,
-) -> Option<v8::Local<'s, v8::Array>>
-where
-    I: IntoIterator<Item = T>,
-    T: WebApiValue<'s>,
-{
-    let values = values.into_iter().collect::<Vec<_>>();
-    serialize_v8_array(scope, values.as_slice())
-}
-
-pub(crate) fn callable_relevant_context<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    mut callable: v8::Local<'s, v8::Value>,
-) -> Option<v8::Local<'s, v8::Context>> {
-    // V8's GetFunctionRealm unwraps Proxy chains. Bound functions are created
-    // in their target function's context, so their creation context already
-    // identifies the target realm through the public embedding API.
-    while callable.is_proxy() {
-        let proxy = v8::Local::<v8::Proxy>::try_from(callable).ok()?;
-        callable = proxy.get_target(scope);
-    }
-    v8::Local::<v8::Object>::try_from(callable)
-        .ok()?
-        .get_creation_context(scope)
-}
-
-pub(crate) fn new_target_realm_constructor_prototype<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    new_target: v8::Local<'s, v8::Value>,
-    constructor_name: &str,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let context = callable_relevant_context(scope, new_target)?;
-    let prototype = {
-        let context_scope = &mut v8::ContextScope::new(scope, context);
-        let prototype = global_constructor_prototype(context_scope, constructor_name)?;
-        v8::Global::new(context_scope, prototype)
-    };
-    Some(v8::Local::new(scope, &prototype))
-}
-
-pub(crate) fn receiver_uses_new_target_realm_object_fallback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    receiver: v8::Local<'s, v8::Object>,
-    new_target: v8::Local<'s, v8::Value>,
-) -> bool {
-    let Some(receiver_prototype) = receiver.get_prototype(scope) else {
-        return false;
-    };
-    let Some(object_prototype) =
-        new_target_realm_constructor_prototype(scope, new_target, "Object")
-    else {
-        return false;
-    };
-    receiver_prototype.strict_equals(object_prototype.into())
-}
-
-pub(crate) fn apply_webidl_constructor_prototype_fallback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    receiver: v8::Local<'s, v8::Object>,
-    new_target: v8::Local<'s, v8::Value>,
-    default_constructor_name: &str,
-) {
-    // V8 has already read `NewTarget.prototype` while preparing the native
-    // constructor receiver. Do not read it again: a Proxy getter must run only
-    // once. V8 represents a non-object result with NewTarget's realm-local
-    // Object prototype, which lets us replace precisely that fallback with
-    // the WebIDL interface's default prototype from the same realm.
-    if !receiver_uses_new_target_realm_object_fallback(scope, receiver, new_target) {
-        return;
-    }
-    let Some(prototype) =
-        new_target_realm_constructor_prototype(scope, new_target, default_constructor_name)
-    else {
-        return;
-    };
-    let _ = receiver.set_prototype(scope, prototype.into());
-}
+pub(crate) use moli_v8_util::{
+    callable_relevant_context, new_target_realm_constructor_prototype,
+    receiver_uses_new_target_realm_object_fallback,
+};
 
 pub(super) fn create_script_origin_with_base_url<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -926,17 +827,7 @@ pub(super) fn callback_arg_string(
         .map(|value| value.to_rust_string_lossy(scope))
 }
 
-pub(crate) fn v8_string_to_u16_string(
-    scope: &mut v8::PinScope<'_, '_>,
-    value: v8::Local<'_, v8::String>,
-) -> U16String {
-    let mut units = vec![0; value.length()];
-    // The vendored V8 binding for String::write_v2 returns `()`. The buffer is
-    // sized from the same V8 string length and the binding writes at most that
-    // many UTF-16 code units.
-    value.write_v2(scope, 0, &mut units, v8::WriteFlags::empty());
-    U16String::from_vec(units)
-}
+pub(crate) use moli_v8_util::v8_string_to_u16_string;
 
 pub(crate) fn v8_value_to_dom_string_u16<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -967,13 +858,6 @@ pub(crate) fn v8_value_to_dom_string_u16<'s>(
         throw_type_error(scope, "Failed to convert value to DOMString.");
     }
     converted
-}
-
-pub(crate) fn v8_string_from_utf16_units<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    units: &[u16],
-) -> Option<v8::Local<'s, v8::String>> {
-    v8::String::new_from_two_byte(scope, units, v8::NewStringType::Normal)
 }
 
 pub(crate) fn utf16_units(value: &str) -> Vec<u16> {

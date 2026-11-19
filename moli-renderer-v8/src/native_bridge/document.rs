@@ -41,7 +41,9 @@ mod queries;
 mod state;
 mod structure;
 
+pub(crate) use attributes::install_attr_prototype;
 pub(crate) use attributes::install_named_node_map_template_bindings;
+#[cfg(feature = "devtools")]
 pub(crate) use queries::evaluate_live_xpath_search_node_handles;
 
 pub(crate) const DETACHED_STATE_SLOT: &str = "__moliDetachedState";
@@ -102,12 +104,16 @@ pub(crate) fn node_document_design_mode_setter_function<'s>(
     }
 }
 
-pub(in crate::native_bridge) use attributes::is_attr_node_value;
 #[cfg(test)]
 pub(crate) use attributes::take_named_node_map_attr_materializations_for_test;
+pub(in crate::native_bridge) use attributes::{AttrReference, is_attr_node_value};
 pub(super) use attributes::{
     build_named_node_map_wrapper_template, clear_live_attr_cache_entry,
     clear_live_attr_cache_entry_ns, live_get_attribute_node_ns_object,
+};
+pub(crate) use attributes::{
+    detach_cached_attr_for_removal, live_get_attribute_node_object, live_named_node_map_wrapper,
+    new_attr_object,
 };
 use attributes::{
     detached_create_attribute_method_callback, detached_create_attribute_ns_method_callback,
@@ -118,9 +124,6 @@ pub(in crate::native_bridge) use attributes::{
 use attributes::{
     live_attr_cache_object, namespace_attr_cache_key, new_document_attr_object,
     set_attr_cache_entry,
-};
-pub(crate) use attributes::{
-    live_get_attribute_node_object, live_named_node_map_wrapper, new_attr_object,
 };
 pub(super) use construction::{
     bridge_create_comment_callback, bridge_create_element_callback,
@@ -158,7 +161,7 @@ pub(super) use detached_install::install_detached_bridge_methods;
 pub(in crate::native_bridge) use detached_install::{
     clear_detached_iframe_cached_context, clear_detached_iframe_cached_context_for_handle,
     detached_form_owner_object, detached_label_control_object, detached_shadow_root_for_host,
-    set_detached_node_text_content, set_detached_text_replacement_value,
+    set_detached_text_replacement_value,
 };
 use detached_install::{
     install_detached_character_data_instance_properties,
@@ -175,18 +178,15 @@ pub(crate) use detached_objects::{
     preserve_detached_element_bridge_for_custom_prototype, read_detached_native_attribute,
     read_detached_native_attribute_names, read_detached_native_attribute_snapshot,
     read_detached_native_has_attribute,
-    remove_detached_native_attribute_appending_to_current_reaction_queue,
     remove_detached_native_attribute_ns_appending_to_current_reaction_queue,
     write_detached_native_attribute_appending_to_current_reaction_queue,
     write_detached_native_attribute_ns_appending_to_current_reaction_queue,
 };
 pub(in crate::native_bridge) use detached_objects::{
     canonical_detached_node_object, define_detached_native_handle,
-    detached_append_child_method_callback, detached_clone_node_method_callback,
-    detached_doctype_name, detached_doctype_public_id, detached_doctype_system_id,
-    detached_insert_before_method_callback, detached_parent_node_object,
+    detached_clone_node_method_callback, detached_doctype_name, detached_doctype_public_id,
+    detached_doctype_system_id, detached_parent_node_object,
     detached_processing_instruction_target, detached_record_tree_mutation,
-    detached_remove_child_method_callback, detached_replace_child_method_callback,
     detached_set_owner_document,
 };
 pub(in crate::native_bridge) use detached_objects::{
@@ -221,12 +221,11 @@ pub(super) use detached_surface::{
     bridge_create_detached_document_type_callback, bridge_create_detached_html_document_callback,
     bridge_create_detached_text_callback, bridge_create_detached_xml_document_callback,
     bridge_detached_after_callback, bridge_detached_append_callback,
-    bridge_detached_append_child_callback, bridge_detached_before_callback,
-    bridge_detached_character_data_getter_callback, bridge_detached_character_data_setter_callback,
-    bridge_detached_child_element_count_callback, bridge_detached_child_nodes_callback,
-    bridge_detached_children_callback, bridge_detached_clone_node_callback,
-    bridge_detached_create_cdata_section_callback, bridge_detached_create_comment_callback,
-    bridge_detached_create_document_fragment_callback,
+    bridge_detached_before_callback, bridge_detached_character_data_getter_callback,
+    bridge_detached_character_data_setter_callback, bridge_detached_child_element_count_callback,
+    bridge_detached_child_nodes_callback, bridge_detached_children_callback,
+    bridge_detached_clone_node_callback, bridge_detached_create_cdata_section_callback,
+    bridge_detached_create_comment_callback, bridge_detached_create_document_fragment_callback,
     bridge_detached_create_processing_instruction_callback, bridge_detached_create_text_callback,
     bridge_detached_doctype_name_callback, bridge_detached_doctype_public_id_callback,
     bridge_detached_doctype_system_id_callback, bridge_detached_document_base_uri_callback,
@@ -243,26 +242,26 @@ pub(super) use detached_surface::{
     bridge_detached_first_element_child_callback, bridge_detached_get_attribute_callback,
     bridge_detached_get_attribute_names_callback, bridge_detached_get_attribute_ns_callback,
     bridge_detached_has_attribute_callback, bridge_detached_has_attribute_ns_callback,
-    bridge_detached_has_child_nodes_callback, bridge_detached_insert_before_callback,
-    bridge_detached_is_connected_callback, bridge_detached_last_child_callback,
-    bridge_detached_last_element_child_callback, bridge_detached_move_before_callback,
-    bridge_detached_next_element_sibling_callback, bridge_detached_next_sibling_callback,
-    bridge_detached_node_name_callback, bridge_detached_node_type_callback,
-    bridge_detached_node_value_getter_callback, bridge_detached_node_value_setter_callback,
-    bridge_detached_owner_document_callback, bridge_detached_parent_element_callback,
-    bridge_detached_parent_node_callback, bridge_detached_prepend_callback,
-    bridge_detached_previous_element_sibling_callback, bridge_detached_previous_sibling_callback,
+    bridge_detached_has_child_nodes_callback, bridge_detached_is_connected_callback,
+    bridge_detached_last_child_callback, bridge_detached_last_element_child_callback,
+    bridge_detached_move_before_callback, bridge_detached_next_element_sibling_callback,
+    bridge_detached_next_sibling_callback, bridge_detached_node_name_callback,
+    bridge_detached_node_type_callback, bridge_detached_node_value_getter_callback,
+    bridge_detached_node_value_setter_callback, bridge_detached_owner_document_callback,
+    bridge_detached_parent_element_callback, bridge_detached_parent_node_callback,
+    bridge_detached_prepend_callback, bridge_detached_previous_element_sibling_callback,
+    bridge_detached_previous_sibling_callback,
     bridge_detached_processing_instruction_target_callback,
     bridge_detached_remove_attribute_callback, bridge_detached_remove_attribute_ns_callback,
-    bridge_detached_remove_child_callback, bridge_detached_replace_child_callback,
-    bridge_detached_replace_children_callback, bridge_detached_replace_with_callback,
-    bridge_detached_set_attribute_callback, bridge_detached_set_attribute_ns_callback,
-    bridge_detached_text_content_callback, bridge_set_detached_document_domain_callback,
-    detached_character_data_append_data_callback, detached_character_data_delete_data_callback,
-    detached_character_data_insert_data_callback, detached_character_data_length,
-    detached_character_data_replace_data_callback, detached_character_data_substring_data_callback,
-    detached_character_data_value, detached_text_split_text_callback,
-    detached_text_whole_text_value, set_detached_character_data_value,
+    bridge_detached_remove_child_callback, bridge_detached_replace_children_callback,
+    bridge_detached_replace_with_callback, bridge_detached_set_attribute_callback,
+    bridge_detached_set_attribute_ns_callback, bridge_detached_text_content_callback,
+    bridge_set_detached_document_domain_callback, detached_character_data_append_data_callback,
+    detached_character_data_delete_data_callback, detached_character_data_insert_data_callback,
+    detached_character_data_length, detached_character_data_replace_data_callback,
+    detached_character_data_substring_data_callback, detached_character_data_value,
+    detached_text_split_text_callback, detached_text_whole_text_value,
+    set_detached_character_data_value,
 };
 pub(in crate::native_bridge) use detached_surface::{
     detached_element_local_name, detached_element_namespace_uri, detached_element_prefix,
@@ -311,7 +310,7 @@ pub(crate) const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
 pub(crate) const MATHML_NS: &str = "http://www.w3.org/1998/Math/MathML";
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Document, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::Document, enumerable)]
 struct DocumentMetadataPrototypeDeclaration {
     #[webapi(accessor_property = "URL", getter = document_url_getter_function)]
     url: (),
@@ -339,7 +338,7 @@ struct DocumentMetadataPrototypeDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Document, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::Document, enumerable)]
 struct DocumentStructurePrototypeDeclaration {
     #[webapi(
         accessor_property,
@@ -370,7 +369,7 @@ struct DocumentStructurePrototypeDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Document, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::Document, enumerable)]
 struct DocumentViewPrototypeDeclaration {
     #[webapi(
         accessor_property = "defaultView",
@@ -380,7 +379,7 @@ struct DocumentViewPrototypeDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Document, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::Document, enumerable)]
 struct DocumentFocusPrototypeDeclaration {
     #[webapi(
         accessor_property = "activeElement",
@@ -390,7 +389,7 @@ struct DocumentFocusPrototypeDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Document, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::Document, enumerable)]
 struct DocumentStatePrototypeDeclaration {
     #[webapi(
         accessor_property,
@@ -432,7 +431,7 @@ struct DocumentStatePrototypeDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Document, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::Document, enumerable)]
 struct DocumentCollectionAccessorsPrototypeDeclaration {
     #[webapi(accessor_property, getter = document_forms_getter_function)]
     forms: (),
@@ -453,7 +452,7 @@ struct DocumentCollectionAccessorsPrototypeDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Document, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::Document, enumerable)]
 struct DocumentCollectionQueryPrototypeDeclaration {
     #[webapi(
         method,
@@ -482,7 +481,7 @@ struct DocumentCollectionQueryPrototypeDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Document, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::Document, enumerable)]
 struct DocumentObsoleteMethodsPrototypeDeclaration {
     #[webapi(method, length = 0, callback = document_obsolete_noop_callback)]
     clear: (),
@@ -1342,14 +1341,14 @@ pub(crate) fn install_document_template_bindings<'s>(
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Document, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::Document, enumerable)]
 struct DocumentGetElementByIdTemplateDeclaration {
     #[webapi(method = "getElementById", length = 1, callback = node_get_element_by_id_callback)]
     get_element_by_id: (),
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Document, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::Document, enumerable)]
 struct DocumentPrototypeMethodsDeclaration {
     #[webapi(method = "createElement", length = 1, callback = node_create_element_callback)]
     create_element: (),

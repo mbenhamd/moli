@@ -1,4 +1,3 @@
-mod buffers;
 mod clone;
 mod console;
 mod definition;
@@ -6,13 +5,11 @@ mod dom;
 mod fonts;
 mod object;
 mod slots;
-mod text_codecs;
 mod time;
 
 use crate::util::{context_host_ptr_from_global_bridge, object_number_property, v8_string};
 
 pub(in crate::context_bootstrap) use crate::host::WINDOW_EVENT_SLOT;
-pub(in crate::context_bootstrap) use buffers::*;
 pub(crate) use clone::*;
 pub(in crate::context_bootstrap) use console::*;
 pub(crate) use console::{
@@ -33,9 +30,9 @@ pub(in crate::context_bootstrap) use moli_browser_profile::{
     DEFAULT_NAVIGATOR_VENDOR, DEFAULT_NAVIGATOR_VENDOR_SUB, DEFAULT_NAVIGATOR_WEBDRIVER,
     DEFAULT_WINDOW_SURFACE_PROFILE,
 };
+pub(in crate::context_bootstrap) use moli_v8_util::new_uint8_array_from_bytes;
 pub(in crate::context_bootstrap) use object::*;
 pub(crate) use slots::*;
-pub(in crate::context_bootstrap) use text_codecs::*;
 pub(crate) use time::*;
 
 pub(in crate::context_bootstrap) use super::shared_installers::{

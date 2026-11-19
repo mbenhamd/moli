@@ -567,6 +567,7 @@ impl ScriptVm {
                         pending.request_mode,
                         pending.credentials_mode,
                         pending.policy_context,
+                        pending.load.request_client().web_security_disabled(),
                     )
                     .err()
                 })
@@ -780,7 +781,7 @@ impl ScriptVm {
                         pending.request_mode,
                         pending.credentials_mode,
                         pending.policy_context,
-                    )
+                    pending.load.request_client().web_security_disabled(),)
                     .err()
                 })
                 .flatten()
@@ -882,13 +883,7 @@ impl ScriptVm {
                     PendingSubresourceContinuation::Beacon
                     | PendingSubresourceContinuation::CspReport { .. }
                     | PendingSubresourceContinuation::WebSocket(_)
-                    | PendingSubresourceContinuation::ChildDocument(_)
-                    | PendingSubresourceContinuation::WorkerFetch { .. }
-                    | PendingSubresourceContinuation::WorkerXhr { .. }
-                    | PendingSubresourceContinuation::WorkerCspReport { .. }
-                    | PendingSubresourceContinuation::SharedWorkerFetch { .. }
-                    | PendingSubresourceContinuation::SharedWorkerXhr { .. }
-                    | PendingSubresourceContinuation::SharedWorkerCspReport { .. } => {}
+                    | PendingSubresourceContinuation::ChildDocument(_) => {}
                 }
                 defer_subresource_owner_async_scope(
                     &self._context_host,
@@ -977,6 +972,7 @@ impl ScriptVm {
                     &pending.request_origin,
                     &observable_head,
                     pending.credentials_mode,
+                    pending.load.request_client().web_security_disabled(),
                 );
             }
 
@@ -1056,23 +1052,27 @@ impl ScriptVm {
 
             let mut event_source_parser = None;
             let mut event_source_to_open = None;
-            match &pending.continuation {
+            match &mut pending.continuation {
                 PendingSubresourceContinuation::Fetch(fetch) => {
                     let resolver = fetch
                         .resolver()
                         .expect("detached keepalive stream is handled before V8 entry");
                     let resolver = v8::Local::new(scope, resolver);
-                    let response_obj = crate::network_host::build_fetch_response_object_from_stream_for_request_mode_with_metadata(
+                    let metadata = fetch.response_metadata.insert(
+                        crate::network_host::fetch_response_metadata(
+                            &pending.request_origin,
+                            &started.head,
+                            pending.request_mode,
+                            started.response_filter.as_ref(),
+                            pending.load.request_client().web_security_disabled(),
+                        ),
+                    );
+                    let response_obj = crate::network_host::build_fetch_response_object_from_stream_with_metadata(
                         scope,
-                        crate::network_host::FetchResponseRequest {
-                            method: &started.request_method,
-                            mode: pending.request_mode,
-                        },
+                        &started.request_method,
                         observable_head,
                         started.body_source_id,
-                        crate::network_host::fetch_response_metadata(
-                            &pending.request_origin, &started.head, pending.request_mode, started.response_filter.as_ref(),
-                        ),
+                        metadata,
                     );
                     resolver.resolve(scope, response_obj.into());
                 }
@@ -1115,7 +1115,7 @@ impl ScriptVm {
                     PendingTextTrackLoadTerminal::FetchFailed,
                 ),
                 PendingSubresourceContinuation::FontFace(face) => {
-                    let face = v8::Local::new(scope, face);
+                    let face = v8::Local::new(scope, &*face);
                     crate::context_bootstrap::finish_font_face_url_load(scope, face, None);
                 }
                 PendingSubresourceContinuation::StylesheetSubresource { binding, .. } => {
@@ -1149,7 +1149,7 @@ impl ScriptVm {
                                 ),
                             );
                     }
-                    let event_source = v8::Local::new(scope, event_source);
+                    let event_source = v8::Local::new(scope, &*event_source);
                     let last_event_id =
                         crate::network_host::event_source_last_event_id(scope, event_source);
                     let reconnect_delay_ms =
@@ -1164,13 +1164,7 @@ impl ScriptVm {
                 | PendingSubresourceContinuation::CspReport { .. }
                 | PendingSubresourceContinuation::Xhr { .. }
                 | PendingSubresourceContinuation::WebSocket(_)
-                | PendingSubresourceContinuation::ChildDocument(_)
-                | PendingSubresourceContinuation::WorkerFetch { .. }
-                | PendingSubresourceContinuation::WorkerXhr { .. }
-                | PendingSubresourceContinuation::WorkerCspReport { .. }
-                | PendingSubresourceContinuation::SharedWorkerFetch { .. }
-                | PendingSubresourceContinuation::SharedWorkerXhr { .. }
-                | PendingSubresourceContinuation::SharedWorkerCspReport { .. } => {}
+                | PendingSubresourceContinuation::ChildDocument(_) => {}
             }
 
             let pending_owner = pending.execution_context.dispatch_scope();
@@ -1793,7 +1787,9 @@ impl ScriptVm {
                                         streaming.pending.continuation
                                     {
                                         let xhr = v8::Local::new(scope, &xhr);
-                                        crate::network_host::apply_xhr_failure(scope, xhr);
+                                        crate::network_host::apply_xhr_streaming_failure(
+                                            scope, xhr, internal_id,
+                                        );
                                     }
                                     context_host
                                         .borrow_mut()
@@ -1892,10 +1888,9 @@ impl ScriptVm {
                                 scope,
                                 fetch.resource_timing().completed(
                                     fetch.initial_request_url(&streaming.pending.info.url),
-                                    &streaming.pending.request_origin,
-                                    streaming.pending.request_mode,
                                     &streaming.head,
                                     response_body_size,
+                                    fetch.response_metadata.as_ref().expect("Fetch stream has response metadata"),
                                     streaming.response_filter.as_ref(),
                                 ),
                             );
@@ -1932,6 +1927,7 @@ impl ScriptVm {
                                         &streaming.pending.request_origin,
                                         &observable_head,
                                         streaming.pending.credentials_mode,
+                                        streaming.pending.load.request_client().web_security_disabled(),
                                     );
                             }
                             // XHR still exposes a complete response at DONE. Keep the
@@ -2028,6 +2024,14 @@ impl ScriptVm {
                             trace_fields,
                             error_started,
                         );
+                        if let PendingSubresourceContinuation::Xhr { xhr, .. } =
+                            &streaming.pending.continuation
+                        {
+                            let xhr = v8::Local::new(scope, xhr);
+                            crate::network_host::apply_xhr_streaming_failure(
+                                scope, xhr, internal_id,
+                            );
+                        }
                     }
                 }
                 context_host

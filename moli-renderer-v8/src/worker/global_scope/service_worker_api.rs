@@ -273,7 +273,7 @@ pub(super) fn service_worker_registration_show_notification_callback<'s>(
     };
     if parent_tx
         .send(WorkerToParentMessage::ServiceWorkerShowNotification(
-            crate::runtime::ServiceWorkerShowNotification {
+            Box::new(crate::runtime::ServiceWorkerShowNotification {
                 request_id,
                 registration_id,
                 version_id,
@@ -282,7 +282,7 @@ pub(super) fn service_worker_registration_show_notification_callback<'s>(
                 metadata: options.metadata,
                 actions: options.actions,
                 data: options.data,
-            },
+            }),
         ))
         .is_err()
     {
@@ -1068,12 +1068,11 @@ pub(super) fn build_service_worker_push_subscription_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     snapshot: &ServiceWorkerPushSubscriptionSnapshot,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let options = ServiceWorkerPushSubscriptionOptionsDeclaration::new(
+    let options = moli_webapi::push_values::new_subscription_options(
+        scope,
         snapshot.user_visible_only,
         v8::null(scope).into(),
-    )
-    .bind(scope)
-    .ok()?;
+    )?;
     ServiceWorkerPushSubscriptionDeclaration {
         endpoint: snapshot.endpoint.clone(),
         expiration_time: v8::null(scope).into(),
@@ -1875,7 +1874,6 @@ struct ServiceWorkerGlobalRegistrationDeclaration<'scope> {
     #[webapi(
         method = "showNotification",
         returns_promise,
-        receiver = web_api_interfaces::ServiceWorkerRegistration::is_instance,
         callback = service_worker_registration_show_notification_callback,
         length = 1
     )]
@@ -1884,7 +1882,6 @@ struct ServiceWorkerGlobalRegistrationDeclaration<'scope> {
     #[webapi(
         method = "getNotifications",
         returns_promise,
-        receiver = web_api_interfaces::ServiceWorkerRegistration::is_instance,
         callback = service_worker_registration_get_notifications_callback,
         length = 0
     )]
@@ -1912,8 +1909,7 @@ struct ServiceWorkerGlobalServiceWorkerDeclaration {
         setter = simple_event_target_handler_setter_callback,
         data = v8str(scope, "onstatechange"),
         setter_data = v8str(scope, "onstatechange"),
-        enumerable,
-        receiver = web_api_interfaces::ServiceWorker::is_instance
+        enumerable
     )]
     onstatechange: (),
     #[webapi(
@@ -1922,8 +1918,7 @@ struct ServiceWorkerGlobalServiceWorkerDeclaration {
         setter = simple_event_target_handler_setter_callback,
         data = v8str(scope, "onerror"),
         setter_data = v8str(scope, "onerror"),
-        enumerable,
-        receiver = web_api_interfaces::ServiceWorker::is_instance
+        enumerable
     )]
     onerror: (),
 
@@ -2058,16 +2053,6 @@ struct ServiceWorkerPushSubscriptionDeclaration<'scope> {
         length = 0
     )]
     to_json: (),
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::PushSubscriptionOptions, prototype = "Object")]
-struct ServiceWorkerPushSubscriptionOptionsDeclaration<'scope> {
-    #[webapi(data_property = "userVisibleOnly", readonly)]
-    user_visible_only: bool,
-
-    #[webapi(data_property = "applicationServerKey", readonly)]
-    application_server_key: v8::Local<'scope, v8::Value>,
 }
 
 #[derive(WebApiObject)]

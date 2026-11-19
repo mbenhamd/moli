@@ -8,6 +8,12 @@
 use super::*;
 use crate::context_bootstrap::navigation_entry::wrappers as entry_wrappers;
 use crate::context_bootstrap::{exposed_interfaces, world_wrappers};
+pub(in crate::context_bootstrap) use moli_webapi::events::state::event_value_attribute_getter;
+
+pub(crate) use moli_webapi::events::state::{
+    event_attribute, event_bool_attribute, event_private_value, new_event_state,
+    set_event_private_value,
+};
 
 const EVENT_ATTRIBUTE_GETTERS_SLOT: &str = "__moliEventAttributeGetters";
 
@@ -73,10 +79,6 @@ impl AttributeProjection {
     }
 }
 
-pub(crate) fn new_event_state<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Object> {
-    crate::util::new_null_prototype_object(scope)
-}
-
 /// Bind a fresh wrapper without invoking a public constructor or inspecting an
 /// author's properties. The original constructor's `this` remains its wrapper.
 pub(crate) fn initialize_event_wrapper<'s>(
@@ -137,21 +139,7 @@ pub(crate) fn initialize_event_wrapper<'s>(
     Some(())
 }
 
-pub(crate) fn new_event_wrapper<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    state: v8::Local<'s, v8::Object>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let state = event_backing(scope, state);
-    let interface = moli_webapi_declare::web_api_object_type(scope, state)?.name();
-    let prototype =
-        exposed_interfaces::ensure_intrinsic_interface_prototype(scope, interface).ok()?;
-    let wrapper = v8::Object::new(scope);
-    if wrapper.set_prototype(scope, prototype.into()) != Some(true) {
-        return None;
-    }
-    initialize_event_wrapper(scope, wrapper, state)?;
-    Some(wrapper)
-}
+pub(crate) use moli_webapi::events::new_event_wrapper;
 
 /// Project DOM and Window listeners through their existing world caches. The
 /// Window resolver selects the target Window's Context in the listener's
@@ -316,14 +304,6 @@ fn event_attribute_getter<'s, const PROJECTION: u8>(
     }
 }
 
-pub(in crate::context_bootstrap) fn event_value_attribute_getter<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    rv: v8::ReturnValue<'_, v8::Value>,
-) {
-    event_attribute_getter::<0>(scope, args, rv);
-}
-
 pub(in crate::context_bootstrap) fn event_platform_attribute_getter<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
@@ -339,44 +319,6 @@ pub(super) fn event_attribute_in_wrapper<'s>(
 ) -> Option<v8::Local<'s, v8::Value>> {
     let value = event_attribute(scope, wrapper, property)?;
     AttributeProjection::for_property(property).project(scope, wrapper, value)
-}
-
-/// Engine reads must bypass the public wrapper, including own shadows and
-/// getters. Constructors initialize these fields on the private state directly.
-pub(crate) fn event_attribute<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event: v8::Local<'_, v8::Object>,
-    property: &str,
-) -> Option<v8::Local<'s, v8::Value>> {
-    let state = event_backing(scope, event);
-    state.get(scope, v8_string(scope, property)?.into())
-}
-
-pub(crate) fn event_bool_attribute<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event: v8::Local<'_, v8::Object>,
-    property: &str,
-) -> bool {
-    event_attribute(scope, event, property).is_some_and(|value| value.boolean_value(scope))
-}
-
-pub(crate) fn event_private_value<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event: v8::Local<'_, v8::Object>,
-    slot: &str,
-) -> Option<v8::Local<'s, v8::Value>> {
-    let state = event_backing(scope, event);
-    get_private_value(scope, state, slot)
-}
-
-pub(crate) fn set_event_private_value(
-    scope: &mut v8::PinScope<'_, '_>,
-    event: v8::Local<'_, v8::Object>,
-    slot: &str,
-    value: v8::Local<'_, v8::Value>,
-) {
-    let state = event_backing(scope, event);
-    set_private_value(scope, state, slot, value);
 }
 
 #[cfg(test)]

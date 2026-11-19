@@ -1,8 +1,8 @@
 use super::super::window_runtime::{
-    build_legacy_storage_quota_object, build_navigator_ua_data_object,
-    install_initial_service_worker_ready_promise, navigator_get_battery_callback,
-    navigator_java_enabled_callback, navigator_permissions_query_callback,
-    navigator_send_beacon_callback, navigator_service_worker_controller_getter_callback,
+    build_legacy_storage_quota_object, install_initial_service_worker_ready_promise,
+    navigator_get_battery_callback, navigator_java_enabled_callback,
+    navigator_permissions_query_callback, navigator_send_beacon_callback,
+    navigator_service_worker_controller_getter_callback,
     navigator_service_worker_controllerchange_handler_getter_callback,
     navigator_service_worker_controllerchange_handler_setter_callback,
     navigator_service_worker_get_registration_callback,
@@ -13,8 +13,7 @@ use super::super::window_runtime::{
     navigator_service_worker_messageerror_handler_setter_callback,
     navigator_service_worker_register_callback, navigator_storage_estimate_callback,
     navigator_storage_get_directory_callback, navigator_storage_persist_callback,
-    navigator_storage_persisted_callback, navigator_ua_data_get_high_entropy_values_callback,
-    navigator_ua_data_to_json_callback, navigator_vibrate_callback,
+    navigator_storage_persisted_callback, navigator_vibrate_callback,
     permission_status_name_getter_callback, permission_status_state_getter_callback,
     service_worker_object_set_owner_scope,
 };
@@ -38,6 +37,7 @@ use crate::util::{
 };
 use crate::web_api_interfaces;
 use moli_browser_profile::{BrowserIdentityProfile, navigator_app_version};
+use moli_webapi::navigator_ua_data::build_navigator_ua_data_object;
 use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
 
 const NAVIGATOR_RUNTIME_DATA_KEYS: &[&str] = &[
@@ -89,8 +89,7 @@ const WORKER_NAVIGATOR_BACKING_SLOT: &str = "__moliWorkerNavigatorBacking";
 const NAVIGATOR_STORAGE_OWNER_CHILD_HANDLE_SLOT: &str = "__moliNavigatorStorageOwnerChildHandle";
 const NAVIGATOR_STORAGE_OWNER_POPUP_ID_SLOT: &str = "__moliNavigatorStorageOwnerPopupId";
 const NAVIGATOR_ACCEPT_LANGUAGE_SLOT: &str = "__moliNavigatorAcceptLanguage";
-pub(in crate::context_bootstrap) const NAVIGATOR_IDENTITY_PROFILE_SLOT: &str =
-    "__moliNavigatorIdentityProfile";
+
 pub(in crate::context_bootstrap) const STORAGE_MANAGER_CHILD_HANDLE_SLOT: &str =
     "__moliStorageManagerChildHandle";
 pub(in crate::context_bootstrap) const STORAGE_MANAGER_POPUP_ID_SLOT: &str =
@@ -113,7 +112,7 @@ pub(in crate::context_bootstrap) const SERVICE_WORKER_OWNER_TOKEN_SLOT: &str =
 struct PermissionsObjectDeclaration {}
 
 #[derive(Default, WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Permissions, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::Permissions, enumerable)]
 struct PermissionsPrototypeMethodsDeclaration {
     #[webapi(method, length = 1, callback = navigator_permissions_query_callback, returns_promise)]
     query: (),
@@ -195,11 +194,11 @@ struct NavigatorRuntimeDataPrototypeDeclaration {
     geolocation: (),
     #[webapi(accessor_property, getter = navigator_runtime_data_getter_callback, data = callback_data_index_value(scope, 32))]
     media_capabilities: (),
-    #[webapi(accessor_property, getter = navigator_runtime_data_getter_callback, data = callback_data_index_value(scope, 34), receiver = web_api_interfaces::Navigator::is_instance)]
+    #[webapi(accessor_property, getter = navigator_runtime_data_getter_callback, data = callback_data_index_value(scope, 34))]
     media_session: (),
-    #[webapi(accessor_property, getter = navigator_runtime_data_getter_callback, data = callback_data_index_value(scope, 35), receiver = web_api_interfaces::Navigator::is_instance)]
+    #[webapi(accessor_property, getter = navigator_runtime_data_getter_callback, data = callback_data_index_value(scope, 35))]
     locks: (),
-    #[webapi(accessor_property, getter = navigator_cookie_enabled_getter_callback, receiver = web_api_interfaces::Navigator::is_instance)]
+    #[webapi(accessor_property, getter = navigator_cookie_enabled_getter_callback)]
     cookie_enabled: (),
 }
 
@@ -211,7 +210,7 @@ struct NavigatorCredentialsPrototypeDeclaration {
 }
 
 #[derive(Default, WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Navigator, receiver)]
+#[webapi(interface = web_api_interfaces::Navigator)]
 struct NavigatorPrototypeMethodsDeclaration {
     #[webapi(method, enumerable, length = 0, callback = navigator_get_gamepads_callback)]
     get_gamepads: (),
@@ -295,9 +294,7 @@ struct PermissionStatusPrototypeDeclaration {
 
 #[derive(Default, WebApiObject)]
 #[webapi(
-    interface = web_api_interfaces::NetworkInformation,
-    receiver
-)]
+    interface = web_api_interfaces::NetworkInformation)]
 struct NavigatorConnectionDeclaration {
     #[webapi(data_property, name = "type", enumerable, value = DEFAULT_CONNECTION_TYPE)]
     connection_type: (),
@@ -331,29 +328,29 @@ struct StorageManagerObjectDeclaration {}
 #[derive(WebApiFunctionTemplate)]
 #[webapi(interface = web_api_interfaces::StorageManager, enumerable)]
 struct StorageManagerTemplateMethodsDeclaration {
-    #[webapi(method, length = 0, callback = navigator_storage_persisted_callback)]
+    #[webapi(returns_promise, method, length = 0, callback = navigator_storage_persisted_callback)]
     persisted: (),
 
-    #[webapi(method, length = 0, callback = navigator_storage_persist_callback)]
+    #[webapi(returns_promise, method, length = 0, callback = navigator_storage_persist_callback)]
     persist: (),
 
-    #[webapi(method, length = 0, callback = navigator_storage_estimate_callback)]
+    #[webapi(returns_promise, method, length = 0, callback = navigator_storage_estimate_callback)]
     estimate: (),
 
-    #[webapi(method, length = 0, callback = navigator_storage_get_directory_callback)]
+    #[webapi(returns_promise, method, length = 0, callback = navigator_storage_get_directory_callback)]
     get_directory: (),
 }
 
 #[derive(WebApiFunctionTemplate)]
 #[webapi(interface = web_api_interfaces::StorageManager, enumerable)]
 struct StorageManagerWorkerTemplateMethodsDeclaration {
-    #[webapi(method, length = 0, callback = navigator_storage_persisted_callback)]
+    #[webapi(returns_promise, method, length = 0, callback = navigator_storage_persisted_callback)]
     persisted: (),
 
-    #[webapi(method, length = 0, callback = navigator_storage_estimate_callback)]
+    #[webapi(returns_promise, method, length = 0, callback = navigator_storage_estimate_callback)]
     estimate: (),
 
-    #[webapi(method, length = 0, callback = navigator_storage_get_directory_callback)]
+    #[webapi(returns_promise, method, length = 0, callback = navigator_storage_get_directory_callback)]
     get_directory: (),
 }
 
@@ -382,16 +379,6 @@ pub(in crate::context_bootstrap) fn install_storage_manager_constructor_template
 #[webapi(interface = web_api_interfaces::StorageBucketManager)]
 struct StorageBucketManagerObjectDeclaration {}
 
-#[derive(Default, WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::NavigatorUAData, enumerable, receiver)]
-struct NavigatorUaDataPrototypeMethodsDeclaration {
-    #[webapi(method, name = "toJSON", length = 0, callback = navigator_ua_data_to_json_callback)]
-    to_json: (),
-
-    #[webapi(method, length = 1, callback = navigator_ua_data_get_high_entropy_values_callback, returns_promise)]
-    get_high_entropy_values: (),
-}
-
 #[derive(Default, WebApiObject)]
 #[webapi(interface = web_api_interfaces::ServiceWorkerContainer)]
 struct ServiceWorkerContainerDeclaration {
@@ -417,7 +404,6 @@ struct ServiceWorkerContainerDeclaration {
         method,
         enumerable,
         callback = navigator_service_worker_register_callback,
-        receiver = web_api_interfaces::ServiceWorkerContainer::is_instance,
         returns_promise,
         length = 1
     )]
@@ -427,7 +413,6 @@ struct ServiceWorkerContainerDeclaration {
         method,
         enumerable,
         callback = navigator_service_worker_get_registration_callback,
-        receiver = web_api_interfaces::ServiceWorkerContainer::is_instance,
         returns_promise,
         length = 0
     )]
@@ -437,7 +422,6 @@ struct ServiceWorkerContainerDeclaration {
         method,
         enumerable,
         callback = navigator_service_worker_get_registrations_callback,
-        receiver = web_api_interfaces::ServiceWorkerContainer::is_instance,
         returns_promise,
         length = 0
     )]
@@ -875,9 +859,7 @@ pub(in crate::context_bootstrap) fn install_navigator_template_bindings<'s>(
             PermissionStatusPrototypeDeclaration::initialize_prototype_template(scope, prototype);
         }
         "NavigatorUAData" => {
-            NavigatorUaDataPrototypeMethodsDeclaration::initialize_prototype_template(
-                scope, prototype,
-            );
+            moli_webapi::navigator_ua_data::install(scope, template);
         }
         _ => {}
     }
@@ -1105,6 +1087,20 @@ fn navigator_backing_owner<'s>(
     (owner_child, owner_popup)
 }
 
+pub(crate) fn navigator_owner_dispatch_scope<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    navigator: v8::Local<'s, v8::Object>,
+) -> Option<OwnerDispatchScope> {
+    let backing = navigator_runtime_data_object(scope, navigator)?;
+    let (owner_child, owner_popup) = navigator_backing_owner(scope, backing);
+    Some(
+        owner_child
+            .map(OwnerDispatchScope::Child)
+            .or_else(|| owner_popup.map(OwnerDispatchScope::LightweightPopup))
+            .unwrap_or(OwnerDispatchScope::Top),
+    )
+}
+
 fn navigator_geolocation_secure_context_available(
     scope: &mut v8::PinScope<'_, '_>,
     owner_child: Option<DomHandle>,
@@ -1188,29 +1184,7 @@ fn worker_navigator_identity<'s>(
     })
 }
 
-pub(in crate::context_bootstrap) fn set_navigator_identity_profile<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    object: v8::Local<'s, v8::Object>,
-    identity: &BrowserIdentityProfile,
-) {
-    let Ok(serialized) = serde_json::to_string(identity) else {
-        return;
-    };
-    let Some(value) = v8_string(scope, &serialized) else {
-        return;
-    };
-    set_private_value(scope, object, NAVIGATOR_IDENTITY_PROFILE_SLOT, value.into());
-}
-
-pub(in crate::context_bootstrap) fn navigator_identity_profile<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    object: v8::Local<'s, v8::Object>,
-) -> Option<BrowserIdentityProfile> {
-    let serialized = get_private_value(scope, object, NAVIGATOR_IDENTITY_PROFILE_SLOT)?
-        .to_string(scope)?
-        .to_rust_string_lossy(scope);
-    serde_json::from_str(&serialized).ok()
-}
+use moli_webapi::navigator_ua_data::{navigator_identity_profile, set_navigator_identity_profile};
 
 fn build_window_navigator_backing_for_owner<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -1673,22 +1647,26 @@ fn navigator_runtime_data_object<'s>(
         .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
 }
 
-pub(in crate::context_bootstrap) fn service_worker_container_for_window<'s>(
+pub(in crate::context_bootstrap) fn service_worker_container_for_client<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    window: v8::Local<'s, v8::Object>,
+    client: v8::Local<'s, v8::Object>,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    // Native notifications address the Window's associated container. Neither
-    // Window.navigator nor Navigator.serviceWorker invokes author code here.
-    let navigator = get_private_value(scope, window, WINDOW_NAVIGATOR_SLOT)
-        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
-        .or_else(|| {
-            super::super::window_lazy_surface::ensure_window_lazy_surface_object(
-                scope,
-                window,
-                super::super::window_lazy_surface::WindowLazySurface::Navigator,
-            )
-            .ok()
-        })?;
+    // Native notifications resolve the client container through its realm's
+    // navigator backing without invoking author-defined getters.
+    let navigator = if get_private_value(scope, client, WORKER_NAVIGATOR_INSTALLED_SLOT).is_some() {
+        ensure_worker_navigator_in_current_realm(scope).ok()?
+    } else {
+        get_private_value(scope, client, WINDOW_NAVIGATOR_SLOT)
+            .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+            .or_else(|| {
+                super::super::window_lazy_surface::ensure_window_lazy_surface_object(
+                    scope,
+                    client,
+                    super::super::window_lazy_surface::WindowLazySurface::Navigator,
+                )
+                .ok()
+            })?
+    };
     let backing = navigator_runtime_data_object(scope, navigator)?;
     ensure_navigator_subobject(scope, backing, NavigatorSubobject::ServiceWorker)
         .ok()

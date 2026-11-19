@@ -331,6 +331,36 @@ async fn worker_global_prototype_chains_inherit_event_target_and_are_immutable()
 }
 
 #[tokio::test]
+async fn worker_bootstrap_can_be_released_without_an_inspector_command() {
+    ensure_v8();
+    let mut handle = spawn_test_worker_with_options(
+        WorkerSpawnOptions::new(
+            r#"postMessage("started");"#.to_owned(),
+            "https://example.test/app/native-start-worker.js".to_owned(),
+        )
+        .with_pause_evaluation_until_debugger(true),
+    );
+    assert!(
+        timeout(Duration::from_millis(50), handle.recv())
+            .await
+            .is_err()
+    );
+    assert!(handle.start_evaluation());
+    let message = timeout(TIMEOUT, handle.recv())
+        .await
+        .expect("timed out waiting for native Worker startup")
+        .expect("Worker closed before native startup completed");
+    match message {
+        WorkerToParentMessage::Post(payload) => {
+            assert_eq!(stringify_payload(&payload), r#""started""#)
+        }
+        other => panic!("unexpected native Worker startup message: {other:?}"),
+    }
+    handle.terminate_and_join();
+}
+
+#[cfg(feature = "devtools")]
+#[tokio::test]
 async fn worker_pause_evaluation_until_debugger_exposes_context_before_bootstrap() {
     ensure_v8();
     let (bootstrap_tx, mut bootstrap_rx) =
@@ -442,6 +472,7 @@ async fn worker_pause_evaluation_until_debugger_exposes_context_before_bootstrap
     handle.terminate_and_join();
 }
 
+#[cfg(feature = "devtools")]
 #[tokio::test]
 async fn worker_attach_before_runtime_enable_preserves_script_loaded_after_resume() {
     ensure_v8();
@@ -503,6 +534,7 @@ async fn worker_attach_before_runtime_enable_preserves_script_loaded_after_resum
     handle.terminate_and_join();
 }
 
+#[cfg(feature = "devtools")]
 #[tokio::test]
 async fn worker_inspector_interrupt_overtakes_js_running_command_during_active_javascript() {
     ensure_v8();
@@ -795,7 +827,6 @@ async fn service_worker_fetch_event_preload_response_resolves_network_response()
             ),
             request_url,
             request_method: "GET".to_owned(),
-            request_mode: moli_fetch::RequestMode::Navigate,
             body_source_id,
             response_head: moli_fetch_types::FetchResponseHead {
                 metadata: moli_fetch_types::FetchResponseMetadata {
@@ -916,7 +947,6 @@ async fn service_worker_fetch_event_preload_response_opaqueredirect_exposes_requ
             ),
             request_url: request_url.clone(),
             request_method: "GET".to_owned(),
-            request_mode: moli_fetch::RequestMode::Navigate,
             body_source_id,
             response_head: moli_fetch_types::FetchResponseHead {
                 metadata: moli_fetch_types::FetchResponseMetadata {
@@ -1091,7 +1121,6 @@ async fn service_worker_fetch_event_preload_response_body_errors_after_response(
             ),
             request_url,
             request_method: "GET".to_owned(),
-            request_mode: moli_fetch::RequestMode::Navigate,
             body_source_id,
             response_head: moli_fetch_types::FetchResponseHead {
                 metadata: moli_fetch_types::FetchResponseMetadata {
@@ -1211,7 +1240,6 @@ async fn service_worker_fetch_event_preload_response_body_completes_after_fetch_
             ),
             request_url,
             request_method: "GET".to_owned(),
-            request_mode: moli_fetch::RequestMode::Navigate,
             body_source_id,
             response_head: moli_fetch_types::FetchResponseHead {
                 metadata: moli_fetch_types::FetchResponseMetadata {

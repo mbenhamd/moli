@@ -43,6 +43,7 @@ members = [
     "moli-dom",
     "moli-parser",
     "moli-paint",
+    "moli-types/moli-command-types",
     "moli-types/moli-page-types",
     "moli-parkable-image",
     "moli-process-signal",
@@ -76,6 +77,7 @@ members = [
     "moli-protocol-webdriver-bidi",
     "moli-protocol-webdriver-classic",
     "moli-webcrypto",
+    "moli-webapi",
     "moli-webapi-declare",
     "moli-webapi-declare-derive",
     "moli-webidl",
@@ -86,6 +88,8 @@ members = [
     "moli-websocket",
     "moli-fetch",
     "moli-types/moli-fetch-types",
+    "moli-types/moli-websocket-types",
+    "moli-types/moli-indexeddb-types",
     "moli-file-api",
     "moli-geometry",
     "moli-header-field",
@@ -131,10 +135,10 @@ stylo_traits = { git = "https://github.com/mbenhamd/stylo", rev = "bdec6bf50535d
 svgtypes = { git = "https://github.com/lexmount/svgtypes", rev = "520374d714d69f8e2dc93c81a9d6be559ecde3ff" }
 # Preserve original SVG selector inputs and collect unclipped source geometry.
 usvg = { git = "https://github.com/lexmount/resvg", rev = "a137793a5749c27862b724eef60c4734526b14a0" }
-taffy = { git = "https://github.com/mbenhamd/taffy", rev = "2a45caee059959ac2a29aa5be01d8006e3cc2673" }
+taffy = { git = "https://github.com/mbenhamd/taffy", rev = "b7ebaf863dd86f49856cbb94069f0cf80887404e" }
 
 [patch."https://github.com/DioxusLabs/taffy"]
-taffy = { git = "https://github.com/mbenhamd/taffy", rev = "2a45caee059959ac2a29aa5be01d8006e3cc2673" }
+taffy = { git = "https://github.com/mbenhamd/taffy", rev = "b7ebaf863dd86f49856cbb94069f0cf80887404e" }
 
 [workspace.lints.clippy]
 disallowed_methods = "deny"

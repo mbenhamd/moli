@@ -263,7 +263,14 @@ pub(crate) async fn fetch_stylesheet_readiness_with_service_worker(
                 return StylesheetFetchTerminal::network_error(error.to_string());
             }
         }
-        stylesheet_terminal_from_response(&request_origin, &url, &options, response, provenance)
+        stylesheet_terminal_from_response(
+            &request_origin,
+            &url,
+            &options,
+            response,
+            provenance,
+            loader.web_security_disabled(),
+        )
     };
     if let Some(context) = service_worker_context {
         match context
@@ -327,17 +334,16 @@ pub(crate) async fn fetch_stylesheet_readiness_with_service_worker(
             resource_type: SubresourceResourceType::Stylesheet,
             request_cookie_report: None,
         };
-        let completed =
-            crate::network_host::controlled_xhr::ControlledResourceLoad::for_stylesheet(
-                context,
-                request,
-                info,
-                load,
-                cancel,
-                request_initiator_type,
-            )
-            .run()
-            .await;
+        let completed = crate::network_host::controlled_resource::ControlledResourceLoad::new(
+            context,
+            request,
+            info,
+            load,
+            cancel,
+            request_initiator_type,
+        )
+        .run()
+        .await;
         let terminal = match completed.result {
             Ok(response) => {
                 let bytes = match completed.network_record.outcome() {
@@ -440,6 +446,7 @@ impl StylesheetResponseProvenance {
         &self,
         request_origin: &moli_url::WebOrigin,
         head: &moli_fetch::ResponseHead,
+        web_security_disabled: bool,
     ) -> bool {
         match self {
             // Fetch classifies data responses as basic despite their opaque URL
@@ -448,6 +455,7 @@ impl StylesheetResponseProvenance {
                 request_origin,
                 head,
                 moli_fetch::RequestMode::NoCors,
+                web_security_disabled,
             )
             .is_none(),
             Self::ServiceWorker { filter } => {
@@ -472,6 +480,7 @@ fn stylesheet_terminal_from_response(
     options: &StylesheetFetchOptions,
     response: crate::protocol_types::NavigationResponse,
     response_provenance: StylesheetResponseProvenance,
+    web_security_disabled: bool,
 ) -> StylesheetFetchTerminal {
     let (request_mode, credentials_mode) = options.request_mode_and_credentials();
     let head = response.head();
@@ -488,12 +497,13 @@ fn stylesheet_terminal_from_response(
                     request_origin,
                     &head,
                     credentials_mode,
+                    web_security_disabled,
                 )
                 .map_err(|error| format!("failed to fetch stylesheet `{request_url}`: {error}"))
             }
         });
     let origin_clean = cors_usability.as_ref().map_or_else(
-        || response_provenance.is_cors_same_origin(request_origin, &head),
+        || response_provenance.is_cors_same_origin(request_origin, &head, web_security_disabled),
         Result::is_ok,
     );
     let fetch_usability = if !(200..=299).contains(&response.status) {
@@ -652,6 +662,7 @@ mod tests {
                 &integrity_options(None, &integrity),
                 response.clone(),
                 StylesheetResponseProvenance::Network,
+                false,
             );
             assert_eq!(terminal.is_ready(), expected, "{integrity}");
             assert_eq!(terminal.failed_integrity(), !expected, "{integrity}");
@@ -694,6 +705,7 @@ mod tests {
                 &integrity_options(cross_origin, &integrity),
                 response,
                 StylesheetResponseProvenance::Network,
+                false,
             );
             assert_eq!(
                 terminal.is_ready(),
@@ -727,6 +739,7 @@ mod tests {
                 &integrity_options(cross_origin, &integrity),
                 response,
                 StylesheetResponseProvenance::Network,
+                false,
             );
             assert_eq!(
                 terminal.is_ready(),
@@ -764,6 +777,7 @@ mod tests {
                 StylesheetResponseProvenance::ServiceWorker {
                     filter: filter.clone(),
                 },
+                false,
             );
             assert_eq!(terminal.is_ready(), expected, "{filter:?}");
             assert_eq!(terminal.ready_response().is_some(), expected);
@@ -790,6 +804,7 @@ mod tests {
                     &integrity_options(cross_origin, integrity),
                     stylesheet_response(&stylesheet_url, Some("text/css"), body),
                     StylesheetResponseProvenance::Network,
+                    false,
                 );
                 assert_eq!(
                     terminal.is_ready(),
@@ -834,6 +849,7 @@ mod tests {
                 &integrity_options(None, &integrity),
                 response,
                 StylesheetResponseProvenance::Network,
+                false,
             );
             assert_eq!(terminal.is_ready(), expected, "{request_url}");
         }
@@ -906,6 +922,7 @@ mod tests {
             &options,
             same_origin_response,
             StylesheetResponseProvenance::Network,
+            false,
         );
 
         assert!(same_origin_terminal.is_ready());
@@ -922,6 +939,7 @@ mod tests {
             &options,
             cross_origin_response,
             StylesheetResponseProvenance::Network,
+            false,
         );
 
         assert!(!cross_origin_terminal.is_ready());
@@ -945,6 +963,7 @@ mod tests {
                 &options,
                 response,
                 StylesheetResponseProvenance::Network,
+                false,
             );
 
             assert_eq!(terminal.is_ready(), expected_ready);
@@ -971,6 +990,7 @@ mod tests {
             &options,
             cross_to_same_response,
             StylesheetResponseProvenance::Network,
+            false,
         );
 
         assert!(!cross_to_same_terminal.is_ready());
@@ -990,6 +1010,7 @@ mod tests {
             &options,
             through_cross_response,
             StylesheetResponseProvenance::Network,
+            false,
         );
 
         assert!(!through_cross_terminal.is_ready());
@@ -1017,6 +1038,7 @@ mod tests {
             &options,
             response,
             StylesheetResponseProvenance::Network,
+            false,
         );
 
         assert!(!terminal.is_ready());
@@ -1127,6 +1149,7 @@ mod tests {
             &options,
             response,
             StylesheetResponseProvenance::Network,
+            false,
         );
 
         assert!(terminal.is_ready());
@@ -1159,6 +1182,7 @@ mod tests {
             &options,
             response,
             StylesheetResponseProvenance::Network,
+            false,
         );
 
         assert!(!terminal.is_ready());
@@ -1188,6 +1212,7 @@ mod tests {
             &StylesheetFetchOptions::default(),
             response,
             StylesheetResponseProvenance::Network,
+            false,
         );
 
         assert!(!terminal.is_ready());
@@ -1220,6 +1245,7 @@ mod tests {
             &StylesheetFetchOptions::default(),
             response,
             StylesheetResponseProvenance::ServiceWorker { filter: None },
+            false,
         );
 
         assert!(terminal.is_ready());
@@ -1251,6 +1277,7 @@ mod tests {
             &options,
             response,
             StylesheetResponseProvenance::ServiceWorker { filter: None },
+            false,
         );
 
         assert!(terminal.is_ready());

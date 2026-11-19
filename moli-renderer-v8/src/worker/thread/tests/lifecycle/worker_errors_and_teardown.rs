@@ -1170,11 +1170,7 @@ async fn worker_error_report_ignores_throwing_accessors() {
         WorkerToParentMessage::Post(_) => panic!("expected worker error"),
         WorkerToParentMessage::SubresourceNetwork(_)
         | WorkerToParentMessage::PendingSubresourceFetch(_)
-        | WorkerToParentMessage::PendingSubresourceFetchCanceled { .. }
         | WorkerToParentMessage::SubresourceContinue(_)
-        | WorkerToParentMessage::WebSocketSubresource(_)
-        | WorkerToParentMessage::WebSocketLifecycle(_)
-        | WorkerToParentMessage::WebSocketFrame(_)
         | WorkerToParentMessage::Console(_)
         | WorkerToParentMessage::RuntimeInspectorMessages(_)
         | WorkerToParentMessage::ServiceWorkerLifecycleCompleted(_)

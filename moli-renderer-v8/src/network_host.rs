@@ -11,7 +11,7 @@ mod event_source;
 mod fetch;
 mod fetch_surface;
 mod font_face;
-mod headers;
+use moli_webapi::headers;
 mod image;
 mod js_values;
 mod loaded_response;
@@ -37,12 +37,10 @@ use moli_fetch::{Request, Response, observe_cookie_access_report_for_request};
 use crate::network::ResourceRequestClient;
 
 pub(crate) use self::async_fetch::{
-    browser_request_needs_manual_preflight_redirects, collect_image_response_into_parkable,
-    fetch_browser_subresource_raw_stream_with_preflight_headers_and_network_metadata,
+    collect_image_response_into_parkable,
     fetch_browser_subresource_with_preflight_and_network_metadata,
-    fetch_browser_subresource_with_preflight_headers,
-    fetch_browser_subresource_with_preflight_headers_and_network_metadata,
-    fetch_intercepted_window_hop, spawn_async_subresource_fetch,
+    fetch_browser_subresource_with_preflight_headers, fetch_intercepted_window_hop,
+    spawn_async_subresource_fetch,
 };
 pub(crate) use self::beacon::{navigator_send_beacon_callback, send_link_audit_ping};
 pub(super) use self::bindings::install_window_network_bindings;
@@ -61,10 +59,9 @@ pub(in crate::network_host) use self::body_source::{
     consume_network_body_value_from_object,
     consume_network_body_value_from_object_with_chunk_callback, network_body_source_from_object,
     network_body_source_object_from_bytes, network_body_stream_from_response_body,
-    network_body_stream_from_subresource_body, set_filtered_response_internal_body_from_bytes,
+    set_filtered_response_internal_body_from_bytes,
     set_filtered_response_internal_body_from_pending_stream,
-    set_filtered_response_internal_body_from_response_body,
-    set_filtered_response_internal_body_from_subresource_body, set_network_body_owned_bytes,
+    set_filtered_response_internal_body_from_response_body, set_network_body_owned_bytes,
     take_network_body_bytes_from_object, try_network_body_bytes_from_object,
 };
 pub(crate) use self::body_source::{
@@ -158,11 +155,9 @@ pub(crate) use self::response::materialize_response_object;
 pub(crate) use self::response::{
     FetchResponseRequest, FetchResponseSecurityViolation, MaterializedResponseBody,
     MaterializedResponseHead, build_fetch_response_object_for_request_mode,
-    build_fetch_response_object_from_body_source_for_request_mode_with_metadata,
-    build_fetch_response_object_from_stream_for_request_mode_with_metadata,
-    build_fetch_response_object_from_subresource_body_for_request_mode,
-    build_filtered_cached_response_object,
-    build_navigation_preload_response_object_from_stream_for_request_mode,
+    build_fetch_response_object_from_body_source_with_metadata,
+    build_fetch_response_object_from_stream_with_metadata, build_filtered_cached_response_object,
+    build_navigation_preload_response_object_from_stream_with_metadata,
     cors_preflight_request_headers, filter_cors_exposed_response_headers,
     is_cors_policy_failure_message, materialize_response_object_body,
     materialize_response_object_body_preserving_error,
@@ -193,10 +188,11 @@ pub(crate) use self::xhr::{
     XHR_METHOD_SLOT, XHR_OPEN_GENERATION_SLOT, XHR_SEND_FLAG_SLOT, XHR_TIMEOUT_SLOT,
     XHR_TIMEOUT_START_MS_SLOT, XHR_TIMEOUT_TIMER_SLOT, XHR_URL_SLOT, XHR_WITH_CREDENTIALS_SLOT,
     apply_xhr_failure, apply_xhr_response, apply_xhr_response_body_source,
-    apply_xhr_response_body_source_with_status_text, apply_xhr_streaming_response_body_source,
-    apply_xhr_streaming_response_chunk, apply_xhr_streaming_response_head, apply_xhr_timeout,
-    begin_xhr_send, convert_xhr_send_body_from_args, dispatch_xhr_loadstart,
-    dispatch_xhr_upload_complete, finish_xhr_abort, install_progress_event_template_bindings,
+    apply_xhr_response_body_source_with_status_text, apply_xhr_streaming_failure,
+    apply_xhr_streaming_response_body_source, apply_xhr_streaming_response_chunk,
+    apply_xhr_streaming_response_head, apply_xhr_timeout, begin_xhr_send,
+    convert_xhr_send_body_from_args, dispatch_xhr_loadstart, dispatch_xhr_upload_complete,
+    finish_xhr_abort, install_progress_event_template_bindings,
     install_window_xml_http_request_template_bindings, install_xml_http_request_bindings,
     install_xml_http_request_event_target_bindings, progress_event_constructor_callback,
     set_xhr_state_number, throw_synchronous_xhr_failure, xhr_author_request_headers,
@@ -263,4 +259,4 @@ pub(crate) use response::{fetch_response_metadata, set_response_metadata};
 #[cfg(test)]
 pub(crate) use response::build_fetch_response_object_from_stream_for_request_mode;
 
-pub(crate) mod controlled_xhr;
+pub(crate) mod controlled_resource;

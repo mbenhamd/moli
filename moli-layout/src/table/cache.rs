@@ -66,11 +66,14 @@ mod tests {
                 width: 80.0,
                 height: 100.0,
             },
-            Size {
-                width: 80.0,
-                height: 120.0,
-            }
-            .into(),
+            (
+                taffy::Rect::from(Size {
+                    width: 80.0,
+                    height: 120.0,
+                }),
+                taffy::Point { x: false, y: false },
+            )
+                .into(),
             Baselines {
                 first: Some(15.0),
                 last: Some(85.0),

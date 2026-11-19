@@ -1,5 +1,4 @@
-use super::global_attributes::parse_tab_index_attribute;
-use crate::dom::native::{Element, Node};
+use crate::dom::native::{ContentEditableState, Element, FocusSupport, Node};
 
 use super::super::{
     PageScriptHost, PendingWindowMessageEndpoint, document, node::node_runtime_and_handle_from_args,
@@ -20,6 +19,7 @@ use super::{
     label_receives_programmatic_focus,
 };
 use crate::document_runtime::{DomHandle, EventTargetHandle};
+#[cfg(feature = "devtools")]
 use crate::runtime::RendererDomFocusOutcome;
 use crate::style_engine::{ComputedDisplayKind, ComputedWhiteSpaceCollapseKind};
 use crate::util::{node_wrapper_from_handle, v8_string, v8str};
@@ -54,40 +54,15 @@ pub(crate) fn contenteditable_editing_host(
     runtime: &PageScriptHost,
     handle: DomHandle,
 ) -> Option<DomHandle> {
-    let dom = runtime.dom_host().dom();
-    let mut current = Some(handle);
-    while let Some(candidate) = current {
-        if let Some(element) = dom.node(candidate).and_then(Node::as_element)
-            && let Some(value) = element.attribute("contenteditable")
-        {
-            match contenteditable_state_from_attr(value) {
-                Some(true) => return Some(candidate),
-                Some(false) => return None,
-                None => {}
-            }
-        }
-        current = dom.parent_node(candidate);
-    }
-    None
-}
-
-fn contenteditable_state_from_attr(value: &str) -> Option<bool> {
-    let normalized = value.trim().to_ascii_lowercase();
-    if normalized.is_empty() || normalized == "true" || normalized == "plaintext-only" {
-        Some(true)
-    } else if normalized == "false" {
-        Some(false)
-    } else {
-        None
-    }
+    runtime
+        .dom_host()
+        .dom()
+        .contenteditable_editing_host(handle)
 }
 
 fn initial_caret_can_descend(element: &Element) -> bool {
     !element.has_attribute("inert")
-        && element
-            .attribute("contenteditable")
-            .and_then(contenteditable_state_from_attr)
-            != Some(false)
+        && element.content_editable_state() != ContentEditableState::False
         && !matches!(
             element.local_name(),
             "br" | "img"
@@ -203,24 +178,17 @@ pub(crate) fn initial_contenteditable_caret(
 }
 
 pub(super) fn is_focusable(runtime: &PageScriptHost, handle: DomHandle) -> bool {
-    let Some(element) = runtime.dom_host().node(handle).and_then(Node::as_element) else {
-        return false;
-    };
-    if !runtime
-        .dom_host()
-        .node(handle)
-        .is_some_and(Node::is_connected)
+    let dom = runtime.dom_host().dom();
+    if !dom.node(handle).is_some_and(Node::is_connected)
         || is_disabled_form_control(runtime, handle)
     {
         return false;
     }
-    matches!(
-        element.local_name(),
-        "body" | "input" | "button" | "select" | "textarea" | "a" | "iframe" | "frame"
-    ) || element.has_attribute("tabindex")
-        || super::is_main_summary(runtime, handle)
-        || contenteditable_editing_host(runtime, handle) == Some(handle)
-        || element_is_scrollable(runtime, handle)
+    match dom.focus_support(handle) {
+        FocusSupport::Blocked => false,
+        FocusSupport::Supported => true,
+        FocusSupport::LayoutDependent => element_is_scrollable(runtime, handle),
+    }
 }
 
 fn overflow_makes_scroll_container(value: &str) -> bool {
@@ -912,9 +880,7 @@ fn collect_sequential_focus_entries(
         if !frame_owner_admits_sequential_focus(runtime, handle) {
             return;
         }
-        let tab_index = element_attribute(runtime, handle, "tabindex")
-            .and_then(|value| parse_tab_index_attribute(&value))
-            .unwrap_or(0);
+        let tab_index = element.explicit_tab_index().unwrap_or(0);
         if tab_index < 0 {
             return;
         }
@@ -1209,8 +1175,11 @@ fn style_integer_property(
 }
 
 fn slot_focus_scope_tab_index(runtime: &PageScriptHost, handle: DomHandle) -> Option<i32> {
-    let value = element_attribute(runtime, handle, "tabindex")
-        .and_then(|value| parse_tab_index_attribute(&value))
+    let value = runtime
+        .dom_host()
+        .node(handle)
+        .and_then(Node::as_element)
+        .and_then(Element::explicit_tab_index)
         .unwrap_or(0);
     (value >= 0).then_some(value)
 }
@@ -1237,8 +1206,11 @@ fn sequential_tab_index_without_scroll_descendant_check(
     runtime: &PageScriptHost,
     handle: DomHandle,
 ) -> Option<i32> {
-    let value = element_attribute(runtime, handle, "tabindex")
-        .and_then(|value| parse_tab_index_attribute(&value))
+    let value = runtime
+        .dom_host()
+        .node(handle)
+        .and_then(Node::as_element)
+        .and_then(Element::explicit_tab_index)
         .unwrap_or_else(|| default_sequential_tab_index(runtime, handle));
     (value >= 0).then_some(value)
 }
@@ -1327,17 +1299,18 @@ fn is_interactive_sequential_focusable_descendant(
         element.local_name(),
         "a" | "button" | "input" | "select" | "textarea"
     ) || super::is_main_summary(runtime, handle);
-    let has_non_negative_tab_index = element_attribute(runtime, handle, "tabindex")
-        .and_then(|value| parse_tab_index_attribute(&value))
-        .is_some_and(|value| value >= 0);
+    let has_non_negative_tab_index = element.explicit_tab_index().is_some_and(|value| value >= 0);
     (is_interactive_element || has_non_negative_tab_index)
         && sequential_tab_index_without_scroll_descendant_check(runtime, handle).is_some()
         && is_rendered_for_focus(runtime, handle)
 }
 
 fn explicit_negative_tab_index(runtime: &PageScriptHost, handle: DomHandle) -> bool {
-    element_attribute(runtime, handle, "tabindex")
-        .and_then(|value| parse_tab_index_attribute(&value))
+    runtime
+        .dom_host()
+        .node(handle)
+        .and_then(Node::as_element)
+        .and_then(Element::explicit_tab_index)
         .is_some_and(|value| value < 0)
 }
 
@@ -1602,6 +1575,7 @@ fn focus_element_with_options(
     Ok(())
 }
 
+#[cfg(feature = "devtools")]
 pub(crate) fn focus_live_element_for_inspector(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,

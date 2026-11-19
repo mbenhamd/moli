@@ -16,19 +16,35 @@ pub(super) fn advance_subresource_response(
     request: &mut Request,
     head: ResponseHead,
     network_extra_info_available: bool,
+    web_security_disabled: bool,
 ) -> Result<SubresourceResponseTransition, String> {
     // Preserve transport-refined snapshots, including cached/internal hops.
     request.observe_redirect_requests(&head.redirect_chain);
-    // Fetch gives redirect:error precedence over CORS validation of a redirect.
+    if !web_security_disabled {
+        request.validate_cors_response_for_url(&head.final_url, &head.headers)?;
+    }
+    advance_validated_subresource_response(
+        request,
+        head,
+        network_extra_info_available,
+        web_security_disabled,
+    )
+}
+
+pub(super) fn advance_validated_subresource_response(
+    request: &mut Request,
+    head: ResponseHead,
+    network_extra_info_available: bool,
+    web_security_disabled: bool,
+) -> Result<SubresourceResponseTransition, String> {
+    // Error mode rejects redirect statuses without consulting Location.
     if request.redirect_mode() == RequestRedirectMode::Error {
-        if next_redirect_url(&head.final_url, head.status, &head.headers, 0)?.is_some() {
+        if matches!(head.status, 301 | 302 | 303 | 307 | 308) {
             return Err(redirect_mode_error_message(&head.final_url));
         }
-        request.validate_cors_response_for_url(&head.final_url, &head.headers)?;
         return Ok(SubresourceResponseTransition::FinalResponse);
     }
 
-    request.validate_cors_response_for_url(&head.final_url, &head.headers)?;
     // Manual responses are filtered without following Location. Parsing it or
     // applying the redirect limit would reject an otherwise valid response.
     if request.redirect_mode() == RequestRedirectMode::Manual {
@@ -50,11 +66,14 @@ pub(super) fn advance_subresource_response(
         return Ok(SubresourceResponseTransition::FinalResponse);
     };
     request
-        .follow_redirect(head.into_redirect(
-            next_url,
-            RedirectSource::Network,
-            network_extra_info_available,
-        ))
+        .follow_redirect_with_web_security(
+            head.into_redirect(
+                next_url,
+                RedirectSource::Network,
+                network_extra_info_available,
+            ),
+            web_security_disabled,
+        )
         .map_err(|error| error.to_string())?;
     Ok(SubresourceResponseTransition::FollowedRedirect)
 }

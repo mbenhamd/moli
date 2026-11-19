@@ -1,10 +1,12 @@
 //! Typed metadata and payloads crossing the renderer DevTools ingress boundary.
 
+use crate::runtime::RendererDevToolsPageCommand;
+use moli_command_types::InspectorPauseEffect as RendererInspectorPauseCommandEffect;
+
 mod nested;
 
-use crate::runtime::{
-    RendererInspectorPageCommand, RendererPageCommand, RendererRuntimeInspectorResponseSender,
-};
+use crate::runtime::RendererInspectorPageCommand;
+use crate::runtime::{RendererPageCommand, RendererRuntimeInspectorResponseSender};
 use crate::script_execution_control::RendererScriptExecutionControl;
 use moli_page_types::{DevToolsSessionKey, RendererAgentAttachmentId, RendererDevToolsCommandId};
 use serde_json::Value;
@@ -22,31 +24,6 @@ pub enum RendererInspectorCommandRoute {
 /// Pause-loop transition owned by an Inspector command. This is derived once
 /// when the ingress envelope is created so executors do not need to reparse
 /// protocol JSON to decide how resumed/paused notifications are attributed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RendererInspectorPauseCommandEffect {
-    None,
-    Resume,
-    Step,
-}
-
-impl RendererInspectorPauseCommandEffect {
-    fn from_message(message: Option<&Value>) -> Self {
-        match message
-            .and_then(|message| message.get("method"))
-            .and_then(Value::as_str)
-        {
-            Some("Debugger.resume") => Self::Resume,
-            Some(
-                "Debugger.continueToLocation"
-                | "Debugger.restartFrame"
-                | "Debugger.stepInto"
-                | "Debugger.stepOut"
-                | "Debugger.stepOver",
-            ) => Self::Step,
-            _ => Self::None,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RendererInspectorMainDispatchBoundary {
@@ -317,7 +294,9 @@ impl RendererDevToolsMainCommandEnvelope {
         inspector_session_id: Option<String>,
     ) -> Self {
         let ticket = match &command {
-            RendererPageCommand::Inspector(envelope) => envelope.ticket().clone(),
+            RendererPageCommand::DevTools(RendererDevToolsPageCommand::Inspector(envelope)) => {
+                envelope.ticket().clone()
+            }
             _ => RendererInspectorIngressTicket::new(
                 None,
                 inspector_session_id,
@@ -340,7 +319,9 @@ impl RendererDevToolsMainCommandEnvelope {
 
     pub(crate) fn inspector_envelope(&self) -> Option<&RendererInspectorCommandEnvelope> {
         match self.payload.as_ref() {
-            RendererPageCommand::Inspector(envelope) => Some(envelope),
+            RendererPageCommand::DevTools(RendererDevToolsPageCommand::Inspector(envelope)) => {
+                Some(envelope)
+            }
             _ => None,
         }
     }
@@ -356,7 +337,9 @@ impl RendererDevToolsMainCommandEnvelope {
             RendererDevToolsMainNestedDispatch::InspectorSession,
             "only a session-boundary Inspector command may enter nested V8 dispatch"
         );
-        let RendererPageCommand::Inspector(envelope) = *self.payload else {
+        let RendererPageCommand::DevTools(RendererDevToolsPageCommand::Inspector(envelope)) =
+            *self.payload
+        else {
             unreachable!("nested Inspector dispatch kind requires an Inspector payload")
         };
         envelope

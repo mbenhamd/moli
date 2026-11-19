@@ -75,6 +75,7 @@ impl FrameHitTest {
     }
 }
 
+#[cfg(feature = "devtools")]
 pub(crate) fn observable_input_hit_test(
     runtime: &PageScriptHost,
     document: DomHandle,
@@ -155,6 +156,7 @@ fn svg_content_input_hit(
     })
 }
 
+#[cfg(feature = "devtools")]
 pub(crate) fn observable_deep_hit_test(
     runtime: &PageScriptHost,
     document: DomHandle,

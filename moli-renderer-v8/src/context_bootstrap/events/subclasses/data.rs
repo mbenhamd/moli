@@ -1,7 +1,9 @@
 use super::*;
-use crate::context_bootstrap::events::EventInit;
 use crate::context_bootstrap::navigation_activation::install_navigation_transition;
-use crate::context_bootstrap::navigation_events::navigation_scroll_event_is_active;
+use crate::context_bootstrap::navigation_events::{
+    navigation_destination_url_value, navigation_scroll_event_is_active,
+    set_navigation_destination_url,
+};
 use crate::context_bootstrap::navigation_handler_callbacks::{
     NAVIGATE_EVENT_ADDED_HANDLERS_SLOT, NAVIGATE_EVENT_DEFERRED_HANDLERS_SLOT,
     NAVIGATE_EVENT_PRECOMMIT_HANDLERS_SLOT, navigation_handler_array_is_empty,
@@ -10,7 +12,6 @@ use crate::context_bootstrap::navigation_handler_callbacks::{
 use crate::context_bootstrap::navigation_window::{
     child_browsing_context_handle_for_runtime_owner, runtime_window_is_global, runtime_window_owner,
 };
-use crate::context_bootstrap::web_storage::StorageReference;
 use crate::native_bridge::element::scroll_to_url_fragment_or_top;
 use crate::native_bridge::throw_dom_exception;
 use crate::util::context_host_ptr_from_global_bridge;
@@ -19,9 +20,8 @@ use crate::web_api_interfaces;
 use crate::webidl;
 use moli_webapi_declare::WebApiObject;
 use url::Url;
-use webidl::WebIdlDictionarySerialize;
 
-const NAVIGATE_EVENT_SYNTHETIC_SLOT: &str = "__lmNavigateEventSynthetic";
+use moli_webapi::events::subclasses::NAVIGATE_EVENT_SYNTHETIC_SLOT;
 const NAVIGATE_EVENT_INTERCEPTED_SLOT: &str = "__lmNavigateEventIntercepted";
 const NAVIGATION_DESTINATION_STATE_SLOT: &str = "__lmNavigationDestinationState";
 const NAVIGATE_EVENT_PRECOMMIT_SEEN_SLOT: &str = "__lmNavigateEventPrecommitSeen";
@@ -128,99 +128,6 @@ struct NavigateEventMethodsDeclaration {
         data = object
     )]
     scroll: (),
-}
-
-#[derive(Default, webidl::WebIdlDictionary)]
-#[webidl(prefix = "StorageEventInit", snapshot)]
-pub(in crate::context_bootstrap::events) struct StorageEventInitMembers<'s> {
-    #[webidl(inherit)]
-    base: EventInit,
-    #[webidl(nullable, converter = "raw")]
-    key: Option<webidl::DomString16>,
-    #[webidl(name = "newValue", nullable, converter = "raw")]
-    new_value: Option<webidl::DomString16>,
-    #[webidl(name = "oldValue", nullable, converter = "raw")]
-    old_value: Option<webidl::DomString16>,
-    #[webidl(name = "storageArea", converter = "raw", nullable)]
-    storage_area: Option<StorageReference<'s>>,
-    #[webidl(default = "", converter = "usv_string")]
-    url: String,
-}
-
-impl<'s> StorageEventInitMembers<'s> {
-    pub(in crate::context_bootstrap::events) fn from_native(
-        key: Option<&[u16]>,
-        old_value: Option<&[u16]>,
-        new_value: Option<&[u16]>,
-        url: &str,
-        storage_area: Option<v8::Local<'s, v8::Value>>,
-    ) -> Self {
-        Self {
-            base: EventInit::default(),
-            key: key.map(|value| webidl::DomString16(value.to_vec())),
-            old_value: old_value.map(|value| webidl::DomString16(value.to_vec())),
-            new_value: new_value.map(|value| webidl::DomString16(value.to_vec())),
-            url: url.to_owned(),
-            storage_area: storage_area
-                .and_then(|value| value.try_into().ok())
-                .map(StorageReference),
-        }
-    }
-}
-
-impl StorageEventInitMembers<'_> {
-    pub(super) fn event_flags(&self) -> (bool, bool, bool) {
-        (self.base.bubbles, self.base.cancelable, self.base.composed)
-    }
-}
-
-pub(super) fn parse_storage_event_init<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: &v8::FunctionCallbackArguments<'s>,
-) -> Option<StorageEventInitMembers<'s>> {
-    crate::context_bootstrap::events::parse_event_dictionary(scope, args, "StorageEvent")
-}
-
-pub(in crate::context_bootstrap::events::subclasses) fn initialize_storage_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event: v8::Local<'s, v8::Object>,
-    parsed: StorageEventInitMembers<'s>,
-) {
-    parsed
-        .initialize_snapshot(scope, event)
-        .expect("StorageEvent state");
-}
-
-pub(super) fn initialize_navigation_current_entry_change_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event: v8::Local<'s, v8::Object>,
-    init: super::navigation_init::NavigationCurrentEntryChangeEventInitMembers<'s>,
-) {
-    init.initialize_snapshot(scope, event)
-        .expect("current entry event state");
-}
-
-pub(super) fn initialize_navigate_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event: v8::Local<'s, v8::Object>,
-    init: super::navigation_init::NavigateEventInitMembers<'s>,
-) {
-    init.initialize_snapshot(scope, event)
-        .expect("NavigateEvent state");
-    define_navigate_event_internal_flag(scope, event, true);
-}
-
-fn define_navigate_event_internal_flag(
-    scope: &mut v8::PinScope<'_, '_>,
-    event: v8::Local<'_, v8::Object>,
-    synthetic: bool,
-) {
-    crate::context_bootstrap::set_event_private_value(
-        scope,
-        event,
-        NAVIGATE_EVENT_SYNTHETIC_SLOT,
-        v8::Boolean::new(scope, synthetic).into(),
-    );
 }
 
 fn navigate_event_private_value<'s>(
@@ -644,7 +551,7 @@ fn precommit_controller_redirect_callback<'s>(
     {
         return;
     }
-    define_non_enumerable_string_property(scope, destination, "url", redirected.as_str());
+    set_navigation_destination_url(scope, destination, redirected.as_str());
     set_navigate_event_private_bool(scope, event, NAVIGATE_EVENT_REDIRECTED_SLOT, true);
 }
 
@@ -743,9 +650,7 @@ fn navigate_event_scroll_callback<'s>(
     let Some(target_url) = crate::context_bootstrap::event_backing(scope, event)
         .get(scope, v8str(scope, "destination").into())
         .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
-        .and_then(|destination| destination.get(scope, v8str(scope, "url").into()))
-        .and_then(|value| value.to_string(scope))
-        .map(|value| value.to_rust_string_lossy(scope))
+        .and_then(|destination| navigation_destination_url_value(scope, destination))
     else {
         return;
     };
@@ -770,128 +675,4 @@ pub(in crate::context_bootstrap::events) fn initialize_navigate_event_methods<'s
     NavigateEventMethodsDeclaration::default()
         .initialize(scope, event)
         .expect("NavigateEvent methods declaration should initialize");
-}
-
-#[derive(webidl::WebIdlDictionary)]
-#[webidl(prefix = "ClipboardChangeEventInit")]
-pub(super) struct ClipboardChangeEventInitMembers<'scope> {
-    #[webidl(inherit)]
-    base: EventInit,
-    #[webidl(name = "changeId", with = clipboard_change_event_change_id_member)]
-    change_id: v8::Local<'scope, v8::BigInt>,
-    #[webidl(with = clipboard_change_event_types_member)]
-    types: Vec<v8::Local<'scope, v8::String>>,
-}
-
-struct ClipboardChangeEventType<'scope>(v8::Local<'scope, v8::String>);
-
-impl<'scope> webidl::WebIdlConverter<'scope> for ClipboardChangeEventType<'scope> {
-    type Options = ();
-
-    fn convert(
-        scope: &mut v8::PinScope<'scope, '_>,
-        value: v8::Local<'scope, v8::Value>,
-        context: webidl::Context,
-        _options: &Self::Options,
-    ) -> Result<Self, webidl::WebIdlError> {
-        value
-            .to_string(scope)
-            .map(Self)
-            .ok_or_else(|| webidl::WebIdlError::pending_exception(context))
-    }
-}
-
-impl ClipboardChangeEventInitMembers<'_> {
-    pub(super) fn event_flags(&self) -> (bool, bool, bool) {
-        (self.base.bubbles, self.base.cancelable, self.base.composed)
-    }
-}
-
-fn clipboard_change_event_change_id_member<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    object: v8::Local<'s, v8::Object>,
-    name: &'static str,
-) -> Result<v8::Local<'s, v8::BigInt>, webidl::WebIdlError> {
-    let context = webidl::Context::member("ClipboardChangeEventInit", name);
-    let Some(value) = webidl::property_result(scope, object, name, context)? else {
-        return Ok(v8::BigInt::new_from_u64(scope, 0));
-    };
-    if value.is_undefined() {
-        return Ok(v8::BigInt::new_from_u64(scope, 0));
-    }
-    value
-        .to_big_int(scope)
-        .ok_or_else(|| webidl::WebIdlError::pending_exception(context))
-}
-
-fn clipboard_change_event_types_member<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    object: v8::Local<'s, v8::Object>,
-    name: &'static str,
-) -> Result<Vec<v8::Local<'s, v8::String>>, webidl::WebIdlError> {
-    let context = webidl::Context::member("ClipboardChangeEventInit", name);
-    let Some(value) = webidl::property_result(scope, object, name, context)? else {
-        return Ok(Vec::new());
-    };
-    if value.is_undefined() {
-        return Ok(Vec::new());
-    }
-    webidl::convert::<webidl::Sequence<ClipboardChangeEventType<'s>>>(scope, value, context)
-        .map(|sequence| sequence.0.into_iter().map(|value| value.0).collect())
-}
-
-pub(super) fn parse_clipboard_change_event_init<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: &v8::FunctionCallbackArguments<'s>,
-) -> Option<ClipboardChangeEventInitMembers<'s>> {
-    let context = webidl::Context::argument("ClipboardChangeEvent", 2);
-    let object = match webidl::dictionary_arg(args, 1, context) {
-        Ok(object) => object,
-        Err(error) => {
-            webidl::throw_error(scope, &error);
-            return None;
-        }
-    };
-    let Some(object) = object else {
-        return Some(ClipboardChangeEventInitMembers {
-            base: EventInit::default(),
-            change_id: v8::BigInt::new_from_u64(scope, 0),
-            types: Vec::new(),
-        });
-    };
-    match webidl::parse_dictionary_object(scope, object) {
-        Ok(init) => Some(init),
-        Err(error) => {
-            webidl::throw_error(scope, &error);
-            None
-        }
-    }
-}
-
-pub(in crate::context_bootstrap::events::subclasses) fn initialize_clipboard_change_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event: v8::Local<'s, v8::Object>,
-    init: ClipboardChangeEventInitMembers<'s>,
-) -> bool {
-    let mut elements = Vec::with_capacity(init.types.len());
-    for event_type in init.types {
-        elements.push(event_type.into());
-    }
-    let types = v8::Array::new_with_elements(scope, &elements);
-    if types.set_integrity_level(scope, v8::IntegrityLevel::Frozen) != Some(true) {
-        return false;
-    }
-    set_private_value(
-        scope,
-        event,
-        CLIPBOARD_CHANGE_EVENT_TYPES_SLOT,
-        types.into(),
-    );
-    set_private_value(
-        scope,
-        event,
-        CLIPBOARD_CHANGE_EVENT_CHANGE_ID_SLOT,
-        init.change_id.into(),
-    );
-    true
 }

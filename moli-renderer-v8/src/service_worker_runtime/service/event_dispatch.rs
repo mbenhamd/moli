@@ -20,7 +20,6 @@ struct ServiceWorkerNavigationPreloadDispatch {
     owner: ServiceWorkerRunOwner,
     request_url: url::Url,
     request_method: String,
-    request_mode: moli_fetch::RequestMode,
     request_client: ResourceRequestClient,
     resource_task_runner: crate::network::RendererResourceTaskRunner,
     cancel_handle: moli_fetch::FetchCancelHandle,
@@ -124,7 +123,6 @@ async fn stream_navigation_preload_response(
         owner: dispatch.owner.clone(),
         request_url: dispatch.request_url,
         request_method: dispatch.request_method,
-        request_mode: dispatch.request_mode,
         body_source_id,
         response_head,
     }) {
@@ -156,6 +154,7 @@ async fn stream_navigation_preload_response(
 }
 
 impl ServiceWorkerRuntimeService {
+    #[cfg(feature = "devtools")]
     pub(super) fn start_queued_launch(&self, launch: ServiceWorkerQueuedLaunch) {
         let Some(launch) = self.defer_install_launch_until_debugger_if_needed(launch) else {
             return;
@@ -163,6 +162,7 @@ impl ServiceWorkerRuntimeService {
         self.start_queued_launch_with_devtools_pause_policy(launch, false);
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn start_queued_launch_without_devtools_pause(
         &self,
         launch: ServiceWorkerQueuedLaunch,
@@ -170,6 +170,7 @@ impl ServiceWorkerRuntimeService {
         self.start_queued_launch_with_devtools_pause_policy(launch, true);
     }
 
+    #[cfg(feature = "devtools")]
     fn start_queued_launch_with_devtools_pause_policy(
         &self,
         mut launch: ServiceWorkerQueuedLaunch,
@@ -187,6 +188,7 @@ impl ServiceWorkerRuntimeService {
             .start_loading(self.clone(), launch.params, launch.preloaded_script);
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn apply_devtools_evaluation_pause_to_launch_if_needed(
         &self,
         launch: &mut ServiceWorkerQueuedLaunch,
@@ -203,6 +205,7 @@ impl ServiceWorkerRuntimeService {
         }
     }
 
+    #[cfg(feature = "devtools")]
     fn launch_should_pause_on_start_for_devtools(
         &self,
         version_id: ServiceWorkerVersionId,
@@ -216,6 +219,7 @@ impl ServiceWorkerRuntimeService {
                 || state.devtools_attached_versions.contains(&version_id))
     }
 
+    #[cfg(feature = "devtools")]
     fn defer_install_launch_until_debugger_if_needed(
         &self,
         launch: ServiceWorkerQueuedLaunch,
@@ -277,6 +281,31 @@ impl ServiceWorkerRuntimeService {
         dispatch: ServiceWorkerFetchDispatch,
         native_request: moli_fetch::Request,
     ) -> bool {
+        self.dispatch_fetch_with_delivery(
+            dispatch,
+            native_request,
+            super::super::state::ServiceWorkerFetchResponseDelivery::Client,
+        )
+    }
+
+    pub(crate) fn dispatch_controlled_fetch_hop(
+        &self,
+        dispatch: ServiceWorkerFetchDispatch,
+        native_request: moli_fetch::Request,
+    ) -> bool {
+        self.dispatch_fetch_with_delivery(
+            dispatch,
+            native_request,
+            super::super::state::ServiceWorkerFetchResponseDelivery::LoaderHop,
+        )
+    }
+
+    fn dispatch_fetch_with_delivery(
+        &self,
+        dispatch: ServiceWorkerFetchDispatch,
+        native_request: moli_fetch::Request,
+        response_delivery: super::super::state::ServiceWorkerFetchResponseDelivery,
+    ) -> bool {
         let request = dispatch.request.clone();
         // Synthetic redirects advance this retained request before a network
         // fallback can bind the owner's cookie scope on its transport copy.
@@ -285,6 +314,7 @@ impl ServiceWorkerRuntimeService {
             .bind_browser_site_context(native_request);
         let initial_redirect_count = native_request.redirect_count();
         let fetch_job = ServiceWorkerFetchJob {
+            response_delivery,
             request: native_request,
             initial_redirect_count,
             internal_id: dispatch.internal_id,
@@ -314,11 +344,12 @@ impl ServiceWorkerRuntimeService {
         mut fetch_job: ServiceWorkerFetchJob,
         mut request: ServiceWorkerFetchRequest,
     ) -> Result<(), Box<ServiceWorkerFetchJob>> {
-        if let Err(error) = fetch_job
-            .request
-            .browser_origin()
-            .and_then(|_| fetch_job.request.admit_request_url(&fetch_job.request.url))
-        {
+        if let Err(error) = fetch_job.request.browser_origin().and_then(|_| {
+            fetch_job.request.admit_request_url_with_web_security(
+                &fetch_job.request.url,
+                fetch_job.request_client.web_security_disabled(),
+            )
+        }) {
             self.complete_fetch_with_failure(fetch_job, error.to_string());
             return Ok(());
         }
@@ -1432,7 +1463,6 @@ impl ServiceWorkerRuntimeService {
         }
 
         let request_url = job.request.url.clone();
-        let request_mode = job.request.request_mode;
         let request_method = job.request.method.clone();
         let request_client = job.request_client.clone();
         let resource_task_runner = job.resource_task_runner.clone();
@@ -1453,7 +1483,6 @@ impl ServiceWorkerRuntimeService {
             owner: event.owner.clone(),
             request_url,
             request_method,
-            request_mode,
             request_client,
             resource_task_runner,
             cancel_handle,
@@ -1579,4 +1608,16 @@ fn service_worker_fetch_request_is_navigation_destination(
         destination,
         ServiceWorkerRequestDestination::Document | ServiceWorkerRequestDestination::Iframe
     )
+}
+
+#[cfg(not(feature = "devtools"))]
+impl ServiceWorkerRuntimeService {
+    pub(super) fn start_queued_launch(&self, launch: ServiceWorkerQueuedLaunch) {
+        for notification in launch.lifecycle_notifications {
+            notification.send();
+        }
+        launch
+            .host
+            .start_loading(self.clone(), launch.params, launch.preloaded_script);
+    }
 }

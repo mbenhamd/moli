@@ -4,12 +4,18 @@ pub(super) const ATTR_STATE_SLOT: &str = "__moliAttrState";
 
 mod cache;
 mod instance;
+mod mutation;
+mod prototype;
+mod reference;
 mod state;
 
-pub(crate) use cache::live_get_attribute_node_object;
+pub(crate) use prototype::install_attr_prototype;
+pub(in crate::native_bridge) use reference::AttrReference;
+
 pub(in crate::native_bridge) use cache::{
     clear_live_attr_cache_entry, clear_live_attr_cache_entry_ns, live_get_attribute_node_ns_object,
 };
+pub(crate) use cache::{detach_cached_attr_for_removal, live_get_attribute_node_object};
 pub(in crate::native_bridge::document) use cache::{
     live_attr_cache_object, namespace_attr_cache_key, set_attr_cache_entry,
 };

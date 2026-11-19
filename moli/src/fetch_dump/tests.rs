@@ -289,6 +289,7 @@ async fn semantic_dump_preserves_protocol_json_bytes_and_text_fields() -> Result
           <input aria-label="Text field" value="field value">
           <input type="range" aria-label="Numeric field" value="42">
           <button disabled>Disabled action</button>
+          <a href="docs/start.html#top">Docs</a>
           <div aria-hidden="true"><span>Ignored text</span></div>
           <div hidden>Not rendered</div>
         </body></html>"#,
@@ -338,11 +339,335 @@ async fn semantic_dump_preserves_protocol_json_bytes_and_text_fields() -> Result
     let text = super::semantic::render_text(&mut page, false).await?;
     assert!(text.contains("textbox: Text field = field value [backendNodeId="));
     assert!(text.contains("textbox: Numeric field = 42 [backendNodeId="));
+    let link_url = page.final_url().join("docs/start.html#top")?;
+    assert!(text.contains(&format!("link: Docs → {link_url} [backendNodeId=")));
     assert!(
         !text.contains("ListMarker"),
         "markers have no child reference in the protocol tree"
     );
     assert!(!text.contains("Not rendered"));
+    http_server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_presentational_links_keep_native_roles_and_targets() -> Result<()> {
+    let (_browser, mut page, server) = load_page(
+        r#"<!doctype html><a href="/go" role="presentation">Go presentation</a>
+        <a href="/go" role="none" tabindex="-1">Go none</a>
+        <a href="/go" role="button">Explicit button</a>
+        <button role="presentation">Native button</button>"#,
+    )
+    .await?;
+    let (nodes, text) = semantic_nodes_and_text(&mut page).await?;
+    let target = page.final_url().join("/go")?;
+    for name in ["Go presentation", "Go none"] {
+        assert_semantic_target(&nodes, &text, name, "link", Some(target.as_str()), true);
+    }
+    assert_semantic_target(&nodes, &text, "Explicit button", "button", None, false);
+    assert_semantic_target(&nodes, &text, "Native button", "button", None, false);
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_presentational_roles_follow_standard_global_aria_properties() -> Result<()> {
+    let (_browser, mut page, server) = load_page(
+        r#"<!doctype html>
+        <h2 role="none" aria-disabled="false">Disabled property</h2>
+        <h2 role="presentation" aria-dropeffect="none">Drop property</h2>
+        <h2 role="none" aria-errormessage="message">Error property</h2>
+        <h2 role="presentation" aria-grabbed="false">Grabbed property</h2>
+        <h2 role="none" aria-haspopup="false">Popup property</h2>
+        <h2 role="presentation" aria-hidden="false">Visible hidden property</h2>
+        <h2 role="none" aria-invalid="false">Invalid property</h2>
+        <h2 role="none" aria-label="Canonical label">Visual label</h2>
+        <h2 role="none" aria-description="Description">Description extension</h2>
+        <h2 role="none" aria-braillelabel="Braille">Braille extension</h2>
+        <h2 role="none" aria-brailleroledescription="Braille role">Braille role extension</h2>
+        <h2 role="none" aria-labeledby="message">Misspelled label</h2>
+        <h2 role="none" aria-level="3">Role-specific property</h2>
+        <h2 id="foreign" role="none">Foreign namespace</h2>
+        <h2 id="foreign-unprefixed" role="none">Foreign unprefixed namespace</h2>
+        <h2 id="aria-namespace" role="none">ARIA namespace</h2>
+        <h2 role="none" aria-hidden="true">Hidden secret</h2>
+        <h2 role="button" aria-hidden="false">Explicit button</h2>
+        <span id="message" hidden>Hidden message</span>"#,
+    )
+    .await?;
+    let setup = page.evaluate_runtime_expression_by_value_async(
+        r#"(() => {
+            const cases = [
+                ['foreign', 'urn:test', 'x:aria-label', 'Foreign label'],
+                ['foreign-unprefixed', 'urn:test', 'aria-live', 'polite'],
+                ['aria-namespace', 'http://www.w3.org/ns/wai-aria/', 'aria:aria-label', 'Namespaced label'],
+            ];
+            for (const [id, namespace, name, value] of cases)
+                document.getElementById(id).setAttributeNS(namespace, name, value);
+            return cases.every(([id, namespace, name, value]) =>
+                document.getElementById(id).getAttributeNS(namespace, name.split(':').pop()) === value);
+        })()"#,
+    ).await?;
+    assert_eq!(setup["value"], true, "{setup}");
+    let (nodes, text) = semantic_nodes_and_text(&mut page).await?;
+    let mut headings = nodes
+        .iter()
+        .filter(|node| node["role"]["value"] == "heading")
+        .map(|node| node["name"]["value"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    headings.sort_unstable();
+    let mut expected = vec![
+        "Disabled property",
+        "Drop property",
+        "Error property",
+        "Grabbed property",
+        "Popup property",
+        "Visible hidden property",
+        "Invalid property",
+        "Canonical label",
+        "Description extension",
+        "Braille extension",
+        "Braille role extension",
+    ];
+    expected.sort_unstable();
+    assert_eq!(headings, expected, "{text}");
+    assert!(!text.contains("Hidden secret"), "{text}");
+    assert_semantic_target(&nodes, &text, "Explicit button", "button", None, false);
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_html_whitespace_excludes_vertical_tab() -> Result<()> {
+    let (_browser, mut page, server) = load_page(
+        r#"<!doctype html><base href="/assets/">
+        <h2 id="vt" role="presentation" tabindex="&#11;0">VT heading</h2>
+        <h2 id="tab" role="presentation" tabindex="&#9;0">TAB heading</h2>
+        <img src="&#11;" alt="VT image"><img src="&#9;" alt="TAB image">
+        <img src="" alt="Empty image"><img src=" " alt="Space image">"#,
+    )
+    .await?;
+    let tab_indices = page
+        .evaluate_runtime_expression_by_value_async(
+            "[document.getElementById('vt').tabIndex, document.getElementById('tab').tabIndex]",
+        )
+        .await?;
+    assert_eq!(tab_indices["value"], json!([-1, 0]), "{tab_indices}");
+    let (nodes, text) = semantic_nodes_and_text(&mut page).await?;
+    assert!(
+        nodes.iter().any(
+            |node| node["role"]["value"] == "heading" && node["name"]["value"] == "TAB heading"
+        ),
+        "{text}"
+    );
+    assert!(!nodes.iter().any(|node| node["role"]["value"] == "heading" && node["name"]["value"] == "VT heading"), "{text}");
+    let base = page.final_url().join("/assets/")?;
+    assert_semantic_target(
+        &nodes,
+        &text,
+        "VT image",
+        "image",
+        Some(base.as_str()),
+        false,
+    );
+    for name in ["TAB image", "Empty image", "Space image"] {
+        assert_semantic_target(&nodes, &text, name, "image", None, false);
+    }
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_url_trimming_preserves_unicode_path_data() -> Result<()> {
+    let (_browser, mut page, server) = load_page(
+        r#"<!doctype html><base href="/assets/">
+        <a href="&nbsp;">NBSP</a><a href=" &#x2003; ">EM space</a>
+        <a href="">Empty</a><a href=" &#x9;&#xA; ">HTML spaces</a>"#,
+    )
+    .await?;
+    let (nodes, text) = semantic_nodes_and_text(&mut page).await?;
+    for (name, path) in [
+        ("NBSP", "/assets/%C2%A0"),
+        ("EM space", "/assets/%E2%80%83"),
+        ("Empty", "/assets/"),
+        ("HTML spaces", "/assets/"),
+    ] {
+        let target = page.final_url().join(path)?;
+        assert_semantic_target(&nodes, &text, name, "link", Some(target.as_str()), true);
+    }
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_svg_href_ignores_unrelated_namespaces() -> Result<()> {
+    let (_browser, mut page, server) = load_page(
+        r#"<!doctype html><base href="/assets/">
+        <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+          <a id="legacy" xlink:href="/real" aria-label="Legacy"><text>Legacy</text></a>
+          <a id="primary" href="/primary" xlink:href="/real" aria-label="Primary"><text>Primary</text></a>
+          <a id="empty" href="" xlink:href="/real" aria-label="Empty SVG"><text>Empty</text></a>
+          <a id="foreign" role="link" aria-label="Foreign"><text>Foreign</text></a>
+        </svg>"#,
+    ).await?;
+    let result = page.evaluate_runtime_expression_by_value_async(
+        "(() => { for (const node of document.querySelectorAll('svg a')) node.setAttributeNS('urn:example', 'href', '/wrong'); return document.getElementById('legacy').getAttributeNS('urn:example', 'href'); })()"
+    ).await?;
+    assert_eq!(result["value"], "/wrong", "{result}");
+    let (nodes, text) = semantic_nodes_and_text(&mut page).await?;
+    for (name, path) in [
+        ("Legacy", "/real"),
+        ("Primary", "/primary"),
+        ("Empty SVG", "/assets/"),
+    ] {
+        let target = page.final_url().join(path)?;
+        assert_semantic_target(&nodes, &text, name, "link", Some(target.as_str()), true);
+    }
+    assert_semantic_target(&nodes, &text, "Foreign", "link", None, false);
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn semantic_mathml_links_do_not_invent_native_targets() -> Result<()> {
+    let (_browser, mut page, server) = load_page(
+        r#"<!doctype html><math><a role="link" href="/other" aria-label="Math reference">M</a></math>
+        <a href="/other">HTML reference</a>"#,
+    ).await?;
+    let (nodes, text) = semantic_nodes_and_text(&mut page).await?;
+    assert_semantic_target(&nodes, &text, "Math reference", "link", None, false);
+    let target = page.final_url().join("/other")?;
+    assert_semantic_target(
+        &nodes,
+        &text,
+        "HTML reference",
+        "link",
+        Some(target.as_str()),
+        true,
+    );
+    server.abort();
+    Ok(())
+}
+
+async fn semantic_nodes_and_text(page: &mut Page) -> Result<(Vec<Value>, String)> {
+    let nodes = serde_json::from_str(&super::semantic::render_json(page, false).await?)?;
+    let text = super::semantic::render_text(page, false).await?;
+    Ok((nodes, text))
+}
+
+fn assert_semantic_target(
+    nodes: &[Value],
+    text: &str,
+    name: &str,
+    role: &str,
+    target: Option<&str>,
+    show_target: bool,
+) {
+    let node = nodes
+        .iter()
+        .find(|node| node["name"]["value"] == name && node["role"]["value"] == role)
+        .unwrap_or_else(|| panic!("missing {role}: {name}: {text}"));
+    let urls = node["properties"]
+        .as_array()
+        .expect("AX properties")
+        .iter()
+        .filter(|property| property["name"] == "url")
+        .map(|property| property["value"]["value"].as_str().expect("AX URL"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        urls,
+        target.into_iter().collect::<Vec<_>>(),
+        "{role}: {name} URL"
+    );
+    let arrow = if show_target {
+        format!(" → {}", target.expect("link target"))
+    } else {
+        String::new()
+    };
+    let expected = format!(
+        "- {role}: {name}{arrow} [backendNodeId={}]",
+        node["backendDOMNodeId"]
+    );
+    assert!(
+        text.lines().any(|line| line.trim_start() == expected),
+        "missing {expected}: {text}"
+    );
+}
+
+#[tokio::test]
+async fn semantic_link_urls_follow_computed_roles() -> Result<()> {
+    let (_browser, mut page, http_server) =
+        load_page(include_str!("../../tests/fixtures/semantic-link-urls.html")).await?;
+    let nodes: Vec<Value> =
+        serde_json::from_str(&super::semantic::render_json(&mut page, false).await?)?;
+    let text = super::semantic::render_text(&mut page, false).await?;
+    let origin = page.final_url().clone();
+    for (name, role, target, show_target) in [
+        ("Docs", "link", Some("/assets/guide#top"), true),
+        ("Footnote", "doc-noteref", Some("/assets/#note"), true),
+        ("Backlink", "doc-backlink", Some("/article#back"), true),
+        (
+            "Bibliography",
+            "doc-biblioref",
+            Some("https://references.test/book"),
+            true,
+        ),
+        ("Glossary", "doc-glossref", Some("/glossary#term"), true),
+        ("Anchor button", "button", None, false),
+        ("Anchor image", "image", None, false),
+        ("Empty href", "link", Some("/assets/"), true),
+        ("Help", "link", None, false),
+        ("Image href", "link", None, false),
+        ("Image footnote", "doc-noteref", None, false),
+        ("Photo", "image", Some("/assets/photo.svg"), false),
+        ("Picture button", "button", None, false),
+        ("Cover", "doc-cover", Some("/assets/cover.svg"), false),
+        (
+            "Symbol",
+            "graphics-symbol",
+            Some("/assets/symbol.svg"),
+            false,
+        ),
+        ("Submit", "button", Some("/assets/submit.svg"), false),
+        ("Input link", "link", None, false),
+        ("Script only", "link", None, false),
+        ("SVG link", "link", Some("/assets/vector#top"), true),
+        ("SVG legacy link", "link", Some("/assets/legacy#top"), true),
+    ] {
+        let node = nodes
+            .iter()
+            .find(|node| node["name"]["value"] == name && node["role"]["value"] == role)
+            .unwrap_or_else(|| panic!("missing {role}: {name}: {nodes:?}"));
+        let properties = node["properties"].as_array().expect("AX properties");
+        let urls = properties
+            .iter()
+            .filter(|property| property["name"] == "url")
+            .map(|property| property["value"]["value"].as_str().expect("AX URL"))
+            .collect::<Vec<_>>();
+        let target = target.map(|target| origin.join(target)).transpose()?;
+        assert_eq!(
+            urls,
+            target
+                .as_ref()
+                .map(|url| url.as_str())
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "{role}: {name} URL"
+        );
+        let arrow = if show_target {
+            format!(" → {}", target.as_ref().expect("link target"))
+        } else {
+            String::new()
+        };
+        let expected = format!(
+            "- {role}: {name}{arrow} [backendNodeId={}]",
+            node["backendDOMNodeId"]
+        );
+        assert!(
+            text.lines().any(|line| line.trim_start() == expected),
+            "missing {expected:?}: {text}"
+        );
+    }
     http_server.abort();
     Ok(())
 }

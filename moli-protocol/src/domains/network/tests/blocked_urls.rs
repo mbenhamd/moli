@@ -9,23 +9,22 @@ async fn enable_network_domain(ctx: &mut TestContext, id: u64, session_id: Optio
     ctx.expect_result(id, json!({}), session_id);
 }
 
-async fn assert_blocked_websocket_events(ctx: &mut TestContext, url: &str) -> serde_json::Value {
-    wait_until_messages(
-        ctx,
-        Some("SID-1"),
-        "blocked WebSocket terminal",
-        |messages| {
-            let Some(created) = messages.iter().find(|message| {
-                message["method"] == "Network.webSocketCreated" && message["params"]["url"] == url
-            }) else {
-                return false;
-            };
-            messages.iter().any(|message| {
-                message["method"] == "Network.webSocketClosed"
-                    && message["params"]["requestId"] == created["params"]["requestId"]
-            })
-        },
-    )
+async fn assert_blocked_websocket_events(
+    ctx: &mut TestContext,
+    url: &str,
+    session_id: &str,
+) -> serde_json::Value {
+    wait_until_messages(ctx, session_id, "blocked WebSocket terminal", |messages| {
+        let Some(created) = messages.iter().find(|message| {
+            message["method"] == "Network.webSocketCreated" && message["params"]["url"] == url
+        }) else {
+            return false;
+        };
+        messages.iter().any(|message| {
+            message["method"] == "Network.webSocketClosed"
+                && message["params"]["requestId"] == created["params"]["requestId"]
+        })
+    })
     .await;
     let created = ctx
         .sent
@@ -53,7 +52,11 @@ async fn assert_blocked_websocket_events(ctx: &mut TestContext, url: &str) -> se
             "Network.webSocketClosed"
         ]
     );
-    assert!(events.iter().all(|message| message["sessionId"] == "SID-1"));
+    assert!(
+        events
+            .iter()
+            .all(|message| message["sessionId"] == session_id)
+    );
     assert_eq!(
         events[2]["params"]["errorMessage"],
         "net::ERR_BLOCKED_BY_CLIENT"
@@ -495,6 +498,7 @@ async fn set_blocked_urls_worker_fetch_emits_loading_failed() {
     bc.attach_active_session("SID-1");
     ctx.with_fixture(|conn| conn.install_browser_context_fixture_for_test(bc));
 
+    ctx.observe_worker_network_for_test(None).await;
     ctx.process_async(json!({
         "id": 28_101,
         "method": "Network.enable",
@@ -579,7 +583,10 @@ async fn set_blocked_urls_worker_fetch_emits_loading_failed() {
         .find(|message| message["method"] == json!("Network.loadingFailed"))
         .cloned()
         .expect("network loadingFailed event");
-    assert_eq!(failed["sessionId"], "SID-1");
+    assert_eq!(
+        failed["sessionId"],
+        ctx.worker_network_session_for_request(&failed["params"]["requestId"])
+    );
     assert_eq!(failed["params"]["type"], "Fetch");
     assert_eq!(failed["params"]["errorText"], "net::ERR_BLOCKED_BY_CLIENT");
     let request_id = failed["params"]["requestId"]
@@ -639,6 +646,7 @@ async fn set_blocked_urls_worker_xhr_emits_loading_failed() {
     bc.attach_active_session("SID-1");
     ctx.with_fixture(|conn| conn.install_browser_context_fixture_for_test(bc));
 
+    ctx.observe_worker_network_for_test(None).await;
     ctx.process_async(json!({
         "id": 28_102,
         "method": "Network.enable",
@@ -724,7 +732,10 @@ async fn set_blocked_urls_worker_xhr_emits_loading_failed() {
         .find(|message| message["method"] == json!("Network.loadingFailed"))
         .cloned()
         .expect("network loadingFailed event");
-    assert_eq!(failed["sessionId"], "SID-1");
+    assert_eq!(
+        failed["sessionId"],
+        ctx.worker_network_session_for_request(&failed["params"]["requestId"])
+    );
     assert_eq!(failed["params"]["type"], "XHR");
     assert_eq!(failed["params"]["errorText"], "net::ERR_BLOCKED_BY_CLIENT");
     let request_id = failed["params"]["requestId"]
@@ -772,13 +783,14 @@ async fn set_blocked_urls_worker_xhr_emits_loading_failed() {
     assert_eq!(result["result"]["result"]["value"], "failed:0");
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn set_blocked_urls_worker_websocket_emits_dedicated_failure_events() {
+async fn set_blocked_urls_worker_websocket_emits_failure_on_worker_target() {
     let mut ctx = TestContext::new();
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1");
     bc.attach_active_session("SID-1");
     ctx.with_fixture(|conn| conn.install_browser_context_fixture_for_test(bc));
 
+    ctx.observe_worker_network_for_test(None).await;
     ctx.process_async(json!({
         "id": 28_103,
         "method": "Network.enable",
@@ -859,8 +871,13 @@ async fn set_blocked_urls_worker_websocket_emits_dedicated_failure_events() {
         .find(|message| message["id"] == json!(2826))
         .cloned()
         .expect("runtime evaluate result");
-    let request =
-        assert_blocked_websocket_events(&mut ctx, "ws://example.test/blocked/worker-ws").await;
+    let worker_session = worker_target_session(&mut ctx, "worker").await;
+    let request = assert_blocked_websocket_events(
+        &mut ctx,
+        "ws://example.test/blocked/worker-ws",
+        &worker_session,
+    )
+    .await;
     assert_eq!(request["headers"]["x-cdp-test"], "works-worker-ws");
 
     ctx.process_and_wait_for_response_async(json!({
@@ -902,6 +919,7 @@ async fn emulate_network_conditions_offline_worker_fetch_emits_loading_failed() 
         .enable_primary_network_events();
     ctx.with_fixture(|conn| conn.install_browser_context_fixture_for_test(bc));
 
+    ctx.observe_worker_network_for_test(None).await;
     ctx.process_async(json!({
         "id": 2821,
         "method": "Page.navigate",
@@ -974,7 +992,10 @@ async fn emulate_network_conditions_offline_worker_fetch_emits_loading_failed() 
         .find(|message| message["method"] == json!("Network.loadingFailed"))
         .cloned()
         .expect("network loadingFailed event");
-    assert_eq!(failed["sessionId"], "SID-1");
+    assert_eq!(
+        failed["sessionId"],
+        ctx.worker_network_session_for_request(&failed["params"]["requestId"])
+    );
     assert_eq!(failed["params"]["type"], "Fetch");
     assert_eq!(failed["params"]["errorText"], "Network emulation offline");
     ctx.process_async(json!({
@@ -1018,6 +1039,7 @@ async fn emulate_network_conditions_offline_worker_xhr_emits_loading_failed() {
         .enable_primary_network_events();
     ctx.with_fixture(|conn| conn.install_browser_context_fixture_for_test(bc));
 
+    ctx.observe_worker_network_for_test(None).await;
     ctx.process_async(json!({
         "id": 2826,
         "method": "Page.navigate",
@@ -1091,7 +1113,10 @@ async fn emulate_network_conditions_offline_worker_xhr_emits_loading_failed() {
         .find(|message| message["method"] == json!("Network.loadingFailed"))
         .cloned()
         .expect("network loadingFailed event");
-    assert_eq!(failed["sessionId"], "SID-1");
+    assert_eq!(
+        failed["sessionId"],
+        ctx.worker_network_session_for_request(&failed["params"]["requestId"])
+    );
     assert_eq!(failed["params"]["type"], "XHR");
     assert_eq!(failed["params"]["errorText"], "Network emulation offline");
     ctx.process_async(json!({
@@ -1275,7 +1300,7 @@ async fn set_blocked_urls_runtime_websocket_emits_dedicated_failure_events() {
         .find(|message| message["id"] == json!(2819))
         .cloned()
         .expect("runtime evaluate result");
-    assert_blocked_websocket_events(&mut ctx, "ws://example.test/blocked/socket").await;
+    assert_blocked_websocket_events(&mut ctx, "ws://example.test/blocked/socket", "SID-1").await;
 
     ctx.process_async(json!({
         "id": 2820,

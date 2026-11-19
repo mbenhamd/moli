@@ -1,0 +1,239 @@
+use super::{dictionary_string::DictionaryDomString, ice_candidate_parser::parse_ice_candidate};
+use crate::interfaces as web_api_interfaces;
+use moli_v8_util::{
+    apply_webidl_constructor_prototype_fallback, callback_data_index_value, get_private_value,
+    throw_type_error, v8str,
+};
+use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
+use moli_webidl as webidl;
+
+#[derive(webidl::WebIdlDictionary)]
+#[webidl(prefix = "RTCIceCandidateInit")]
+struct CandidateInit<'s> {
+    #[webidl(converter = "raw", default = DictionaryDomString::default())]
+    candidate: DictionaryDomString<'s>,
+    #[webidl(nullable)]
+    sdp_m_line_index: Option<u16>,
+    #[webidl(nullable, converter = "raw")]
+    sdp_mid: Option<DictionaryDomString<'s>>,
+    #[webidl(nullable, converter = "raw")]
+    username_fragment: Option<DictionaryDomString<'s>>,
+}
+
+#[derive(Clone, Copy, webidl::WebIdlEnum)]
+#[webidl(name = "RTCIceServerTransportProtocol", rename_all = "kebab-case")]
+enum IceServerTransportProtocol {
+    Udp,
+    Tcp,
+    Tls,
+}
+
+#[derive(webidl::WebIdlDictionary)]
+#[webidl(prefix = "RTCLocalIceCandidateInit")]
+struct LocalCandidateInit<'s> {
+    #[webidl(inherit)]
+    base: CandidateInit<'s>,
+    #[webidl(nullable, converter = "enum")]
+    relay_protocol: Option<IceServerTransportProtocol>,
+    #[webidl(nullable, converter = "usv_string")]
+    url: Option<String>,
+}
+
+#[derive(webidl::WebIdlArgs)]
+#[webidl(prefix = "RTCIceCandidate")]
+struct CandidateArgs<'s> {
+    #[webidl(dictionary)]
+    init: LocalCandidateInit<'s>,
+}
+
+const CANDIDATE_VALUES_SLOT: &str = "__moliRtcIceCandidateValues";
+
+#[derive(WebApiObject)]
+#[webapi(interface = web_api_interfaces::RTCIceCandidate)]
+struct IceCandidateObjectDeclaration<'scope> {
+    #[webapi(slot = CANDIDATE_VALUES_SLOT)]
+    values: v8::Local<'scope, v8::Array>,
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::RTCIceCandidate, enumerable)]
+struct IceCandidatePrototypeDeclaration {
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 0))]
+    candidate: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 1))]
+    sdp_mid: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 2))]
+    sdp_m_line_index: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 3))]
+    foundation: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 4))]
+    component: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 5))]
+    priority: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 6))]
+    address: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 7))]
+    protocol: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 8))]
+    port: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 9))]
+    r#type: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 10))]
+    tcp_type: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 11))]
+    related_address: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 12))]
+    related_port: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 13))]
+    username_fragment: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 14))]
+    relay_protocol: (),
+    #[webapi(accessor_property, getter = candidate_attribute_getter, data = callback_data_index_value(scope, 15))]
+    url: (),
+    #[webapi(method = "toJSON", length = 0, callback = candidate_to_json_callback)]
+    to_json: (),
+}
+
+#[derive(WebApiObject)]
+#[webapi(plain, data_properties, enumerable)]
+struct IceCandidateJsonDeclaration<'scope> {
+    candidate: v8::Local<'scope, v8::Value>,
+    sdp_mid: v8::Local<'scope, v8::Value>,
+    sdp_m_line_index: v8::Local<'scope, v8::Value>,
+    username_fragment: v8::Local<'scope, v8::Value>,
+}
+
+pub fn install_ice_candidate_template_bindings<'s>(
+    scope: &mut v8::PinScope<'s, '_, ()>,
+    template: v8::Local<'s, v8::FunctionTemplate>,
+) {
+    IceCandidatePrototypeDeclaration::initialize_prototype_template(
+        scope,
+        template.prototype_template(scope),
+    );
+}
+
+pub fn rtc_ice_candidate_constructor_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    if !args.is_construct_call() {
+        throw_type_error(scope, "RTCIceCandidate constructor requires 'new'.");
+        return;
+    }
+    let Some(parsed_args) = webidl::parse_args::<CandidateArgs>(scope, &args) else {
+        return;
+    };
+    let init = parsed_args.init;
+    let mut values: [v8::Local<'s, v8::Value>; 16] = [v8::null(scope).into(); 16];
+    values[0] = init.base.candidate.into_value(scope).into();
+    if let Some(mid) = init.base.sdp_mid {
+        values[1] = mid.into_value(scope).into();
+    }
+    if let Some(line) = init.base.sdp_m_line_index {
+        values[2] = v8::Integer::new_from_unsigned(scope, line.into()).into();
+    }
+    if let Some(fragment) = init.base.username_fragment {
+        values[13] = fragment.into_value(scope).into();
+    }
+    if let Some(protocol) = init.relay_protocol {
+        values[14] = v8str(scope, webidl::WebIdlEnumSnapshot::snapshot_token(&protocol)).into();
+    }
+    if let Some(url) = init.url {
+        values[15] = v8::String::new(scope, &url).expect("ICE URL").into();
+    }
+    if values[1].is_null() && values[2].is_null() {
+        throw_type_error(scope, "RTCIceCandidate requires sdpMid or sdpMLineIndex.");
+        return;
+    }
+    let candidate =
+        v8::Local::<v8::String>::try_from(values[0]).expect("converted candidate string");
+    let candidate = candidate.to_rust_string_lossy(scope);
+    if let Some(parsed) = parse_ice_candidate(&candidate) {
+        values[3] = v8::String::new(scope, parsed.foundation).unwrap().into();
+        values[4] = v8str(scope, parsed.component).into();
+        values[5] = v8::Integer::new_from_unsigned(scope, parsed.priority).into();
+        values[6] = v8::String::new(scope, parsed.address).unwrap().into();
+        values[7] = v8str(scope, parsed.protocol).into();
+        values[8] = v8::Integer::new_from_unsigned(scope, parsed.port.into()).into();
+        values[9] = v8str(scope, parsed.kind).into();
+        if let Some(tcp_type) = parsed.tcp_type {
+            values[10] = v8str(scope, tcp_type).into();
+        }
+        if let Some(address) = parsed.related_address {
+            values[11] = v8::String::new(scope, address).unwrap().into();
+        }
+        if let Some(port) = parsed.related_port {
+            values[12] = v8::Integer::new_from_unsigned(scope, port.into()).into();
+        }
+    }
+    let values = v8::Array::new_with_elements(scope, &values);
+    if IceCandidateObjectDeclaration::new(values)
+        .initialize(scope, args.this())
+        .is_err()
+    {
+        return;
+    }
+    apply_webidl_constructor_prototype_fallback(
+        scope,
+        args.this(),
+        args.new_target(),
+        "RTCIceCandidate",
+    );
+    rv.set(args.this().into());
+}
+
+fn candidate_values<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    receiver: v8::Local<'s, v8::Object>,
+) -> Option<v8::Local<'s, v8::Array>> {
+    let values = get_private_value(scope, receiver, CANDIDATE_VALUES_SLOT)
+        .and_then(|value| v8::Local::<v8::Array>::try_from(value).ok());
+    if values.is_none() {
+        throw_type_error(scope, "Illegal invocation");
+    }
+    values
+}
+
+fn candidate_attribute_getter<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let Some(values) = candidate_values(scope, args.this()) else {
+        return;
+    };
+    let Some(index) = args.data().uint32_value(scope) else {
+        return;
+    };
+    if let Some(value) = values.get_index(scope, index) {
+        rv.set(value);
+    }
+}
+
+fn candidate_to_json_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let Some(values) = candidate_values(scope, args.this()) else {
+        return;
+    };
+    let Some(candidate) = values.get_index(scope, 0) else {
+        return;
+    };
+    let Some(mid) = values.get_index(scope, 1) else {
+        return;
+    };
+    let Some(line) = values.get_index(scope, 2) else {
+        return;
+    };
+    let Some(fragment) = values.get_index(scope, 13) else {
+        return;
+    };
+    if let Ok(result) = IceCandidateJsonDeclaration::new(candidate, mid, line, fragment).bind(scope)
+    {
+        rv.set(result.into());
+    }
+}

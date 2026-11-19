@@ -356,6 +356,7 @@ impl ServiceWorkerRuntimeState {
         self.live_target_run(version_id).as_ref() == Some(run)
     }
 
+    #[cfg(feature = "devtools")]
     pub(super) fn target_output_journal(
         &self,
         version_id: ServiceWorkerVersionId,
@@ -768,7 +769,15 @@ pub(super) enum ServiceWorkerPeriodicSyncStart {
     Dropped,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum ServiceWorkerFetchResponseDelivery {
+    #[default]
+    Client,
+    LoaderHop,
+}
+
 pub(super) struct ServiceWorkerFetchJob {
+    pub(super) response_delivery: ServiceWorkerFetchResponseDelivery,
     pub(super) request: moli_fetch::Request,
     // Only redirects followed during this job transfer network fallback to it.
     pub(super) initial_redirect_count: usize,
