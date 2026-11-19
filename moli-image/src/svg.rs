@@ -35,6 +35,7 @@ pub struct SvgScene {
 /// before `usvg` receives attacker-controlled bytes.
 pub const MAX_ENCODED_SVG_BYTES: usize = 16 * 1024 * 1024;
 
+const FOREIGN_OBJECT_NAME: &[u8] = b"foreignObject";
 const DEFAULT_OBJECT_WIDTH: f32 = 300.0;
 const DEFAULT_OBJECT_HEIGHT: f32 = 150.0;
 
@@ -312,6 +313,7 @@ impl SvgImageMetadata {
 pub struct SvgImage {
     tree: usvg::Tree,
     metadata: SvgImageMetadata,
+    contains_foreign_object: bool,
 }
 
 impl SvgImage {
@@ -321,6 +323,12 @@ impl SvgImage {
 
     pub const fn metadata(&self) -> SvgImageMetadata {
         self.metadata
+    }
+
+    /// Whether the encoded document may hold `<foreignObject>` content, which
+    /// [`Self::tree`] omits. Canvas origin tainting depends on it.
+    pub const fn contains_foreign_object(&self) -> bool {
+        self.contains_foreign_object
     }
 }
 
@@ -490,7 +498,11 @@ pub fn decode_inline_svg_scene(
         concrete_height: viewport.1,
     };
     Ok(SvgScene {
-        image: SvgImage { tree, metadata },
+        image: SvgImage {
+            tree,
+            metadata,
+            contains_foreign_object: false,
+        },
         objects,
     })
 }
@@ -529,7 +541,14 @@ fn decode_svg_image_with_fonts(
         ..Default::default()
     };
     let tree = usvg::Tree::from_data(bytes, &options)?;
-    Ok(SvgImage { tree, metadata })
+    let contains_foreign_object = bytes
+        .windows(FOREIGN_OBJECT_NAME.len())
+        .any(|window| window == FOREIGN_OBJECT_NAME);
+    Ok(SvgImage {
+        tree,
+        metadata,
+        contains_foreign_object,
+    })
 }
 
 fn concrete_object_size(width: Option<f32>, height: Option<f32>, ratio: Option<f32>) -> (f32, f32) {

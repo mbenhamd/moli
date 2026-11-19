@@ -289,6 +289,12 @@ impl ImageResourceStore {
             .is_some_and(|slot| matches!(slot.state, ImageResourceState::Ready(_)))
     }
 
+    pub(super) fn is_failed(&self, element: DomHandle) -> bool {
+        self.slots
+            .get(&element)
+            .is_some_and(|slot| matches!(slot.state, ImageResourceState::Failed))
+    }
+
     pub(super) fn has_ready_request(&self, request_key: &ImageRequestKey) -> bool {
         self.ready_by_request.contains_live(request_key)
     }
