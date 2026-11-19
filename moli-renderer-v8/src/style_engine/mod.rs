@@ -159,6 +159,9 @@ pub(crate) use world_update::{
     StyleWorldUpdate, StyleWorldUpdatePlan,
 };
 
+/// The frame interval at which running CSS transitions are sampled.
+const CSS_TRANSITION_FRAME_INTERVAL_MS: f64 = 1000.0 / 60.0;
+
 /// Page-level facade for document-owned style state.
 ///
 /// The selector/query adapter in `moli-selector` deliberately stays
@@ -278,6 +281,14 @@ impl MoliStyleEngine {
         documents: impl IntoIterator<Item = DomHandle>,
     ) -> Vec<(DomHandle, u64, u64)> {
         self.document_worlds.visual_input_generations(documents)
+    }
+
+    /// The style inputs a published layout tree depends on.
+    pub(crate) fn layout_style_input_generations(
+        &self,
+        documents: impl IntoIterator<Item = DomHandle>,
+    ) -> Vec<(DomHandle, u64, u64)> {
+        self.document_worlds.layout_input_generations(documents)
     }
 
     pub(crate) fn style_invalidation_generation(
@@ -862,7 +873,6 @@ impl MoliStyleEngine {
         owner_document: DomHandle,
         document_context: StyleSourceDocumentContext<'_>,
     ) {
-        self.sample_css_transitions(host);
         for document in document_context.documents_with_owner(owner_document) {
             self.drain_pending_style_invalidations_for_document_and_boundary(
                 host,
@@ -934,16 +944,25 @@ impl MoliStyleEngine {
         let now = transitions::animation_clock_now();
         let mut restyled = false;
         for world in self.document_worlds.active_worlds() {
-            let roots = world
+            let sample = world
                 .css_transitions
                 .sample(now, |handle| host.is_connected(handle));
-            if roots.is_empty() {
-                continue;
+            let cleanup = self.invalidation_cleanup_for_world(&world);
+            if !sample.layout_roots.is_empty() {
+                world.document_state.note_visual_input_change();
+                cleanup.invalidate_subtrees(host, sample.layout_roots);
+                restyled = true;
             }
-            world.document_state.note_visual_input_change();
-            self.invalidation_cleanup_for_world(&world)
-                .invalidate_subtrees(host, roots);
-            restyled = true;
+            if !sample.paint_roots.is_empty() {
+                // Styles and the next paint see the new values; the published
+                // layout tree stays valid for geometry and hit testing.
+                let roots = &world.document_state.lazy_invalidation_roots;
+                let before = roots.generation();
+                world.document_state.note_paint_only_visual_input_change();
+                cleanup.invalidate_subtrees(host, sample.paint_roots);
+                roots.note_paint_only_since(before);
+                restyled = true;
+            }
         }
         restyled
     }
@@ -959,7 +978,7 @@ impl MoliStyleEngine {
     }
 
     /// Milliseconds until the CSS transitions need a task: zero when events
-    /// are pending, the time to the next phase change while transitions run,
+    /// are pending, the next frame or phase change while transitions run,
     /// and `None` when there are none.
     pub(crate) fn css_transition_task_delay_ms(&self) -> Option<f64> {
         let now = transitions::animation_clock_now();
@@ -969,9 +988,12 @@ impl MoliStyleEngine {
             let due = if transitions.has_pending_events() {
                 Some(0.0)
             } else {
-                transitions
-                    .next_phase_change()
-                    .map(|time| ((time - now) * 1000.0).max(0.0))
+                // While a transition runs, its values change every frame:
+                // the task stands in for the rendering update's "update
+                // animations and send events" step at a 60Hz frame rate.
+                transitions.next_phase_change().map(|time| {
+                    ((time - now) * 1000.0).clamp(0.0, CSS_TRANSITION_FRAME_INTERVAL_MS)
+                })
             };
             if let Some(due) = due {
                 delay = Some(delay.map_or(due, |delay| delay.min(due)));

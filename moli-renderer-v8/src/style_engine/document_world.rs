@@ -189,7 +189,7 @@ impl DocumentStyleWorlds {
                 let state = &self.for_document(document).document_state;
                 state
                     .lazy_invalidation_roots
-                    .generation()
+                    .layout_generation()
                     .saturating_add(state.computed_cache_generation())
             })
             .fold(0, u64::saturating_add)
@@ -210,6 +210,28 @@ impl DocumentStyleWorlds {
                     document,
                     world.document_state.source_set_generation(),
                     world.document_state.visual_input_generation(),
+                )
+            })
+            .collect()
+    }
+
+    /// `visual_input_generations` without the changes that only repaint: the
+    /// style inputs a published layout tree depends on.
+    pub(super) fn layout_input_generations(
+        &self,
+        documents: impl IntoIterator<Item = DomHandle>,
+    ) -> Vec<(DomHandle, u64, u64)> {
+        let mut documents = documents.into_iter().collect::<Vec<_>>();
+        documents.sort_by_key(|document| document.index());
+        documents.dedup();
+        documents
+            .into_iter()
+            .map(|document| {
+                let state = &self.for_document(document).document_state;
+                (
+                    document,
+                    state.source_set_generation(),
+                    state.layout_input_generation(),
                 )
             })
             .collect()

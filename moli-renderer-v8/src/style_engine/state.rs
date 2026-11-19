@@ -90,6 +90,8 @@ pub(super) struct StyleDocumentState {
     /// Source-side invalidation only. The target context also advances when
     /// derived styles are cleared, including temporary capture environments.
     visual_input_generation: Cell<u64>,
+    /// How much of `visual_input_generation` cannot change layout.
+    paint_only_visual_inputs: Cell<u64>,
     pub(super) lazy_invalidation_roots: LazyStyleInvalidationRoots,
     #[cfg(debug_assertions)]
     completed_style_observation: RefCell<Option<CompletedStyleObservation>>,
@@ -116,6 +118,7 @@ impl StyleDocumentState {
             retained_style_system_generation: Cell::new(0),
             target_context_epoch: Cell::new(0),
             visual_input_generation: Cell::new(0),
+            paint_only_visual_inputs: Cell::new(0),
             lazy_invalidation_roots: LazyStyleInvalidationRoots::default(),
             #[cfg(debug_assertions)]
             completed_style_observation: RefCell::new(None),
@@ -175,6 +178,19 @@ impl StyleDocumentState {
 
     pub(super) fn visual_input_generation(&self) -> u64 {
         self.visual_input_generation.get()
+    }
+
+    /// `visual_input_generation` without the changes that only repaint.
+    pub(super) fn layout_input_generation(&self) -> u64 {
+        self.visual_input_generation
+            .get()
+            .saturating_sub(self.paint_only_visual_inputs.get())
+    }
+
+    pub(super) fn note_paint_only_visual_input_change(&self) {
+        self.note_visual_input_change();
+        self.paint_only_visual_inputs
+            .set(self.paint_only_visual_inputs.get().saturating_add(1));
     }
 
     pub(super) fn note_visual_input_change(&self) {

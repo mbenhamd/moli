@@ -988,6 +988,52 @@ body { margin: 0; }
     );
 }
 
+/// A color transition repaints: its frames restyle the element, but geometry
+/// reads keep the published layout, as no box can have moved.
+#[tokio::test]
+async fn css_color_transition_samples_keep_the_published_layout() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-color-transition-layout.test/",
+        r#"<html><head><style>
+#t { position: absolute; left: 0; width: 10px; height: 10px; color: rgb(0, 0, 0);
+     transition: color 60ms linear; }
+#t.on { color: rgb(255, 0, 0); }
+</style></head><body><div id="t"></div></body></html>"#,
+    );
+    vm.eval(
+        r#"
+(() => {
+  const t = document.getElementById('t');
+  getComputedStyle(t).color;
+  t.classList.add('on');
+  getComputedStyle(t).color;
+  t.getBoundingClientRect();
+})()
+"#,
+    )
+    .expect("transition start should evaluate");
+    let builds = vm.layout_pass_observability_for_test().1;
+
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("transition task should run");
+    let settled = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  return [t.getBoundingClientRect().x, getComputedStyle(t).color].join('|');
+})()
+"#,
+        )
+        .expect("settled transition should be readable");
+
+    assert_eq!(settled, "0|rgb(255, 0, 0)");
+    assert_eq!(vm.layout_pass_observability_for_test().1, builds);
+}
+
 #[tokio::test]
 async fn invalid_move_before_does_not_run_plain_transition_runtime() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");

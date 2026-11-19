@@ -8,9 +8,15 @@
 //! embedder owns: the document animation clock, transition identity, the
 //! transition events, and the `Animation` state script observes.
 //!
-//! The clock only advances when the page samples it (a computed-style read,
-//! a layout or a transition task). A sample restyles every element whose
-//! transitions run, so a style read after it shows the values at that time.
+//! While transitions run, the clock only advances in the transition task,
+//! which stands in for the rendering update's "update animations and send
+//! events" step and runs once per frame. Style and geometry reads within a
+//! frame see the same time, as in Chromium. A transition's start time
+//! resolves at the first sample after its style change event, as a pending
+//! animation's does at the next frame in Chromium, so its first frame shows
+//! its start value. A sample restyles every element whose transition value
+//! moved, so a read after it shows the values at that time. Like Chromium's animation updates, a sample of colors alone repaints
+//! without invalidating layout.
 
 use std::{
     cell::{Cell, RefCell},
@@ -30,6 +36,32 @@ use style::{
 use style_traits::ToCss;
 
 use crate::document_runtime::DomHandle;
+
+/// Whether animating `property` leaves every box and hit-test result as is.
+fn is_paint_only_property(property: &str) -> bool {
+    matches!(
+        property,
+        "color"
+            | "background-color"
+            | "border-top-color"
+            | "border-right-color"
+            | "border-bottom-color"
+            | "border-left-color"
+            | "outline-color"
+            | "text-decoration-color"
+            | "caret-color"
+            | "column-rule-color"
+    )
+}
+
+/// The elements one clock sample must restyle.
+#[derive(Default)]
+pub(super) struct TransitionSample {
+    /// Elements with a moved value that can affect layout or hit testing.
+    pub(super) layout_roots: Vec<DomHandle>,
+    /// Elements whose moved values only change how they paint.
+    pub(super) paint_roots: Vec<DomHandle>,
+}
 
 /// Seconds since the Unix epoch: the time base of the document animation clock.
 pub(crate) fn animation_clock_now() -> f64 {
@@ -112,6 +144,9 @@ pub(crate) struct CssTransitionRecord {
     pub(crate) from: String,
     pub(crate) to: String,
     phase: TransitionPhase,
+    /// The start time still waits for the first sample after the style
+    /// change event.
+    start_pending: bool,
 }
 
 impl CssTransitionRecord {
@@ -272,11 +307,15 @@ impl DocumentCssTransitions {
     /// Advances the clock to `now`, finishes the transitions that ended, and
     /// cancels those of elements for which `connected` is false. Returns the
     /// elements whose transition values changed, which must restyle.
-    pub(super) fn sample(&self, now: f64, connected: impl Fn(DomHandle) -> bool) -> Vec<DomHandle> {
+    pub(super) fn sample(
+        &self,
+        now: f64,
+        connected: impl Fn(DomHandle) -> bool,
+    ) -> TransitionSample {
         let mut store = self.store.borrow_mut();
         if store.records.is_empty() {
             self.clock.set(now);
-            return Vec::new();
+            return TransitionSample::default();
         }
         let advanced = now > self.clock.get();
         if advanced {
@@ -284,7 +323,7 @@ impl DocumentCssTransitions {
         }
         let now = self.clock.get();
         let store = &mut *store;
-        let mut restyle = Vec::new();
+        let mut restyle = TransitionSample::default();
         let mut sets = self.animations.sets.write();
         let mut removed = Vec::new();
         for (key, set) in sets.iter_mut() {
@@ -304,7 +343,8 @@ impl DocumentCssTransitions {
                 removed.push(key.clone());
                 continue;
             }
-            let mut changed = false;
+            let mut repaint = false;
+            let mut relayout = false;
             for (transition, id) in set.transitions.iter_mut().zip(ids) {
                 if !matches!(
                     transition.state,
@@ -315,7 +355,19 @@ impl DocumentCssTransitions {
                 let Some(record) = store.records.get_mut(id) else {
                     continue;
                 };
+                // A new transition's pending play task resolves its start
+                // time at the next frame (Web Animations, "play an
+                // animation"), not at the last sampled time, so its value
+                // stays the one its style change event resolved.
+                let start_resolved = advanced && record.start_pending;
+                if start_resolved {
+                    transition.start_time = now + transition.delay;
+                    record.start_time = transition.start_time;
+                    record.start_pending = false;
+                }
                 let phase = record.phase_at(now);
+                let paint_only = is_paint_only_property(&record.property);
+                let value_moved = advanced && !start_resolved && now > record.start_time;
                 record.advance_to(phase, &mut store.events);
                 if phase == TransitionPhase::Active {
                     transition.state = AnimationState::Running;
@@ -324,13 +376,16 @@ impl DocumentCssTransitions {
                     // The end event queued above also settles `finished`.
                     transition.state = AnimationState::Finished;
                     store.records.remove(id);
-                    changed = true;
-                } else if advanced {
-                    changed = true;
+                }
+                if phase == TransitionPhase::After || value_moved {
+                    repaint |= paint_only;
+                    relayout |= !paint_only;
                 }
             }
-            if changed {
-                restyle.push(target);
+            if relayout {
+                restyle.layout_roots.push(target);
+            } else if repaint {
+                restyle.paint_roots.push(target);
             }
         }
         for key in removed {
@@ -426,6 +481,7 @@ impl DocumentCssTransitions {
                     from,
                     to,
                     phase: TransitionPhase::Idle,
+                    start_pending: true,
                 },
             );
         }

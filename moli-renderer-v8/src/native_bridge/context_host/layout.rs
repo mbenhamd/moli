@@ -300,7 +300,7 @@ impl PageScriptHost {
             dom: self.dom_host().dom_version_excluding_interaction_state(),
             styles: self
                 .style_engine
-                .visual_style_input_generations(self.active_layout_document_handles()),
+                .layout_style_input_generations(self.active_layout_document_handles()),
             used_geometry: self.visual_state_generation(),
             resources: self.visual_resource_generation(),
             viewport: (
@@ -368,8 +368,6 @@ impl PageScriptHost {
             return Ok(());
         }
         self.sync_pending_scroll_offsets();
-        // Running CSS transitions restyle their elements at this time first.
-        self.style_engine.sample_css_transitions(self.dom_host());
         let document = self.document_handle();
         let viewport = self.layout_viewport_for_document(document);
         let inputs = self.live_layout_input_key(viewport, None);
