@@ -7,20 +7,34 @@
 //! it never run and it fetches no subresources, as in Blink's isolated SVG
 //! image pages.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::VecDeque, sync::Arc};
 
 use moli_layout::{LayoutViewport, PaintRect, PaintSnapshot, PaintTransform2D};
 
 use super::PageScriptHost;
 use crate::{context_bootstrap::svg_runtime::screen, document_runtime::DomHandle};
 
-/// Parsed documents kept for repeated draws. The DOM arena never frees nodes,
-/// so sharing one Document per distinct source is what bounds their cost.
+/// Parsed documents kept for repeated draws of the same image. An evicted
+/// Document releases its style world and layout services. Its nodes stay in
+/// the page's DOM arena, which never frees a node, like a `DOMParser`
+/// Document that script dropped.
 const MAX_CACHED_SVG_IMAGE_DOCUMENTS: usize = 16;
 
+/// Documents in insertion order, keyed by the decoded image's source buffer.
+/// The entry holds that buffer, so its address cannot be reused while cached,
+/// and a lookup never hashes the source bytes.
 #[derive(Default)]
 pub(super) struct SvgImageDocuments {
-    roots: HashMap<Arc<[u8]>, DomHandle>,
+    entries: VecDeque<(Arc<[u8]>, (DomHandle, DomHandle))>,
+}
+
+impl SvgImageDocuments {
+    fn get(&self, source: &Arc<[u8]>) -> Option<(DomHandle, DomHandle)> {
+        self.entries
+            .iter()
+            .find(|(cached, _)| Arc::ptr_eq(cached, source))
+            .map(|(_, documents)| *documents)
+    }
 }
 
 /// Painted content of one `<foreignObject>`.
@@ -92,8 +106,8 @@ impl PageScriptHost {
     }
 
     fn svg_image_document_root(&mut self, source: &Arc<[u8]>) -> Option<DomHandle> {
-        if let Some(root) = self.svg_image_documents.roots.get(source) {
-            return Some(*root);
+        if let Some((_, root)) = self.svg_image_documents.get(source) {
+            return Some(root);
         }
         let xml = std::str::from_utf8(source).ok()?;
         let url = url::Url::parse("about:blank").ok()?;
@@ -109,10 +123,21 @@ impl PageScriptHost {
             .dom_host()
             .child_handles(document)
             .find(|&node| self.dom_host().node(node).is_some_and(|n| n.is_element()))?;
-        if self.svg_image_documents.roots.len() >= MAX_CACHED_SVG_IMAGE_DOCUMENTS {
-            self.svg_image_documents.roots.clear();
+        if self.svg_image_documents.entries.len() >= MAX_CACHED_SVG_IMAGE_DOCUMENTS
+            && let Some((_, (evicted, _))) = self.svg_image_documents.entries.pop_front()
+        {
+            self.retire_svg_image_document(evicted);
         }
-        self.svg_image_documents.roots.insert(source.clone(), root);
+        self.svg_image_documents
+            .entries
+            .push_back((source.clone(), (document, root)));
         Some(root)
+    }
+
+    fn retire_svg_image_document(&mut self, document: DomHandle) {
+        self.document_layout_state
+            .borrow_mut()
+            .retire_embedded_document(document);
+        self.style_engine.retire_document_style_world(document);
     }
 }

@@ -42,15 +42,6 @@ pub(crate) fn build_native_layout_pass(
     )
 }
 
-/// Lays out the HTML content of one `<foreignObject>` as its own block root
-/// in its Document's current style world.
-///
-/// The outer `<svg>` is a replaced box in the Document's pass, so content
-/// below it has no CSS box there. This one-shot pass gives that content the
-/// CSS geometry Blink computes for it, in the `<foreignObject>`'s local
-/// coordinate space (CSS pixels before the SVG screen CTM). It never
-/// publishes, keeps the Document's retained world, and does not update the
-/// Document's container-query sizes.
 /// The style observation `build_foreign_object_layout_pass` reads `document`
 /// in for `viewport`.
 pub(crate) fn foreign_object_style_scope(
@@ -61,6 +52,15 @@ pub(crate) fn foreign_object_style_scope(
     style_resolver::layout_style_read_scope(runtime, document, viewport, None)
 }
 
+/// Lays out the HTML content of one `<foreignObject>` as its own block root
+/// in its Document's current style world.
+///
+/// The outer `<svg>` is a replaced box in the Document's pass, so content
+/// below it has no CSS box there. This one-shot pass gives that content the
+/// CSS geometry Blink computes for it, in the `<foreignObject>`'s local
+/// coordinate space (CSS pixels before the SVG screen CTM). It never
+/// publishes, keeps the Document's retained world, and does not update the
+/// Document's container-query sizes.
 pub(crate) fn build_foreign_object_layout_pass(
     runtime: &PageScriptHost,
     foreign_object: DomHandle,

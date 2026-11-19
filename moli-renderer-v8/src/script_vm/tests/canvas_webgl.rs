@@ -2500,6 +2500,54 @@ fn html_canvas_draw_image_paints_foreign_object_html_with_the_image_style_sheets
     );
 }
 
+#[test]
+fn html_canvas_draw_image_places_foreign_object_content_by_its_transform_once() {
+    // Chromium 156 paints the translated content at [50,20,89,39], places a
+    // CSS `transform` before `x`/`y` as it does the attribute (f2
+    // css_transform_fo), and paints no outline for an image an SVG image
+    // cannot load.
+    let mut vm = new_storage_test_vm("https://canvas-draw-svg-transform.test/");
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
+
+    let result = vm
+        .eval(
+            r##"
+(() => {
+  const xhtml = 'xmlns="http://www.w3.org/1999/xhtml"';
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="60">'
+    + '<foreignObject width="20" height="20">'
+    + '<img ' + xhtml + ' src="missing.png" width="10" height="10" style="display:block"/></foreignObject>'
+    + '<foreignObject width="40" height="20" transform="translate(50,20)">'
+    + '<div ' + xhtml + ' style="width:100%;height:100%;background:#0f0"></div>'
+    + '</foreignObject>'
+    + '<foreignObject x="5" y="40" width="10" height="10" style="transform:translate(10px,5px)">'
+    + '<div ' + xhtml + ' style="width:100%;height:100%;background:#00f"></div>'
+    + '</foreignObject></svg>';
+  const image = new Image();
+  image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  const canvas = document.createElement('canvas');
+  canvas.width = 100;
+  canvas.height = 60;
+  const context = canvas.getContext('2d');
+  context.drawImage(image, 0, 0);
+  const at = (x, y) => Array.from(context.getImageData(x, y, 1, 1).data);
+  return JSON.stringify({
+    inside: [at(50, 20), at(89, 39)],
+    outside: at(91, 41),
+    unloaded: at(0, 0),
+    css: [at(15, 45), at(24, 54), at(5, 40)],
+  });
+})()
+"##,
+        )
+        .expect("SVG image draw should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"inside":[[0,255,0,255],[0,255,0,255]],"outside":[0,0,0,0],"unloaded":[0,0,0,0],"css":[[0,0,255,255],[0,0,255,255],[0,0,0,0]]}"#
+    );
+}
+
 #[tokio::test]
 async fn html_canvas_draw_image_rejects_a_broken_svg_image() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
@@ -2538,7 +2586,7 @@ async fn html_canvas_draw_image_rejects_a_broken_svg_image() {
 async fn offscreen_canvas_keeps_origin_taint_through_blob_and_bitmap_exports() {
     // Chromium 156: a canvas tainted by a blob: SVG with <foreignObject>
     // taints an OffscreenCanvas it is drawn into; convertToBlob() rejects and
-    // the transferred ImageBitmap taints the canvas it is drawn into.
+    // an ImageBitmap it creates or transfers taints the canvas it is drawn into.
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     // Only real layout with image fetch decodes the blob: SVG for drawing.
     loader.set_image_fetch_enabled(true);
@@ -2562,6 +2610,11 @@ async fn offscreen_canvas_keeps_origin_taint_through_blob_and_bitmap_exports() {
     const offscreen = new OffscreenCanvas(4, 4);
     offscreen.getContext('2d').drawImage(source, 0, 0);
     offscreen.convertToBlob().then(() => { result.blob = 'resolved'; }, (error) => { result.blob = error.name; });
+    createImageBitmap(offscreen).then((created) => {
+      const sink = document.createElement('canvas');
+      sink.getContext('2d').drawImage(created, 0, 0);
+      try { sink.toDataURL(); result.created = 'clean'; } catch (error) { result.created = error.name; }
+    }, (error) => { result.created = 'rejected ' + error.name; });
     const target = document.createElement('canvas');
     target.getContext('2d').drawImage(offscreen.transferToImageBitmap(), 0, 0);
     try {
@@ -2580,7 +2633,7 @@ async fn offscreen_canvas_keeps_origin_taint_through_blob_and_bitmap_exports() {
     advance_page_task_executor_until_eval_equals(
         &mut vm,
         &loader,
-        "String('blob' in globalThis.__lmOffscreenTaint)",
+        "String('blob' in globalThis.__lmOffscreenTaint && 'created' in globalThis.__lmOffscreenTaint)",
         "true",
         "offscreen_canvas_keeps_origin_taint_through_blob_and_bitmap_exports",
     )
@@ -2589,7 +2642,7 @@ async fn offscreen_canvas_keeps_origin_taint_through_blob_and_bitmap_exports() {
     assert_eq!(
         vm.eval("JSON.stringify(globalThis.__lmOffscreenTaint)")
             .expect("offscreen taint result should be readable"),
-        r#"{"source":"SecurityError","bitmap":"SecurityError","blob":"SecurityError"}"#
+        r#"{"source":"SecurityError","bitmap":"SecurityError","blob":"SecurityError","created":"SecurityError"}"#
     );
 }
 

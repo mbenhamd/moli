@@ -1,4 +1,7 @@
-use super::backing_store::{canvas_like_has_context, canvas_like_pixels_copy};
+use super::backing_store::{
+    canvas_is_origin_tainted, canvas_like_has_context, canvas_like_pixels_copy,
+    mark_canvas_origin_tainted,
+};
 use crate::{
     context_bootstrap::new_dom_exception_value, util::throw_type_error, web_api_interfaces,
 };
@@ -72,6 +75,11 @@ pub(crate) fn window_create_image_bitmap_callback<'s>(
         rv.set(promise.into());
         return;
     };
+    // The bitmap keeps its source's origin-clean flag, as for
+    // `transferToImageBitmap`.
+    if canvas_is_origin_tainted(scope, source) {
+        mark_canvas_origin_tainted(scope, bitmap);
+    }
     let _ = resolver.resolve(scope, bitmap.into());
     rv.set(promise.into());
 }

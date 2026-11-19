@@ -147,8 +147,10 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
     fn flat_children(&self, node: Self::NodeId) -> Self::ChildIter<'_> {
         let host = self.host();
         let mut children = flat_children(host, self.root, node);
-        // Outside SVG content only an outermost `<svg>` renders, as in Blink:
-        // an SVG `<style>` or `<rect>` in HTML or `<foreignObject>` makes no box.
+        // Below a non-SVG element, an SVG-namespace child makes a CSS box only
+        // when it is an `<svg>`, which starts its own SVG root, as in Blink: an
+        // SVG `<style>` or `<rect>` inside HTML content makes none. Children of
+        // SVG elements, `<foreignObject>` included, are not filtered here.
         if !is_svg_namespace_element(host, node) {
             children.retain(|&child| {
                 !is_svg_namespace_element(host, child)

@@ -409,7 +409,13 @@ where
                         }
                     }
                 }
-                project_box_contents(projection, id, embedded_frames, &mut snapshot);
+                project_box_contents(
+                    projection,
+                    id,
+                    embedded_frames,
+                    capture.paint_unavailable_images,
+                    &mut snapshot,
+                );
             }
             PaintOrderEvent::InlineContents(id) => {
                 active_clips.transition_to(
@@ -1015,6 +1021,7 @@ fn project_box_contents<N>(
     projection: &OutputProjection<'_, N>,
     id: LayoutBoxId,
     embedded_frames: &mut HashMap<LayoutBoxId, PaintSnapshot>,
+    paint_unavailable_images: bool,
     snapshot: &mut PaintSnapshot,
 ) where
     N: Copy + Debug + Eq + Hash,
@@ -1037,7 +1044,13 @@ fn project_box_contents<N>(
             local_to_surface,
         );
     }
-    project_replaced_image(projection, id, paint_space, snapshot);
+    project_replaced_image(
+        projection,
+        id,
+        paint_space,
+        paint_unavailable_images,
+        snapshot,
+    );
     project_form_control_appearance(layout_box, geometry.border_box, transform, snapshot);
 }
 

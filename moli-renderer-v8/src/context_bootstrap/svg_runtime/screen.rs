@@ -13,6 +13,7 @@ use super::builders::{
     svg_geometry_optional_length_attribute_for_handle, svg_has_non_rendered_ancestor_with,
     svg_transform_for_handle,
 };
+use super::hit_test::computed_transform_matrix;
 use super::{
     SVG_MEET_OR_SLICE_SLICE, SVG_PRESERVE_ASPECT_RATIO_NONE, SVG_PRESERVE_ASPECT_RATIO_X_MAX_Y_MAX,
     SVG_PRESERVE_ASPECT_RATIO_X_MAX_Y_MID, SVG_PRESERVE_ASPECT_RATIO_X_MAX_Y_MIN,
@@ -197,12 +198,34 @@ pub(crate) fn svg_image_foreign_objects(
         }
         let x = length(handle, "x", viewport_width).unwrap_or(0.0);
         let y = length(handle, "y", viewport_height).unwrap_or(0.0);
+        // The element's own transform is its computed `transform`, which
+        // carries the attribute as a presentation hint unless author CSS
+        // replaces it. The hint is dropped when the attribute is not also
+        // valid CSS (`rotate(30)`, `rotate(90 20 10)`), and a computed value
+        // that needs a reference box has no matrix here; both use the
+        // attribute. `transform: none` over a non-identity attribute
+        // therefore keeps the attribute, a known gap.
+        let attribute_transform = svg_transform_for_handle(runtime, handle);
+        let own_transform = styles
+            .read(handle)
+            .computed_values()
+            .and_then(|computed| computed_transform_matrix(&computed))
+            .filter(|computed| *computed != SvgMatrixComponents::identity())
+            .unwrap_or(attribute_transform);
+        let parent = runtime
+            .dom_host()
+            .node(handle)
+            .and_then(|node| node.parent_node_id());
+        let parent_ctm = parent.map_or_else(SvgMatrixComponents::identity, |parent| {
+            svg_ctm_below_root(runtime, parent, Some(root))
+        });
         found.push(SvgImageForeignObject {
             handle,
             width,
             height,
             content_to_image: root_transform
-                .multiply(svg_ctm_below_root(runtime, handle, Some(root)))
+                .multiply(parent_ctm)
+                .multiply(own_transform)
                 .multiply(SvgMatrixComponents::translate(x, y)),
         });
     }

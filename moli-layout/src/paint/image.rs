@@ -26,6 +26,7 @@ pub(super) fn project_replaced_image<N>(
     projection: &OutputProjection<'_, N>,
     id: LayoutBoxId,
     paint_space: PaintSpace,
+    paint_unavailable_images: bool,
     snapshot: &mut PaintSnapshot,
 ) where
     N: Copy + Debug + Eq + Hash,
@@ -45,13 +46,13 @@ pub(super) fn project_replaced_image<N>(
         return;
     }
     let Some(resource) = layout_box.replaced_image.as_ref() else {
-        if kind == LayoutReplacedKind::Image {
+        if kind == LayoutReplacedKind::Image && paint_unavailable_images {
             project_unavailable_image(projection, id, paint_space, snapshot);
         }
         return;
     };
     if resource.pixels.is_none() && resource.svg.is_none() {
-        if kind == LayoutReplacedKind::Image {
+        if kind == LayoutReplacedKind::Image && paint_unavailable_images {
             project_unavailable_image(projection, id, paint_space, snapshot);
         }
         return;
