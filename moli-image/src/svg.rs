@@ -798,7 +798,8 @@ fn nested_image_has_foreign_object(
             })
         })
         .map(|(_, _, value)| value.trim());
-    let Some(href) = href.filter(|href| href.len() > 5 && href[..5].eq_ignore_ascii_case("data:"))
+    let Some(href) =
+        href.filter(|href| href.len() > 5 && href.as_bytes()[..5].eq_ignore_ascii_case(b"data:"))
     else {
         return false;
     };
@@ -1334,6 +1335,10 @@ mod tests {
             (
                 r#"<s:svg xmlns:s="http://www.w3.org/2000/svg"><s:foreignObject/></s:svg>"#,
                 true,
+            ),
+            (
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><image width="4" height="4" href="日本.png"/></svg>"#,
+                false,
             ),
             (fo, true),
             (nested.as_str(), true),

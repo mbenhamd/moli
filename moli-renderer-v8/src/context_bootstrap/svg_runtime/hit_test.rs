@@ -501,21 +501,8 @@ fn transform_is_the_attribute(
         return false;
     }
     let attribute = svg_transform_for_handle(runtime, handle);
-    let transform = computed.clone_transform();
-    let css = if transform.0.is_empty() {
-        SvgMatrixComponents::identity()
-    } else {
-        match transform.to_transform_3d_matrix_f64(None) {
-            Ok((matrix, false)) => SvgMatrixComponents {
-                a: matrix.m11,
-                b: matrix.m12,
-                c: matrix.m21,
-                d: matrix.m22,
-                e: matrix.m41,
-                f: matrix.m42,
-            },
-            _ => return false,
-        }
+    let Some(css) = computed_transform_matrix(computed) else {
+        return false;
     };
     if !matrices_agree(css, attribute) {
         return false;
@@ -528,6 +515,26 @@ fn transform_is_the_attribute(
         || (is_zero_length(&origin.horizontal)
             && is_zero_length(&origin.vertical)
             && origin.depth.px() == 0.0)
+}
+
+/// The computed `transform` as a 2D matrix, `None` when it is 3D or needs a
+/// reference box (percentages).
+pub(super) fn computed_transform_matrix(computed: &ComputedValues) -> Option<SvgMatrixComponents> {
+    let transform = computed.clone_transform();
+    if transform.0.is_empty() {
+        return Some(SvgMatrixComponents::identity());
+    }
+    match transform.to_transform_3d_matrix_f64(None) {
+        Ok((matrix, false)) => Some(SvgMatrixComponents {
+            a: matrix.m11,
+            b: matrix.m12,
+            c: matrix.m21,
+            d: matrix.m22,
+            e: matrix.m41,
+            f: matrix.m42,
+        }),
+        _ => None,
+    }
 }
 
 fn is_zero_length(value: &LengthPercentage) -> bool {
