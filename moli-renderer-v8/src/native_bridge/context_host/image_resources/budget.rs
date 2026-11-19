@@ -104,6 +104,13 @@ pub(super) struct ImageDecodedBytesPermit {
     decoded_bytes: usize,
 }
 
+impl ImageDecodedBytesPermit {
+    /// Holds `other`'s charge for as long as this permit lives.
+    pub(super) fn absorb(&mut self, mut other: Self) {
+        self.decoded_bytes += std::mem::take(&mut other.decoded_bytes);
+    }
+}
+
 impl Drop for ImageDecodedBytesPermit {
     fn drop(&mut self) {
         let mut state = self.budget.state.lock();

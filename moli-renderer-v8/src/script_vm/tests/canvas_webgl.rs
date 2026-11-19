@@ -2500,6 +2500,42 @@ fn html_canvas_draw_image_paints_foreign_object_html_with_the_image_style_sheets
     );
 }
 
+#[test]
+fn html_canvas_draw_image_paints_a_data_raster_image_inside_an_svg_image() {
+    let mut vm = new_storage_test_vm("https://canvas-draw-svg-raster.test/");
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
+
+    let result = vm
+        .eval(
+            r##"
+(() => {
+  const red = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">'
+    + '<rect width="20" height="20" fill="blue"/>'
+    + '<image x="20" width="20" height="20" preserveAspectRatio="none" href="' + red + '"/></svg>';
+  const image = new Image();
+  image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  const canvas = document.createElement('canvas');
+  canvas.width = 40;
+  canvas.height = 20;
+  const context = canvas.getContext('2d');
+  context.drawImage(image, 0, 0);
+  return JSON.stringify({
+    vector: Array.from(context.getImageData(10, 10, 1, 1).data),
+    raster: Array.from(context.getImageData(30, 10, 1, 1).data),
+    exportable: canvas.toDataURL().startsWith('data:image/png')
+  });
+})()
+"##,
+        )
+        .expect("SVG image draw should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"vector":[0,0,255,255],"raster":[255,0,0,255],"exportable":true}"#
+    );
+}
+
 #[tokio::test]
 async fn html_canvas_draw_image_rejects_a_broken_svg_image() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");

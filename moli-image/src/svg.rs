@@ -10,6 +10,11 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
+use crate::{
+    MAX_DECODED_RGBA_BYTES, RasterImageFormat, RasterImageMetadata, RgbaImage,
+    decode_raster_image_with_metadata, probe_raster_image,
+};
+
 pub use usvg::ElementStyleProperty as SvgStyleProperty;
 /// Shared final style profile, applied after matching the original SVG XML.
 pub type SvgElementStyle = Arc<[SvgStyleProperty]>;
@@ -40,6 +45,9 @@ const XLINK_NAMESPACE: &str = "http://www.w3.org/1999/xlink";
 const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
 /// Nested `data:` SVG images checked for `<foreignObject>`, as levels deep.
 const MAX_NESTED_SVG_IMAGE_DEPTH: u8 = 4;
+/// Decoded RGBA bytes shared by the nested `data:` raster images of one SVG
+/// image, the bound one HTML raster image has.
+const MAX_NESTED_RASTER_RGBA_BYTES: usize = MAX_DECODED_RGBA_BYTES;
 const DEFAULT_OBJECT_WIDTH: f32 = 300.0;
 const DEFAULT_OBJECT_HEIGHT: f32 = 150.0;
 
@@ -319,6 +327,15 @@ pub struct SvgImage {
     metadata: SvgImageMetadata,
     foreign_object_source: Option<Arc<[u8]>>,
     contains_foreign_object: bool,
+    nested_rasters: Vec<NestedRaster>,
+}
+
+/// A `data:` raster `<image>` the tree draws, identified by the encoded
+/// bytes `usvg` keeps on its node.
+struct NestedRaster {
+    data: Arc<Vec<u8>>,
+    metadata: RasterImageMetadata,
+    pixels: Option<Arc<RgbaImage>>,
 }
 
 impl SvgImage {
@@ -343,6 +360,37 @@ impl SvgImage {
     /// treats such an image as having more than one security origin.
     pub const fn contains_foreign_object(&self) -> bool {
         self.contains_foreign_object
+    }
+
+    /// RGBA bytes [`Self::decode_nested_rasters`] allocates, so a resource
+    /// owner can charge them before the pixels exist.
+    pub fn nested_raster_byte_len(&self) -> usize {
+        self.nested_rasters
+            .iter()
+            .map(|raster| raster.metadata.decoded_byte_len())
+            .sum()
+    }
+
+    /// Decodes the `data:` raster images the tree draws with Moli's raster
+    /// decoders. One that fails to decode stays unpainted, as in Blink.
+    pub fn decode_nested_rasters(&mut self) {
+        for raster in &mut self.nested_rasters {
+            if raster.pixels.is_none() {
+                raster.pixels = decode_raster_image_with_metadata(&raster.data, raster.metadata)
+                    .ok()
+                    .map(|decoded| Arc::new(decoded.image));
+            }
+        }
+    }
+
+    /// The decoded pixels of a raster `<image>` node of [`Self::tree`].
+    pub fn nested_raster(&self, image: &usvg::Image) -> Option<&Arc<RgbaImage>> {
+        let data = nested_raster_data(image.kind())?;
+        self.nested_rasters
+            .iter()
+            .find(|raster| Arc::ptr_eq(&raster.data, data))?
+            .pixels
+            .as_ref()
     }
 }
 
@@ -431,9 +479,12 @@ pub fn svg_image_metadata_from_root_attributes(
     }
 }
 
+/// Parses an SVG image and decodes its nested `data:` raster images.
 pub fn decode_svg_image(bytes: &[u8]) -> Result<SvgImage, SvgDecodeError> {
     let metadata = probe_svg_image(bytes)?;
-    decode_svg_image_with_metadata(bytes, metadata)
+    let mut image = decode_svg_image_with_metadata(bytes, metadata)?;
+    image.decode_nested_rasters();
+    Ok(image)
 }
 
 /// Decodes an original XML input with an embedding document's final styles.
@@ -517,12 +568,17 @@ pub fn decode_inline_svg_scene(
             metadata,
             foreign_object_source: None,
             contains_foreign_object: false,
+            nested_rasters: Vec::new(),
         },
         objects,
     })
 }
 
 /// Parses SVG after the caller has already admitted the immutable byte buffer.
+///
+/// Nested `data:` raster images are probed, not decoded: the caller charges
+/// [`SvgImage::nested_raster_byte_len`] and then calls
+/// [`SvgImage::decode_nested_rasters`].
 pub fn decode_svg_image_with_metadata(
     bytes: &[u8],
     metadata: SvgImageMetadata,
@@ -545,17 +601,23 @@ fn decode_svg_image_with_fonts(
         font_family: fonts.default_family.clone(),
         font_resolver: fonts.resolver(),
         default_size,
-        // The default usvg resolver accepts data URLs and local filesystem
-        // paths. Image resources must stay behind Moli's fetch and
-        // decode owner, so Phase 10 deliberately omits nested raster/SVG
-        // images instead of reading or decoding them inside this parser.
+        // An SVG image never fetches: Blink loads its subresources only
+        // from `data:` URLs. usvg's default resolver also reads local files
+        // and parses nested SVG, so only `data:` raster bytes are admitted
+        // here, by their signature as Blink's image decoders select them.
         image_href_resolver: usvg::ImageHrefResolver {
-            resolve_data: Box::new(|_, _, _| None),
+            resolve_data: Box::new(|_, data, _| nested_raster_kind(data)),
             resolve_string: Box::new(|_, _| None),
         },
         ..Default::default()
     };
     let tree = usvg::Tree::from_data(bytes, &options)?;
+    let mut nested_rasters = Vec::new();
+    collect_nested_rasters(
+        tree.root(),
+        &mut { MAX_NESTED_RASTER_RGBA_BYTES },
+        &mut nested_rasters,
+    );
     let foreign_objects = std::str::from_utf8(bytes)
         .map(|source| scan_foreign_objects(source, 0))
         .unwrap_or_default();
@@ -564,7 +626,65 @@ fn decode_svg_image_with_fonts(
         metadata,
         foreign_object_source: foreign_objects.own.then(|| Arc::from(bytes)),
         contains_foreign_object: foreign_objects.own || foreign_objects.nested,
+        nested_rasters,
     })
+}
+
+/// Classifies `data:` image bytes Moli's raster decoders admit. usvg names
+/// no BMP kind; the kind only carries the bytes, which Moli decodes by their
+/// signature.
+fn nested_raster_kind(data: Arc<Vec<u8>>) -> Option<usvg::ImageKind> {
+    Some(match probe_raster_image(&data).ok()?.format {
+        RasterImageFormat::Png | RasterImageFormat::Bmp => usvg::ImageKind::PNG(data),
+        RasterImageFormat::Jpeg => usvg::ImageKind::JPEG(data),
+        RasterImageFormat::Gif => usvg::ImageKind::GIF(data),
+        RasterImageFormat::WebP => usvg::ImageKind::WEBP(data),
+    })
+}
+
+fn nested_raster_data(kind: &usvg::ImageKind) -> Option<&Arc<Vec<u8>>> {
+    match kind {
+        usvg::ImageKind::PNG(data)
+        | usvg::ImageKind::JPEG(data)
+        | usvg::ImageKind::GIF(data)
+        | usvg::ImageKind::WEBP(data) => Some(data),
+        usvg::ImageKind::SVG(_) => None,
+    }
+}
+
+/// Lists the raster images of the rendered tree in document order while
+/// their decoded size fits `budget`. A `<use>` copy shares its bytes.
+fn collect_nested_rasters(
+    group: &usvg::Group,
+    budget: &mut usize,
+    rasters: &mut Vec<NestedRaster>,
+) {
+    for node in group.children() {
+        match node {
+            usvg::Node::Group(group) => collect_nested_rasters(group, budget, rasters),
+            usvg::Node::Image(image) => {
+                let Some(data) = nested_raster_data(image.kind()) else {
+                    continue;
+                };
+                if rasters.iter().any(|raster| Arc::ptr_eq(&raster.data, data)) {
+                    continue;
+                }
+                let Ok(metadata) = probe_raster_image(data) else {
+                    continue;
+                };
+                let Some(remaining) = budget.checked_sub(metadata.decoded_byte_len()) else {
+                    continue;
+                };
+                *budget = remaining;
+                rasters.push(NestedRaster {
+                    data: data.clone(),
+                    metadata,
+                    pixels: None,
+                });
+            }
+            usvg::Node::Path(_) | usvg::Node::Text(_) => {}
+        }
+    }
 }
 
 #[derive(Default)]
@@ -998,24 +1118,32 @@ mod tests {
     }
 
     #[test]
-    fn parser_does_not_retain_nested_image_resources() {
+    fn parser_decodes_data_raster_images_and_never_reads_paths() {
         let svg = decode_svg_image(
             br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
                 <image width="10" height="10" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lw2K7wAAAABJRU5ErkJggg=="/>
                 <image width="10" height="10" href="/tmp/moli-must-not-read.png"/>
             </svg>"#,
         )
-        .expect("unsupported nested images should be omitted, not fail the outer SVG");
+        .expect("an unloadable nested image should be omitted, not fail the outer SVG");
 
-        assert!(!group_contains_image(svg.tree().root()));
+        let images = group_images(svg.tree().root());
+        assert_eq!(images.len(), 1, "only the data: raster is retained");
+        let pixels = svg.nested_raster(images[0]).expect("decoded data: raster");
+        assert_eq!((pixels.width, pixels.height), (1, 1));
+        assert_eq!(svg.nested_raster_byte_len(), 4);
     }
 
-    fn group_contains_image(group: &usvg::Group) -> bool {
-        group.children().iter().any(|node| match node {
-            usvg::Node::Group(group) => group_contains_image(group),
-            usvg::Node::Image(_) => true,
-            usvg::Node::Path(_) | usvg::Node::Text(_) => false,
-        })
+    fn group_images(group: &usvg::Group) -> Vec<&usvg::Image> {
+        group
+            .children()
+            .iter()
+            .flat_map(|node| match node {
+                usvg::Node::Group(group) => group_images(group),
+                usvg::Node::Image(image) => vec![image],
+                usvg::Node::Path(_) | usvg::Node::Text(_) => Vec::new(),
+            })
+            .collect()
     }
 
     // A text node only survives parsing when its font resolved: usvg drops the
