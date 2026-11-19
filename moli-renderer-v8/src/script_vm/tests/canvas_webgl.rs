@@ -2430,7 +2430,41 @@ async fn html_canvas_draw_image_reads_data_url_image_pixels() {
 }
 
 #[test]
-fn html_canvas_draw_image_paints_svg_and_foreign_object_html_from_data_urls() {
+fn html_canvas_draw_image_paints_svg_data_url_images_as_vectors() {
+    let mut vm = new_storage_test_vm("https://canvas-draw-svg-image.test/");
+
+    let result = vm
+        .eval(
+            r##"
+(() => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 40 20">'
+    + '<rect width="20" height="20" fill="#00f"/></svg>';
+  const image = new Image();
+  image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  const canvas = document.createElement('canvas');
+  canvas.width = 80;
+  canvas.height = 40;
+  const context = canvas.getContext('2d');
+  context.drawImage(image, 0, 0, 80, 40);
+  return JSON.stringify({
+    size: [image.naturalWidth, image.naturalHeight],
+    inside: Array.from(context.getImageData(39, 20, 1, 1).data),
+    outside: Array.from(context.getImageData(41, 20, 1, 1).data),
+    exportable: canvas.toDataURL().startsWith('data:image/png')
+  });
+})()
+"##,
+        )
+        .expect("SVG image draw should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"size":[40,20],"inside":[0,0,255,255],"outside":[0,0,0,0],"exportable":true}"#
+    );
+}
+
+#[test]
+fn html_canvas_draw_image_paints_foreign_object_html_with_the_image_style_sheets() {
     let mut vm = new_storage_test_vm("https://canvas-draw-svg-image.test/");
     vm.set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
 
@@ -2450,30 +2484,7 @@ fn html_canvas_draw_image_paints_svg_and_foreign_object_html_from_data_urls() {
   canvas.height = 40;
   const context = canvas.getContext('2d');
   context.drawImage(image, 0, 0, 80, 40);
-  const variants = {};
-  for (const [name, css, attrs, pre] of [
-    ['inline', '', ' style="background:#0f0;width:20px;height:20px"', ''],
-    ['type', 'div{background:#0f0}', '', ''],
-    ['class', '.g{background:#0f0}', ' class="g"', ''],
-    ['id', '#i{background:#0f0}', ' id="i"', ''],
-    ['attr', '[data-x]{background:#0f0}', ' data-x="1"', ''],
-    ['universal', '*{background-color:#0f0}', '', ''],
-    ['fo', 'foreignObject{background:#00f}', '', ''],
-    ['nsdiv', '@namespace h url(http://www.w3.org/1999/xhtml); h|div{background:#0f0}', '', ''],
-    ['body', 'div{background:#0f0}', '', '<body xmlns="http://www.w3.org/1999/xhtml">'],
-  ]) {
-    const inner = '<div xmlns="http://www.w3.org/1999/xhtml"' + attrs + (attrs.includes('style=') ? '' : ' style="width:20px;height:20px"') + '></div>';
-    const doc = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><style>' + css + '</style>'
-      + '<foreignObject width="100%" height="100%">' + (pre ? pre + inner.replace(' xmlns="http://www.w3.org/1999/xhtml"', '') + '</body>' : inner) + '</foreignObject></svg>';
-    const i = new Image();
-    i.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(doc);
-    const c = document.createElement('canvas').getContext('2d');
-    c.drawImage(i, 0, 0);
-    variants[name] = [Array.from(c.getImageData(5, 5, 1, 1).data), Array.from(c.getImageData(30, 5, 1, 1).data)];
-  }
-  console.log('DBG-VARIANTS ' + JSON.stringify(variants));
   return JSON.stringify({
-    variants,
     vector: Array.from(context.getImageData(20, 20, 1, 1).data),
     html: Array.from(context.getImageData(60, 20, 1, 1).data),
     exportable: canvas.toDataURL().startsWith('data:image/png')
@@ -2529,7 +2540,13 @@ async fn offscreen_canvas_keeps_origin_taint_through_blob_and_bitmap_exports() {
     // taints an OffscreenCanvas it is drawn into; convertToBlob() rejects and
     // the transferred ImageBitmap taints the canvas it is drawn into.
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
-    let mut vm = new_storage_page_task_executor_test_vm("https://offscreen-canvas-taint.test/");
+    // Only real layout with image fetch decodes the blob: SVG for drawing.
+    loader.set_image_fetch_enabled(true);
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+        "https://offscreen-canvas-taint.test/",
+        &loader,
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
 
     vm.eval(
         r#"
@@ -2541,6 +2558,7 @@ async fn offscreen_canvas_keeps_origin_taint_through_blob_and_bitmap_exports() {
   image.onload = () => {
     const source = document.createElement('canvas');
     source.getContext('2d').drawImage(image, 0, 0);
+    try { source.toDataURL(); result.source = 'clean'; } catch (error) { result.source = error.name; }
     const offscreen = new OffscreenCanvas(4, 4);
     offscreen.getContext('2d').drawImage(source, 0, 0);
     offscreen.convertToBlob().then(() => { result.blob = 'resolved'; }, (error) => { result.blob = error.name; });
@@ -2559,12 +2577,19 @@ async fn offscreen_canvas_keeps_origin_taint_through_blob_and_bitmap_exports() {
     )
     .expect("offscreen taint setup should evaluate");
 
-    drain_canvas_image_load_event_tasks(&mut vm, &loader).await;
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String('blob' in globalThis.__lmOffscreenTaint)",
+        "true",
+        "offscreen_canvas_keeps_origin_taint_through_blob_and_bitmap_exports",
+    )
+    .await;
 
     assert_eq!(
         vm.eval("JSON.stringify(globalThis.__lmOffscreenTaint)")
             .expect("offscreen taint result should be readable"),
-        r#"{"bitmap":"SecurityError","blob":"SecurityError"}"#
+        r#"{"source":"SecurityError","bitmap":"SecurityError","blob":"SecurityError"}"#
     );
 }
 

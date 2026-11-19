@@ -1177,15 +1177,36 @@ mod tests {
         let fo = r#"<svg xmlns="http://www.w3.org/2000/svg"><foreignObject width="4" height="4"><div xmlns="http://www.w3.org/1999/xhtml">x</div></foreignObject></svg>"#;
         let nested = format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg"><image width="4" height="4" href="data:image/svg+xml,{}"/></svg>"#,
-            fo.replace('<', "%3C").replace('>', "%3E").replace('"', "%22").replace('#', "%23")
+            fo.replace('<', "%3C")
+                .replace('>', "%3E")
+                .replace('"', "%22")
+                .replace('#', "%23")
         );
         let cases = [
-            (r#"<svg xmlns="http://www.w3.org/2000/svg"><!-- foreignObject --><rect/></svg>"#, false),
-            (r#"<svg xmlns="http://www.w3.org/2000/svg"><text>foreignObject</text></svg>"#, false),
-            (r#"<svg xmlns="http://www.w3.org/2000/svg"><rect id="foreignObject"/></svg>"#, false),
-            (r#"<svg xmlns="http://www.w3.org/2000/svg"><foreignObject xmlns="urn:x"/></svg>"#, false),
-            (r#"<svg xmlns="http://www.w3.org/2000/svg"><defs><foreignObject/></defs></svg>"#, true),
-            (r#"<s:svg xmlns:s="http://www.w3.org/2000/svg"><s:foreignObject/></s:svg>"#, true),
+            (
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><!-- foreignObject --><rect/></svg>"#,
+                false,
+            ),
+            (
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><text>foreignObject</text></svg>"#,
+                false,
+            ),
+            (
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><rect id="foreignObject"/></svg>"#,
+                false,
+            ),
+            (
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><foreignObject xmlns="urn:x"/></svg>"#,
+                false,
+            ),
+            (
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><defs><foreignObject/></defs></svg>"#,
+                true,
+            ),
+            (
+                r#"<s:svg xmlns:s="http://www.w3.org/2000/svg"><s:foreignObject/></s:svg>"#,
+                true,
+            ),
             (fo, true),
             (nested.as_str(), true),
         ];

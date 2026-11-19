@@ -3060,6 +3060,7 @@ dependencies = [
 name = "moli-image"
 version = "0.1.0"
 dependencies = [
+ "data-url",
  "image",
  "jpeg-decoder",
  "jpeg-encoder",

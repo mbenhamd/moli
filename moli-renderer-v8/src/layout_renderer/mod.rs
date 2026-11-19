@@ -51,6 +51,16 @@ pub(crate) fn build_native_layout_pass(
 /// coordinate space (CSS pixels before the SVG screen CTM). It never
 /// publishes, keeps the Document's retained world, and does not update the
 /// Document's container-query sizes.
+/// The style observation `build_foreign_object_layout_pass` reads `document`
+/// in for `viewport`.
+pub(crate) fn foreign_object_style_scope(
+    runtime: &PageScriptHost,
+    document: DomHandle,
+    viewport: moli_layout::LayoutViewport,
+) -> crate::native_bridge::element::StyleObservation<'_> {
+    style_resolver::layout_style_read_scope(runtime, document, viewport, None)
+}
+
 pub(crate) fn build_foreign_object_layout_pass(
     runtime: &PageScriptHost,
     foreign_object: DomHandle,

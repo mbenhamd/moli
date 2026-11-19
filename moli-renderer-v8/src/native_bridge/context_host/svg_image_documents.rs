@@ -52,7 +52,19 @@ impl PageScriptHost {
             viewport_height.ceil() as u32,
             1.0,
         );
-        screen::svg_image_foreign_objects(self, root, image_size)
+        let foreign_objects = {
+            let Some(document) = self.dom_host().owner_document_handle(root) else {
+                return Vec::new();
+            };
+            // Every read of the image's styles uses its Document's own
+            // context. A context-free read would build that Document's style
+            // world without the sheets of its unconnected `<style>` elements,
+            // and layout would then reuse that world.
+            let mut styles =
+                crate::layout_renderer::foreign_object_style_scope(self, document, viewport);
+            screen::svg_image_foreign_objects(self, &mut styles, root, image_size)
+        };
+        foreign_objects
             .into_iter()
             .filter_map(|foreign_object| {
                 let snapshot = self
@@ -93,13 +105,6 @@ impl PageScriptHost {
         )?;
         // The image's own `<style>` sheets apply inside it, as in any Document.
         self.initialize_style_element_sources_for_document(document);
-        {
-            let c = self.dom_host().stylesheet_candidate_handles_for_tree_scope(document);
-            eprintln!("DBG-SVGIMG candidates={}", c.len());
-            for &o in c.iter() {
-                eprintln!("DBG-SVGIMG owner text={:?}", self.style_engine.owner_style_sheet_text_with_host(self.dom_host(), o).map(|t| t.len()));
-            }
-        }
         let root = self
             .dom_host()
             .child_handles(document)

@@ -10,7 +10,8 @@ use moli_svg::SvgMatrixComponents;
 use super::builders::{
     parse_svg_preserve_aspect_ratio_value, parse_svg_view_box_value, svg_bbox_for_handle,
     svg_bbox_has_non_rendered_ancestor, svg_computed_pixel_value,
-    svg_geometry_optional_length_attribute_for_handle, svg_transform_for_handle,
+    svg_geometry_optional_length_attribute_for_handle, svg_has_non_rendered_ancestor_with,
+    svg_transform_for_handle,
 };
 use super::{
     SVG_MEET_OR_SLICE_SLICE, SVG_PRESERVE_ASPECT_RATIO_NONE, SVG_PRESERVE_ASPECT_RATIO_X_MAX_Y_MAX,
@@ -21,6 +22,7 @@ use super::{
 };
 use crate::document_runtime::DomHandle;
 use crate::native_bridge::PageScriptHost;
+use crate::native_bridge::element::StyleObservation;
 
 fn is_svg_element(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     runtime
@@ -140,9 +142,10 @@ pub(crate) fn svg_image_user_viewport(
 
 /// Every rendered `<foreignObject>` below the root `<svg>` of an image
 /// document, in document order. Percentages use the root's user viewport, also
-/// below a nested `<svg>`.
+/// below a nested `<svg>`. `styles` reads the image document's own styles.
 pub(crate) fn svg_image_foreign_objects(
     runtime: &PageScriptHost,
+    styles: &mut StyleObservation<'_>,
     root: DomHandle,
     image_size: (f64, f64),
 ) -> Vec<SvgImageForeignObject> {
@@ -181,7 +184,15 @@ pub(crate) fn svg_image_foreign_objects(
         }
         let width = length(handle, "width", viewport_width).unwrap_or(0.0);
         let height = length(handle, "height", viewport_height).unwrap_or(0.0);
-        if width <= 0.0 || height <= 0.0 || svg_bbox_has_non_rendered_ancestor(runtime, handle) {
+        if width <= 0.0
+            || height <= 0.0
+            || svg_has_non_rendered_ancestor_with(runtime, handle, |candidate| {
+                styles
+                    .read(candidate)
+                    .computed_values()
+                    .is_some_and(|computed| computed.get_box().display.is_none())
+            })
+        {
             continue;
         }
         let x = length(handle, "x", viewport_width).unwrap_or(0.0);
