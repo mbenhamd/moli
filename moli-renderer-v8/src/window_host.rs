@@ -1980,19 +1980,21 @@ fn parse_timer_delay_ms<'s>(
 /// Marks the animation frame at `timestamp` as started for the Window that
 /// requested it. The frame bookkeeping lives on that Window's global, which
 /// is not necessarily the current context while the timer task runs.
+/// Returns whether this call started the frame.
 pub(crate) fn finish_animation_frame_callback_batch(
     scope: &mut v8::PinScope<'_, '_>,
     window: v8::Local<'_, v8::Object>,
     timestamp: f64,
-) {
+) -> bool {
     let Some(context) = window.get_creation_context(scope) else {
-        return;
+        return false;
     };
     let global = context.global(scope);
     let pending_timestamp =
         get_private_value(scope, global, WINDOW_PENDING_ANIMATION_FRAME_TIMESTAMP_SLOT)
             .and_then(|value| value.number_value(scope));
-    if pending_timestamp == Some(timestamp) {
+    let started = pending_timestamp == Some(timestamp);
+    if started {
         set_private_value(
             scope,
             global,
@@ -2011,6 +2013,7 @@ pub(crate) fn finish_animation_frame_callback_batch(
             v8::Number::new(scope, timestamp).into(),
         );
     }
+    started
 }
 
 pub(crate) fn build_window_idle_deadline<'s>(

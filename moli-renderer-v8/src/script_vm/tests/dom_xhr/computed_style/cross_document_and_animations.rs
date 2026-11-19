@@ -989,49 +989,56 @@ body { margin: 0; }
 }
 
 /// A color transition repaints: its frames restyle the element, but geometry
-/// reads keep the published layout, as no box can have moved.
+/// reads keep the published layout, as no box can have moved. A `left`
+/// transition's frames lay out again.
 #[tokio::test]
 async fn css_color_transition_samples_keep_the_published_layout() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_rendered_test_vm(
         "https://css-color-transition-layout.test/",
         r#"<html><head><style>
-#t { position: absolute; left: 0; width: 10px; height: 10px; color: rgb(0, 0, 0);
+#c { position: absolute; left: 0; width: 10px; height: 10px; color: rgb(0, 0, 0);
      transition: color 60ms linear; }
-#t.on { color: rgb(255, 0, 0); }
-</style></head><body><div id="t"></div></body></html>"#,
+#c.on { color: rgb(255, 0, 0); }
+#l { position: absolute; top: 20px; left: 0; width: 10px; height: 10px;
+     transition: left 60ms linear; }
+#l.on { left: 400px; }
+</style></head><body><div id="c"></div><div id="l"></div></body></html>"#,
     );
-    vm.eval(
-        r#"
-(() => {
-  const t = document.getElementById('t');
-  getComputedStyle(t).color;
-  t.classList.add('on');
-  getComputedStyle(t).color;
-  t.getBoundingClientRect();
-})()
-"#,
-    )
-    .expect("transition start should evaluate");
-    let builds = vm.layout_pass_observability_for_test().1;
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    let start = |vm: &mut StandaloneScriptVmHarness, id: &str| {
+        vm.eval(&format!(
+            "(() => {{ const e = document.getElementById('{id}'); getComputedStyle(e).left; \
+             e.classList.add('on'); e.getBoundingClientRect(); }})()"
+        ))
+        .expect("transition start should evaluate");
+        vm.layout_pass_observability_for_test().1
+    };
 
+    let builds = start(&mut vm, "c");
     tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     vm.advance_timers_until_deadline_for_test(&loader)
         .await
-        .expect("transition task should run");
-    let settled = vm
+        .expect("color transition frames should run");
+    let color = vm
         .eval(
-            r#"
-(() => {
-  const t = document.getElementById('t');
-  return [t.getBoundingClientRect().x, getComputedStyle(t).color].join('|');
-})()
-"#,
+            "(() => { const c = document.getElementById('c'); \
+             return [c.getBoundingClientRect().x, getComputedStyle(c).color].join('|'); })()",
         )
-        .expect("settled transition should be readable");
-
-    assert_eq!(settled, "0|rgb(255, 0, 0)");
+        .expect("settled color transition should be readable");
+    assert_eq!(color, "0|rgb(255, 0, 0)");
     assert_eq!(vm.layout_pass_observability_for_test().1, builds);
+
+    let builds = start(&mut vm, "l");
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("left transition frames should run");
+    let x = vm
+        .eval("String(document.getElementById('l').getBoundingClientRect().x)")
+        .expect("settled left transition should be readable");
+    assert_eq!(x, "400");
+    assert!(vm.layout_pass_observability_for_test().1 > builds);
 }
 
 #[tokio::test]

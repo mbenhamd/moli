@@ -967,6 +967,14 @@ impl MoliStyleEngine {
         restyled
     }
 
+    /// Whether transition events wait for delivery to script.
+    pub(crate) fn has_pending_css_transition_events(&self) -> bool {
+        self.document_worlds
+            .active_worlds()
+            .iter()
+            .any(|world| world.css_transitions.has_pending_events())
+    }
+
     /// The transition events and `Animation` state changes not yet delivered
     /// to script.
     pub(crate) fn take_css_transition_events(&self) -> Vec<transitions::CssTransitionEvent> {
@@ -987,6 +995,10 @@ impl MoliStyleEngine {
             let transitions = &world.css_transitions;
             let due = if transitions.has_pending_events() {
                 Some(0.0)
+            } else if self.css_transition_style_update_due_for_world(&world) {
+                // A style change may start a transition: the next frame runs
+                // its style change event.
+                Some(CSS_TRANSITION_FRAME_INTERVAL_MS)
             } else {
                 // While a transition runs, its values change every frame:
                 // the task stands in for the rendering update's "update
@@ -1000,6 +1012,91 @@ impl MoliStyleEngine {
             }
         }
         delay
+    }
+
+    fn css_transition_style_generation(world: &DocumentStyleWorld) -> u64 {
+        world
+            .document_state
+            .lazy_invalidation_roots
+            .generation()
+            .saturating_add(world.document_state.computed_cache_generation())
+    }
+
+    fn css_transition_style_update_due_for_world(&self, world: &DocumentStyleWorld) -> bool {
+        let transitions = &world.css_transitions;
+        transitions.has_candidates()
+            && (world.pending_invalidations.has_work()
+                || transitions.updated_generation()
+                    != Some(Self::css_transition_style_generation(world)))
+    }
+
+    /// The elements whose style change events the next frame must run, or
+    /// none when no style changed since the last frame's style update.
+    pub(crate) fn css_transition_style_update_targets(&self, host: &DomHost) -> Vec<DomHandle> {
+        self.document_worlds
+            .active_worlds()
+            .iter()
+            .filter(|world| self.css_transition_style_update_due_for_world(world))
+            .flat_map(|world| {
+                world
+                    .css_transitions
+                    .style_update_targets(|handle| host.is_connected(handle))
+            })
+            .collect()
+    }
+
+    /// The elements with running CSS transitions.
+    pub(crate) fn css_transition_running_targets(&self) -> Vec<DomHandle> {
+        self.document_worlds
+            .active_worlds()
+            .iter()
+            .flat_map(|world| world.css_transitions.running_targets())
+            .collect()
+    }
+
+    /// Records that a frame's style update saw every style change so far.
+    pub(crate) fn note_css_transition_style_update(&self) {
+        for world in self.document_worlds.active_worlds() {
+            world
+                .css_transitions
+                .set_updated_generation(Self::css_transition_style_generation(&world));
+        }
+    }
+
+    /// An animation frame callback runs: transitions its style changes start
+    /// begin at this frame.
+    pub(crate) fn begin_css_transition_animation_frame(&self) {
+        for world in self.document_worlds.active_worlds() {
+            world.css_transitions.begin_animation_frame();
+        }
+    }
+
+    pub(crate) fn css_transition_animation_frame_open(&self) -> bool {
+        self.document_worlds
+            .active_worlds()
+            .iter()
+            .any(|world| world.css_transitions.in_animation_frame())
+    }
+
+    /// Ends the animation frame callbacks' part of a frame after its style
+    /// update: the transitions they started start at the frame's time.
+    pub(crate) fn end_css_transition_animation_frame(&self) {
+        for world in self.document_worlds.active_worlds() {
+            world.css_transitions.end_animation_frame();
+        }
+    }
+
+    /// Cancels the CSS transitions of `element`, which is not rendered, and
+    /// restyles it.
+    pub(crate) fn cancel_css_transitions_for_element(&self, host: &DomHost, element: DomHandle) {
+        let Some(world) = self.active_owner_document_world(host, element) else {
+            return;
+        };
+        if world.css_transitions.cancel_for_element(element) {
+            world.document_state.note_visual_input_change();
+            self.invalidation_cleanup_for_world(&world)
+                .invalidate_subtrees(host, [element]);
+        }
     }
 
     /// The clock seconds at which the earliest queued CSS transition task

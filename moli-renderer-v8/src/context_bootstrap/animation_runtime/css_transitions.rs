@@ -15,9 +15,7 @@ use crate::style_engine::transitions::{
 const CSS_TRANSITION_OBJECTS_SLOT: &str = "__moliCssTransitionObjects";
 pub(super) const CSS_TRANSITION_ID_SLOT: &str = "__moliCssTransitionId";
 const CSS_TRANSITION_PROPERTY_SLOT: &str = "__moliCssTransitionProperty";
-const CSS_TRANSITION_FINISHED_REJECT_SLOT: &str = "__moliCssTransitionFinishedReject";
-const PROMISE_CAPABILITY_RESOLVE_SLOT: &str = "__moliPromiseCapabilityResolve";
-const PROMISE_CAPABILITY_REJECT_SLOT: &str = "__moliPromiseCapabilityReject";
+const CSS_TRANSITION_FINISHED_RESOLVER_SLOT: &str = "__moliCssTransitionFinishedResolver";
 
 #[derive(WebApiFunctionTemplate)]
 #[webapi(interface = web_api_interfaces::CSSTransition, enumerable)]
@@ -203,45 +201,28 @@ fn renew_finished_promise<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     animation: v8::Local<'s, v8::Object>,
 ) {
-    let entry = v8::Object::new(scope);
-    let Some(executor) = v8::Function::builder(promise_capability_executor)
-        .data(entry.into())
-        .length(2)
-        .build(scope)
-    else {
+    let Some(resolver) = v8::PromiseResolver::new(scope) else {
         return;
     };
-    let Some(promise) = global_constructor_object(scope, "Promise")
-        .and_then(|constructor| v8::Local::<v8::Function>::try_from(constructor).ok())
-        .and_then(|constructor| constructor.new_instance(scope, &[executor.into()]))
-    else {
-        return;
-    };
-    let undefined = v8::undefined(scope).into();
-    let resolve =
-        get_private_value(scope, entry, PROMISE_CAPABILITY_RESOLVE_SLOT).unwrap_or(undefined);
-    let reject =
-        get_private_value(scope, entry, PROMISE_CAPABILITY_REJECT_SLOT).unwrap_or(undefined);
+    let promise = resolver.get_promise(scope);
     set_private_value(scope, animation, ANIMATION_FINISHED_SLOT, promise.into());
-    set_private_value(scope, animation, ANIMATION_FINISHED_RESOLVE_SLOT, resolve);
     set_private_value(
         scope,
         animation,
-        CSS_TRANSITION_FINISHED_REJECT_SLOT,
-        reject,
+        CSS_TRANSITION_FINISHED_RESOLVER_SLOT,
+        resolver.into(),
     );
 }
 
-fn promise_capability_executor<'s>(
+fn finished_resolver<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
-) {
-    if let Ok(entry) = v8::Local::<v8::Object>::try_from(args.data()) {
-        set_private_value(scope, entry, PROMISE_CAPABILITY_RESOLVE_SLOT, args.get(0));
-        set_private_value(scope, entry, PROMISE_CAPABILITY_REJECT_SLOT, args.get(1));
-    }
-    rv.set_undefined();
+    animation: v8::Local<'s, v8::Object>,
+) -> Option<v8::Local<'s, v8::PromiseResolver>> {
+    let resolver = get_private_value(scope, animation, CSS_TRANSITION_FINISHED_RESOLVER_SLOT)
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())?;
+    // SAFETY: only `renew_finished_promise` writes this private slot, and it
+    // always stores a `PromiseResolver`.
+    Some(unsafe { v8::Local::<v8::PromiseResolver>::cast_unchecked(resolver) })
 }
 
 /// Settles a `CSSTransition` whose transition ended: `finished` resolves
@@ -251,11 +232,8 @@ fn settle_finished<'s>(scope: &mut v8::PinScope<'s, '_>, animation: v8::Local<'s
         return;
     }
     set_animation_play_state(scope, animation, "finished");
-    if let Some(resolve) = get_private_value(scope, animation, ANIMATION_FINISHED_RESOLVE_SLOT)
-        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
-    {
-        let undefined = v8::undefined(scope).into();
-        let _ = resolve.call(scope, undefined, &[animation.into()]);
+    if let Some(resolver) = finished_resolver(scope, animation) {
+        let _ = resolver.resolve(scope, animation.into());
     }
 }
 
@@ -274,21 +252,15 @@ fn settle_canceled<'s>(scope: &mut v8::PinScope<'s, '_>, animation: v8::Local<'s
     if !was_running {
         return;
     }
-    if let Some(reject) = get_private_value(scope, animation, CSS_TRANSITION_FINISHED_REJECT_SLOT)
-        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
-    {
+    if let Some(resolver) = finished_resolver(scope, animation) {
+        // Handled first, so the rejection is never reported as unhandled.
+        resolver.get_promise(scope).mark_as_handled();
         let error = super::super::new_dom_exception_value(
             scope,
             "The user aborted a request.",
             "AbortError",
         );
-        let undefined = v8::undefined(scope).into();
-        let _ = reject.call(scope, undefined, &[error]);
-    }
-    if let Some(promise) = get_private_value(scope, animation, ANIMATION_FINISHED_SLOT)
-        .and_then(|value| v8::Local::<v8::Promise>::try_from(value).ok())
-    {
-        promise.mark_as_handled();
+        let _ = resolver.reject(scope, error);
     }
     renew_finished_promise(scope, animation);
 }
@@ -378,19 +350,127 @@ fn css_transition_task_callback<'s>(
     let Some(host_ptr) = crate::util::context_host_ptr_from_global_bridge(scope) else {
         return;
     };
+    unsafe { &*host_ptr }
+        .style_engine_ref()
+        .css_transition_task_due()
+        .set(None);
+    // A queued animation frame runs this frame's work and sends its events
+    // at its start, as Chromium's rendering update does; it queues the next
+    // task.
+    if unsafe { &*host_ptr }.has_pending_animation_frame() {
+        return;
+    }
+    // Events a style change queued outside a frame (`transitionrun`, a
+    // removal's `transitioncancel`) are delivered without a frame: the
+    // next frame resolves the new transitions' start times.
+    if unsafe { &*host_ptr }
+        .style_engine_ref()
+        .has_pending_css_transition_events()
+    {
+        deliver_pending_css_transition_events(scope, host_ptr);
+        queue_css_transition_task_if_due(scope);
+        return;
+    }
+    run_css_transition_frame(scope, host_ptr, true);
+}
+
+/// One frame of the CSS transitions: "update animations and send events" at
+/// the frame's time. Without animation frame callbacks (`update_styles`),
+/// the frame first runs the style change events of the elements whose
+/// styles changed. An animation frame runs them after its callbacks instead
+/// (`end_css_transition_animation_frame`), as Chromium's style update
+/// follows the callbacks, so the callbacks start without that work.
+pub(crate) fn run_css_transition_frame(
+    scope: &mut v8::PinScope<'_, '_>,
+    host_ptr: *mut PageScriptHost,
+    update_styles: bool,
+) {
     {
         let host = unsafe { &*host_ptr };
+        if update_styles {
+            update_css_transition_styles(host);
+        }
         let engine = host.style_engine_ref();
-        engine.css_transition_task_due().set(None);
         engine.sample_css_transitions(host.dom_host());
+        if update_styles {
+            engine.note_css_transition_style_update();
+        }
     }
+    deliver_pending_css_transition_events(scope, host_ptr);
+    queue_css_transition_task_if_due(scope);
+}
+
+fn deliver_pending_css_transition_events(
+    scope: &mut v8::PinScope<'_, '_>,
+    host_ptr: *mut PageScriptHost,
+) {
     let events = unsafe { &*host_ptr }
         .style_engine_ref()
         .take_css_transition_events();
     for event in events {
         deliver_css_transition_event(scope, host_ptr, &event);
     }
-    queue_css_transition_task_if_due(scope);
+}
+
+/// Ends the animation frame callbacks' part of a frame: runs the style
+/// change events of their style changes, so the transitions those start at
+/// the frame's time, as Chromium's style update after the callbacks does.
+pub(crate) fn end_css_transition_animation_frame(host: &PageScriptHost) {
+    let engine = host.style_engine_ref();
+    if !engine.css_transition_animation_frame_open() {
+        return;
+    }
+    update_css_transition_styles(host);
+    engine.note_css_transition_style_update();
+    engine.end_css_transition_animation_frame();
+}
+
+/// Runs the style change event of every element whose style specifies
+/// transitions, when any style changed since the last update, and cancels
+/// the transitions of elements an ancestor's `display: none` stopped
+/// rendering.
+pub(crate) fn update_css_transition_styles(host: &PageScriptHost) {
+    let engine = host.style_engine_ref();
+    let targets = engine.css_transition_style_update_targets(host.dom_host());
+    if targets.is_empty() {
+        return;
+    }
+    let dom = host.dom_host();
+    for handle in targets {
+        if dom.is_connected(handle) {
+            let _ = crate::native_bridge::element::computed_style_property_for_handle(
+                host,
+                handle,
+                "transition-property",
+            );
+        }
+    }
+    for target in engine.css_transition_running_targets() {
+        if has_undisplayed_ancestor(host, target) {
+            engine.cancel_css_transitions_for_element(dom, target);
+        }
+    }
+}
+
+fn has_undisplayed_ancestor(host: &PageScriptHost, element: DomHandle) -> bool {
+    let dom = host.dom_host();
+    let mut current = dom.node(element).and_then(|node| node.parent_node());
+    while let Some(handle) = current {
+        let Some(node) = dom.node(handle) else {
+            return false;
+        };
+        if !node.is_element() {
+            return false;
+        }
+        if crate::native_bridge::element::computed_style_property_for_handle(
+            host, handle, "display",
+        ) == "none"
+        {
+            return true;
+        }
+        current = node.parent_node();
+    }
+    false
 }
 
 fn deliver_css_transition_event(

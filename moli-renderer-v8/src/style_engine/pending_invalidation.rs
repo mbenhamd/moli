@@ -107,6 +107,10 @@ impl PendingStyleInvalidations {
     pub(super) fn clear(&self) {
         self.work_items.borrow_mut().clear();
     }
+
+    pub(super) fn has_work(&self) -> bool {
+        !self.work_items.borrow().is_empty()
+    }
 }
 
 impl PendingStyleInvalidationBatch {

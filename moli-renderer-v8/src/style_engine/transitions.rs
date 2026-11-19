@@ -8,19 +8,25 @@
 //! embedder owns: the document animation clock, transition identity, the
 //! transition events, and the `Animation` state script observes.
 //!
-//! While transitions run, the clock only advances in the transition task,
-//! which stands in for the rendering update's "update animations and send
-//! events" step and runs once per frame. Style and geometry reads within a
-//! frame see the same time, as in Chromium. A transition's start time
-//! resolves at the first sample after its style change event, as a pending
-//! animation's does at the next frame in Chromium, so its first frame shows
-//! its start value. A sample restyles every element whose transition value
-//! moved, so a read after it shows the values at that time. Like Chromium's animation updates, a sample of colors alone repaints
+//! Moli has no continuous rendering loop, so a frame is either the start of
+//! an animation frame callback batch or, when no callback is queued, the
+//! transition task, which runs at a 60Hz frame interval while a transition
+//! runs or a style change may start one. Each frame first runs the style
+//! change events of the elements whose styles specify transitions, as the
+//! rendering update's style recalc does, and then samples the clock (the
+//! "update animations and send events" step). Style and geometry reads
+//! between frames see the last frame's time, as in Chromium.
+//!
+//! A transition's start time is the time of the first frame that processes
+//! its style change event: a style change made in an animation frame callback
+//! belongs to that frame, any other one to the next frame, which shows the
+//! transition's start value. A sample restyles every element whose transition
+//! value moved, so a read after it shows the values at that time. Like Chromium's animation updates, a sample of colors alone repaints
 //! without invalidating layout.
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -231,6 +237,14 @@ pub(crate) struct DocumentCssTransitions {
     animations: DocumentAnimationSet,
     clock: Cell<f64>,
     store: RefCell<TransitionStore>,
+    /// Elements whose last resolved style specifies transitions: a frame
+    /// runs their style change events.
+    candidates: RefCell<HashSet<DomHandle>>,
+    /// The style invalidation generation the last frame's style update saw.
+    updated_generation: Cell<Option<u64>>,
+    /// An animation frame callback batch ran since the last style update, so
+    /// transitions that start now belong to that frame.
+    in_frame: Cell<bool>,
 }
 
 impl Default for DocumentCssTransitions {
@@ -239,6 +253,9 @@ impl Default for DocumentCssTransitions {
             animations: DocumentAnimationSet::default(),
             clock: Cell::new(animation_clock_now()),
             store: RefCell::default(),
+            candidates: RefCell::default(),
+            updated_generation: Cell::new(None),
+            in_frame: Cell::new(false),
         }
     }
 }
@@ -249,7 +266,7 @@ impl DocumentCssTransitions {
     /// at its style change event; while one runs, it only advances when
     /// sampled, so every element restyled at a sample shows the same time.
     pub(super) fn resolution_inputs(&self) -> (DocumentAnimationSet, f64) {
-        if self.store.borrow().records.is_empty() {
+        if self.store.borrow().records.is_empty() && !self.in_frame.get() {
             self.clock.set(animation_clock_now());
         }
         (self.animations.clone(), self.clock.get())
@@ -259,6 +276,107 @@ impl DocumentCssTransitions {
     pub(super) fn clear(&self) {
         self.animations.sets.write().clear();
         *self.store.borrow_mut() = TransitionStore::default();
+        self.candidates.borrow_mut().clear();
+        self.updated_generation.set(None);
+        self.in_frame.set(false);
+    }
+
+    /// Notes `target` when its newly resolved style specifies transitions.
+    /// It stays a candidate while connected: a later style change, such as
+    /// restoring a `transition: none` override, may start a transition.
+    fn note_candidate(&self, target: DomHandle, specifies_transitions: bool) {
+        if specifies_transitions {
+            self.candidates.borrow_mut().insert(target);
+        }
+    }
+
+    /// The elements whose style change events a frame runs: the connected
+    /// candidates and those with running transitions. Disconnected
+    /// candidates are forgotten.
+    pub(super) fn style_update_targets(
+        &self,
+        connected: impl Fn(DomHandle) -> bool,
+    ) -> Vec<DomHandle> {
+        self.candidates
+            .borrow_mut()
+            .retain(|&target| connected(target));
+        let mut targets = self
+            .candidates
+            .borrow()
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        targets.extend(
+            self.store
+                .borrow()
+                .records
+                .values()
+                .map(|record| record.target),
+        );
+        targets.into_iter().collect()
+    }
+
+    /// The elements with running transitions.
+    pub(super) fn running_targets(&self) -> Vec<DomHandle> {
+        self.store
+            .borrow()
+            .records
+            .values()
+            .map(|record| record.target)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub(super) fn has_candidates(&self) -> bool {
+        !self.candidates.borrow().is_empty() || !self.store.borrow().records.is_empty()
+    }
+
+    pub(super) fn updated_generation(&self) -> Option<u64> {
+        self.updated_generation.get()
+    }
+
+    pub(super) fn set_updated_generation(&self, generation: u64) {
+        self.updated_generation.set(Some(generation));
+    }
+
+    pub(super) fn begin_animation_frame(&self) {
+        self.in_frame.set(true);
+    }
+
+    /// Ends the animation frame callback batch's part of a frame: the
+    /// transitions its callbacks started start at the frame's time, which the
+    /// clock still holds.
+    pub(super) fn end_animation_frame(&self) {
+        if self.in_frame.replace(false) {
+            for record in self.store.borrow_mut().records.values_mut() {
+                record.start_pending = false;
+            }
+        }
+    }
+
+    pub(super) fn in_animation_frame(&self) -> bool {
+        self.in_frame.get()
+    }
+
+    /// Cancels the transitions of `target`, whose element is no longer
+    /// rendered (CSS Transitions Level 1 §3: an element that is not
+    /// rendered, through `display: none` on it or an ancestor, or removal,
+    /// cancels its running transitions). Returns whether any was canceled.
+    pub(super) fn cancel_for_element(&self, target: DomHandle) -> bool {
+        let ids = {
+            let store = self.store.borrow();
+            store
+                .records
+                .values()
+                .filter(|record| record.target == target)
+                .map(|record| record.id)
+                .collect::<Vec<_>>()
+        };
+        for id in &ids {
+            self.settle(*id, false);
+        }
+        !ids.is_empty()
     }
 
     pub(crate) fn has_pending_events(&self) -> bool {
@@ -335,9 +453,15 @@ impl DocumentCssTransitions {
                 for (transition, id) in set.transitions.iter_mut().zip(ids) {
                     transition.state = AnimationState::Canceled;
                     if let Some(record) = store.records.remove(id) {
-                        store
-                            .events
-                            .push(record.event(CssTransitionEventKind::Cancel, 0.0, false));
+                        // Chromium 156 fires transitioncancel at a removed
+                        // element whose transition had started.
+                        let elapsed = (now - record.start_time).clamp(0.0, record.duration);
+                        let dispatch = record.phase != TransitionPhase::Idle;
+                        store.events.push(record.event(
+                            CssTransitionEventKind::Cancel,
+                            elapsed,
+                            dispatch,
+                        ));
                     }
                 }
                 removed.push(key.clone());
@@ -359,7 +483,7 @@ impl DocumentCssTransitions {
                 // time at the next frame (Web Animations, "play an
                 // animation"), not at the last sampled time, so its value
                 // stays the one its style change event resolved.
-                let start_resolved = advanced && record.start_pending;
+                let start_resolved = record.start_pending;
                 if start_resolved {
                     transition.start_time = now + transition.delay;
                     record.start_time = transition.start_time;
@@ -550,6 +674,10 @@ pub(super) fn process_css_transitions<E>(
         return;
     };
     let key = AnimationSetKey::new_for_non_pseudo(element.as_node().opaque());
+    transitions.note_candidate(
+        DomHandle::new(element.as_node().debug_id()),
+        new_primary.get_ui().specifies_transitions(),
+    );
     if old.is_none()
         || (!new_primary.get_ui().specifies_transitions()
             && !context.shared.animations.sets.read().contains_key(&key))

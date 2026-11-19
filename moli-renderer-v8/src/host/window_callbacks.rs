@@ -129,7 +129,18 @@ impl ScheduledWindowWebIdlCallback {
         if let WindowWebIdlCallbackTaskKind::AnimationFrame { timestamp } = self.kind {
             // The frame starts whether or not this callback still runs.
             let window = v8::Local::new(scope, &self.target_receiver);
-            crate::window_host::finish_animation_frame_callback_batch(scope, window, timestamp);
+            let frame_started =
+                crate::window_host::finish_animation_frame_callback_batch(scope, window, timestamp);
+            // The rendering update samples animations before it runs the
+            // frame's callbacks, which then see the frame's values; the
+            // style changes made before the frame start their transitions in
+            // the style update after the callbacks.
+            if frame_started {
+                crate::context_bootstrap::run_css_transition_frame(scope, host_ptr, false);
+            }
+            unsafe { &*host_ptr }
+                .style_engine_ref()
+                .begin_css_transition_animation_frame();
             if self.cancelled.get() {
                 return WebIdlCallbackExecutionOutcome::Unavailable;
             }
