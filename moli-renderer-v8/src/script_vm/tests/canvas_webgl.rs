@@ -2523,6 +2523,51 @@ async fn html_canvas_draw_image_rejects_a_broken_svg_image() {
     );
 }
 
+#[tokio::test]
+async fn offscreen_canvas_keeps_origin_taint_through_blob_and_bitmap_exports() {
+    // Chromium 156: a canvas tainted by a blob: SVG with <foreignObject>
+    // taints an OffscreenCanvas it is drawn into; convertToBlob() rejects and
+    // the transferred ImageBitmap taints the canvas it is drawn into.
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_storage_page_task_executor_test_vm("https://offscreen-canvas-taint.test/");
+
+    vm.eval(
+        r#"
+(() => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">'
+    + '<foreignObject width="4" height="4"/></svg>';
+  const image = new Image();
+  const result = globalThis.__lmOffscreenTaint = {};
+  image.onload = () => {
+    const source = document.createElement('canvas');
+    source.getContext('2d').drawImage(image, 0, 0);
+    const offscreen = new OffscreenCanvas(4, 4);
+    offscreen.getContext('2d').drawImage(source, 0, 0);
+    offscreen.convertToBlob().then(() => { result.blob = 'resolved'; }, (error) => { result.blob = error.name; });
+    const target = document.createElement('canvas');
+    target.getContext('2d').drawImage(offscreen.transferToImageBitmap(), 0, 0);
+    try {
+      target.toDataURL();
+      result.bitmap = 'clean';
+    } catch (error) {
+      result.bitmap = error.name;
+    }
+  };
+  image.src = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+})()
+"#,
+    )
+    .expect("offscreen taint setup should evaluate");
+
+    drain_canvas_image_load_event_tasks(&mut vm, &loader).await;
+
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__lmOffscreenTaint)")
+            .expect("offscreen taint result should be readable"),
+        r#"{"bitmap":"SecurityError","blob":"SecurityError"}"#
+    );
+}
+
 #[test]
 fn html_canvas_image_smoothing_controls_draw_image_filter() {
     let mut vm = new_storage_test_vm("https://canvas-image-smoothing.test/");

@@ -1824,12 +1824,14 @@ pub(crate) fn canvas_context_draw_image_callback<'s>(
         }
         HtmlImageDrawSource::Raster(pixels, width, height) => (pixels, width, height),
         HtmlImageDrawSource::None => {
-            let Some(copy) = canvas_like_pixels_copy(scope, source) else {
-                return;
-            };
+            // A canvas or an ImageBitmap that is not origin-clean taints this
+            // canvas, even where Moli has no pixels to copy from it.
             if canvas_is_origin_tainted(scope, source) {
                 mark_canvas_origin_tainted(scope, canvas);
             }
+            let Some(copy) = canvas_like_pixels_copy(scope, source) else {
+                return;
+            };
             copy
         }
     };
@@ -1967,7 +1969,7 @@ fn draw_svg_image<'s>(
         .unwrap_or_default();
     // Blink treats `<foreignObject>` in a non-`data:` image as a second
     // security origin, even for a same-origin blob.
-    if source.from_blob && source.image.foreign_object_source().is_some() {
+    if source.from_blob && source.image.contains_foreign_object() {
         mark_canvas_origin_tainted(scope, canvas);
     }
     let context_transform = PaintTransform2D::new(
