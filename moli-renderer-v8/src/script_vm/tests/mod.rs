@@ -1,3 +1,4 @@
+#[cfg(feature = "devtools")]
 mod baseline_drag_views;
 mod beforeinput_target_validation;
 mod fetch_cache_modes;
@@ -8,20 +9,27 @@ mod child_document_web_fonts;
 mod container_query_layout;
 mod credential_container;
 mod credential_json_options;
+#[cfg(feature = "devtools")]
 mod cross_document_drag_events;
 mod cross_origin_navigation;
 mod current_pass_css_fonts;
 mod document_encodings;
 mod document_location_activity;
+#[cfg(feature = "devtools")]
 mod drag_drop_outcomes;
 mod idb_transaction_gc;
 mod message_port_transfer;
+#[cfg(feature = "devtools")]
 mod native_drag_payloads;
+#[cfg(feature = "devtools")]
 mod native_drag_pointer_coordinates;
+#[cfg(feature = "devtools")]
 mod native_drag_pointer_suppression;
+#[cfg(feature = "devtools")]
 mod native_drag_source_events;
 mod picture_in_picture_interfaces;
 mod touch_native_receivers;
+#[cfg(feature = "devtools")]
 mod touch_snapshot;
 mod visual_viewport_receiver;
 mod writable_stream_native_receivers;
@@ -299,7 +307,6 @@ enum PendingWindowFetchTestStage {
     Streaming,
     Auth,
     Response,
-    ServiceWorkerInFlight,
 }
 
 fn register_pending_window_fetch_for_test(
@@ -361,7 +368,7 @@ fn register_pending_window_fetch_for_test(
     );
 
     if !matches!(stage, PendingWindowFetchTestStage::Pending) {
-        let pending = host
+        let mut pending = host
             .take_pending_subresource_fetch(internal_id)
             .expect("test Fetch should move from pending into its requested stage");
         match stage {
@@ -380,6 +387,29 @@ fn register_pending_window_fetch_for_test(
                 });
             }
             PendingWindowFetchTestStage::Streaming => {
+                let head = moli_fetch::ResponseHead {
+                    status_text: None,
+                    final_url: url.clone(),
+                    status: 200,
+                    headers: Vec::new(),
+                    request_cookie_report: None,
+                    cookie_set_reports: Vec::new(),
+                    redirected: false,
+                    redirect_chain: Vec::new(),
+                    from_cache: false,
+                    cache_state: Default::default(),
+                    negotiated_http_version: None,
+                };
+                let metadata = head.fetch_metadata_with_web_security(
+                    &pending.request_origin,
+                    pending.request_mode,
+                    pending.load.request_client().web_security_disabled(),
+                );
+                if let crate::types::PendingSubresourceContinuation::Fetch(fetch) =
+                    &mut pending.continuation
+                {
+                    fetch.response_metadata = Some(metadata);
+                }
                 host.record_streaming_subresource_fetch(
                     crate::types::StreamingSubresourceFetchState {
                         response_filter: None,
@@ -389,19 +419,7 @@ fn register_pending_window_fetch_for_test(
                         request_headers: Vec::new().into(),
                         request_body: None,
                         body_source_id: 10_000 + internal_id,
-                        head: moli_fetch::ResponseHead {
-                            status_text: None,
-                            final_url: url.clone(),
-                            status: 200,
-                            headers: Vec::new(),
-                            request_cookie_report: None,
-                            cookie_set_reports: Vec::new(),
-                            redirected: false,
-                            redirect_chain: Vec::new(),
-                            from_cache: false,
-                            cache_state: Default::default(),
-                            negotiated_http_version: None,
-                        },
+                        head,
                         network_request_headers: None,
                         body_capture: crate::types::StreamingSubresourceBody::new(None, None),
                         event_source_parser: None,
@@ -448,17 +466,6 @@ fn register_pending_window_fetch_for_test(
                             Vec::new(),
                             "pending response".to_owned(),
                         ),
-                    },
-                );
-            }
-            PendingWindowFetchTestStage::ServiceWorkerInFlight => {
-                host.record_in_flight_worker_subresource_fetch(
-                    crate::types::InFlightWorkerSubresourceFetchState {
-                        pending,
-                        request_url: url,
-                        request_method: "GET".to_owned(),
-                        request_headers: Vec::new().into(),
-                        request_body: None,
                     },
                 );
             }
@@ -2188,6 +2195,8 @@ mod audio_node_interfaces;
 
 mod element_animation_native_receivers;
 
+mod attr_accessors;
+mod attr_node_references;
 mod audio_buffer_interfaces;
 mod audio_channel_node_interfaces;
 mod audio_param_node_interfaces;
@@ -2301,6 +2310,7 @@ mod svg_matrix_native_receivers;
 
 mod lazy_window_surfaces;
 mod midi_owner_interfaces;
+#[cfg(feature = "devtools")]
 mod mouse_snapshot;
 mod multipart_encoding;
 mod native_bridge_identity;
@@ -2366,6 +2376,7 @@ mod idb_cursor_native_receivers;
 
 mod text_encoder_utf16_progress;
 mod time_ranges;
+mod touch_event_webidl;
 mod url_components;
 mod video_codecs_shell;
 
@@ -2398,6 +2409,7 @@ mod window_immutable_prototype_chain;
 
 mod window_getter_consolidation;
 mod window_node_events;
+#[cfg(feature = "devtools")]
 mod window_node_worlds;
 mod window_receiver_access;
 mod worklet_interfaces;
@@ -2462,3 +2474,5 @@ mod native_request_url_provenance;
 mod svg_legacy_rectangle_contracts;
 
 mod indexed_db_prototype_handlers;
+
+mod beacon_receiver_owner;

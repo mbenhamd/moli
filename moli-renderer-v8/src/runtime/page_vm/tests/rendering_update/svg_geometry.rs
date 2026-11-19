@@ -791,6 +791,7 @@ async fn svg_markers_and_filters_do_not_extend_the_hit_area() {
 /// SVG content has no CSS box, yet DevTools reports its stroke bounding box
 /// as every box-model quad and as its content quad, which Playwright uses to
 /// click it. Chromium 156 answers the same quad and a 14x14 size.
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "current_thread")]
 async fn devtools_geometry_reports_svg_content_stroke_bounds() {
     run_page_vm_async_test(async move {

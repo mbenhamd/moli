@@ -580,7 +580,9 @@ fn failed_intrinsic_finalization_does_not_expose_registered_objects() {
     assert!(realm.public_interface(scope, id).is_none());
     assert!(super::ensure_intrinsic_interface_constructor(scope, "Crypto").is_err());
     assert!(super::ensure_intrinsic_interface_prototype(scope, "Crypto").is_err());
-    assert!(super::materialized_intrinsic_interface_prototype(scope, "Crypto").is_none());
+    assert!(
+        super::materialize::materialized_intrinsic_interface_prototype(scope, "Crypto").is_none()
+    );
     assert_eq!(registry.materialization_count(id), 0);
     assert!(crate::util::global_constructor_object(scope, "Crypto").is_none());
     assert!(crate::util::global_constructor_prototype(scope, "Crypto").is_none());
@@ -605,6 +607,10 @@ fn worker_realm_lazy_properties_follow_chromium_exposure_sets() {
             secure_context,
         )
         .expect("worker lazy interfaces should install");
+        // This harness omits eager Worker globals and their final capture. Enter
+        // the same native intrinsic registry before author code can replace URL.
+        super::initialize_realm_interface_registry(scope, realm)
+            .expect("worker intrinsic registry should initialize before script");
         let registry = super::template_registry::ExposedInterfaceTemplateRegistry::current(scope)
             .expect("worker template registry");
         assert_eq!(

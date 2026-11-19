@@ -1,16 +1,10 @@
 use super::{
     event_document::{document_create_event_callback, document_has_focus_callback},
     event_legacy::{
-        composition_event_init_callback, custom_event_init_callback, event_init_event_callback,
-        mouse_event_init_callback, storage_event_init_callback, text_event_init_callback,
-        ui_event_init_callback,
+        composition_event_init_callback, event_init_event_callback, mouse_event_init_callback,
+        text_event_init_callback, ui_event_init_callback,
     },
     events::{
-        before_unload_event_return_value_getter, before_unload_event_return_value_setter,
-        clipboard_change_event_change_id_getter_function,
-        clipboard_change_event_types_getter_function,
-        clipboard_event_clipboard_data_getter_function, close_event_code_getter_function,
-        close_event_reason_getter_function, close_event_was_clean_getter_function,
         event_bubbles_getter_function, event_cancel_bubble_getter_function,
         event_cancel_bubble_setter_function, event_cancelable_getter_function,
         event_composed_getter_function, event_composed_path_callback,
@@ -23,10 +17,8 @@ use super::{
         event_time_stamp_getter_function, event_type_getter_function, event_value_attribute_getter,
         focus_event_related_target_getter_function, form_data_event_form_data_getter_function,
         input_event_get_target_ranges_callback, keyboard_event_init_callback,
-        message_event_init_callback, mouse_event_related_target_getter_function,
-        pointer_event_get_predicted_events_callback, submit_event_agent_invoked_getter_function,
-        submit_event_respond_with_callback, submit_event_submitter_getter_function,
-        track_event_track_getter_function, ui_event_pseudo_target_getter_function,
+        mouse_event_related_target_getter_function, pointer_event_get_predicted_events_callback,
+        submit_event_submitter_getter_function, ui_event_pseudo_target_getter_function,
         ui_event_which_getter_function,
     },
     selection_surface::document_get_selection_callback,
@@ -34,10 +26,11 @@ use super::{
 };
 use crate::web_api_interfaces;
 use crate::{native_bridge::document, window_host};
-use moli_webapi_declare::{WebApiFunctionTemplate, WebApiFunctionTemplateDeclaration};
+use moli_webapi::events::subclasses::EventTemplateDeclaration;
+use moli_webapi_declare::WebApiFunctionTemplate;
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Event, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::Event, enumerable)]
 struct EventBaseTemplateMethodsDeclaration {
     #[webapi(accessor_property = "type", getter = event_type_getter_function)]
     event_type: (),
@@ -131,68 +124,35 @@ struct EventBaseTemplateMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::CloseEvent, enumerable, receiver)]
-struct CloseEventTemplateAccessorsDeclaration {
-    #[webapi(accessor_property = "wasClean", getter = close_event_was_clean_getter_function)]
-    was_clean: (),
-
-    #[webapi(accessor_property, getter = close_event_code_getter_function)]
-    code: (),
-
-    #[webapi(accessor_property, getter = close_event_reason_getter_function)]
-    reason: (),
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::TrackEvent, enumerable, receiver)]
-struct TrackEventTemplateAccessorsDeclaration {
-    #[webapi(accessor_property, getter = track_event_track_getter_function)]
-    track: (),
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::SubmitEvent, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::SubmitEvent, enumerable)]
 struct SubmitEventTemplateAccessorsDeclaration {
-    #[webapi(accessor_property = "agentInvoked", getter = submit_event_agent_invoked_getter_function)]
-    agent_invoked: (),
-    #[webapi(method = "respondWith", length = 1, callback = submit_event_respond_with_callback)]
-    respond_with: (),
     #[webapi(accessor_property, getter = submit_event_submitter_getter_function)]
     submitter: (),
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::FormDataEvent, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::TouchEvent, enumerable)]
+struct TouchEventTemplateMethodsDeclaration {
+    #[webapi(method, length = 1, callback = event_get_modifier_state_callback)]
+    get_modifier_state: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::FormDataEvent, enumerable)]
 struct FormDataEventTemplateAccessorsDeclaration {
     #[webapi(accessor_property = "formData", getter = form_data_event_form_data_getter_function)]
     form_data: (),
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::BeforeUnloadEvent, enumerable, receiver)]
-struct BeforeUnloadEventTemplateAccessorsDeclaration {
-    #[webapi(accessor_property, getter = before_unload_event_return_value_getter, setter = before_unload_event_return_value_setter)]
-    return_value: (),
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::DragEvent, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::DragEvent, enumerable)]
 struct DragEventTemplateAccessorsDeclaration {
     #[webapi(accessor_property = "dataTransfer", getter = event_platform_attribute_getter, data = crate::util::v8str(scope, "dataTransfer"))]
     data_transfer: (),
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::HashChangeEvent, enumerable, receiver)]
-struct HashChangeEventTemplateAccessorsDeclaration {
-    #[webapi(accessor_property = "oldURL", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "oldURL"))]
-    old_url: (),
-    #[webapi(accessor_property = "newURL", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "newURL"))]
-    new_url: (),
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::UIEvent, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::UIEvent, enumerable)]
 struct UiEventTemplateMethodsDeclaration {
     #[webapi(accessor_property, getter = event_platform_attribute_getter, data = crate::util::v8str(scope, "sourceCapabilities"))]
     source_capabilities: (),
@@ -215,7 +175,7 @@ struct UiEventTemplateMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::FocusEvent, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::FocusEvent, enumerable)]
 struct FocusEventTemplateAccessorsDeclaration {
     #[webapi(
         accessor_property = "relatedTarget",
@@ -225,7 +185,7 @@ struct FocusEventTemplateAccessorsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::TextEvent, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::TextEvent, enumerable)]
 struct TextEventTemplateMethodsDeclaration {
     #[webapi(accessor_property = "data", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "data"))]
     data: (),
@@ -235,7 +195,7 @@ struct TextEventTemplateMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::CompositionEvent, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::CompositionEvent, enumerable)]
 struct CompositionEventTemplateMethodsDeclaration {
     #[webapi(accessor_property = "data", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "data"))]
     data: (),
@@ -249,14 +209,7 @@ struct CompositionEventTemplateMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::CustomEvent, enumerable, receiver)]
-struct CustomEventTemplateMethodsDeclaration {
-    #[webapi(method = "initCustomEvent", length = 1, callback = custom_event_init_callback)]
-    init_custom_event: (),
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::InputEvent, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::InputEvent, enumerable)]
 struct InputEventTemplateAccessorsDeclaration {
     #[webapi(accessor_property, getter = event_value_attribute_getter, data = crate::util::v8str(scope, "dataTransfer"))]
     data_transfer: (),
@@ -275,18 +228,7 @@ struct InputEventTemplateAccessorsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::StorageEvent, enumerable, receiver)]
-struct StorageEventTemplateMethodsDeclaration {
-    #[webapi(
-        method = "initStorageEvent",
-        length = 1,
-        callback = storage_event_init_callback
-    )]
-    init_storage_event: (),
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::KeyboardEvent, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::KeyboardEvent, enumerable)]
 struct KeyboardEventTemplateMethodsDeclaration {
     #[webapi(constant = "DOM_KEY_LOCATION_STANDARD", value = 0u32)]
     dom_key_location_standard: (),
@@ -345,7 +287,7 @@ struct KeyboardEventTemplateMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::MouseEvent, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::MouseEvent, enumerable)]
 struct MouseEventTemplateMethodsDeclaration {
     #[webapi(method = "getModifierState", length = 1, callback = event_get_modifier_state_callback)]
     get_modifier_state: (),
@@ -367,7 +309,7 @@ struct MouseEventTemplateMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::WheelEvent, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::WheelEvent, enumerable)]
 struct WheelEventTemplateConstantsDeclaration {
     #[webapi(accessor_property, getter = event_value_attribute_getter, data = crate::util::v8str(scope, "wheelDeltaX"))]
     wheel_delta_x: (),
@@ -387,7 +329,7 @@ struct WheelEventTemplateConstantsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::PointerEvent, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::PointerEvent, enumerable)]
 struct PointerEventTemplateMethodsDeclaration {
     #[webapi(accessor_property, getter = event_value_attribute_getter, data = crate::util::v8str(scope, "persistentDeviceId"))]
     persistent_device_id: (),
@@ -401,7 +343,7 @@ struct PointerEventTemplateMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::EventTarget, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::EventTarget, enumerable)]
 struct EventTargetTemplateMethodsDeclaration {
     #[webapi(
         method = "addEventListener",
@@ -426,7 +368,7 @@ struct EventTargetTemplateMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::Document, enumerable, receiver)]
+#[webapi(interface = web_api_interfaces::Document, enumerable)]
 struct DocumentEventTemplateMethodsDeclaration {
     #[webapi(method = "createEvent", length = 1, callback = document_create_event_callback)]
     create_event: (),
@@ -438,114 +380,14 @@ struct DocumentEventTemplateMethodsDeclaration {
     get_selection: (),
 }
 
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::SecurityPolicyViolationEvent, enumerable, receiver)]
-struct SecurityPolicyViolationEventTemplateAccessorsDeclaration {
-    #[webapi(accessor_property = "documentURI", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "documentURI"))]
-    document_uri: (),
-
-    #[webapi(accessor_property = "referrer", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "referrer"))]
-    referrer: (),
-
-    #[webapi(accessor_property = "blockedURI", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "blockedURI"))]
-    blocked_uri: (),
-
-    #[webapi(accessor_property = "effectiveDirective", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "effectiveDirective"))]
-    effective_directive: (),
-
-    #[webapi(accessor_property = "violatedDirective", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "violatedDirective"))]
-    violated_directive: (),
-
-    #[webapi(accessor_property = "originalPolicy", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "originalPolicy"))]
-    original_policy: (),
-
-    #[webapi(accessor_property = "sourceFile", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "sourceFile"))]
-    source_file: (),
-
-    #[webapi(accessor_property = "sample", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "sample"))]
-    sample: (),
-
-    #[webapi(accessor_property = "disposition", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "disposition"))]
-    disposition: (),
-
-    #[webapi(accessor_property = "statusCode", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "statusCode"))]
-    status_code: (),
-
-    #[webapi(accessor_property = "lineNumber", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "lineNumber"))]
-    line_number: (),
-
-    #[webapi(accessor_property = "columnNumber", getter = event_value_attribute_getter, data = crate::util::v8str(scope, "columnNumber"))]
-    column_number: (),
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::ErrorEvent, enumerable, receiver)]
-struct ErrorEventTemplateAccessorsDeclaration {
-    #[webapi(accessor_property, getter = event_value_attribute_getter, data = crate::util::v8str(scope, "message"))]
-    message: (),
-
-    #[webapi(accessor_property, getter = event_value_attribute_getter, data = crate::util::v8str(scope, "filename"))]
-    filename: (),
-
-    #[webapi(accessor_property, getter = event_value_attribute_getter, data = crate::util::v8str(scope, "lineno"))]
-    lineno: (),
-
-    #[webapi(accessor_property, getter = event_value_attribute_getter, data = crate::util::v8str(scope, "colno"))]
-    colno: (),
-
-    #[webapi(accessor_property, getter = event_value_attribute_getter, data = crate::util::v8str(scope, "error"))]
-    error: (),
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::MessageEvent, enumerable, receiver)]
-struct MessageEventTemplateMethodsDeclaration {
-    #[webapi(method = "initMessageEvent", length = 1, callback = message_event_init_callback)]
-    init_message_event: (),
-}
-
-struct EventTemplateDeclaration {
-    attributes: &'static [&'static str],
-    install: for<'s, 'p> fn(&mut v8::PinScope<'s, 'p, ()>, v8::Local<'s, v8::FunctionTemplate>),
-}
-
-impl EventTemplateDeclaration {
-    fn new<D: WebApiFunctionTemplateDeclaration>() -> Self {
-        Self {
-            attributes: D::PROTOTYPE_ATTRIBUTE_NAMES,
-            install: install_declaration::<D>,
-        }
-    }
-}
-
-fn install_declaration<'s, D: WebApiFunctionTemplateDeclaration>(
-    scope: &mut v8::PinScope<'s, '_, ()>,
-    template: v8::Local<'s, v8::FunctionTemplate>,
-) {
-    D::initialize_template(scope, template);
-    let prototype = template.prototype_template(scope);
-    D::initialize_prototype_template(scope, prototype);
-}
-
 // Installation and wrapper placement share the same native declarations. Public
 // prototype mutations cannot change which fields are exposed as own properties.
 fn event_template_declaration(interface: &str) -> Option<EventTemplateDeclaration> {
+    if let Some(declaration) = moli_webapi::events::subclasses::template_declaration(interface) {
+        return Some(declaration);
+    }
     Some(match interface {
-        "ClipboardEvent" => {
-            EventTemplateDeclaration::new::<ClipboardEventTemplateAccessorsDeclaration>()
-        }
-        "ClipboardChangeEvent" => {
-            EventTemplateDeclaration::new::<ClipboardChangeEventTemplateAccessorsDeclaration>()
-        }
-        "ErrorEvent" => EventTemplateDeclaration::new::<ErrorEventTemplateAccessorsDeclaration>(),
-        "SecurityPolicyViolationEvent" => EventTemplateDeclaration::new::<
-            SecurityPolicyViolationEventTemplateAccessorsDeclaration,
-        >(),
-        "MessageEvent" => EventTemplateDeclaration::new::<MessageEventTemplateMethodsDeclaration>(),
         "Event" => EventTemplateDeclaration::new::<EventBaseTemplateMethodsDeclaration>(),
-        "BeforeUnloadEvent" => {
-            EventTemplateDeclaration::new::<BeforeUnloadEventTemplateAccessorsDeclaration>()
-        }
         "DragEvent" => EventTemplateDeclaration::new::<DragEventTemplateAccessorsDeclaration>(),
         "UIEvent" => EventTemplateDeclaration::new::<UiEventTemplateMethodsDeclaration>(),
         "FocusEvent" => EventTemplateDeclaration::new::<FocusEventTemplateAccessorsDeclaration>(),
@@ -553,23 +395,17 @@ fn event_template_declaration(interface: &str) -> Option<EventTemplateDeclaratio
         "CompositionEvent" => {
             EventTemplateDeclaration::new::<CompositionEventTemplateMethodsDeclaration>()
         }
-        "CustomEvent" => EventTemplateDeclaration::new::<CustomEventTemplateMethodsDeclaration>(),
         "InputEvent" => EventTemplateDeclaration::new::<InputEventTemplateAccessorsDeclaration>(),
-        "StorageEvent" => EventTemplateDeclaration::new::<StorageEventTemplateMethodsDeclaration>(),
         "KeyboardEvent" => {
             EventTemplateDeclaration::new::<KeyboardEventTemplateMethodsDeclaration>()
         }
         "MouseEvent" => EventTemplateDeclaration::new::<MouseEventTemplateMethodsDeclaration>(),
         "WheelEvent" => EventTemplateDeclaration::new::<WheelEventTemplateConstantsDeclaration>(),
         "PointerEvent" => EventTemplateDeclaration::new::<PointerEventTemplateMethodsDeclaration>(),
-        "CloseEvent" => EventTemplateDeclaration::new::<CloseEventTemplateAccessorsDeclaration>(),
-        "TrackEvent" => EventTemplateDeclaration::new::<TrackEventTemplateAccessorsDeclaration>(),
+        "TouchEvent" => EventTemplateDeclaration::new::<TouchEventTemplateMethodsDeclaration>(),
         "SubmitEvent" => EventTemplateDeclaration::new::<SubmitEventTemplateAccessorsDeclaration>(),
         "FormDataEvent" => {
             EventTemplateDeclaration::new::<FormDataEventTemplateAccessorsDeclaration>()
-        }
-        "HashChangeEvent" => {
-            EventTemplateDeclaration::new::<HashChangeEventTemplateAccessorsDeclaration>()
         }
         "EventTarget" => EventTemplateDeclaration::new::<EventTargetTemplateMethodsDeclaration>(),
         "Document" => EventTemplateDeclaration::new::<DocumentEventTemplateMethodsDeclaration>(),
@@ -580,6 +416,11 @@ fn event_template_declaration(interface: &str) -> Option<EventTemplateDeclaratio
 pub(super) fn event_has_prototype_attribute(interface: &str, property: &str) -> bool {
     let mut interface = Some(interface);
     while let Some(name) = interface {
+        if name == "TouchEvent"
+            && super::touch_runtime::TOUCH_EVENT_PROTOTYPE_ATTRIBUTES.contains(&property)
+        {
+            return true;
+        }
         if event_template_declaration(name)
             .is_some_and(|declaration| declaration.attributes.contains(&property))
         {
@@ -597,6 +438,9 @@ pub(super) fn install_event_template_bindings<'s>(
     spec: ConstructorSpec,
 ) {
     let interface = spec.interface.name();
+    if interface == "SubmitEvent" {
+        moli_webapi::events::subclasses::submit::install_template_bindings(scope, template);
+    }
     super::events::install_value_event_template_bindings(scope, template, interface);
     super::events::install_device_event_template_bindings(scope, template, interface);
     if interface == "Document" {
@@ -607,27 +451,4 @@ pub(super) fn install_event_template_bindings<'s>(
     if let Some(declaration) = event_template_declaration(interface) {
         (declaration.install)(scope, template);
     }
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::ClipboardEvent, enumerable, receiver)]
-struct ClipboardEventTemplateAccessorsDeclaration {
-    #[webapi(
-        accessor_property = "clipboardData",
-        getter = clipboard_event_clipboard_data_getter_function
-    )]
-    clipboard_data: (),
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::ClipboardChangeEvent, enumerable, receiver)]
-struct ClipboardChangeEventTemplateAccessorsDeclaration {
-    #[webapi(accessor_property, getter = clipboard_change_event_types_getter_function)]
-    types: (),
-
-    #[webapi(
-        accessor_property = "changeId",
-        getter = clipboard_change_event_change_id_getter_function
-    )]
-    change_id: (),
 }

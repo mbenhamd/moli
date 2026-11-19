@@ -1,4 +1,5 @@
 use anyhow::Result;
+use moli_core::RendererDevToolsPageCommand;
 
 use super::{DrainedFetchRequests, navigation::NavigationTermination};
 use crate::conn::{
@@ -129,9 +130,7 @@ impl PreparedFetchCleanup {
                         || pending
                             .detached_parser_script_fetch_continuation()
                             .is_some()
-                        || pending
-                            .document_command_target()
-                            .is_some_and(|target| target.has_native_network_pause()))
+                        || pending.residence.has_native_network_pause())
                 {
                     CleanupSubresource::ContinueRequest {
                         request_id,
@@ -145,10 +144,7 @@ impl PreparedFetchCleanup {
                 if resume_navigations
                     && pending.owner_kind.drains_on_fetch_disable()
                     && (pending.resource_type == moli_core::page::SubresourceResourceType::Document
-                        || pending
-                            .command_target
-                            .as_ref()
-                            .is_some_and(|target| target.has_native_network_pause()))
+                        || pending.residence.has_native_network_pause())
                 {
                     CleanupSubresource::ContinueAuth {
                         request_id,
@@ -162,10 +158,7 @@ impl PreparedFetchCleanup {
                 if resume_navigations
                     && pending.owner_kind.drains_on_fetch_disable()
                     && (pending.resource_type == moli_core::page::SubresourceResourceType::Document
-                        || pending
-                            .command_target
-                            .as_ref()
-                            .is_some_and(|target| target.has_native_network_pause()))
+                        || pending.residence.has_native_network_pause())
                 {
                     CleanupSubresource::ContinueResponse(pending)
                 } else {
@@ -491,16 +484,18 @@ fn admit_subresource_cleanup(
                 return None;
             }
             (
-                request.document_command_target(),
-                RendererPageCommand::ContinuePendingSubresourceFetch {
-                    internal_id: request.internal_id,
-                    url,
-                    method,
-                    body,
-                    headers,
-                    intercept_response: response_candidate,
-                    handle_auth_requests,
-                },
+                Some(&request.residence),
+                RendererPageCommand::DevTools(
+                    RendererDevToolsPageCommand::ContinuePendingSubresourceFetch {
+                        internal_id: request.internal_id,
+                        url,
+                        method,
+                        body,
+                        headers,
+                        intercept_response: response_candidate,
+                        handle_auth_requests,
+                    },
+                ),
             )
         }
         CleanupSubresource::Request(request) => {
@@ -509,40 +504,50 @@ fn admit_subresource_cleanup(
                 return None;
             }
             (
-                request.document_command_target(),
-                RendererPageCommand::FailPendingSubresourceFetch {
-                    internal_id: request.internal_id,
-                    error_text: reason.to_owned(),
-                },
+                Some(&request.residence),
+                RendererPageCommand::DevTools(
+                    RendererDevToolsPageCommand::FailPendingSubresourceFetch {
+                        internal_id: request.internal_id,
+                        error_text: reason.to_owned(),
+                    },
+                ),
             )
         }
         CleanupSubresource::Auth(request) => (
-            request.command_target.as_ref(),
-            RendererPageCommand::FailPendingSubresourceAuth {
-                internal_id: request.internal_id,
-                error_text: reason.to_owned(),
-            },
+            Some(&request.residence),
+            RendererPageCommand::DevTools(
+                RendererDevToolsPageCommand::FailPendingSubresourceAuth {
+                    internal_id: request.internal_id,
+                    error_text: reason.to_owned(),
+                },
+            ),
         ),
         CleanupSubresource::ContinueAuth { pending, .. } => (
-            pending.command_target.as_ref(),
-            RendererPageCommand::CancelPendingSubresourceAuth {
-                internal_id: pending.internal_id,
-            },
+            Some(&pending.residence),
+            RendererPageCommand::DevTools(
+                RendererDevToolsPageCommand::CancelPendingSubresourceAuth {
+                    internal_id: pending.internal_id,
+                },
+            ),
         ),
         CleanupSubresource::ContinueResponse(request) => (
-            request.command_target.as_ref(),
-            RendererPageCommand::ContinuePendingSubresourceResponse {
-                internal_id: request.internal_id,
-                response_code: None,
-                response_headers: None,
-            },
+            Some(&request.residence),
+            RendererPageCommand::DevTools(
+                RendererDevToolsPageCommand::ContinuePendingSubresourceResponse {
+                    internal_id: request.internal_id,
+                    response_code: None,
+                    response_headers: None,
+                },
+            ),
         ),
         CleanupSubresource::Response(request) => (
-            request.command_target.as_ref(),
-            RendererPageCommand::FailPendingSubresourceResponse {
-                internal_id: request.internal_id,
-                error_text: reason.to_owned(),
-            },
+            Some(&request.residence),
+            RendererPageCommand::DevTools(
+                RendererDevToolsPageCommand::FailPendingSubresourceResponse {
+                    internal_id: request.internal_id,
+                    error_text: reason.to_owned(),
+                },
+            ),
         ),
     };
     let target = target?;
@@ -591,7 +596,9 @@ fn admit_subresource_cleanup(
     if matches!(
         &pending,
         moli_core::page::PendingResourceCommand::Network(Ok(_))
-    ) {
+    ) && target.page_owner().is_some()
+        && !target.observes_worker_network()
+    {
         // Retiring a Document must publish its admitted cancellation before
         // that Document's networking tasks become ineligible. The load's
         // late terminal shares this ID and uses the existing once-only claim.
@@ -639,7 +646,9 @@ fn admit_subresource_cleanup(
             }
         }
     }
-    let binding = conn.target_root_document_output_identity_for_owner(owner, target.document());
+    let binding = target
+        .source_document()
+        .and_then(|document| conn.target_root_document_output_identity_for_owner(owner, document));
     Some(PreparedSubresourceCleanup::Command(Box::new(
         PreparedSubresourceCommand {
             plan,

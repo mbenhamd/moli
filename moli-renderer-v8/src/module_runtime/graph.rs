@@ -466,6 +466,7 @@ impl NativeModuleGraphFetchRequest {
         let csp_context = self.csp_context.clone();
         let url_rewrite = ModuleSourceUrlRewrite::default();
         let completion_url_rewrite = url_rewrite.clone();
+        let web_security_disabled = loader.web_security_disabled();
         let completion = move |response: anyhow::Result<moli_fetch::Response>| {
             let mut network_result: Option<SharedNavigationResponseResult> = None;
             let result = response
@@ -528,12 +529,13 @@ impl NativeModuleGraphFetchRequest {
                         &request_origin,
                         &head,
                         credentials_mode,
+                        web_security_disabled,
                     ).map_err(|error| ModuleLoadError::new(ModuleLoadStage::Fetch, error).message().to_owned())?;
                     let response_is_eligible = crate::network_host::network_response_filter(
                         &request_origin,
                         &head,
                         request_mode,
-                    ).is_none();
+                    web_security_disabled,).is_none();
                     if !crate::subresource_integrity::response_matches_subresource_integrity_metadata(
                         &body_bytes,
                         integrity.as_deref(),

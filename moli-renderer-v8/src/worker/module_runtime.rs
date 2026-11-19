@@ -413,7 +413,7 @@ pub(super) fn evaluate_module_worker_bootstrap_source(
         options: WorkerModuleGraphFetchOptions {
             initiator_url: static_import_initiator_url.unwrap_or(root_url),
             csp_source: WorkerModuleGraphFetchCspSource::StaticModuleGraph,
-            browser_request_metadata: BrowserRequestMetadata::Fetch,
+            browser_request_metadata: BrowserRequestMetadata::Worker,
             referrer_policy,
         },
     };
@@ -596,6 +596,11 @@ fn finish_worker_module_bootstrap(
             WorkerParentErrorEventKind::ErrorEvent,
         )));
     };
+    let evaluation_promise = v8::Local::<v8::Promise>::try_from(value).ok();
+    if let Some(promise) = evaluation_promise {
+        // The host reports evaluation failures as errors, not unhandled rejections.
+        promise.mark_as_handled();
+    }
     scope.perform_microtask_checkpoint();
     crate::context_bootstrap::run_end_of_microtask_checkpoint_tasks(scope);
     if root_module.get_status() == v8::ModuleStatus::Errored {
@@ -1139,6 +1144,10 @@ fn finish_worker_dynamic_module_import_evaluation(
             "dynamic import evaluation threw an exception",
         ));
     };
+    let evaluation_promise = v8::Local::<v8::Promise>::try_from(value).ok();
+    if let Some(promise) = evaluation_promise {
+        promise.mark_as_handled();
+    }
     scope.perform_microtask_checkpoint();
     crate::context_bootstrap::run_end_of_microtask_checkpoint_tasks(scope);
     if root_module.get_status() == v8::ModuleStatus::Errored {
@@ -1313,7 +1322,7 @@ impl WorkerDynamicModuleImportJob {
         if self.audio_worklet_bootstrap {
             BrowserRequestMetadata::AudioWorklet
         } else {
-            BrowserRequestMetadata::Fetch
+            BrowserRequestMetadata::Script
         }
     }
 }

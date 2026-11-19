@@ -939,7 +939,6 @@ fn unpromoted_child_retirement_closes_only_its_execution_resources() {
         })
         .unwrap();
     vm.eval("frame.remove()").unwrap();
-    vm.prune_stale_child_default_execution_contexts();
 
     assert!(ordinary.3.is_cancelled());
     assert!(!keepalive.3.is_cancelled());
@@ -1119,19 +1118,72 @@ fn failed_main_realm_baseline_does_not_publish_inspector_context() {
 }
 
 #[test]
+fn child_realm_queries_leave_retirement_to_the_owner_transition() {
+    let mut vm = new_storage_test_vm("https://child-realm-retirement.test/");
+    vm.eval("document.appendChild(document.createElement('iframe'))")
+        .unwrap();
+    let context_id = materialize_single_child_default_realm_for_test(&mut vm, "child realm");
+    let realm = vm.child_frame_realm_store.get(&context_id).unwrap();
+    let child_handle = realm.child_handle;
+    let frame_id = realm.frame_id.clone();
+    let registrations = vm
+        .page_inspector
+        .context_registration_count_for_diagnostics();
+    assert_eq!(
+        vm.child_default_execution_context_id_for_frame_id(&frame_id),
+        Some(context_id)
+    );
+    vm.with_default_context_scope(|scope, host_ptr| {
+        PageScriptHost::drop_child_browsing_context_subtree_with_window_realm(
+            scope,
+            host_ptr,
+            child_handle,
+        );
+        Ok(())
+    })
+    .unwrap();
+
+    assert!(vm.live_child_default_runtime_realm_inventory().is_empty());
+    assert_eq!(
+        vm.child_default_frame_id_for_execution_context_id(context_id),
+        None
+    );
+    assert_eq!(
+        vm.child_default_execution_context_id_for_frame_id(&frame_id),
+        None
+    );
+    assert!(vm.child_frame_realm_store.contains_key(&context_id));
+    assert_eq!(
+        vm.page_inspector
+            .context_registration_count_for_diagnostics(),
+        registrations
+    );
+
+    vm.apply_pending_child_document_owner_retirements();
+    assert!(!vm.child_frame_realm_store.contains_key(&context_id));
+    assert_eq!(
+        vm.page_inspector
+            .context_registration_count_for_diagnostics(),
+        registrations - 1
+    );
+}
+
+#[test]
 fn failed_child_realm_bootstrap_releases_context_and_registration() {
     let mut vm = new_storage_test_vm("https://failed-realm-bootstrap.test/");
     vm.eval("const frame = document.createElement('iframe'); document.appendChild(frame)")
         .unwrap();
     let child = vm
-        .live_child_default_context_entries()
+        ._context_host
+        .borrow()
+        .child_browsing_context_handles_in_document_order()
         .into_iter()
         .next()
         .unwrap();
     let mut owner = vm
         ._context_host
         .borrow()
-        .current_child_document_task_owner(child.handle)
+        .current_child_document_task_owner(child)
         .unwrap();
     owner.document_id = crate::frame_owner_model::DocumentId(u64::MAX);
     let baseline = vm
@@ -1153,7 +1205,7 @@ fn failed_child_realm_bootstrap_releases_context_and_registration() {
                     &vm.promise_reject_dispatch,
                     None,
                     Some(vm.storage_bucket_store.clone()),
-                    child.handle,
+                    child,
                     owner,
                 )
             });
@@ -1442,6 +1494,7 @@ fn runtime_binding_calls_freeze_the_invoking_realm_generation() {
     );
     assert_ne!(calls[0].execution_context_id, calls[1].execution_context_id);
 }
+#[cfg(feature = "devtools")]
 #[tokio::test]
 async fn opaque_child_isolated_world_projects_only_its_own_document() {
     let mut vm = new_storage_test_vm("https://opaque-child-isolated-world.test/");
@@ -1558,6 +1611,7 @@ async fn opaque_child_isolated_world_projects_only_its_own_document() {
         "isolated child navigator.storage must use the child opaque storage owner"
     );
 }
+#[cfg(feature = "devtools")]
 #[tokio::test]
 async fn initial_empty_child_isolated_world_rebinds_committed_document() {
     let mut vm = new_storage_test_vm("https://initial-empty-isolated-world.test/");
@@ -3149,6 +3203,7 @@ fn inspector_context_created_matches_same_name_child_isolated_world_by_frame_id(
     );
     assert_eq!(vm.page_isolated_world_contexts.len(), 2);
 }
+#[cfg(feature = "devtools")]
 #[test]
 fn same_name_isolated_worlds_are_scoped_to_devtools_session_and_detach() {
     let mut vm = new_storage_test_vm("https://isolated-world-session.test/");
@@ -3348,6 +3403,7 @@ async fn commit_opaque_child_for_test(vm: &mut StandaloneScriptVmHarness, elemen
         .unwrap_or_else(|| panic!("{element_id}: opaque child realm should exist"))
 }
 
+#[cfg(feature = "devtools")]
 fn child_context_weak_for_test(
     vm: &mut StandaloneScriptVmHarness,
     context_id: i64,
@@ -3378,6 +3434,7 @@ fn context_weak_was_collected_for_test(
     .expect("parent context should remain usable")
 }
 
+#[cfg(feature = "devtools")]
 fn expose_real_top_window_for_test(vm: &mut StandaloneScriptVmHarness, context_id: i64) {
     // Exercise the native access-check handlers on the actual top WindowProxy.
     vm.with_child_frame_realm_context_scope(context_id, |scope, host_ptr| {
@@ -3397,6 +3454,7 @@ fn expose_real_top_window_for_test(vm: &mut StandaloneScriptVmHarness, context_i
     .expect("real top Window should be reachable from the opaque child");
 }
 
+#[cfg(feature = "devtools")]
 #[tokio::test]
 async fn borrowed_cross_origin_window_accessors_follow_the_receiver() {
     let mut vm = new_storage_test_vm("https://cross-origin-window-receiver.test/");
@@ -3446,6 +3504,7 @@ async fn borrowed_cross_origin_window_accessors_follow_the_receiver() {
     );
 }
 
+#[cfg(feature = "devtools")]
 #[tokio::test]
 async fn native_cross_origin_bindings_release_removed_accessor_realm() {
     let mut vm = new_storage_test_vm("https://cross-origin-surface-cache.test/");
@@ -3509,6 +3568,7 @@ document.getElementById("accessor-frame").remove();
     );
 }
 
+#[cfg(feature = "devtools")]
 #[tokio::test]
 async fn native_cross_origin_bindings_ignore_author_weak_map_overrides() {
     let mut vm = new_storage_test_vm("https://cross-origin-cache-intrinsics.test/");
@@ -3567,6 +3627,7 @@ Object.getPrototypeOf(savedPostMessage) === Function.prototype
     );
 }
 
+#[cfg(feature = "devtools")]
 #[tokio::test]
 async fn cross_origin_window_keys_follow_frame_removal() {
     let mut vm = new_storage_test_vm("https://cross-origin-window-keys.test/");

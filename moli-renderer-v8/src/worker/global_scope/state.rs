@@ -1,17 +1,33 @@
 //! WorkerGlobalScope runtime state and native queries for the current worker.
 
 use crate::content_security_policy::ContentSecurityPolicy;
+use crate::document_runtime::DocumentConnectPolicySnapshot;
+use crate::network_host::controlled_resource::ControlledXhrContext;
 
 use super::*;
 
 impl WorkerGlobalState {
-    pub(in crate::worker) fn subresource_interception_config(
-        &self,
-    ) -> SubresourceInterceptionClasses {
-        self.loader
-            .request_client()
-            .page_network_policy()
-            .subresource_interception_config()
+    /// The execution origin belongs to the Worker, independently of its script URL.
+    pub(in crate::worker) fn request_origin(&self) -> moli_url::WebOrigin {
+        moli_url::WebOrigin::from_serialized(
+            self.message_source_security
+                .serialized_origin()
+                .unwrap_or("null"),
+        )
+    }
+
+    pub(super) fn resource_load_control(&self) -> ControlledXhrContext {
+        ControlledXhrContext {
+            interception: self
+                .interception_context
+                .clone()
+                .expect("Worker resource loads own a native interception context"),
+            connect_policy: DocumentConnectPolicySnapshot::from_worker_policies(
+                self.content_security_policies.clone(),
+                self.content_security_report_only_policies.clone(),
+                self.content_security_reporting_endpoints.clone(),
+            ),
+        }
     }
 
     pub(crate) fn callback_invocation_allowed(&self) -> bool {
@@ -65,6 +81,9 @@ pub(crate) struct WorkerGlobalState {
     pub(in crate::worker) current_script_url: Option<Url>,
     /// Referrer policy parsed from the top-level worker script response.
     pub(in crate::worker) referrer_policy: Option<String>,
+    /// Creator origin used by the bootstrap module graph, independently of a
+    /// data: Worker's own opaque origin and its script URL.
+    pub(in crate::worker) module_static_import_origin: Option<moli_url::WebOrigin>,
     /// CSP policies from outside settings used for module static imports.
     pub(in crate::worker) module_static_import_content_security_policies:
         Vec<ContentSecurityPolicy>,
@@ -107,7 +126,6 @@ pub(crate) struct WorkerGlobalState {
     /// Worker XHR id counter.
     pub(in crate::worker) next_xhr_id: u32,
     /// Worker-owned CSP report requests paused for Fetch domain request-stage interception.
-    pub(in crate::worker) pending_csp_reports: HashMap<u32, PendingWorkerCspReport>,
     /// Worker-local AbortController/AbortSignal runtime state.
     pub(in crate::worker) abort: Rc<RefCell<WorkerAbortStore>>,
     /// Worker-thread view of the creator's browser-context/partition runtime.
@@ -141,8 +159,6 @@ pub(crate) struct WorkerGlobalState {
     pub(in crate::worker) websocket_event_tx: tokio::sync::mpsc::Sender<WebSocketEvent>,
     /// Worker-owned classic WebSocket connections keyed by socket id.
     pub(in crate::worker) websockets: HashMap<u64, WorkerWebSocketState>,
-    /// Worker-local WebSocket id counter.
-    pub(in crate::worker) next_websocket_id: u64,
     /// Worker-local dedicated workers created through `new Worker(...)`.
     pub(in crate::worker) next_nested_worker_id: u64,
     pub(in crate::worker) nested_worker_wrappers:

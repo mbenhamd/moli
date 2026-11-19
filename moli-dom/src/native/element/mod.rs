@@ -495,7 +495,7 @@ impl Element {
     }
 
     pub fn input_type(&self) -> InputType {
-        InputType::from_attribute_value(self.attribute("type"))
+        InputType::from_attribute_value(self.attribute_ns("", "type"))
     }
 
     /// A `textarea`, or an `input` whose type edits text (selection and

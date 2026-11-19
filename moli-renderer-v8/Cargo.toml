@@ -5,9 +5,10 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = []
+default = ["devtools"]
+devtools = ["moli-command-types/devtools", "dep:moli-protocol-cdp"]
 # Native ACE page tasks for embedders. Public browser builds leave this disabled.
-ace-protocol = []
+ace-protocol = ["devtools"]
 # Diagnostic-only page-created global snapshots. Core integration tests enable
 # this through a dev-dependency; normal browser builds leave it compiled out.
 test-support = []
@@ -17,20 +18,19 @@ test-support = []
 wpt-extensions = []
 
 [dependencies]
+moli-command-types = { path = "../moli-types/moli-command-types", default-features = false }
 moli-inspector-json = { path = "../moli-inspector-json" }
 moli-fetch-types = { path = "../moli-types/moli-fetch-types" }
 anyhow = "1.0.100"
 thiserror = "2.0.17"
 app_units = "0.7.8"
 base64 = "0.22"
-brotlic = "0.8.2"
 bytes = "1"
 crossbeam-channel = "0.5.15"
 cssparser = "0.38"
 data-url = "0.3.2"
 dom = { package = "stylo_dom", version = "0.22" }
 encoding_rs = "0.8"
-flate2 = { version = "1.1.9", default-features = false, features = ["zlib"] }
 euclid = "0.22"
 kurbo = "0.13.1"
 futures-util = "0.3.31"
@@ -53,7 +53,7 @@ moli-disk-pool = { path = "../moli-disk-pool" }
 moli-parser = { path = "../moli-parser" }
 moli-page-types = { path = "../moli-types/moli-page-types" }
 moli-parkable-image = { path = "../moli-parkable-image" }
-moli-protocol-cdp = { path = "../moli-protocol-cdp" }
+moli-protocol-cdp = { path = "../moli-protocol-cdp", optional = true }
 moli-protocol-cdp-defs = { path = "../moli-protocol-cdp-defs" }
 moli-selector = { path = "../moli-selector" }
 moli-shared-worker = { path = "../moli-shared-worker" }
@@ -99,6 +99,7 @@ moli-v8-util = { path = "../moli-v8-util" }
 moli-web-errors = { path = "../moli-web-errors" }
 moli-web-mime = { path = "../moli-web-mime" }
 moli-webcrypto = { path = "../moli-webcrypto" }
+moli-webapi = { path = "../moli-webapi" }
 moli-webapi-declare = { path = "../moli-webapi-declare" }
 moli-webidl = { path = "../moli-webidl" }
 moli-webidl-callback = { path = "../moli-webidl-callback" }

@@ -9,6 +9,7 @@ use crate::conn::{
 };
 use crate::domains::fetch;
 use anyhow::Result;
+use moli_core::RendererDevToolsPageCommand;
 use moli_core::page::{
     PendingSubresourceAuthInfo, PendingSubresourceContinueEvent, PendingSubresourceResponseInfo,
     SubresourceNetworkRequestHandle,
@@ -23,7 +24,7 @@ use crate::domains::network::{
 
 #[derive(Debug)]
 pub(crate) struct PreparedSubresourceContinueAction {
-    owner: TargetPageResidenceIdentity,
+    owner: Option<TargetPageResidenceIdentity>,
     event: PendingSubresourceContinueEvent,
     request: Option<ClaimedSubresourceContinueRequest>,
 }
@@ -40,7 +41,7 @@ impl PreparedSubresourceContinueAction {
     fn capture(
         conn: &mut CdpConnection,
         command_owner: &CommandOwnerScope,
-        owner: TargetPageResidenceIdentity,
+        owner: Option<TargetPageResidenceIdentity>,
         event: PendingSubresourceContinueEvent,
         network_pause: Option<moli_core::network::ResourceInterceptionPause>,
         response_body: Option<moli_core::network::ResourceInterceptionBody>,
@@ -48,7 +49,7 @@ impl PreparedSubresourceContinueAction {
         let internal_id = Self::internal_id(&event);
         let mut request = conn.claim_subresource_continue_request_for_owner(
             command_owner,
-            &owner,
+            owner.as_ref(),
             internal_id,
             matches!(&event, PendingSubresourceContinueEvent::Completed { .. }),
         );
@@ -89,7 +90,7 @@ impl PreparedSubresourceContinueAction {
         Some(Self::capture(
             conn,
             &command_owner,
-            owner,
+            Some(owner),
             event,
             None,
             None,
@@ -111,7 +112,7 @@ pub(in crate::domains) fn prepare_subresource_continue_action_for_renderer_recor
     Some(PreparedSubresourceContinueAction::capture(
         conn,
         command_owner,
-        owner,
+        Some(owner),
         event,
         network_pause,
         response_body,
@@ -124,7 +125,11 @@ pub(crate) fn prepare_subresource_continue_action(
     command_owner: &CommandOwnerScope,
     action: PreparedSubresourceContinueAction,
 ) -> Option<PreparedSubresourceContinueWait> {
-    if !conn.target_page_output_residence_is_current(&action.owner) {
+    if action
+        .owner
+        .as_ref()
+        .is_some_and(|owner| !conn.target_page_output_residence_is_current(owner))
+    {
         return None;
     }
     let session_id = command_owner.session_id();
@@ -417,11 +422,7 @@ fn pending_auth_request(
     auth_info: &PendingSubresourceAuthInfo,
 ) -> PendingSubresourceFetchAuthRequest {
     PendingSubresourceFetchAuthRequest {
-        command_target: pending.document_command_target().cloned(),
-        page_owner: pending
-            .page_owner()
-            .expect("an in-flight auth continuation must retain its native Page residence")
-            .clone(),
+        residence: pending.residence.clone(),
         owner_session_id: pending.owner_session_id.clone(),
         action_session_id: pending.action_session_id.clone(),
         owner_kind: pending.owner_kind,
@@ -453,11 +454,7 @@ fn pending_response_request(
     response_info: &PendingSubresourceResponseInfo,
 ) -> PendingSubresourceFetchResponseRequest {
     PendingSubresourceFetchResponseRequest {
-        command_target: pending.document_command_target().cloned(),
-        page_owner: pending
-            .page_owner()
-            .expect("an in-flight response continuation must retain its native Page residence")
-            .clone(),
+        residence: pending.residence.clone(),
         owner_session_id: pending.owner_session_id.clone(),
         action_session_id: pending.action_session_id.clone(),
         owner_kind: pending.owner_kind,
@@ -540,11 +537,7 @@ pub(crate) fn flush_post_subresource_response_activity_for_owner_background_even
     owner: &CommandOwnerScope,
     pending: &PendingSubresourceFetchResponseRequest,
 ) {
-    if !conn.subresource_document_is_current_for_owner(
-        owner,
-        &pending.page_owner,
-        pending.source_document(),
-    ) {
+    if !conn.subresource_residence_is_current(&pending.residence) {
         return;
     }
     record_subresource_network_request_handle(
@@ -578,11 +571,7 @@ pub(crate) fn flush_post_subresource_auth_activity_for_owner_background_events(
     owner: &CommandOwnerScope,
     pending: &PendingSubresourceFetchAuthRequest,
 ) {
-    if !conn.subresource_document_is_current_for_owner(
-        owner,
-        &pending.page_owner,
-        pending.source_document(),
-    ) {
+    if !conn.subresource_residence_is_current(&pending.residence) {
         return;
     }
     record_subresource_network_request_handle(
@@ -669,7 +658,7 @@ pub(crate) struct PreparedSubresourceContinueWait {
 
 pub(crate) struct SubresourceContinueCompletion {
     owner: CommandOwnerScope,
-    binding: crate::conn::TargetRootDocumentProtocolAttachmentIdentity,
+    binding: Option<crate::conn::TargetRootDocumentProtocolAttachmentIdentity>,
     request: PendingSubresourceFetchRequest,
 }
 
@@ -681,31 +670,37 @@ impl PreparedSubresourceContinueWait {
         request: PendingSubresourceFetchRequest,
         kind: SubresourceContinuationKind,
     ) -> Option<Self> {
-        let document = request
-            .source_document()
-            .or_else(|| conn.target_root_document_lifecycle_identity_for_owner(owner))?;
-        let binding = conn.target_root_document_output_identity_for_owner(owner, document)?;
+        let binding = if matches!(
+            request.residence,
+            crate::conn::PendingSubresourceFetchResidence::Worker { .. }
+        ) {
+            None
+        } else {
+            let document = request
+                .source_document()
+                .or_else(|| conn.target_root_document_lifecycle_identity_for_owner(owner))?;
+            Some(conn.target_root_document_output_identity_for_owner(owner, document)?)
+        };
         let native = match kind {
             SubresourceContinuationKind::Response(internal_id) => {
-                moli_core::RendererPageCommand::ContinuePendingSubresourceResponse {
-                    internal_id,
-                    response_code: None,
-                    response_headers: None,
-                }
+                moli_core::RendererPageCommand::DevTools(
+                    RendererDevToolsPageCommand::ContinuePendingSubresourceResponse {
+                        internal_id,
+                        response_code: None,
+                        response_headers: None,
+                    },
+                )
             }
             SubresourceContinuationKind::FailAuth(internal_id) => {
-                moli_core::RendererPageCommand::FailPendingSubresourceAuth {
-                    internal_id,
-                    error_text: "Fetch auth challenge has no DevTools request".to_owned(),
-                }
+                moli_core::RendererPageCommand::DevTools(
+                    RendererDevToolsPageCommand::FailPendingSubresourceAuth {
+                        internal_id,
+                        error_text: "Fetch auth challenge has no DevTools request".to_owned(),
+                    },
+                )
             }
         };
-        let pending = conn.start_subresource_document_command(
-            owner,
-            request.page_owner()?,
-            request.document_command_target(),
-            native,
-        );
+        let pending = conn.start_subresource_command(owner, &request.residence, native);
         match pending {
             Ok(pending) => Some(Self {
                 pending,
@@ -743,7 +738,11 @@ impl SubresourceContinueCompletion {
         completed: Result<moli_core::page::CompletedResourceCommand>,
     ) -> Vec<BackgroundProtocolEvent> {
         let mut events = Vec::new();
-        if !conn.target_root_document_output_identity_is_current(&self.binding) {
+        if !conn.subresource_residence_is_current(&self.request.residence)
+            || self.binding.as_ref().is_some_and(|binding| {
+                !conn.target_root_document_output_identity_is_current(binding)
+            })
+        {
             return events;
         }
         let result = completed.and_then(moli_core::page::CompletedResourceCommand::into_unit_reply);
@@ -758,4 +757,13 @@ impl SubresourceContinueCompletion {
         );
         events
     }
+}
+
+pub(in crate::domains) fn prepare_worker_subresource_continue_action(
+    conn: &mut CdpConnection,
+    owner: &CommandOwnerScope,
+    event: PendingSubresourceContinueEvent,
+    pause: Option<moli_core::network::ResourceInterceptionPause>,
+) -> PreparedSubresourceContinueAction {
+    PreparedSubresourceContinueAction::capture(conn, owner, None, event, pause, None)
 }

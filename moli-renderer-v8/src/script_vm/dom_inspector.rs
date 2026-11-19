@@ -3,9 +3,8 @@ use anyhow::Result;
 use super::ScriptVm;
 use crate::document_runtime::DomHandle;
 use crate::dom::native::{Attribute, NativeDom, Node, NodeType};
-use crate::native_bridge::element::{
-    focus_live_element_for_inspector, mutate_live_element_attribute_for_inspector,
-};
+use crate::native_bridge::element::focus_live_element_for_inspector;
+use crate::native_bridge::element::mutate_live_element_attribute_for_inspector;
 use crate::native_bridge::{
     PageScriptHost, node_runtime_and_handle_from_object, validate_element_name,
 };

@@ -123,11 +123,7 @@ async fn dispatch_service_worker_fetch_event_and_handled_console_for_test(
             WorkerToParentMessage::Post(_)
             | WorkerToParentMessage::SubresourceNetwork(_)
             | WorkerToParentMessage::PendingSubresourceFetch(_)
-            | WorkerToParentMessage::PendingSubresourceFetchCanceled { .. }
             | WorkerToParentMessage::SubresourceContinue(_)
-            | WorkerToParentMessage::WebSocketSubresource(_)
-            | WorkerToParentMessage::WebSocketLifecycle(_)
-            | WorkerToParentMessage::WebSocketFrame(_)
             | WorkerToParentMessage::RuntimeInspectorMessages(_)
             | WorkerToParentMessage::ServiceWorkerLifecycleCompleted(_)
             | WorkerToParentMessage::ServiceWorkerFetchStreamStarted(_)

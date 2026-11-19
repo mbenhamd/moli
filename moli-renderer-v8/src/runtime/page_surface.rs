@@ -3,6 +3,7 @@ use super::*;
 use crate::native_bridge::{
     PendingRuntimeObservableConsoleSourceEvent, RuntimeObservableContextToken,
 };
+#[cfg(feature = "devtools")]
 use crate::page_task_queue::RendererOwnerWakeSender;
 use crate::protocol_types::{
     ChildFrameDocumentOpenedSnapshot, ChildFrameTreeEventSnapshot, ChildFrameTreeSnapshot,
@@ -597,6 +598,7 @@ impl RendererPendingWindowOpenEvent {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RendererSharedWorkerTargetInfo {
+    pub interception_policy: Option<crate::network::ResourceInterceptionPolicy>,
     pub owner_local_host_id: super::RendererOwnerLocalHostId,
     pub instance_id: SharedWorkerInstanceId,
     pub url: String,
@@ -612,6 +614,10 @@ pub struct RendererSharedWorkerConsoleMessage {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RendererSharedWorkerTargetEvent {
+    Resource {
+        instance_id: SharedWorkerInstanceId,
+        event: crate::network::ResourceInterceptionEvent,
+    },
     Created(RendererSharedWorkerTargetInfo),
     Destroyed {
         instance_id: SharedWorkerInstanceId,
@@ -646,6 +652,10 @@ pub struct RendererDedicatedWorkerTargetInfo {
 /// complete Page subresource record.
 #[derive(Debug, Clone)]
 pub enum RendererDedicatedWorkerTargetEvent {
+    Resource {
+        instance_id: u64,
+        event: crate::network::ResourceInterceptionEvent,
+    },
     Created(RendererDedicatedWorkerTargetInfo),
     ScriptLoaded {
         instance_id: u64,
@@ -675,6 +685,16 @@ pub enum RendererDedicatedWorkerTargetEvent {
 impl PartialEq for RendererDedicatedWorkerTargetEvent {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (
+                Self::Resource {
+                    instance_id: a,
+                    event: ae,
+                },
+                Self::Resource {
+                    instance_id: b,
+                    event: be,
+                },
+            ) => a == b && ae == be,
             (Self::Created(left), Self::Created(right)) => left == right,
             (
                 Self::ScriptLoaded {
@@ -1646,8 +1666,12 @@ pub struct RendererCommandTurnCompletion {
 }
 
 impl RendererCommandTurnCompletion {
+    #[cfg(feature = "devtools")]
     pub fn native_response_was_published(&self) -> bool {
-        matches!(self.reply, RendererPageReply::NativeCommandPublished)
+        matches!(
+            self.reply,
+            RendererPageReply::DevTools(RendererDevToolsPageReply::NativeCommandPublished)
+        )
     }
     pub fn reply(&self) -> &RendererPageReply {
         &self.reply
@@ -1716,8 +1740,10 @@ impl RendererCommandTurnOutput {
         page_state: Arc<RendererPageState>,
         runtime_command_output: RendererRuntimeCommandOutput,
         post_response_continuation: Option<RendererPageCommandPostResponseContinuation>,
-        mut renderer_output_predecessor: Option<RendererOutputFence>,
+        renderer_output_predecessor: Option<RendererOutputFence>,
     ) -> Result<Self> {
+        #[cfg(feature = "devtools")]
+        let mut renderer_output_predecessor = renderer_output_predecessor;
         let reply = match reply {
             RendererPageReply::RuntimeInspectorProtocolMessages(reply_messages) => {
                 let mut messages = runtime_command_output;
@@ -1733,7 +1759,8 @@ impl RendererCommandTurnOutput {
             }
         };
         let reply = match reply {
-            RendererPageReply::NativeCommandReady(ready) => {
+            #[cfg(feature = "devtools")]
+            RendererPageReply::DevTools(RendererDevToolsPageReply::NativeCommandReady(ready)) => {
                 // Settlement has already published this turn's earlier facts.
                 // Publish the ready reply here, before a later Main command
                 // can append its output, regardless of adapter waiter polling.
@@ -1749,7 +1776,7 @@ impl RendererCommandTurnOutput {
                 // is released. Only this final boundary leaves the renderer;
                 // typed/composite replies still retain independent leases.
                 renderer_output_predecessor = Some(terminal);
-                RendererPageReply::NativeCommandPublished
+                RendererPageReply::DevTools(RendererDevToolsPageReply::NativeCommandPublished)
             }
             reply => reply,
         };
@@ -2941,6 +2968,7 @@ impl CompletedWorkerRuntimeInspectorCommandDispatch {
         (self.messages, self.pending_session_response)
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn finish(
         dispatch: Result<Vec<RendererRuntimeInspectorMessage>>,
         settlement: oneshot::Receiver<RendererRuntimeInspectorSessionResponseSettlement>,
@@ -3038,6 +3066,7 @@ impl RendererRuntimeCommandOutputSettlement {
         }
     }
 
+    #[cfg(feature = "devtools")]
     fn session_response(publication: RendererRuntimeInspectorResponsePublication) -> Self {
         Self {
             output: RendererRuntimeCommandOutput::default(),
@@ -3055,10 +3084,12 @@ impl RendererRuntimeCommandOutputSettlement {
         }
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn has_session_response(&self) -> bool {
         self.session_response.is_some()
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn set_v8_state_update(&mut self, state: V8InspectorSessionState) {
         self.output.set_v8_state_update(state);
     }
@@ -3103,6 +3134,7 @@ impl std::fmt::Debug for RendererRuntimeCommandOutputRecorder {
 }
 
 impl RendererRuntimeCommandOutputRecorder {
+    #[cfg(feature = "devtools")]
     pub(crate) fn new(inspector_session_id: Option<String>, expected_call_id: i32) -> Self {
         Self(Rc::new(RefCell::new(
             RendererRuntimeCommandOutputRecorderState {
@@ -3128,10 +3160,12 @@ impl RendererRuntimeCommandOutputRecorder {
         self.0.borrow().causal_identity.clone()
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn has_response(&self) -> bool {
         self.0.borrow().response.is_some()
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn response_succeeded(&self) -> bool {
         self.0
             .borrow()
@@ -3144,6 +3178,7 @@ impl RendererRuntimeCommandOutputRecorder {
         self.0.borrow_mut().output.push_inspector_message(message);
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn set_v8_state_update(&self, state: V8InspectorSessionState) {
         self.0.borrow_mut().output.set_v8_state_update(state);
     }
@@ -3168,10 +3203,12 @@ impl RendererRuntimeCommandOutputRecorder {
             .into_adapter_reply_output()
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn finish_for_page(self) -> RendererRuntimeCommandOutputSettlement {
         self.finish_settlement_with_response_override(None)
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn finish_with_error_for_page(
         self,
         message: String,
@@ -3207,6 +3244,7 @@ impl RendererRuntimeCommandOutputRecorder {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RendererRuntimeInspectorResponseChannel {
+    #[cfg(feature = "devtools")]
     delivery: moli_page_types::RendererInspectorResponseDelivery,
     authority: RendererCommandResponseAuthority<
         RendererRuntimeInspectorAsyncCompletion,
@@ -3227,6 +3265,7 @@ impl RendererRuntimeInspectorResponseChannel {
         let (tx, rx) = oneshot::channel();
         (
             Self {
+                #[cfg(feature = "devtools")]
                 delivery: moli_page_types::RendererInspectorResponseDelivery::AdapterReply,
                 authority: RendererCommandResponseAuthority::adapter(tx),
             },
@@ -3234,6 +3273,7 @@ impl RendererRuntimeInspectorResponseChannel {
         )
     }
 
+    #[cfg(feature = "devtools")]
     pub fn new_for_delivery(
         delivery: moli_page_types::RendererInspectorResponseDelivery,
     ) -> (
@@ -3270,6 +3310,7 @@ impl RendererRuntimeInspectorResponseChannel {
         attachment_id: Option<RendererAgentAttachmentId>,
     ) -> Option<RendererRuntimeInspectorResponseSender> {
         let lease = self.authority.activate()?;
+        #[cfg(feature = "devtools")]
         let destination = match self.delivery {
             moli_page_types::RendererInspectorResponseDelivery::AdapterReply => {
                 RendererRuntimeInspectorResponseDestination::AdapterReply(lease)
@@ -3278,6 +3319,8 @@ impl RendererRuntimeInspectorResponseChannel {
                 RendererRuntimeInspectorResponseDestination::DevToolsSessionPending(lease)
             }
         };
+        #[cfg(not(feature = "devtools"))]
+        let destination = RendererRuntimeInspectorResponseDestination::AdapterReply(lease);
         Some(RendererRuntimeInspectorResponseSender {
             abandoned_object_group: None,
             call_id,
@@ -3308,6 +3351,7 @@ impl RendererRuntimeInspectorResponseChannel {
 /// the old journal structurally prevents an old session response from entering
 /// the replacement stream.
 #[derive(Clone, Debug)]
+#[cfg(feature = "devtools")]
 pub(crate) struct RendererDevToolsSessionOutputHost {
     agent_token: RendererDevToolsAgentToken,
     session: DevToolsSessionKey,
@@ -3315,6 +3359,7 @@ pub(crate) struct RendererDevToolsSessionOutputHost {
     output_journal: RendererTurnOutputJournal,
 }
 
+#[cfg(feature = "devtools")]
 impl RendererDevToolsSessionOutputHost {
     pub(crate) fn new(
         agent_token: RendererDevToolsAgentToken,
@@ -3330,6 +3375,7 @@ impl RendererDevToolsSessionOutputHost {
         }
     }
 
+    #[cfg(feature = "devtools")]
     fn for_worker(session_id: String, output_journal: RendererTurnOutputJournal) -> Self {
         Self {
             agent_token: output_journal.stream().renderer_agent(),
@@ -3384,7 +3430,9 @@ impl RendererDevToolsSessionOutputHost {
 #[derive(Clone, Debug)]
 enum RendererRuntimeInspectorResponseDestination {
     AdapterReply(RendererRuntimeInspectorResponseLease),
+    #[cfg(feature = "devtools")]
     DevToolsSessionPending(RendererRuntimeInspectorResponseLease),
+    #[cfg(feature = "devtools")]
     DevToolsSession {
         lease: RendererRuntimeInspectorResponseLease,
         host: RendererDevToolsSessionOutputHost,
@@ -3401,7 +3449,9 @@ impl RendererRuntimeInspectorResponseDestination {
     > {
         match self {
             Self::AdapterReply(lease) => lease.send_adapter_reply(completion).map(|()| None),
+            #[cfg(feature = "devtools")]
             Self::DevToolsSessionPending(_) => Err(completion),
+            #[cfg(feature = "devtools")]
             Self::DevToolsSession { lease, host } => {
                 let settlement_tx = match lease.claim_session() {
                     Ok(settlement_tx) => settlement_tx,
@@ -3443,11 +3493,13 @@ impl RendererRuntimeInspectorResponseDestination {
         }
     }
 
+    #[cfg(feature = "devtools")]
     fn take_session_response_settlement_receiver(
         &self,
     ) -> Option<oneshot::Receiver<RendererRuntimeInspectorSessionResponseSettlement>> {
         match self {
             Self::AdapterReply(_) => None,
+            #[cfg(feature = "devtools")]
             Self::DevToolsSessionPending(lease) | Self::DevToolsSession { lease, .. } => {
                 lease.take_session_response_settlement_receiver()
             }
@@ -3458,7 +3510,9 @@ impl RendererRuntimeInspectorResponseDestination {
 #[derive(Clone)]
 enum RendererRuntimeInspectorResponsePublicationBoundary {
     Immediate,
+    #[cfg(feature = "devtools")]
     PageOwner(RendererOwnerWakeSender),
+    #[cfg(feature = "devtools")]
     WorkerParent(tokio::sync::mpsc::UnboundedSender<crate::worker::WorkerToParentMessage>),
 }
 
@@ -3493,16 +3547,18 @@ impl RendererRuntimeInspectorResponseSender {
 
     pub(crate) fn is_open(&self) -> bool {
         match &self.destination {
-            RendererRuntimeInspectorResponseDestination::AdapterReply(lease)
-            | RendererRuntimeInspectorResponseDestination::DevToolsSessionPending(lease)
+            #[cfg(feature = "devtools")]
+            RendererRuntimeInspectorResponseDestination::DevToolsSessionPending(lease)
             | RendererRuntimeInspectorResponseDestination::DevToolsSession { lease, .. } => {
                 lease.is_open()
             }
+            RendererRuntimeInspectorResponseDestination::AdapterReply(lease) => lease.is_open(),
         }
     }
 
     pub fn new(call_id: i32, tx: oneshot::Sender<RendererRuntimeInspectorAsyncCompletion>) -> Self {
         RendererRuntimeInspectorResponseChannel {
+            #[cfg(feature = "devtools")]
             delivery: moli_page_types::RendererInspectorResponseDelivery::AdapterReply,
             authority: RendererCommandResponseAuthority::adapter(tx),
         }
@@ -3518,6 +3574,7 @@ impl RendererRuntimeInspectorResponseSender {
             RendererRuntimeInspectorResponseDestination::AdapterReply(_) => {
                 moli_page_types::RendererInspectorResponseDelivery::AdapterReply
             }
+            #[cfg(feature = "devtools")]
             RendererRuntimeInspectorResponseDestination::DevToolsSessionPending(_)
             | RendererRuntimeInspectorResponseDestination::DevToolsSession { .. } => {
                 moli_page_types::RendererInspectorResponseDelivery::SessionSink
@@ -3525,6 +3582,7 @@ impl RendererRuntimeInspectorResponseSender {
         }
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn take_session_response_settlement_receiver(
         &self,
     ) -> Option<oneshot::Receiver<RendererRuntimeInspectorSessionResponseSettlement>> {
@@ -3543,6 +3601,7 @@ impl RendererRuntimeInspectorResponseSender {
         self
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn defer_publication_to_page_owner(
         mut self,
         owner_wake: RendererOwnerWakeSender,
@@ -3552,6 +3611,7 @@ impl RendererRuntimeInspectorResponseSender {
         self
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn defer_publication_to_worker_parent(
         mut self,
         parent_tx: tokio::sync::mpsc::UnboundedSender<crate::worker::WorkerToParentMessage>,
@@ -3563,6 +3623,7 @@ impl RendererRuntimeInspectorResponseSender {
 
     /// Selects the frontend session output capability without changing when
     /// the response is allowed to publish.
+    #[cfg(feature = "devtools")]
     pub(crate) fn route_to_devtools_session_output(
         mut self,
         host: RendererDevToolsSessionOutputHost,
@@ -3572,9 +3633,11 @@ impl RendererRuntimeInspectorResponseSender {
             "a DevTools session response host must belong to the command attachment"
         );
         self.destination = match self.destination {
+            #[cfg(feature = "devtools")]
             RendererRuntimeInspectorResponseDestination::DevToolsSessionPending(lease) => {
                 RendererRuntimeInspectorResponseDestination::DevToolsSession { lease, host }
             }
+            #[cfg(feature = "devtools")]
             RendererRuntimeInspectorResponseDestination::DevToolsSession { lease, host: _ } => {
                 RendererRuntimeInspectorResponseDestination::DevToolsSession { lease, host }
             }
@@ -3585,6 +3648,7 @@ impl RendererRuntimeInspectorResponseSender {
         self
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn route_to_worker_devtools_session_output(
         self,
         session_id: String,
@@ -3628,9 +3692,11 @@ impl RendererRuntimeInspectorResponseSender {
             RendererRuntimeInspectorResponsePublicationBoundary::Immediate => {
                 publication.commit(None).map(|_| ())
             }
+            #[cfg(feature = "devtools")]
             RendererRuntimeInspectorResponsePublicationBoundary::PageOwner(owner_wake) => {
                 owner_wake.defer_runtime_inspector_response_publication(publication)
             }
+            #[cfg(feature = "devtools")]
             RendererRuntimeInspectorResponsePublicationBoundary::WorkerParent(parent_tx) => {
                 match parent_tx.send(
                     crate::worker::WorkerToParentMessage::RuntimeInspectorResponse(publication),
@@ -3658,7 +3724,7 @@ impl RendererRuntimeInspectorResponseSender {
             output.bind_renderer_agent_attachment(attachment_id);
         }
         let Self {
-            call_id,
+            call_id: _call_id,
             attachment_id: _,
             destination,
             publication_boundary: _,
@@ -3668,13 +3734,15 @@ impl RendererRuntimeInspectorResponseSender {
             RendererRuntimeInspectorResponseDestination::AdapterReply(_) => {
                 RendererRuntimeCommandOutputSettlement::adapter_reply(output)
             }
+            #[cfg(feature = "devtools")]
             RendererRuntimeInspectorResponseDestination::DevToolsSessionPending(_) => panic!(
                 "a DevTools session response must bind its concrete output host before settlement"
             ),
+            #[cfg(feature = "devtools")]
             RendererRuntimeInspectorResponseDestination::DevToolsSession { lease, host } => {
                 RendererRuntimeCommandOutputSettlement::session_response(
                     RendererRuntimeInspectorResponsePublication {
-                        call_id,
+                        call_id: _call_id,
                         output,
                         destination: RendererRuntimeInspectorResponseDestination::DevToolsSession {
                             lease,
@@ -3690,7 +3758,9 @@ impl RendererRuntimeInspectorResponseSender {
 #[cfg(test)]
 mod renderer_runtime_inspector_response_channel_tests {
     use super::*;
-    use crate::page_task_queue::{RendererOwnerWake, RendererOwnerWakeSender};
+    use crate::page_task_queue::RendererOwnerWake;
+    #[cfg(feature = "devtools")]
+    use crate::page_task_queue::RendererOwnerWakeSender;
     use crate::runtime::protocol_output::{
         RendererOutputTransportTestLimits, renderer_output_transport_channel_with_test_limits,
     };
@@ -3739,6 +3809,7 @@ mod renderer_runtime_inspector_response_channel_tests {
         .into()
     }
 
+    #[cfg(feature = "devtools")]
     fn assert_raw_session_sink_settlement(raw: &str, expected_success: bool) {
         let payload = InspectorJson::from_slice(raw.as_bytes()).unwrap();
         assert!(!payload.is_materialized());
@@ -3811,6 +3882,7 @@ mod renderer_runtime_inspector_response_channel_tests {
         assert_eq!(response.payload().to_string(), raw);
     }
 
+    #[cfg(feature = "devtools")]
     #[test]
     fn raw_session_sink_large_success_stays_opaque() {
         let raw = format!(
@@ -3820,6 +3892,7 @@ mod renderer_runtime_inspector_response_channel_tests {
         assert_raw_session_sink_settlement(&raw, true);
     }
 
+    #[cfg(feature = "devtools")]
     #[test]
     fn raw_session_sink_deep_success_uses_wire_status() {
         let raw = format!(
@@ -3833,6 +3906,7 @@ mod renderer_runtime_inspector_response_channel_tests {
         assert_raw_session_sink_settlement(&raw, true);
     }
 
+    #[cfg(feature = "devtools")]
     #[test]
     fn raw_session_sink_error_stays_opaque() {
         assert_raw_session_sink_settlement(
@@ -3885,6 +3959,7 @@ mod renderer_runtime_inspector_response_channel_tests {
         assert!(rx.await.is_err());
     }
 
+    #[cfg(feature = "devtools")]
     #[tokio::test]
     async fn revoking_session_lease_leaves_terminal_settlement_to_protocol_owner() {
         let attachment = RendererAgentAttachmentId::allocate();
@@ -3983,6 +4058,7 @@ mod renderer_runtime_inspector_response_channel_tests {
         );
     }
 
+    #[cfg(feature = "devtools")]
     #[tokio::test]
     async fn late_response_waits_for_page_owner_publication() {
         let page_id = PageId::new_for_testing(1);
@@ -4032,6 +4108,7 @@ mod renderer_runtime_inspector_response_channel_tests {
         );
     }
 
+    #[cfg(feature = "devtools")]
     #[tokio::test]
     async fn session_output_changes_the_sink_without_bypassing_the_page_owner_boundary() {
         let page_id = PageId::new_for_testing(1);
@@ -4117,6 +4194,7 @@ mod renderer_runtime_inspector_response_channel_tests {
         channel.cancel();
     }
 
+    #[cfg(feature = "devtools")]
     #[tokio::test]
     async fn session_terminal_response_uses_essential_reserve_after_observation_saturation() {
         let page_id = PageId::new_for_testing(2);
@@ -4215,6 +4293,7 @@ mod renderer_runtime_inspector_response_channel_tests {
         drop(fence);
     }
 
+    #[cfg(feature = "devtools")]
     #[tokio::test]
     async fn rejected_session_terminal_response_does_not_settle_the_frontend_call() {
         let page_id = PageId::new_for_testing(3);
@@ -4266,6 +4345,7 @@ mod renderer_runtime_inspector_response_channel_tests {
         assert_eq!(transport_rx.recv().await, None);
     }
 
+    #[cfg(feature = "devtools")]
     #[tokio::test]
     async fn unbound_session_terminal_response_is_not_deferred_or_settled() {
         let page_id = PageId::new_for_testing(4);
@@ -4297,6 +4377,7 @@ mod renderer_runtime_inspector_response_channel_tests {
         assert_eq!(journal.pending_len(), 0);
     }
 
+    #[cfg(feature = "devtools")]
     #[tokio::test]
     async fn rotating_session_lease_rejects_stale_bound_sender_and_publishes_once() {
         let old_stream =
@@ -4385,6 +4466,7 @@ mod renderer_runtime_inspector_response_channel_tests {
         }
     }
 
+    #[cfg(feature = "devtools")]
     #[tokio::test]
     async fn owner_failure_replaces_parked_session_result_with_exactly_one_error() {
         let page_id = PageId::new_for_testing(21);
@@ -4457,6 +4539,7 @@ mod renderer_runtime_inspector_response_channel_tests {
         }
     }
 
+    #[cfg(feature = "devtools")]
     #[tokio::test]
     async fn page_settlement_keeps_nonresponse_output_beside_session_response() {
         let page_id = PageId::new_for_testing(22);
@@ -4519,6 +4602,7 @@ mod renderer_runtime_inspector_response_channel_tests {
         ));
     }
 
+    #[cfg(feature = "devtools")]
     #[test]
     #[should_panic(expected = "one Page command cannot settle multiple terminal session responses")]
     fn page_settlement_rejects_two_terminal_session_responses() {
@@ -4552,17 +4636,7 @@ mod renderer_runtime_inspector_response_channel_tests {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RendererRuntimeRealmInfo {
-    pub context_id: i64,
-    pub realm_id: Option<String>,
-    pub frame_id: Option<String>,
-    pub origin: String,
-    pub name: String,
-    pub is_default: bool,
-    pub context_type: String,
-    pub grant_universal_access: Option<bool>,
-}
+pub use moli_command_types::RuntimeRealmInfo as RendererRuntimeRealmInfo;
 
 /// A native DOM-agent reference, resolved against the current Page document.
 /// CDP frontend IDs must be published in their Inspector session. Internal
@@ -4858,131 +4932,16 @@ pub enum RendererDomDebuggerDomBreakpointResolution {
     UnknownType(String),
 }
 
-pub(crate) enum RendererInspectorPageCommand {
-    DispatchRuntimeProtocolMessage {
-        raw_json: String,
-    },
-    DispatchRuntimeProtocolMessageWithDeferredResponse {
-        raw_json: String,
-        deferred_response: RendererRuntimeInspectorResponseSender,
-    },
-    DispatchRuntimeProtocolMessageWithContextResolution {
-        action: String,
-        raw_json: String,
-    },
-    DispatchRuntimeProtocolMessageWithContextResolutionAndDeferredResponse {
-        action: String,
-        raw_json: String,
-        deferred_response: RendererRuntimeInspectorResponseSender,
-    },
-    RuntimeEnableEvents,
-    RuntimeDisableEvents,
-    RuntimeBindingEvents {
-        binding: crate::protocol_types::RuntimeBindingRegistration,
-        remove: bool,
-    },
-    /// The V8 session already executed removal. Only native restore metadata
-    /// remains to be committed before publishing the original native terminal.
-    CommitRuntimeBindingRemoval {
-        name: String,
-        output: Result<RendererRuntimeCommandOutput, String>,
-    },
-    ApplyRuntimeProtocolState {
-        session_restore_snapshots: Vec<RendererInspectorSessionRestoreSnapshot>,
-        isolated_worlds: Vec<crate::protocol_types::RuntimeIsolatedWorldDefinition>,
-        stored_runtime_bindings: Vec<crate::protocol_types::RuntimeBindingRegistration>,
-        session_runtime_bindings: Vec<crate::protocol_types::RuntimeBindingRegistration>,
-    },
-    DetachRuntimeInspectorSession {
-        pause_guard: RendererRuntimeInspectorSessionDetachGuard,
-    },
-    AddRuntimeBinding {
-        name: String,
-        execution_context_name: Option<String>,
-        execution_context_id: Option<i64>,
-    },
-    DomDebuggerGetEventListeners {
-        object_id: String,
-        depth: i32,
-        pierce: bool,
-    },
-    ComputedStylePropertiesForObjectId {
-        object_id: String,
-    },
-    PrepareElementClick {
-        object_id: String,
-    },
-    ScrollObjectNodeIntoViewIfNeeded {
-        object_id: String,
-        rect: Option<moli_page_types::DomScrollIntoViewRect>,
-    },
-    ClientRectForObjectId {
-        object_id: String,
-    },
-    DocumentGeometryForObjectId {
-        object_id: String,
-    },
-    NodeHasGeometryForObjectId {
-        object_id: String,
-    },
-    FocusDocumentNodeForObjectId {
-        object_id: String,
-    },
-    SetFileInputFilesForObjectId {
-        object_id: String,
-        files: Vec<crate::dom::native::SelectedFile>,
-        append: bool,
-    },
-    DocumentNodeSnapshotForObjectId {
-        include_whitespace: bool,
-        object_id: String,
-        depth: i32,
-        pierce: bool,
-        bind_frontend_nodes: bool,
-    },
-    RequestDocumentNodeForObjectId {
-        include_whitespace: bool,
-        object_id: String,
-    },
-    AccessibilityTreePayloadsForObjectId {
-        object_id: String,
-    },
-    AccessibilityNodeAndAncestorPayloadsForObjectId {
-        object_id: String,
-    },
-    AccessibilityPartialTreePayloadsForObjectId {
-        object_id: String,
-        fetch_relatives: bool,
-    },
-    OuterHtmlForObjectId {
-        object_id: String,
-        include_shadow_dom: bool,
-    },
-    ResolveRuntimeObjectForBackendNodeId {
-        backend_node_id: u32,
-        execution_context_id: Option<i64>,
-        object_group: Option<String>,
-    },
-    ResolveBlobObject {
-        object_id: String,
-    },
-}
-
 #[non_exhaustive]
 pub enum RendererPageCommand {
-    WebMcp {
-        session: DevToolsSessionKey,
-        command: moli_page_types::RendererWebMcpCommand,
-    },
-    // The call fits inline; its operation boxes the recursively contained page command.
-    Native(RendererCdpCall),
+    #[cfg(feature = "devtools")]
+    DevTools(RendererDevToolsPageCommand),
     /// Checks the original root Document on the renderer before executing an
     /// operation admitted while its browser-side Page is still being adopted.
     ForDocument {
         source_document: RendererDocumentLifecycleIdentity,
         command: Box<RendererPageCommand>,
     },
-    Inspector(RendererInspectorCommandEnvelope),
     EvaluateExpression {
         expression: String,
         await_promise: bool,
@@ -5038,99 +4997,14 @@ pub enum RendererPageCommand {
     RefreshFullPageState,
     PageDiagnosticsSnapshot,
     HasPendingLocationNavigation,
-    DispatchPreparedElementClick(RendererPreparedPointerClick),
     #[cfg(feature = "ace-protocol")]
     AcePageTask(Box<dyn crate::ace_page_task::AcePageTask>),
-    DispatchMouseEventAtPoint {
-        x: f64,
-        y: f64,
-        event_name: String,
-        button: i32,
-        buttons: Option<i32>,
-        click_count: i32,
-        delta_x: f64,
-        delta_y: f64,
-        pointer: RendererPointerEventProperties,
-        modifiers: u8,
-        /// `Input.setInterceptDrags` state of the issuing DevTools session.
-        intercept_drags: bool,
-    },
-    DispatchTouchEvent {
-        points: Vec<RendererTouchPoint>,
-        event_name: String,
-        activate: bool,
-    },
-    DispatchDragEventAtPoint {
-        x: f64,
-        y: f64,
-        event_name: String,
-        data: RendererDragData,
-        modifiers: u8,
-    },
-    ClearActiveDragDataTransfer,
-    CancelDragging,
-    InsertTextIntoActiveControl(String),
-    DispatchKeyEvent {
-        event_name: String,
-        key: String,
-        code: String,
-        text: String,
-        modifiers: u8,
-        location: u32,
-        auto_repeat: bool,
-        should_insert_text: bool,
-    },
-    DomDebuggerConfigureEventListenerBreakpoint {
-        inspector_session_id: Option<String>,
-        breakpoint: RendererDomDebuggerEventListenerBreakpoint,
-        enabled: bool,
-    },
-    DomDebuggerConfigureXhrBreakpoint {
-        inspector_session_id: Option<String>,
-        breakpoint: RendererDomDebuggerXhrBreakpoint,
-        enabled: bool,
-    },
-    DomDebuggerConfigureDomBreakpoint {
-        inspector_session_id: Option<String>,
-        frontend_node_id: u32,
-        breakpoint_type: String,
-        enabled: bool,
-    },
-    CreateIsolatedWorld {
-        name: String,
-        grant_universal_access: bool,
-        frame_id: Option<String>,
-    },
-    CreateIsolatedWorldRuntimeActivity {
-        inspector_session_id: Option<String>,
-        frame_id: Option<String>,
-        name: String,
-        grant_universal_access: bool,
-    },
-    InstallRuntimeBinding {
-        name: String,
-        execution_context_name: Option<String>,
-        execution_context_id: Option<i64>,
-    },
-    RemoveRuntimeBinding(String),
-    RemoveDefaultRuntimeBinding(String),
     QueueTopLevelHistoryTraversalByDelta(i64),
     RunPageSurfaceOverrideScript {
         source: String,
     },
-    AddDocumentStartScriptRuntimeActivity {
-        inspector_session_id: Option<String>,
-        script: DocumentStartScript,
-        run_immediately: bool,
-    },
-    RemoveDocumentStartScriptByRegistryKey(String),
     #[cfg(test)]
     SetStoredDocumentStartScripts(Vec<DocumentStartScript>),
-    SetRuntimeBindingState {
-        inspector_session_id: Option<String>,
-        stored_runtime_bindings: Vec<crate::protocol_types::RuntimeBindingRegistration>,
-        session_runtime_bindings: Vec<crate::protocol_types::RuntimeBindingRegistration>,
-    },
     DefaultExecutionContextId,
     DefaultOrInitialExecutionContextId,
     HasIsolatedWorldNamed {
@@ -5138,222 +5012,19 @@ pub enum RendererPageCommand {
         frame_id: Option<String>,
     },
     HasIsolatedExecutionContextId(i64),
-    EnsureIsolatedWorldsAttachedToInspector,
-    InspectorExecutionContextIdForIsolatedContext(i64),
-    IsolatedExecutionContextIdForInspectorContext(i64),
     RuntimeRealmInventory,
     LiveChildDefaultRuntimeRealmInventory,
     ChildFrameIdForDefaultExecutionContextId(i64),
     ChildDefaultExecutionContextIdForFrameId(String),
     RuntimeConsoleMessagesWithContext,
+    #[cfg(any(test, feature = "devtools"))]
     RuntimeHeapUsage,
-    PerformanceMetricSnapshot,
-    RuntimeCollectGarbage,
     #[cfg(test)]
     TakeDocumentLifecycleEvents,
     StopDocumentLifecycle,
-    ComputedStyleProperties {
-        reference: RendererDomNodeReference,
-    },
-    SetInlineStyleSheetTextForStyleSheetId {
-        inspector_session_id: Option<String>,
-        style_sheet_id: String,
-        text: String,
-    },
-    ScrollNodeIntoViewIfNeeded {
-        reference: RendererDomNodeReference,
-        rect: Option<moli_page_types::DomScrollIntoViewRect>,
-    },
-    ClientRectForBackendNodeId {
-        backend_node_id: u32,
-    },
-    DocumentGeometryForNode {
-        reference: RendererDomNodeReference,
-    },
-    DocumentHitTest {
-        inspector_session_id: Option<String>,
-        x: f64,
-        y: f64,
-        include_user_agent_shadow_dom: bool,
-        ignore_pointer_events_none: bool,
-    },
-    NodeHasGeometryForBackendNodeId {
-        backend_node_id: u32,
-    },
-    RemoveDocumentNode {
-        reference: RendererDomNodeReference,
-    },
-    MutateDocumentNodeAttribute {
-        reference: RendererDomNodeReference,
-        mutation: RendererDomAttributeMutation,
-    },
-    EditDocumentNode {
-        inspector_session_id: Option<String>,
-        edit: RendererDomEdit,
-    },
-    FocusDocumentNode {
-        reference: RendererDomNodeReference,
-    },
-    TriggerAutofill(RendererAutofillTriggerRequest),
     ResetNavigationHistory,
-    SetFileInputFilesForBackendNodeId {
-        backend_node_id: u32,
-        files: Vec<crate::dom::native::SelectedFile>,
-        append: bool,
-    },
-    DocumentNodeExistsForBackendNodeId {
-        backend_node_id: u32,
-    },
-    DocumentNodeSnapshotForBackendNodeId {
-        backend_node_id: u32,
-        depth: i32,
-        pierce: bool,
-    },
-    DocumentNodeSnapshotForNodeInInspectorSession {
-        inspector_session_id: Option<String>,
-        include_whitespace: bool,
-        reference: RendererDomNodeReference,
-        depth: i32,
-        pierce: bool,
-    },
-    DocumentNodeSnapshotForDocument {
-        inspector_session_id: Option<String>,
-        include_whitespace: bool,
-        depth: i32,
-        pierce: bool,
-    },
-    DiscardDomAgentFrontendBindings {
-        inspector_session_id: Option<String>,
-    },
-    DomSnapshotCapture {
-        top_frame_id: String,
-        options: RendererDomSnapshotCaptureOptions,
-    },
-    DocumentChildNodeSnapshotEventsForNode {
-        inspector_session_id: Option<String>,
-        include_whitespace: bool,
-        reference: RendererDomNodeReference,
-        depth: i32,
-        pierce: bool,
-    },
-    DocumentQuerySelectorForDocument {
-        inspector_session_id: Option<String>,
-        include_whitespace: bool,
-        selector: String,
-        multiple: bool,
-    },
-    DocumentQuerySelectorForChildFrameNode {
-        inspector_session_id: Option<String>,
-        include_whitespace: bool,
-        frame_id: String,
-        root: RendererDomNodeReference,
-        selector: String,
-        multiple: bool,
-    },
-    DocumentQuerySelectorForNode {
-        inspector_session_id: Option<String>,
-        include_whitespace: bool,
-        root: RendererDomNodeReference,
-        selector: String,
-        multiple: bool,
-    },
-    DocumentQuerySelectorWithChildNodeSnapshotEventsForNode {
-        inspector_session_id: Option<String>,
-        include_whitespace: bool,
-        root: RendererDomNodeReference,
-        selector: String,
-        multiple: bool,
-    },
-    DocumentPerformSearch {
-        inspector_session_id: Option<String>,
-        query: String,
-        include_user_agent_shadow_dom: bool,
-        include_whitespace: bool,
-    },
-    DocumentGetSearchResults {
-        inspector_session_id: Option<String>,
-        search_id: String,
-        from_index: usize,
-        to_index: usize,
-    },
-    DocumentDiscardSearchResults {
-        inspector_session_id: Option<String>,
-        search_id: String,
-    },
-    DocumentSetNodeStackTracesEnabled {
-        inspector_session_id: Option<String>,
-        enabled: bool,
-    },
-    DocumentNodeStackTrace {
-        inspector_session_id: Option<String>,
-        frontend_node_id: u32,
-    },
-    DocumentFrontendNodeBinding {
-        reference: RendererDomNodeReference,
-    },
-    RegisterDocumentBidiNodeBinding {
-        inspector_session_id: Option<String>,
-        shared_id: String,
-        backend_node_id: u32,
-    },
-    DocumentBidiNodeBinding {
-        inspector_session_id: Option<String>,
-        shared_id: String,
-    },
-    DocumentBidiNodeSharedIdForBackendNodeId {
-        inspector_session_id: Option<String>,
-        backend_node_id: u32,
-    },
-    DocumentNodeAttributes {
-        reference: RendererDomNodeReference,
-    },
-    DocumentNodeText {
-        reference: RendererDomNodeReference,
-    },
-    DocumentNodeProperty {
-        reference: RendererDomNodeReference,
-        name: String,
-    },
     AccessibilityTreeNodes {
         frame_id: Option<String>,
-    },
-    AccessibilityTreePayloadsForDocument {
-        max_depth: Option<i32>,
-    },
-    AccessibilityNodePayloadForDocument,
-    AccessibilityTreePayloadsForNode {
-        reference: RendererDomNodeReference,
-        max_depth: Option<i32>,
-    },
-    AccessibilityNodePayloadForNode {
-        reference: RendererDomNodeReference,
-    },
-    AccessibilityNodeAndAncestorPayloadsForNode {
-        reference: RendererDomNodeReference,
-    },
-    AccessibilityChildNodePayloadsForNode {
-        reference: RendererDomNodeReference,
-    },
-    AccessibilityPartialTreePayloadsForNode {
-        reference: RendererDomNodeReference,
-        fetch_relatives: bool,
-    },
-    AccessibilityTreePayloadsForChildFrame {
-        frame_id: String,
-        max_depth: Option<i32>,
-    },
-    AccessibilityNodePayloadForChildFrame {
-        frame_id: String,
-    },
-    StyleSheetPayloadForStyleSheetId {
-        inspector_session_id: Option<String>,
-        style_sheet_id: String,
-    },
-    StyleSheetInventoryForDocument {
-        inspector_session_id: Option<String>,
-    },
-    ResetCssAgentSession {
-        inspector_session_id: Option<String>,
     },
     OuterHtmlForDocument {
         include_shadow_dom: bool,
@@ -5372,88 +5043,12 @@ pub enum RendererPageCommand {
     PublishLayout,
     PrintToPdf(RendererPrintToPdfRequest),
     CaptureScreenshot(RendererCaptureScreenshotRequest),
-    CaptureScreencastFrame(RendererCaptureScreencastFrameRequest),
     BlobBytesForUuid {
         uuid: String,
     },
-    DocumentFrontendNodeIdsForBackendNodeIds {
-        inspector_session_id: Option<String>,
-        backend_node_ids: Vec<u32>,
-    },
     DocumentStorageKeySnapshot,
-    SearchResourceByLines(Box<RendererResourceSearchRequest>),
     ChildFrameTreeSnapshot,
-    ChildFrameOwnerNodeReference {
-        inspector_session_id: Option<String>,
-        frame_id: String,
-    },
-    ChildFrameDocumentRootNodeReference {
-        inspector_session_id: Option<String>,
-        frame_id: String,
-    },
-    ContinuePendingSubresourceFetch {
-        internal_id: u64,
-        url: Option<Url>,
-        method: Option<String>,
-        body: Option<Option<bytes::Bytes>>,
-        headers: Option<moli_fetch::RequestHeaderOverride>,
-        intercept_response: bool,
-        handle_auth_requests: bool,
-    },
-    ContinuePendingSubresourceAuth {
-        internal_id: u64,
-        auth: crate::SubresourceAuthCredentials,
-    },
-    CancelPendingSubresourceAuth {
-        internal_id: u64,
-    },
-    FailPendingSubresourceAuth {
-        internal_id: u64,
-        error_text: String,
-    },
-    FailPendingSubresourceFetch {
-        internal_id: u64,
-        error_text: String,
-    },
-    FulfillPendingSubresourceFetch {
-        internal_id: u64,
-        request_overrides: Option<Box<moli_fetch::RequestOverrides>>,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    },
-    ContinuePendingSubresourceResponse {
-        internal_id: u64,
-        response_code: Option<u16>,
-        response_headers: Option<Vec<(String, Vec<u8>)>>,
-    },
-    FailPendingSubresourceResponse {
-        internal_id: u64,
-        error_text: String,
-    },
-    FulfillPendingSubresourceResponse {
-        internal_id: u64,
-        response_code: u16,
-        response_headers: Vec<(String, Vec<u8>)>,
-        response_body: RendererSyntheticResponseBody,
-    },
-    ReceiveSyntheticWebSocketText {
-        socket_id: u64,
-        data: String,
-    },
-    ReceiveSyntheticWebSocketBinary {
-        socket_id: u64,
-        data: Vec<u8>,
-    },
-    CloseSyntheticWebSocketFromServer {
-        socket_id: u64,
-        code: Option<u16>,
-        reason: String,
-    },
     PendingSubresourceRequestCount,
-    SetFetchSubresourceInterception {
-        classes: crate::SubresourceInterceptionClasses,
-    },
     ReplaceBrowserResourceRuntime {
         resource_runtime: crate::network::BrowserResourceRuntime,
         navigator_identity: moli_browser_profile::BrowserIdentityProfile,
@@ -5463,12 +5058,6 @@ pub enum RendererPageCommand {
     ClearDocumentCookieFacadeOverrides,
     DocumentCookieTelemetrySnapshot,
     DocumentCookieOwnerSnapshot,
-    PrepareNetworkResourceLoad {
-        frame_id: String,
-        url: Url,
-        disable_cache: bool,
-        include_credentials: bool,
-    },
     PrepareAppManifestLoad,
     PublishAppManifestLoad(Box<crate::RendererAppManifestLoadPublication>),
     SetExtraHttpHeaders(moli_fetch::RequestHeaders),
@@ -5527,371 +5116,9 @@ pub enum RendererRuntimeRemoteObjectResolution {
 }
 
 impl RendererPageCommand {
-    fn inspector_command(
-        inspector_session_id: Option<String>,
-        command: RendererInspectorPageCommand,
-    ) -> Self {
-        Self::Inspector(RendererInspectorCommandEnvelope::new(
-            inspector_session_id,
-            command,
-        ))
-    }
-
-    pub fn dispatch_runtime_protocol_message(
-        inspector_session_id: Option<String>,
-        raw_json: String,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::DispatchRuntimeProtocolMessage { raw_json },
-        )
-    }
-
-    pub fn dispatch_runtime_protocol_message_with_deferred_response(
-        inspector_session_id: Option<String>,
-        raw_json: String,
-        deferred_response: RendererRuntimeInspectorResponseSender,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::DispatchRuntimeProtocolMessageWithDeferredResponse {
-                raw_json,
-                deferred_response,
-            },
-        )
-    }
-
-    pub fn dispatch_runtime_protocol_message_with_context_resolution(
-        inspector_session_id: Option<String>,
-        action: String,
-        raw_json: String,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::DispatchRuntimeProtocolMessageWithContextResolution {
-                action,
-                raw_json,
-            },
-        )
-    }
-
-    pub fn dispatch_runtime_protocol_message_with_context_resolution_and_deferred_response(
-        inspector_session_id: Option<String>,
-        action: String,
-        raw_json: String,
-        deferred_response: RendererRuntimeInspectorResponseSender,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::DispatchRuntimeProtocolMessageWithContextResolutionAndDeferredResponse {
-                action,
-                raw_json,
-                deferred_response,
-            },
-        )
-    }
-
-    pub fn runtime_enable_events(inspector_session_id: Option<String>) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::RuntimeEnableEvents,
-        )
-    }
-
-    pub fn runtime_disable_events(inspector_session_id: Option<String>) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::RuntimeDisableEvents,
-        )
-    }
-
-    pub fn runtime_binding_events(
-        inspector_session_id: Option<String>,
-        binding: crate::protocol_types::RuntimeBindingRegistration,
-        remove: bool,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::RuntimeBindingEvents { binding, remove },
-        )
-    }
-
-    pub fn apply_runtime_protocol_state(
-        inspector_session_id: Option<String>,
-        session_restore_snapshots: Vec<RendererInspectorSessionRestoreSnapshot>,
-        isolated_worlds: Vec<crate::protocol_types::RuntimeIsolatedWorldDefinition>,
-        stored_runtime_bindings: Vec<crate::protocol_types::RuntimeBindingRegistration>,
-        session_runtime_bindings: Vec<crate::protocol_types::RuntimeBindingRegistration>,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::ApplyRuntimeProtocolState {
-                session_restore_snapshots,
-                isolated_worlds,
-                stored_runtime_bindings,
-                session_runtime_bindings,
-            },
-        )
-    }
-
-    pub fn detach_runtime_inspector_session(
-        inspector_session_id: Option<String>,
-        pause_guard: RendererRuntimeInspectorSessionDetachGuard,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::DetachRuntimeInspectorSession { pause_guard },
-        )
-    }
-
-    pub fn add_runtime_binding(
-        inspector_session_id: Option<String>,
-        name: String,
-        execution_context_name: Option<String>,
-        execution_context_id: Option<i64>,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::AddRuntimeBinding {
-                name,
-                execution_context_name,
-                execution_context_id,
-            },
-        )
-    }
-
-    pub fn dom_debugger_get_event_listeners(
-        inspector_session_id: Option<String>,
-        object_id: String,
-        depth: i32,
-        pierce: bool,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::DomDebuggerGetEventListeners {
-                object_id,
-                depth,
-                pierce,
-            },
-        )
-    }
-
-    pub fn computed_style_properties_for_object_id(
-        inspector_session_id: Option<String>,
-        object_id: String,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::ComputedStylePropertiesForObjectId { object_id },
-        )
-    }
-
-    pub fn prepare_element_click(inspector_session_id: Option<String>, object_id: String) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::PrepareElementClick { object_id },
-        )
-    }
-
-    pub fn scroll_object_node_into_view_if_needed(
-        inspector_session_id: Option<String>,
-        object_id: String,
-        rect: Option<moli_page_types::DomScrollIntoViewRect>,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::ScrollObjectNodeIntoViewIfNeeded { object_id, rect },
-        )
-    }
-
-    pub fn client_rect_for_object_id(
-        inspector_session_id: Option<String>,
-        object_id: String,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::ClientRectForObjectId { object_id },
-        )
-    }
-
-    pub fn document_geometry_for_object_id(
-        inspector_session_id: Option<String>,
-        object_id: String,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::DocumentGeometryForObjectId { object_id },
-        )
-    }
-
-    pub fn node_has_geometry_for_object_id(
-        inspector_session_id: Option<String>,
-        object_id: String,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::NodeHasGeometryForObjectId { object_id },
-        )
-    }
-
-    pub fn focus_document_node_for_object_id(
-        inspector_session_id: Option<String>,
-        object_id: String,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::FocusDocumentNodeForObjectId { object_id },
-        )
-    }
-
-    pub fn set_file_input_files_for_object_id(
-        inspector_session_id: Option<String>,
-        object_id: String,
-        files: Vec<crate::dom::native::SelectedFile>,
-        append: bool,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::SetFileInputFilesForObjectId {
-                object_id,
-                files,
-                append,
-            },
-        )
-    }
-
-    pub fn document_node_snapshot_for_object_id(
-        inspector_session_id: Option<String>,
-        include_whitespace: bool,
-        object_id: String,
-        depth: i32,
-        pierce: bool,
-        bind_frontend_nodes: bool,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::DocumentNodeSnapshotForObjectId {
-                include_whitespace,
-                object_id,
-                depth,
-                pierce,
-                bind_frontend_nodes,
-            },
-        )
-    }
-
-    pub fn request_document_node_for_object_id(
-        inspector_session_id: Option<String>,
-        include_whitespace: bool,
-        object_id: String,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::RequestDocumentNodeForObjectId {
-                include_whitespace,
-                object_id,
-            },
-        )
-    }
-
-    pub fn accessibility_tree_payloads_for_object_id(
-        inspector_session_id: Option<String>,
-        object_id: String,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::AccessibilityTreePayloadsForObjectId { object_id },
-        )
-    }
-
-    pub fn accessibility_node_and_ancestor_payloads_for_object_id(
-        inspector_session_id: Option<String>,
-        object_id: String,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::AccessibilityNodeAndAncestorPayloadsForObjectId {
-                object_id,
-            },
-        )
-    }
-
-    pub fn accessibility_partial_tree_payloads_for_object_id(
-        inspector_session_id: Option<String>,
-        object_id: String,
-        fetch_relatives: bool,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::AccessibilityPartialTreePayloadsForObjectId {
-                object_id,
-                fetch_relatives,
-            },
-        )
-    }
-
-    pub fn outer_html_for_object_id(
-        inspector_session_id: Option<String>,
-        object_id: String,
-        include_shadow_dom: bool,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::OuterHtmlForObjectId {
-                object_id,
-                include_shadow_dom,
-            },
-        )
-    }
-
-    pub fn resolve_runtime_object_for_backend_node_id(
-        inspector_session_id: Option<String>,
-        backend_node_id: u32,
-        execution_context_id: Option<i64>,
-        object_group: Option<String>,
-    ) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::ResolveRuntimeObjectForBackendNodeId {
-                backend_node_id,
-                execution_context_id,
-                object_group,
-            },
-        )
-    }
-
-    pub fn resolve_blob_object(inspector_session_id: Option<String>, object_id: String) -> Self {
-        Self::inspector_command(
-            inspector_session_id,
-            RendererInspectorPageCommand::ResolveBlobObject { object_id },
-        )
-    }
-
-    /// Metadata is structurally present for every command that can access a
-    /// frontend V8 Inspector session; no command-variant allowlist is involved.
-    #[cfg(test)]
-    pub(crate) fn inspector_ticket(&self) -> Option<&RendererInspectorIngressTicket> {
-        match self {
-            Self::Inspector(envelope) => Some(envelope.ticket()),
-            _ => None,
-        }
-    }
-
-    pub fn bind_inspector_attachment(&mut self, attachment: RendererAgentAttachmentId) {
-        if let Self::Native(command) = self {
-            command
-                .operation
-                .command
-                .bind_inspector_attachment(attachment);
-            return;
-        }
-        if let Self::Inspector(envelope) = self {
-            envelope.bind_attachment(attachment);
-        }
-    }
-
     pub(crate) fn interruptible_by_javascript_dialog(&self) -> bool {
-        if let Self::Native(command) = self {
+        #[cfg(feature = "devtools")]
+        if let Self::DevTools(RendererDevToolsPageCommand::Native(command)) = self {
             return command
                 .operation
                 .command
@@ -5914,92 +5141,11 @@ impl RendererPageCommand {
 
     pub(crate) fn cdp_nav_timing_label(&self) -> Option<&'static str> {
         match self {
-            Self::Native(command) => command.operation.command.cdp_nav_timing_label(),
-            Self::Inspector(envelope) => envelope.cdp_nav_timing_label(),
+            #[cfg(feature = "devtools")]
+            Self::DevTools(command) => command.cdp_nav_timing_label(),
             Self::DocumentStorageKeySnapshot => Some("DocumentStorageKeySnapshot"),
-            Self::SearchResourceByLines(..) => Some("SearchResourceByLines"),
-            Self::CreateIsolatedWorldRuntimeActivity { .. } => {
-                Some("CreateIsolatedWorldRuntimeActivity")
-            }
-            Self::AddDocumentStartScriptRuntimeActivity { .. } => {
-                Some("AddDocumentStartScriptRuntimeActivity")
-            }
-            Self::RemoveDocumentStartScriptByRegistryKey(_) => {
-                Some("RemoveDocumentStartScriptByRegistryKey")
-            }
-            Self::SetRuntimeBindingState { .. } => Some("SetRuntimeBindingState"),
             Self::ChildFrameTreeSnapshot => Some("ChildFrameTreeSnapshot"),
-            Self::ChildFrameOwnerNodeReference { .. } => Some("ChildFrameOwnerNodeReference"),
-            Self::ChildFrameDocumentRootNodeReference { .. } => {
-                Some("ChildFrameDocumentRootNodeReference")
-            }
-            Self::DocumentNodeExistsForBackendNodeId { .. } => {
-                Some("DocumentNodeExistsForBackendNodeId")
-            }
-            Self::DocumentNodeSnapshotForBackendNodeId { .. } => {
-                Some("DocumentNodeSnapshotForBackendNodeId")
-            }
-            Self::DocumentNodeSnapshotForNodeInInspectorSession { .. } => {
-                Some("DocumentNodeSnapshotForNodeInInspectorSession")
-            }
-            Self::DocumentNodeSnapshotForDocument { .. } => Some("DocumentNodeSnapshotForDocument"),
-            Self::DiscardDomAgentFrontendBindings { .. } => Some("DiscardDomAgentFrontendBindings"),
-            Self::DomSnapshotCapture { .. } => Some("DomSnapshotCapture"),
-            Self::DocumentChildNodeSnapshotEventsForNode { .. } => {
-                Some("DocumentChildNodeSnapshotEventsForNode")
-            }
-            Self::DocumentQuerySelectorForDocument { .. } => {
-                Some("DocumentQuerySelectorForDocument")
-            }
-            Self::DocumentQuerySelectorForChildFrameNode { .. } => {
-                Some("DocumentQuerySelectorForChildFrameNode")
-            }
-            Self::DocumentQuerySelectorForNode { .. } => Some("DocumentQuerySelectorForNode"),
-            Self::DocumentQuerySelectorWithChildNodeSnapshotEventsForNode { .. } => {
-                Some("DocumentQuerySelectorWithChildNodeSnapshotEventsForNode")
-            }
-            Self::DocumentPerformSearch { .. } => Some("DocumentPerformSearch"),
-            Self::DocumentGetSearchResults { .. } => Some("DocumentGetSearchResults"),
-            Self::DocumentSetNodeStackTracesEnabled { .. } => {
-                Some("DocumentSetNodeStackTracesEnabled")
-            }
-            Self::DocumentNodeStackTrace { .. } => Some("DocumentNodeStackTrace"),
-            Self::DocumentDiscardSearchResults { .. } => Some("DocumentDiscardSearchResults"),
-            Self::DocumentFrontendNodeBinding { .. } => Some("DocumentFrontendNodeBinding"),
-            Self::RegisterDocumentBidiNodeBinding { .. } => Some("RegisterDocumentBidiNodeBinding"),
-            Self::DocumentBidiNodeBinding { .. } => Some("DocumentBidiNodeBinding"),
-            Self::DocumentBidiNodeSharedIdForBackendNodeId { .. } => {
-                Some("DocumentBidiNodeSharedIdForBackendNodeId")
-            }
-            Self::DocumentNodeAttributes { .. } => Some("DocumentNodeAttributes"),
-            Self::DocumentNodeText { .. } => Some("DocumentNodeText"),
-            Self::DocumentNodeProperty { .. } => Some("DocumentNodeProperty"),
             Self::AccessibilityTreeNodes { .. } => Some("AccessibilityTreeNodes"),
-            Self::AccessibilityTreePayloadsForDocument { .. } => {
-                Some("AccessibilityTreePayloadsForDocument")
-            }
-            Self::AccessibilityNodePayloadForDocument => {
-                Some("AccessibilityNodePayloadForDocument")
-            }
-            Self::AccessibilityTreePayloadsForNode { .. } => {
-                Some("AccessibilityTreePayloadsForNode")
-            }
-            Self::AccessibilityNodePayloadForNode { .. } => Some("AccessibilityNodePayloadForNode"),
-            Self::AccessibilityNodeAndAncestorPayloadsForNode { .. } => {
-                Some("AccessibilityNodeAndAncestorPayloadsForNode")
-            }
-            Self::AccessibilityChildNodePayloadsForNode { .. } => {
-                Some("AccessibilityChildNodePayloadsForNode")
-            }
-            Self::AccessibilityPartialTreePayloadsForNode { .. } => {
-                Some("AccessibilityPartialTreePayloadsForNode")
-            }
-            Self::AccessibilityTreePayloadsForChildFrame { .. } => {
-                Some("AccessibilityTreePayloadsForChildFrame")
-            }
-            Self::AccessibilityNodePayloadForChildFrame { .. } => {
-                Some("AccessibilityNodePayloadForChildFrame")
-            }
             Self::OuterHtmlForDocument { .. } => Some("OuterHtmlForDocument"),
             Self::OuterHtmlForNode { .. } => Some("OuterHtmlForNode"),
             Self::RenderMarkdown { .. } => Some("RenderMarkdown"),
@@ -6008,27 +5154,7 @@ impl RendererPageCommand {
             Self::PublishLayout => Some("PublishLayout"),
             Self::PrintToPdf(_) => Some("PrintToPdf"),
             Self::CaptureScreenshot(_) => Some("CaptureScreenshot"),
-            Self::CaptureScreencastFrame(_) => Some("CaptureScreencastFrame"),
-            Self::ScrollNodeIntoViewIfNeeded { .. } => Some("ScrollNodeIntoViewIfNeeded"),
-            Self::ClientRectForBackendNodeId { .. } => Some("ClientRectForBackendNodeId"),
-            Self::DocumentGeometryForNode { .. } => Some("DocumentGeometryForNode"),
-            Self::DocumentHitTest { .. } => Some("DocumentHitTest"),
-            Self::NodeHasGeometryForBackendNodeId { .. } => Some("NodeHasGeometryForBackendNodeId"),
-            Self::RemoveDocumentNode { .. } => Some("RemoveDocumentNode"),
-            Self::EditDocumentNode { .. } => Some("EditDocumentNode"),
-            Self::TriggerAutofill(_) => Some("TriggerAutofill"),
-            Self::WebMcp { .. } => Some("WebMCP"),
-            Self::ComputedStyleProperties { .. } => Some("ComputedStyleProperties"),
-            Self::SetFileInputFilesForBackendNodeId { .. } => {
-                Some("SetFileInputFilesForBackendNodeId")
-            }
             Self::BlobBytesForUuid { .. } => Some("BlobBytesForUuid"),
-            Self::DocumentFrontendNodeIdsForBackendNodeIds { .. } => {
-                Some("DocumentFrontendNodeIdsForBackendNodeIds")
-            }
-            Self::EnsureIsolatedWorldsAttachedToInspector => {
-                Some("EnsureIsolatedWorldsAttachedToInspector")
-            }
             Self::RuntimeRealmInventory => Some("RuntimeRealmInventory"),
             Self::LiveChildDefaultRuntimeRealmInventory => {
                 Some("LiveChildDefaultRuntimeRealmInventory")
@@ -6038,113 +5164,13 @@ impl RendererPageCommand {
     }
 }
 
-#[cfg(test)]
-mod renderer_inspector_command_envelope_tests {
-    use super::*;
-
-    fn assert_ticket(
-        command: &RendererPageCommand,
-        session: DevToolsSessionKey,
-        route: RendererInspectorCommandRoute,
-    ) {
-        let ticket = command
-            .inspector_ticket()
-            .expect("every frontend V8 Inspector operation must carry an ingress ticket");
-        assert_eq!(ticket.session(), &session);
-        assert_eq!(ticket.route(), route);
-        assert!(ticket.sequence() > 0);
-    }
-
-    #[test]
-    fn raw_special_and_runtime_object_commands_share_one_inspector_boundary() {
-        let attached = Some("SID-envelope".to_owned());
-        let main_thread_commands = [
-            RendererPageCommand::runtime_enable_events(attached.clone()),
-            RendererPageCommand::apply_runtime_protocol_state(
-                attached.clone(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            ),
-            RendererPageCommand::add_runtime_binding(
-                attached.clone(),
-                "binding".to_owned(),
-                None,
-                None,
-            ),
-            RendererPageCommand::computed_style_properties_for_object_id(
-                attached,
-                "runtime-object".to_owned(),
-            ),
-        ];
-        for command in &main_thread_commands {
-            assert_ticket(
-                command,
-                DevToolsSessionKey::Attached("SID-envelope".to_owned()),
-                RendererInspectorCommandRoute::MainThread,
-            );
-        }
-
-        assert!(
-            RendererPageCommand::PageDiagnosticsSnapshot
-                .inspector_ticket()
-                .is_none(),
-            "ordinary Page commands must remain outside Inspector lanes"
-        );
-    }
-
-    #[test]
-    fn empty_wire_session_id_normalizes_to_the_primary_session() {
-        let command = RendererPageCommand::runtime_enable_events(Some(String::new()));
-        assert_ticket(
-            &command,
-            DevToolsSessionKey::Primary,
-            RendererInspectorCommandRoute::MainThread,
-        );
-    }
-
-    #[test]
-    fn ingress_tickets_bind_one_attachment_and_allocate_monotonic_sequences() {
-        let mut first = RendererPageCommand::runtime_enable_events(Some("SID-first".to_owned()));
-        let second = RendererPageCommand::runtime_enable_events(Some("SID-second".to_owned()));
-        let first_sequence = first
-            .inspector_ticket()
-            .expect("first Inspector ticket")
-            .sequence();
-        let second_sequence = second
-            .inspector_ticket()
-            .expect("second Inspector ticket")
-            .sequence();
-        assert!(second_sequence > first_sequence);
-
-        let attachment = RendererAgentAttachmentId::allocate();
-        first.bind_inspector_attachment(attachment);
-        first.bind_inspector_attachment(attachment);
-        assert_eq!(
-            first
-                .inspector_ticket()
-                .expect("bound Inspector ticket")
-                .attachment(),
-            Some(attachment)
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "cannot be retargeted to another attachment")]
-    fn ingress_ticket_cannot_be_retargeted_during_navigation() {
-        let mut command = RendererPageCommand::runtime_enable_events(None);
-        command.bind_inspector_attachment(RendererAgentAttachmentId::allocate());
-        command.bind_inspector_attachment(RendererAgentAttachmentId::allocate());
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct RendererRuntimeRemoteObject {
     protocol_value: Value,
 }
 
 impl RendererRuntimeRemoteObject {
+    #[cfg(feature = "devtools")]
     pub(crate) fn from_protocol_value(protocol_value: Value) -> Option<Self> {
         let is_object = protocol_value.get("type").and_then(Value::as_str) == Some("object");
         let is_node = protocol_value.get("subtype").and_then(Value::as_str) == Some("node");
@@ -6265,6 +5291,7 @@ pub struct RendererDomSnapshotCapturePayload {
 }
 
 impl RendererDomSnapshotCapturePayload {
+    #[cfg(feature = "devtools")]
     pub(crate) fn from_protocol_payload(protocol_payload: Value) -> Self {
         Self { protocol_payload }
     }
@@ -6293,19 +5320,17 @@ impl RendererRuntimeEvaluationResult {
     }
 }
 
+#[non_exhaustive]
 pub enum RendererPageReply {
-    WebMcp(std::result::Result<Option<u64>, moli_page_types::RendererWebMcpError>),
-    NativeCommandReady(Box<RendererNativeCommandReadyResponse>),
-    NativeCommandPublished,
+    #[cfg(feature = "devtools")]
+    DevTools(RendererDevToolsPageReply),
     ElementClickPreparation(Result<RendererElementClickTarget, RendererElementClickError>),
-    ElementClickDispatch(Result<RendererInputDispatchOutcome, RendererElementClickError>),
     RuntimeEvaluationResult(RendererRuntimeEvaluationResult),
     RuntimeInspectorProtocolMessages(RendererRuntimeCommandOutput),
     RuntimeConsoleMessageSnapshots(Vec<RuntimeConsoleMessageSnapshot>),
+    #[cfg(any(test, feature = "devtools"))]
     RuntimeHeapUsage(Box<RendererRuntimeHeapUsage>),
-    PerformanceMetricSnapshot(Box<RendererPerformanceMetricSnapshot>),
     RuntimeRealmInventory(Vec<RendererRuntimeRealmInfo>),
-    ExecutionContextId(i64),
     ExecutionContextIds(Vec<i64>),
     OptionalExecutionContextId(Option<i64>),
     OptionalDocumentNodeObjectSnapshot(Box<Option<DocumentNodeObjectSnapshot>>),
@@ -6313,54 +5338,16 @@ pub enum RendererPageReply {
         node_id: Option<u32>,
         child_node_snapshot_events: Option<RendererDocumentChildNodeSnapshotEvents>,
     },
-    OptionalDomSnapshotCapturePayload(Option<RendererDomSnapshotCapturePayload>),
     OptionalDocumentChildNodeSnapshots(Option<RendererDocumentChildNodeSnapshots>),
     OptionalDocumentChildNodeSnapshotEvents(Option<RendererDocumentChildNodeSnapshotEvents>),
-    DocumentQuerySelectorResolution(RendererDocumentQuerySelectorResolution),
     DocumentQuerySelectorNode(RendererDocumentQuerySelectorNode),
-    DocumentQuerySelectorWithChildNodeSnapshotEvents(
-        RendererDocumentQuerySelectorWithChildNodeSnapshotEvents,
-    ),
-    DocumentPerformSearch(RendererDomSearchRegistration),
-    DocumentSearchResults {
-        resolution: RendererDomSearchResultsResolution,
-        child_node_snapshot_events: Option<RendererDocumentChildNodeSnapshotEvents>,
-    },
-    DocumentSearchResultsDiscarded,
-    DocumentNodeStackTracesEnabled,
-    DocumentNodeStackTrace(RendererDomNodeStackTraceResolution),
-    DocumentFrontendNodeBinding(RendererDomFrontendNodeBindingResolution),
-    DocumentBidiNodeBinding(RendererDomBidiNodeBindingResolution),
-    DocumentBidiNodeSharedId(RendererDomBidiNodeSharedIdResolution),
-    DocumentBidiNodeBindingRegistered,
-    DocumentNodeAttributesResolution(RendererDocumentNodeAttributesResolution),
-    DocumentNodeTextResolution(RendererDocumentNodeTextResolution),
-    DocumentNodePropertyResolution(RendererDocumentNodePropertyResolution),
     OptionalAccessibilityNodes(Option<Vec<moli_dom::accessibility::AccessibilityNode>>),
-    OptionalAccessibilityPayloads(Option<Vec<Value>>),
-    OptionalAccessibilityPayload(Option<Value>),
-    OptionalAccessibilityPayloadsForObjectId(Option<RendererAccessibilityPayloadsForObjectId>),
-    OptionalStyleSheetPayload(Option<RendererStyleSheetPayload>),
-    StyleSheetInventory(RendererStyleSheetInventoryUpdate),
-    DocumentFrontendNodeIds(RendererDocumentFrontendNodeIdsResolution),
     OptionalDocumentNodeReference(Option<RendererDocumentNodeReference>),
     OptionalClientRect(Option<ClientRect>),
-    OptionalDocumentNodeClientRect(Option<RendererDocumentNodeClientRect>),
-    OptionalDocumentNodeGeometry(Option<RendererDocumentNodeGeometry>),
-    OptionalDocumentHitTest(Option<RendererDocumentHitTestResult>),
     RuntimeRemoteObjectResolution(RendererRuntimeRemoteObjectResolution),
-    DomDebuggerEventListeners(RendererDomDebuggerEventListenersResolution),
-    DomDebuggerDomBreakpoint(RendererDomDebuggerDomBreakpointResolution),
     BlobUuid(String),
     OptionalBlobBytes(Option<Arc<[u8]>>),
-    ComputedStyleProperties(Option<Vec<(String, String)>>),
-    DomAttributeMutationOutcome(RendererDomAttributeMutationOutcome),
-    DomEditOutcome(RendererDomEditOutcome),
-    DomFocusOutcome(RendererDomFocusOutcome),
-    AutofillTriggerOutcome(RendererAutofillTriggerOutcome),
     DocumentStorageKey(String),
-    ResourceTextSearchOutcome(RendererResourceTextSearchOutcome),
-    NetworkResourceLoadPreparation(crate::network::RendererNetworkResourceLoadPreparation),
     AppManifestLoadPreparation(crate::RendererAppManifestLoadPreparation),
     ChildFrameTreeSnapshots(Vec<ChildFrameTreeSnapshot>),
     DocumentStartScriptResult(Option<(i64, bool)>),
@@ -6370,11 +5357,8 @@ pub enum RendererPageReply {
     PageDiagnosticsSnapshot(RendererPageDiagnosticsSnapshot),
     #[cfg(feature = "ace-protocol")]
     AcePageTask(Box<crate::ace_page_task::AcePageTaskExecution>),
-    InputDispatchOutcome(RendererInputDispatchOutcome),
     SetDocumentContentResult(RendererSetDocumentContentResult),
-    ScrollIntoViewResult(RendererScrollIntoViewResult),
     Bool(bool),
-    OptionalBool(Option<bool>),
     OptionalString(Option<String>),
     SerializedDocument {
         url: String,
@@ -6386,7 +5370,6 @@ pub enum RendererPageReply {
     LayoutMetrics(RendererLayoutMetrics),
     PrintToPdf(RendererPrintToPdfReply),
     CaptureScreenshot(RendererCaptureScreenshotReply),
-    CaptureScreencastFrame(RendererCaptureScreencastFrameReply),
     Unit,
 }
 
@@ -6562,24 +5545,20 @@ impl RendererPageTable {
 impl RendererPageReply {
     pub(crate) fn input_dispatch_outcomes(&self) -> &[RendererInputDispatchOutcome] {
         match self {
-            Self::InputDispatchOutcome(outcome) | Self::ElementClickDispatch(Ok(outcome)) => {
-                std::slice::from_ref(outcome)
-            }
+            #[cfg(feature = "devtools")]
+            Self::DevTools(reply) => reply.input_dispatch_outcomes(),
             #[cfg(feature = "ace-protocol")]
             Self::AcePageTask(result) => &result.input_outcomes,
-            Self::NativeCommandReady(ready) => ready.input_dispatch_outcomes(),
             _ => &[],
         }
     }
 
     pub(crate) fn input_dispatch_outcomes_mut(&mut self) -> &mut [RendererInputDispatchOutcome] {
         match self {
-            Self::InputDispatchOutcome(outcome) | Self::ElementClickDispatch(Ok(outcome)) => {
-                std::slice::from_mut(outcome)
-            }
+            #[cfg(feature = "devtools")]
+            Self::DevTools(reply) => reply.input_dispatch_outcomes_mut(),
             #[cfg(feature = "ace-protocol")]
             Self::AcePageTask(result) => &mut result.input_outcomes,
-            Self::NativeCommandReady(ready) => ready.input_dispatch_outcomes_mut(),
             _ => &mut [],
         }
     }

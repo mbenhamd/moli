@@ -114,30 +114,6 @@ pub(super) enum PendingSubresourceContinuation {
     WebSocket(PendingWebSocketConnection),
     /// A child frame navigation held before its request leaves the renderer.
     ChildDocument(Box<crate::native_bridge::ChildDocumentFetch>),
-    WorkerFetch {
-        worker_id: DedicatedWorkerId,
-        fetch_id: u32,
-    },
-    WorkerXhr {
-        worker_id: DedicatedWorkerId,
-        xhr_id: u32,
-    },
-    WorkerCspReport {
-        worker_id: DedicatedWorkerId,
-        report_id: u32,
-    },
-    SharedWorkerFetch {
-        instance_id: moli_shared_worker::SharedWorkerInstanceId,
-        fetch_id: u32,
-    },
-    SharedWorkerXhr {
-        instance_id: moli_shared_worker::SharedWorkerInstanceId,
-        xhr_id: u32,
-    },
-    SharedWorkerCspReport {
-        instance_id: moli_shared_worker::SharedWorkerInstanceId,
-        report_id: u32,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -181,15 +157,6 @@ impl PendingSubresourceContinuation {
                 | Self::TextTrack { .. }
                 | Self::StylesheetSubresource { .. }
         )
-    }
-
-    pub(super) fn dedicated_worker_id(&self) -> Option<DedicatedWorkerId> {
-        match self {
-            Self::WorkerFetch { worker_id, .. }
-            | Self::WorkerXhr { worker_id, .. }
-            | Self::WorkerCspReport { worker_id, .. } => Some(*worker_id),
-            _ => None,
-        }
     }
 
     pub(super) fn stylesheet_subresource_owner(
@@ -247,6 +214,7 @@ impl PendingSubresourceContinuation {
 
 pub(super) struct PendingWindowFetchContinuation {
     pub(super) intercepted_request: Option<Box<moli_fetch::Request>>,
+    pub(super) response_metadata: Option<moli_fetch_types::FetchResponseMetadata>,
     promise: PendingWindowFetchPromise,
     resource_timing: crate::context_bootstrap::FetchResourceTiming,
     keepalive: bool,
@@ -271,6 +239,7 @@ impl PendingWindowFetchContinuation {
     ) -> Self {
         Self {
             intercepted_request: None,
+            response_metadata: None,
             promise: PendingWindowFetchPromise::Active(resolver),
             resource_timing,
             keepalive,
@@ -653,14 +622,6 @@ pub(super) struct RunningSubresourceFetchState {
     pub(super) initial_auth_network_request_headers: Option<Vec<(String, String)>>,
 }
 
-pub(super) struct InFlightWorkerSubresourceFetchState {
-    pub(super) pending: PendingSubresourceFetchState,
-    pub(super) request_url: Url,
-    pub(super) request_method: String,
-    pub(super) request_headers: moli_fetch::RequestHeaders,
-    pub(super) request_body: Option<String>,
-}
-
 #[derive(Debug)]
 pub(super) struct AsyncSubresourceFetchCompletion {
     pub(super) internal_id: u64,
@@ -930,7 +891,7 @@ pub(crate) enum AsyncSubresourceFetchEventTarget {
 #[derive(Debug)]
 pub(super) enum AsyncSubresourceFetchEvent {
     InterceptionOutputReady(crate::network::interception_output::InterceptionOutputWake),
-    InterceptedXhrCompleted(Box<crate::network_host::controlled_xhr::XhrLoadResult>),
+    InterceptedXhrCompleted(Box<crate::network_host::controlled_resource::XhrLoadResult>),
     InterceptedXhrStreamingStarted {
         info: Box<PendingSubresourceFetchInfo>,
         started: Box<AsyncSubresourceStreamingStarted>,
@@ -1726,7 +1687,10 @@ pub(super) struct ChildDocumentDownload {
 #[derive(Debug)]
 pub(super) enum ChildDocumentLoadOutcome {
     Loaded(Box<LoadedChildDocument>),
-    IgnoredNavigation(Box<crate::protocol_types::ChildFrameDocumentNetworkSnapshot>),
+    IgnoredNavigation {
+        network: Box<crate::protocol_types::ChildFrameDocumentNetworkSnapshot>,
+        resource_timing_status: Option<u16>,
+    },
     Download(Box<ChildDocumentDownload>),
     Redirect(Box<crate::native_bridge::ChildDocumentFetch>),
 }
@@ -1826,7 +1790,7 @@ impl ChildDocumentLoadCompletion {
     ) -> Option<&crate::protocol_types::ChildFrameDocumentNetworkSnapshot> {
         match &self.result {
             Ok(ChildDocumentLoadOutcome::Loaded(loaded)) => loaded.document_network.as_ref(),
-            Ok(ChildDocumentLoadOutcome::IgnoredNavigation(network)) => Some(network),
+            Ok(ChildDocumentLoadOutcome::IgnoredNavigation { network, .. }) => Some(network),
             Ok(ChildDocumentLoadOutcome::Download(download)) => Some(&download.network),
             Ok(ChildDocumentLoadOutcome::Redirect(_)) | Err(_) => None,
         }

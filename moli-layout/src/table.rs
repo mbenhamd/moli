@@ -423,13 +423,12 @@ where
             *last_baseline += top_height;
         }
         output.size.height += top_height + bottom_height;
-        output.scrollable_overflow_rect.bottom += top_height + bottom_height;
-        output.scrollable_overflow_rect.right =
-            output.scrollable_overflow_rect.right.min(output.size.width);
-        output.scrollable_overflow_rect.bottom = output
-            .scrollable_overflow_rect
-            .bottom
-            .min(output.size.height);
+        let mut overflow = output.scrollable_overflow_rect.rect();
+        overflow.bottom += top_height + bottom_height;
+        overflow.right = overflow.right.min(output.size.width);
+        overflow.bottom = overflow.bottom.min(output.size.height);
+        output.scrollable_overflow_rect =
+            taffy::ScrollableOverflow::new(overflow, output.scrollable_overflow_rect.is_reversed());
     }
     output
 }
@@ -1539,7 +1538,11 @@ fn set_table_part_layout<N>(
         order: 0,
         location: Point { x, y },
         size: Size { width, height },
-        scrollable_overflow_rect: Size { width, height }.into(),
+        scrollable_overflow_rect: (
+            Rect::from(Size { width, height }),
+            Point { x: false, y: false },
+        )
+            .into(),
         scrollbar_size: Size::ZERO,
         border: Rect::ZERO,
         padding: Rect::ZERO,

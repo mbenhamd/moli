@@ -992,8 +992,11 @@ impl RendererOwnerLocalStore {
                     .loader
                     .set_cache_disabled(configuration.cache_disabled);
                 request.blocked_url_patterns = configuration.blocked_url_patterns;
-                request.fetch_subresource_interception_classes =
-                    configuration.fetch_subresource_interception_classes;
+                #[cfg(feature = "devtools")]
+                {
+                    request.fetch_subresource_interception_classes =
+                        configuration.fetch_subresource_interception_classes;
+                }
             }};
         }
         apply_configuration!(&mut residence.request);
@@ -2475,6 +2478,7 @@ impl RendererOwnerLocalStore {
                 .expect("an attached Page must own a renderer script environment")
                 .output_journal(),
         );
+        #[cfg(feature = "devtools")]
         devtools_target
             .main_ref()
             .configure_owner_wake(owner.render_runtime.clone());
@@ -2763,6 +2767,7 @@ impl RendererOwnerLocalStore {
             .document_replacement_lifecycle_action_snapshot();
         let command_epoch = Self::advance_command_epoch(entry);
         let slot = entry.slot.clone();
+        #[cfg(feature = "devtools")]
         let _nested_main_page = super::nested_main::bind_active_nested_main_page(entry);
         let mut reply = slot
             .dispatch_async_owned(command_epoch, entry.page_vm_mut(), command)

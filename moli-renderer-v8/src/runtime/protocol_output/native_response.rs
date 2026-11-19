@@ -4,6 +4,7 @@
 //! metadata here. Internal queries continue to return their typed values to
 //! their continuation; they never acquire this frontend publication capability.
 
+use crate::runtime::RendererDevToolsPageCommand;
 use std::convert::Infallible;
 
 use moli_page_types::{DevToolsSessionKey, FrontendCommandId, RendererAgentAttachmentId};
@@ -16,87 +17,17 @@ use super::{
 };
 use crate::runtime::{RendererPageCommand, RendererPageReply};
 
-/// A resolved native frontend reply. The projection captures only immutable
-/// protocol metadata at admission; it cannot borrow a Browser or live Page.
-/// Both success and backend errors are published at the renderer boundary.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RendererNativeProtocolResponse {
-    pub result: Result<serde_json::Value, RendererNativeProtocolError>,
-    pub notifications: Vec<RendererNativeProtocolNotification>,
-    pub state_updates: Vec<RendererNativeProtocolStateUpdate>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RendererNativeProtocolError {
-    pub code: i32,
-    pub message: String,
-}
-
-/// Native notifications keep the semantic sidecars needed by non-CDP
-/// observers. JSON-only events and DOM automation events share one ordered
-/// prefix; neither can be reconstructed from mutable Page state at drain.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RendererNativeProtocolNotification {
-    Json(serde_json::Value),
-    DomSetChildNodes {
-        parent_node_id: u32,
-        nodes: Vec<serde_json::Value>,
-    },
-}
-
-impl From<serde_json::Value> for RendererNativeProtocolNotification {
-    fn from(value: serde_json::Value) -> Self {
-        Self::Json(value)
-    }
-}
-
-impl RendererNativeProtocolResponse {
-    pub fn success(result: serde_json::Value) -> Self {
-        Self {
-            result: Ok(result),
-            notifications: Vec::new(),
-            state_updates: Vec::new(),
-        }
-    }
-
-    pub fn error(code: i32, message: impl Into<String>) -> Self {
-        Self {
-            result: Err(RendererNativeProtocolError {
-                code,
-                message: message.into(),
-            }),
-            notifications: Vec::new(),
-            state_updates: Vec::new(),
-        }
-    }
-}
-
-/// Browser mirrors committed with a native terminal. These are frozen data,
-/// never callbacks into a live Page. Attachment retirement discards document
-/// updates; command-local replay can instead fail the terminal at projection.
-#[derive(Clone, Debug, PartialEq)]
-pub enum RendererNativeProtocolStateUpdate {
-    /// Frozen V8 replay and state, projected by the ordered protocol consumer
-    /// before this terminal. Retirement can still turn enable into an error;
-    /// neither the adapter waiter nor a replacement attachment owns that choice.
-    RuntimeSubscription {
-        enabled: bool,
-        output: Box<crate::runtime::RendererRuntimeCommandOutput>,
-    },
-    /// Persistent binding mutations share the subscription's ordered ingress;
-    /// adapter completion cannot restore bindings cleared by a later disable.
-    RuntimeBinding {
-        binding: crate::protocol_types::RuntimeBindingRegistration,
-        remove: bool,
-        output: Box<crate::runtime::RendererRuntimeCommandOutput>,
-    },
-    WebMcpEnabled(bool),
-    /// A DOM-domain fallback snapshot, scoped to the producing session.
-    DomRemoteObjectNode {
-        object_id: String,
-        node: serde_json::Value,
-    },
-}
+pub use moli_command_types::devtools::{
+    NativeProtocolError as RendererNativeProtocolError,
+    NativeProtocolNotification as RendererNativeProtocolNotification,
+};
+pub type RendererNativeProtocolResponse = moli_command_types::devtools::NativeProtocolResponse<
+    crate::runtime::RendererRuntimeCommandOutput,
+>;
+pub type RendererNativeProtocolStateUpdate =
+    moli_command_types::devtools::NativeProtocolStateUpdate<
+        crate::runtime::RendererRuntimeCommandOutput,
+    >;
 
 type NativeResponseProjection = Box<
     dyn FnOnce(
@@ -106,16 +37,10 @@ type NativeResponseProjection = Box<
         + Send,
 >;
 
-/// A complete reply to the original frontend call, not a live Page observation.
-/// Its metadata remains valid even if the Page is replaced before projection.
-/// The frontend router uses its globally allocated call id to deliver it once.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RendererNativeCommandTerminal {
-    pub command_id: FrontendCommandId,
-    pub session: DevToolsSessionKey,
-    pub attachment_id: RendererAgentAttachmentId,
-    pub reply: RendererNativeProtocolResponse,
-}
+/// Frozen frontend metadata; renderer publication capabilities remain local.
+pub type RendererNativeCommandTerminal = moli_command_types::devtools::NativeCommandTerminal<
+    crate::runtime::RendererRuntimeCommandOutput,
+>;
 
 type Authority = RendererCommandResponseAuthority<Infallible, RendererOutputFence>;
 type Lease = RendererCommandResponseLease<Infallible, RendererOutputFence>;
@@ -164,13 +89,30 @@ struct RendererNativeCommandResponse {
     lease: Lease,
 }
 
+/// Reserves only the original reply authority while Browser I/O prepares an
+/// operation. It does not occupy a renderer journal position or enter a Page.
+pub struct RendererNativeCommandAdmission {
+    response: RendererNativeCommandResponse,
+}
+
+impl RendererNativeCommandAdmission {
+    pub fn bind(self, operation: RendererNativeOperation) -> RendererCdpCall {
+        RendererCdpCall {
+            operation,
+            response: self.response,
+        }
+    }
+}
+
 impl RendererCdpCall {
-    pub fn new(
+    pub fn reserve(
         command_id: FrontendCommandId,
         session: DevToolsSessionKey,
         attachment_id: RendererAgentAttachmentId,
-        operation: RendererNativeOperation,
-    ) -> (Self, RendererNativeCommandResponseGuard) {
+    ) -> (
+        RendererNativeCommandAdmission,
+        RendererNativeCommandResponseGuard,
+    ) {
         let authority = Authority::session();
         let lease = authority
             .activate()
@@ -179,8 +121,7 @@ impl RendererCdpCall {
             .take_session_response_settlement_receiver()
             .expect("native frontend calls retain a publication receipt");
         (
-            Self {
-                operation,
+            RendererNativeCommandAdmission {
                 response: RendererNativeCommandResponse {
                     command_id,
                     session,
@@ -193,6 +134,16 @@ impl RendererCdpCall {
                 publication: Some(publication),
             },
         )
+    }
+
+    pub fn new(
+        command_id: FrontendCommandId,
+        session: DevToolsSessionKey,
+        attachment_id: RendererAgentAttachmentId,
+        operation: RendererNativeOperation,
+    ) -> (Self, RendererNativeCommandResponseGuard) {
+        let (admission, guard) = Self::reserve(command_id, session, attachment_id);
+        (admission.bind(operation), guard)
     }
 }
 
@@ -290,7 +241,7 @@ impl RendererNativeOperation {
         + 'static,
     ) -> Self {
         let nested_dispatch = match &command {
-            RendererPageCommand::Inspector(envelope)
+            RendererPageCommand::DevTools(RendererDevToolsPageCommand::Inspector(envelope))
                 if envelope.runtime_binding_removal_name().is_some() =>
             {
                 RendererDevToolsMainNestedDispatch::NativeInspectorSession
@@ -364,7 +315,9 @@ enum NativeReadyReply {
 
 impl RendererCdpCall {
     pub(crate) fn runtime_binding_removal_name(&self) -> &str {
-        let RendererPageCommand::Inspector(envelope) = self.operation.command.as_ref() else {
+        let RendererPageCommand::DevTools(RendererDevToolsPageCommand::Inspector(envelope)) =
+            self.operation.command.as_ref()
+        else {
             unreachable!("nested native Inspector dispatch requires an Inspector payload")
         };
         envelope
@@ -376,16 +329,20 @@ impl RendererCdpCall {
         mut self,
         output: Result<crate::runtime::RendererRuntimeCommandOutput, String>,
     ) -> RendererPageCommand {
-        let RendererPageCommand::Inspector(envelope) = *self.operation.command else {
+        let RendererPageCommand::DevTools(RendererDevToolsPageCommand::Inspector(envelope)) =
+            *self.operation.command
+        else {
             unreachable!("nested native Inspector dispatch requires an Inspector payload")
         };
-        self.operation.command = Box::new(RendererPageCommand::Inspector(
-            envelope.into_runtime_binding_removal_commit(output),
+        self.operation.command = Box::new(RendererPageCommand::DevTools(
+            RendererDevToolsPageCommand::Inspector(
+                envelope.into_runtime_binding_removal_commit(output),
+            ),
         ));
         self.operation.nested_dispatch = RendererDevToolsMainNestedDispatch::PageAgent;
         // Keep the original response lease and terminal projection. Neither
         // the V8 response capture nor the adapter can publish another reply.
-        RendererPageCommand::Native(self)
+        RendererPageCommand::DevTools(RendererDevToolsPageCommand::Native(self))
     }
 
     pub(crate) fn dispatch(

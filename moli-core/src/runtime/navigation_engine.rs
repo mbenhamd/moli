@@ -1,18 +1,14 @@
-use crate::{
-    network::{ResourceRequestClient, SharedWebStorageStore},
-    page::{
-        CompletedPageCommand, DocumentStartScript, EmulatedMediaOverrides, NavigationResponse,
-        Page, PendingPageCommand, PermissionOverrideRegistration,
-        RendererInspectorSessionRestoreSnapshot, RendererMainDocumentCommit,
-        RendererPageCreationArtifacts, RendererPageCreationDiagnostics,
-        RendererPendingDownloadActivation, RuntimeBindingRegistration,
-        RuntimeIsolatedWorldDefinition, SubresourceAuthCredentials, SubresourceInterceptionClasses,
-        ViewportSurface,
-    },
-    renderer::ExternalRawDocumentBodyStream,
-    renderer::JsRuntime,
-    renderer::PageVmInitStage,
+use crate::network::{ResourceRequestClient, SharedWebStorageStore};
+#[cfg(feature = "devtools")]
+use crate::page::CompletedPageCommand;
+use crate::page::{
+    DocumentStartScript, EmulatedMediaOverrides, NavigationResponse, Page, PendingPageCommand,
+    PermissionOverrideRegistration, RendererInspectorSessionRestoreSnapshot,
+    RendererMainDocumentCommit, RendererPageCreationArtifacts, RendererPageCreationDiagnostics,
+    RendererPendingDownloadActivation, RuntimeBindingRegistration, RuntimeIsolatedWorldDefinition,
+    SubresourceAuthCredentials, SubresourceInterceptionClasses, ViewportSurface,
 };
+use crate::renderer::{ExternalRawDocumentBodyStream, JsRuntime, PageVmInitStage};
 use anyhow::{Context, Result, anyhow};
 use moli_cookie_jar::{SharedBrowserCookieStore, new_shared_browser_cookie_store};
 use moli_fetch::{
@@ -58,7 +54,18 @@ struct DocumentPageLoadOptions {
     pub viewport_surface: Option<ViewportSurface>,
     pub network_offline: bool,
     pub blocked_url_patterns: Vec<String>,
+    /// Requested Fetch interception classes when DevTools is enabled.
     pub fetch_subresource_interception_classes: SubresourceInterceptionClasses,
+}
+
+fn renderer_interception_classes(
+    classes: SubresourceInterceptionClasses,
+) -> SubresourceInterceptionClasses {
+    if cfg!(feature = "devtools") {
+        classes
+    } else {
+        SubresourceInterceptionClasses::NONE
+    }
 }
 
 /// Explicit resource authority source for a newly committed top-level Document.
@@ -239,6 +246,7 @@ pub struct PreparedDocumentPageCommitConfiguration {
     pub bypass_service_worker: bool,
     pub cache_disabled: bool,
     pub blocked_url_patterns: Vec<String>,
+    #[cfg(feature = "devtools")]
     pub fetch_subresource_interception: SubresourceInterceptionClasses,
 }
 
@@ -262,7 +270,10 @@ impl PreparedDocumentPageCommitConfiguration {
             bypass_service_worker: self.bypass_service_worker,
             cache_disabled: self.cache_disabled,
             blocked_url_patterns: self.blocked_url_patterns,
+            #[cfg(feature = "devtools")]
             fetch_subresource_interception_classes: self.fetch_subresource_interception,
+            #[cfg(not(feature = "devtools"))]
+            fetch_subresource_interception_classes: SubresourceInterceptionClasses::NONE,
         }
     }
 }
@@ -949,6 +960,7 @@ impl NavigationEngine {
         self.page_network_policy.set_blocked_url_patterns(patterns);
     }
 
+    #[cfg(feature = "devtools")]
     pub fn set_subresource_interception(
         &mut self,
         classes: crate::page::SubresourceInterceptionClasses,
@@ -1752,7 +1764,9 @@ impl NavigationEngine {
                 },
                 network_offline,
                 blocked_url_patterns,
-                fetch_subresource_interception_classes,
+                fetch_subresource_interception_classes: renderer_interception_classes(
+                    fetch_subresource_interception_classes,
+                ),
                 runtime_inspector_session_restore_snapshots,
                 root_frame_id,
                 main_document_commit,
@@ -1908,7 +1922,9 @@ impl NavigationEngine {
                     },
                     network_offline,
                     blocked_url_patterns,
-                    fetch_subresource_interception_classes,
+                    fetch_subresource_interception_classes: renderer_interception_classes(
+                        fetch_subresource_interception_classes,
+                    ),
                     runtime_inspector_session_restore_snapshots,
                     root_frame_id,
                     main_document_commit,
@@ -2043,8 +2059,9 @@ impl NavigationEngine {
                     },
                     network_offline: options.network_offline,
                     blocked_url_patterns: options.blocked_url_patterns,
-                    fetch_subresource_interception_classes: options
-                        .fetch_subresource_interception_classes,
+                    fetch_subresource_interception_classes: renderer_interception_classes(
+                        options.fetch_subresource_interception_classes,
+                    ),
                     runtime_inspector_session_restore_snapshots: options
                         .runtime_inspector_session_restore_snapshots,
                     root_frame_id: options.root_frame_id,
@@ -2085,6 +2102,7 @@ impl NavigationEngine {
         )
     }
 
+    #[cfg(feature = "devtools")]
     pub fn complete_page_child_frame_lifecycle_work_best_effort(
         &mut self,
         page: &mut Page,

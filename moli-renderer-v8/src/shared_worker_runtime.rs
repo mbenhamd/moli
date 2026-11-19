@@ -24,11 +24,11 @@ mod load_completion;
 mod loading;
 mod matching;
 mod owner_wake;
+#[cfg(feature = "devtools")]
 mod protocol_commands;
+#[cfg(feature = "devtools")]
 mod protocol_routing;
 mod pump;
-mod resource_commands;
-mod resource_routing;
 mod routing;
 mod service;
 mod service_lane;

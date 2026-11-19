@@ -9,6 +9,7 @@ mod lifecycle;
 mod lookup;
 mod network_owner;
 mod page_owner;
+mod resource_target;
 mod runtime_owner;
 mod session_owner;
 mod target_session_owner;

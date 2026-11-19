@@ -1,0 +1,24 @@
+mod bindings;
+mod methods;
+mod store;
+
+use moli_v8_util::{throw_type_error, v8_string};
+
+pub use self::bindings::headers_constructor_callback;
+pub use self::methods::install_headers_template_bindings;
+pub use self::store::headers_entries;
+pub use self::store::{HeadersGuard, combined_headers_entries, filter_headers_for_guard};
+pub use self::store::{
+    build_headers_object, build_headers_object_with_state, headers_entries_from_init, headers_list,
+    mark_headers_immutable, normalized_headers_entries,
+};
+
+pub fn clone_headers_object<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    original: v8::Local<'s, v8::Object>,
+) -> v8::Local<'s, v8::Object> {
+    let entries = headers_list(scope, original);
+    let guard = self::store::headers_guard(scope, original);
+    let immutable = self::store::headers_are_immutable(scope, original);
+    build_headers_object_with_state(scope, &entries, guard, immutable)
+}

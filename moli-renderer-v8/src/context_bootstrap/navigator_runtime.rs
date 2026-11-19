@@ -1,14 +1,14 @@
 mod clipboard;
-mod collections;
+use moli_webapi::navigator_collections as collections;
 mod credentials;
 mod gamepad;
 mod geolocation;
-mod media_capabilities;
+use moli_webapi::media_capabilities;
 mod media_devices;
 mod media_session;
 mod navigator;
 mod navigator_subobjects;
-mod promises;
+use moli_webapi::media_capabilities::promises;
 mod screen;
 mod visual_viewport;
 mod web_locks;
@@ -20,14 +20,14 @@ pub(in crate::context_bootstrap) use self::clipboard::clipboard_item_constructor
 pub(crate) use self::navigator::build_lightweight_popup_window_navigator_object;
 pub(super) use self::navigator::install_navigator_template_bindings;
 pub(crate) use self::navigator::install_worker_navigator_runtime_state;
+pub(crate) use self::navigator::navigator_owner_dispatch_scope;
 pub(in crate::context_bootstrap) use self::navigator::{
     SERVICE_WORKER_OWNER_TOKEN_SLOT, STORAGE_BUCKET_MANAGER_CHILD_HANDLE_SLOT,
     STORAGE_BUCKET_MANAGER_POPUP_ID_SLOT, STORAGE_MANAGER_CHILD_HANDLE_SLOT,
     STORAGE_MANAGER_POPUP_ID_SLOT, build_storage_manager_worker_template,
     current_protocol_user_gesture_activation, finalize_navigator_credentials_realm_bindings,
-    install_storage_manager_constructor_template_bindings, navigator_identity_profile,
-    service_worker_container_for_window, service_worker_owner_token_value,
-    set_navigator_identity_profile,
+    install_storage_manager_constructor_template_bindings, service_worker_container_for_client,
+    service_worker_owner_token_value,
 };
 #[cfg(test)]
 pub(crate) use self::navigator::{

@@ -253,7 +253,6 @@ impl ScriptVm {
     pub(super) fn sync_child_browsing_context_records(&mut self) {
         self.resync_child_browsing_contexts();
         self.apply_pending_child_document_owner_retirements();
-        self.prune_stale_child_default_execution_contexts();
     }
 
     #[cfg(test)]
@@ -347,6 +346,7 @@ impl ScriptVm {
             .collect()
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn child_browsing_context_owner_node_id_by_frame_id(
         &self,
         frame_id: &str,
@@ -392,6 +392,7 @@ impl ScriptVm {
             .child_browsing_context_current_url(owner_node_id)
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn child_browsing_context_parent_frame_id(
         &self,
         owner_node_id: crate::dom::NodeId,
@@ -424,6 +425,7 @@ impl ScriptVm {
             .collect()
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn detached_child_browsing_context_document_snapshots_for_dom_snapshot(
         &mut self,
         top_frame_id: &str,

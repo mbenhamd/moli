@@ -50,15 +50,6 @@ use super::super::{
     shared_worker_host::shared_worker_constructor_callback,
     specs::{ConstructorKind, ConstructorPrototypeProperty, ConstructorSpec},
     speech_synthesis::speech_synthesis_utterance_constructor_callback,
-    streams::{
-        byte_length_queuing_strategy_constructor_callback, compression_stream_constructor_callback,
-        count_queuing_strategy_constructor_callback,
-        readable_stream_byob_reader_constructor_callback, readable_stream_constructor_callback,
-        readable_stream_default_reader_constructor_callback,
-        text_decoder_stream_constructor_callback, text_encoder_stream_constructor_callback,
-        transform_stream_constructor_callback, writable_stream_constructor_callback,
-        writable_stream_default_writer_constructor_callback,
-    },
     touch_runtime::touch_constructor_callback,
     url_form::build_url_constructor_template,
     url_search_params_runtime::build_url_search_params_constructor_template,
@@ -70,12 +61,6 @@ use super::super::{
         gain_node_constructor_callback, iir_constructor, media_element_source_constructor_callback,
         offline_audio_context_constructor_callback, oscillator_constructor,
         periodic_wave_constructor, stereo_panner_constructor, wave_shaper_constructor,
-    },
-    webrtc::{
-        rtc_data_channel_event_constructor_callback, rtc_error_event_constructor_callback,
-        rtc_ice_candidate_constructor_callback, rtc_peer_connection_constructor_callback,
-        rtc_peer_connection_ice_event_constructor_callback,
-        rtc_session_description_constructor_callback,
     },
     websocket::{
         websocket_constructor_callback, websocket_error_constructor_callback,
@@ -90,6 +75,12 @@ use crate::{
     xml_serializer,
 };
 use anyhow::{Result, anyhow};
+use moli_webapi::rtc::{
+    rtc_data_channel_event_constructor_callback, rtc_error_event_constructor_callback,
+    rtc_ice_candidate_constructor_callback, rtc_peer_connection_constructor_callback,
+    rtc_peer_connection_ice_event_constructor_callback,
+    rtc_session_description_constructor_callback,
+};
 
 pub(in crate::context_bootstrap) fn build_constructor_template<'s>(
     scope: &mut v8::PinScope<'s, '_, ()>,
@@ -155,7 +146,7 @@ pub(in crate::context_bootstrap) fn build_constructor_template_for_profile<'s>(
         ConstructorKind::RtcEncodedAudioFrame => {
             v8::FunctionTemplate::builder(moli_webapi_declare::web_api_constructor!(
                 web_api_interfaces::RTCEncodedAudioFrame,
-                super::super::webrtc::encoded_frames::audio_constructor
+                moli_webapi::rtc::encoded_frames::audio_constructor
             ))
             .length(1)
             .build(scope)
@@ -163,7 +154,7 @@ pub(in crate::context_bootstrap) fn build_constructor_template_for_profile<'s>(
         ConstructorKind::RtcEncodedVideoFrame => {
             v8::FunctionTemplate::builder(moli_webapi_declare::web_api_constructor!(
                 web_api_interfaces::RTCEncodedVideoFrame,
-                super::super::webrtc::encoded_frames::video_constructor
+                moli_webapi::rtc::encoded_frames::video_constructor
             ))
             .length(1)
             .build(scope)
@@ -276,6 +267,9 @@ pub(in crate::context_bootstrap) fn build_constructor_template_for_profile<'s>(
         }
         ConstructorKind::HashChangeEvent => {
             build_event_subclass_template(scope, EventSubclassKind::HashChangeEvent)
+        }
+        ConstructorKind::PageRevealEvent => {
+            build_event_subclass_template(scope, EventSubclassKind::PageRevealEvent)
         }
         ConstructorKind::PageTransitionEvent => {
             build_event_subclass_template(scope, EventSubclassKind::PageTransitionEvent)
@@ -411,72 +405,9 @@ pub(in crate::context_bootstrap) fn build_constructor_template_for_profile<'s>(
             .length(0)
             .build(scope)
         }
-        ConstructorKind::ReadableStream => {
-            v8::FunctionTemplate::builder(readable_stream_constructor_callback)
-                .length(0)
-                .build(scope)
-        }
-        ConstructorKind::WritableStream => {
-            v8::FunctionTemplate::builder(writable_stream_constructor_callback)
-                .length(0)
-                .build(scope)
-        }
-        ConstructorKind::ReadableStreamDefaultReader => {
-            v8::FunctionTemplate::builder(readable_stream_default_reader_constructor_callback)
-                .length(1)
-                .build(scope)
-        }
-        ConstructorKind::ReadableStreamByobReader => {
-            v8::FunctionTemplate::builder(readable_stream_byob_reader_constructor_callback)
-                .length(1)
-                .build(scope)
-        }
-        ConstructorKind::WritableStreamDefaultWriter => {
-            v8::FunctionTemplate::builder(writable_stream_default_writer_constructor_callback)
-                .length(1)
-                .build(scope)
-        }
-        ConstructorKind::ReadableStreamDefaultController
-        | ConstructorKind::WritableStreamDefaultController
-        | ConstructorKind::TransformStreamDefaultController => {
-            v8::FunctionTemplate::builder(illegal_constructor_callback)
-                .length(0)
-                .build(scope)
-        }
-        ConstructorKind::TransformStream => {
-            v8::FunctionTemplate::builder(transform_stream_constructor_callback)
-                .length(0)
-                .build(scope)
-        }
-        ConstructorKind::TextEncoderStream => {
-            v8::FunctionTemplate::builder(text_encoder_stream_constructor_callback)
-                .length(0)
-                .build(scope)
-        }
-        ConstructorKind::TextDecoderStream => {
-            v8::FunctionTemplate::builder(text_decoder_stream_constructor_callback)
-                .length(0)
-                .build(scope)
-        }
-        ConstructorKind::CompressionStream => {
-            v8::FunctionTemplate::builder(compression_stream_constructor_callback::<false>)
-                .length(1)
-                .build(scope)
-        }
-        ConstructorKind::DecompressionStream => {
-            v8::FunctionTemplate::builder(compression_stream_constructor_callback::<true>)
-                .length(1)
-                .build(scope)
-        }
-        ConstructorKind::CountQueuingStrategy => {
-            v8::FunctionTemplate::builder(count_queuing_strategy_constructor_callback)
-                .length(1)
-                .build(scope)
-        }
-        ConstructorKind::ByteLengthQueuingStrategy => {
-            v8::FunctionTemplate::builder(byte_length_queuing_strategy_constructor_callback)
-                .length(1)
-                .build(scope)
+        ConstructorKind::Stream => {
+            moli_webapi::streams::build_constructor_template(scope, spec.interface.name())
+                .expect("constructible stream interface must have a template")
         }
         ConstructorKind::Blob => {
             v8::FunctionTemplate::builder(moli_webapi_declare::web_api_constructor!(
@@ -595,20 +526,10 @@ pub(in crate::context_bootstrap) fn build_constructor_template_for_profile<'s>(
             .build(scope)
         }
         ConstructorKind::DomRectReadOnly => {
-            v8::FunctionTemplate::builder(moli_webapi_declare::web_api_constructor!(
-                web_api_interfaces::DOMRectReadOnly,
-                super::super::dom_rect::dom_rect_readonly_constructor_callback
-            ))
-            .length(0)
-            .build(scope)
+            super::super::dom_rect::build_dom_rect_readonly_constructor_template(scope)
         }
         ConstructorKind::DomRect => {
-            v8::FunctionTemplate::builder(moli_webapi_declare::web_api_constructor!(
-                web_api_interfaces::DOMRect,
-                super::super::dom_rect::dom_rect_constructor_callback
-            ))
-            .length(0)
-            .build(scope)
+            super::super::dom_rect::build_dom_rect_constructor_template(scope)
         }
         ConstructorKind::DomPointReadOnly => {
             v8::FunctionTemplate::builder(moli_webapi_declare::web_api_constructor!(
@@ -750,7 +671,7 @@ pub(in crate::context_bootstrap) fn build_constructor_template_for_profile<'s>(
         ConstructorKind::RtcPeerConnectionIceErrorEvent => {
             v8::FunctionTemplate::builder(moli_webapi_declare::web_api_constructor!(
                 web_api_interfaces::RTCPeerConnectionIceErrorEvent,
-                super::super::webrtc::rtc_peer_connection_ice_error_event_constructor
+                moli_webapi::rtc::rtc_peer_connection_ice_error_event_constructor
             ))
             .length(2)
             .build(scope)
