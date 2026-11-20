@@ -224,6 +224,15 @@ const DIRECT_V8_CALL_ALLOWLIST: &[AllowedDirectCallFile] = &[
         DirectCallOwner::NativeForwardingOrScript,
     ),
     allowed(
+        "native_bridge/element/canvas.rs",
+        // Known page-callback bypass: HTMLCanvasElement.toBlob calls the
+        // page BlobCallback directly in its queued task, outside
+        // moli-webidl-callback. PF-9462 moves it onto
+        // WindowWebIdlCallbackFunction and removes this entry.
+        1,
+        DirectCallOwner::NativeForwardingOrScript,
+    ),
+    allowed(
         "native_bridge/element/focus.rs",
         1,
         DirectCallOwner::NativeForwardingOrScript,
