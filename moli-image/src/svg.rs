@@ -1122,7 +1122,7 @@ mod tests {
     fn parser_decodes_data_raster_images_and_never_reads_paths() {
         let svg = decode_svg_image(
             br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
-                <image width="10" height="10" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lw2K7wAAAABJRU5ErkJggg=="/>
+                <image width="10" height="10" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="/>
                 <image width="10" height="10" href="/tmp/moli-must-not-read.png"/>
             </svg>"#,
         )
