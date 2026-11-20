@@ -5225,11 +5225,16 @@ async fn toggle_and_interest_events_follow_reference_target_source_path() {
 (() => {
   globalThis.__lmReferenceTargetButtonG.click();
   globalThis.__lmReferenceTargetButtonJ.focus();
-  globalThis.__lmReferenceTargetOtherFocusTarget.focus();
 })()
 "#,
     )
     .expect("second reference-target interaction should evaluate");
+    // Blink fires focus interest after a delay and cancels it when focus
+    // moves on in the same task, so focus moves away in a later script, as
+    // in the Chromium recording (which waits 1.5 s between the two). Moli
+    // fires it without the delay (PF-9505).
+    vm.eval("globalThis.__lmReferenceTargetOtherFocusTarget.focus()")
+        .expect("moving focus away from the interest invoker should evaluate");
 
     assert!(
         vm.run_one_dom_manipulation_task_executor_turn(
@@ -5252,7 +5257,8 @@ async fn toggle_and_interest_events_follow_reference_target_source_path() {
         .expect("reference target event log should evaluate");
 
     // Chromium 156 (Playwright 1.64.1 headless shell) for the same script,
-    // markup and interactions. Blink composes the toggle and interest events
+    // markup and interactions, with the focus moves in separate tasks. Blink
+    // composes the toggle and interest events
     // it fires and ends their path where the retargeted source and target
     // meet (AdjustForReferenceTarget), so the inner hosts are on the path
     // despite their "unexpected" labels.
@@ -5263,14 +5269,6 @@ interest-target:true:true:true:targetDiv,#document-fragment,innerJ,#document-fra
 lose-target:true:true:true:targetDiv,#document-fragment,innerJ,#document-fragment,middleJ,#document-fragment|inner-lose-unexpected|lose-middle:true:true"
     );
 
-    assert!(
-        vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::ElementToggle,
-            &loader,
-        )
-        .await
-        .expect("third queued reference-target toggle task should run")
-    );
     assert!(
         !vm.run_one_dom_manipulation_task_executor_turn(
             PageDomManipulationTestFamily::ElementToggle,
@@ -5295,8 +5293,8 @@ inner-before-unexpected|inner-toggle-unexpected"
               globalThis.__lmReferenceTargetToggleStatesJ.join('|')].join(';')"
         )
         .expect("reference-target toggle state log should evaluate"),
-        "closed->open|open->closed;closed->open",
-        "the three selected production tasks should belong to the command and interest popovers"
+        "closed->open|open->closed;",
+        "the two toggle tasks belong to the command popover; the interest target is no popover"
     );
 }
 #[test]

@@ -2208,9 +2208,8 @@ fn selection_syncs_all_associations_after_shadow_host_adoption() {
 // Expected lines are Chromium's output for the same script (Playwright
 // 1.64.1 headless shell), PF-9474. A source-bearing event shapes its path
 // with a related target, as Blink's AdjustForReferenceTarget does. Dispatch
-// leaves that related target retargeted against the path's last entry, or
-// null when the path ends at a shadow root, while `source` keeps the
-// original. A second composed dispatch to a light-DOM target still reaches
+// leaves the related target of the last path entry it reached, or null when
+// the path ends at a shadow root, while `source` keeps the original. A second composed dispatch to a light-DOM target still reaches
 // Window.
 #[test]
 fn command_event_path_retargets_its_related_source_like_blink() {
@@ -2400,4 +2399,243 @@ fn keydown_final_target_follows_a_nested_node_redispatch_in_the_default_action()
         "shadow-node inner=shadowHost target=shadowHost active=next",
     ];
     assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell), PF-9474. Blink selects the reference-target path
+// by event interface and composes the source-bearing events it fires when
+// it creates them, so a script redispatch keeps that path. Each path entry's
+// related target is fixed when the path is built, and the event keeps the
+// one of the last entry its dispatch reached. A non-composed event stops
+// only at its target's own shadow root, and a host the target retargets to
+// runs its capture listeners once.
+#[test]
+fn source_bearing_event_paths_follow_blink_reference_target_rules() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-reference-rules.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+            const out = [];
+            if (!document.documentElement) document.appendChild(document.createElement('html'));
+            if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+            const body = document.body;
+            const add = (parent, tag = 'div') => parent.appendChild(document.createElement(tag));
+            const shadow = host => host.attachShadow({mode: 'open'});
+            function reachesWindow(target, event) {
+              let seen = false;
+              const listener = () => { seen = true };
+              window.addEventListener(event.type, listener, true);
+              target.dispatchEvent(event);
+              window.removeEventListener(event.type, listener, true);
+              return seen;
+            }
+            const fresh = () => { body.replaceChildren(); };
+            // 1a saved native submit
+            { fresh();
+              const form = add(body, 'form'), button = add(form, 'button');
+              let saved;
+              form.addEventListener('submit', e => { e.preventDefault(); saved = e });
+              form.requestSubmit(button);
+              const target = add(shadow(add(body, 'div')), 'i');
+              out.push('native-submit-redispatch ' + reachesWindow(target, saved)); }
+            // 1b saved native command
+            { fresh();
+              const button = add(body, 'button'), dest = add(body); dest.id = 'dest';
+              button.setAttribute('commandfor', 'dest'); button.setAttribute('command', '--probe');
+              let saved; dest.addEventListener('command', e => saved = e); button.click();
+              const host = add(body), root = host.attachShadow({mode: 'open'});
+              let calls = 0; host.addEventListener('command', () => ++calls);
+              add(root).dispatchEvent(saved);
+              out.push('native-command-redispatch ' + calls); }
+            // 2a std replay
+            { function replay(stopped) {
+                fresh();
+                const root = shadow(add(body, 'div')), target = add(root, 'i');
+                const source = add(stopped ? root : body, 'button');
+                const e = new CommandEvent('command', {source, bubbles: true, composed: true});
+                if (stopped) e.stopPropagation();
+                else body.addEventListener('command', () => root.append(source), {once: true});
+                body.dispatchEvent(e);
+                body.append(source);
+                return reachesWindow(target, e);
+              }
+              out.push('related-snapshot-std ' + replay(false) + ' ' + replay(true)); }
+            // 2b spec replay
+            { function replay(stopAtSlot) {
+                fresh();
+                const host = add(body), root = host.attachShadow({mode: 'open'});
+                const source = add(root), peer = add(root);
+                const e = new CommandEvent('command', {source, bubbles: true, composed: true});
+                if (stopAtSlot) {
+                  add(root, 'slot').addEventListener('command', x => x.stopPropagation(), {once: true});
+                  add(host).dispatchEvent(e);
+                  body.append(source);
+                } else {
+                  body.addEventListener('command', () => body.append(source), {once: true});
+                  body.dispatchEvent(e);
+                }
+                let escaped = false;
+                host.addEventListener('command', () => escaped = true);
+                peer.dispatchEvent(e);
+                return escaped;
+              }
+              out.push('related-snapshot-spec ' + replay(false) + ' ' + replay(true)); }
+            // 3 nested slot non-composed
+            { fresh();
+              const host = add(body, 'div'), target = add(host, 'b');
+              const innerHost = add(shadow(host), 'div');
+              add(innerHost, 'slot'); add(shadow(innerHost), 'slot');
+              out.push('nested-slot-std ' + reachesWindow(target, new CommandEvent('command', {source: body}))); }
+            { fresh();
+              const outer = add(body), outerRoot = outer.attachShadow({mode: 'open'});
+              const inner = add(outerRoot); add(inner, 'slot'); add(inner.attachShadow({mode: 'open'}), 'slot');
+              let calls = 0; const l = () => ++calls; window.addEventListener('command', l);
+              add(outer).dispatchEvent(new CommandEvent('command', {source: body, bubbles: true}));
+              window.removeEventListener('command', l);
+              out.push('nested-slot-spec ' + calls); }
+            // 4 capture twice
+            { fresh();
+              const outer = shadow(add(body, 'div')), source = add(outer, 'button');
+              const middle = add(outer, 'div'), inner = add(shadow(middle), 'div');
+              const target = add(shadow(inner), 'i');
+              const log = [];
+              inner.addEventListener('command', e => log.push('cap' + e.eventPhase), true);
+              inner.addEventListener('command', e => log.push('bub' + e.eventPhase));
+              target.dispatchEvent(new CommandEvent('command', {source, composed: true}));
+              out.push('capture-once ' + log.join(','));
+              const log2 = [];
+              inner.addEventListener('command', e => log2.push('c'), true);
+              target.dispatchEvent(new CommandEvent('command', {source, composed: true, bubbles: true}));
+              out.push('capture-once-bubbles ' + log2.join(',')); }
+            // 6 interface selection, custom names
+            { fresh();
+              const source = add(shadow(add(body, 'div')), 'button');
+              const root = shadow(add(body, 'div')), target = add(root, 'i');
+              const e = new CommandEvent('probe', {source, composed: true});
+              body.dispatchEvent(e); root.append(source);
+              e.initEvent('command', true, false);
+              out.push('custom-name-std ' + reachesWindow(target, e)); }
+            { fresh();
+              const host = add(body), root = host.attachShadow({mode: 'open'});
+              const target = add(root), source = add(root);
+              let calls = 0; host.addEventListener('probe', () => ++calls);
+              const res = [];
+              for (const C of [CommandEvent, ToggleEvent, (typeof InterestEvent === 'function' ? InterestEvent : null), SubmitEvent]) {
+                if (!C) { res.push('none'); continue; }
+                const before = calls;
+                target.dispatchEvent(new C('probe', {source, submitter: source, bubbles: true, composed: true}));
+                res.push(C.name + '=' + (calls - before));
+              }
+              out.push('custom-name-spec ' + res.join(',')); }
+            return out.join('\n');
+            })()
+            "#,
+        )
+        .expect("reference-target rules probe should evaluate");
+
+    let expected = [
+        "native-submit-redispatch true",
+        "native-command-redispatch 1",
+        "related-snapshot-std true true",
+        "related-snapshot-spec false true",
+        "nested-slot-std true",
+        "nested-slot-spec 1",
+        "capture-once cap2,bub2",
+        "capture-once-bubbles c",
+        "custom-name-std true",
+        "custom-name-spec CommandEvent=0,ToggleEvent=0,InterestEvent=0,SubmitEvent=0",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
+// Expected line is Chromium's output for the same scripts (Playwright 1.64.1
+// headless shell, a CDP isolated world), PF-9474. The dispatch bookkeeping a
+// Node dispatch keeps on an event is not visible on a wrapper an isolated
+// world first creates after that dispatch.
+#[test]
+fn event_dispatch_bookkeeping_stays_off_isolated_world_wrappers() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-isolated-bookkeeping.test/");
+    vm.eval(
+        r#"
+        (() => {
+          if (!document.documentElement) document.appendChild(document.createElement('html'));
+          if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+          window.savedCommand = new CommandEvent('command', { source: document.body });
+          document.dispatchEvent(savedCommand);
+          window.savedKey = new KeyboardEvent('keydown', { key: 'a' });
+          document.dispatchEvent(savedKey);
+        })()
+        "#,
+    )
+    .expect("main-world dispatch setup should evaluate");
+    let isolated = vm
+        .create_isolated_world("event-bookkeeping", false)
+        .expect("isolated world should be created");
+    vm.eval_in_isolated_context(
+        isolated,
+        r#"
+        for (const type of ['command', 'keydown']) {
+          document.addEventListener(type, (e) => {
+            const own = Object.getOwnPropertyNames(e).filter((k) => !['isTrusted'].includes(k));
+            const named = ['pathFinalTarget', 'pathFinalRelatedTarget', 'referenceRelatedTarget', 'relatedTarget'].filter((k) => k in e);
+            document.body.dataset[type] = 'own=' + (own.join('|') || 'none') + ' named=' + (named.join('|') || 'none');
+          });
+        }
+        "#,
+    )
+    .expect("isolated-world listeners should register");
+    let result = vm
+        .eval(
+            r#"
+            document.dispatchEvent(window.savedCommand);
+            document.dispatchEvent(window.savedKey);
+            'command ' + document.body.dataset.command.split(' ')[1] + '; keydown ' + document.body.dataset.keydown.split(' ')[1]
+            "#,
+        )
+        .expect("main-world redispatch should evaluate");
+
+    assert_eq!(result, "command named=none; keydown named=none");
+}
+
+// Expected line is Chromium's output for the same script (Playwright 1.64.1
+// headless shell, a real mouse move onto the button), PF-9474. Blink runs
+// hover interest after the mouseover dispatch has ended, so a plain
+// EventTarget redispatch from the interest listener keeps its target.
+#[test]
+fn hover_interest_listener_redispatch_keeps_its_plain_event_target() {
+    let mut vm = new_rendered_test_vm(
+        "https://event-dispatch-hover-interest-redispatch.test/",
+        "<!doctype html><html><body><button id='button' interestfor='tip'>Hover</button><div id='tip' popover>Tip</div></body></html>",
+    );
+    vm.eval(
+        r#"
+        (() => {
+          const button = document.getElementById('button');
+          const plain = new EventTarget();
+          const name = (t) => t === plain ? 'plain' : t === button ? 'button' : String(t);
+          let over = null;
+          const log = [];
+          button.addEventListener('mouseover', (e) => { over = e; });
+          document.getElementById('tip').addEventListener('interest', () => {
+            plain.dispatchEvent(over);
+            log.push('interest inner=' + name(over.target));
+          }, { once: true });
+          window.__read = () => log.concat('after=' + (over ? name(over.target) : 'none')).join(' ');
+        })()
+        "#,
+    )
+    .expect("hover interest redispatch setup should evaluate");
+    vm.publish_layout_for_test()
+        .expect("publish geometry before coordinate input");
+    vm.dispatch_mouse_event_at_point(300.0, 300.0, "mousemove", 0, Some(0), 0.0, 0.0)
+        .expect("mousemove away from the button should dispatch");
+    vm.dispatch_mouse_event_at_point(12.0, 12.0, "mousemove", 0, Some(0), 0.0, 0.0)
+        .expect("mousemove onto the button should dispatch");
+    let result = vm
+        .eval("window.__read()")
+        .expect("hover interest redispatch result should evaluate");
+
+    assert_eq!(result, "interest inner=plain after=plain");
 }

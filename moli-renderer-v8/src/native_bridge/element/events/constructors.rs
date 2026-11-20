@@ -974,14 +974,13 @@ pub(crate) fn construct_submit_event<'s>(
         .wrap_handle(scope, runtime_ptr, target)?;
     let context = crate::native_bridge::node_relevant_context(scope, target)?;
     let scope = &mut v8::ContextScope::new(scope, context);
-    let init = SubmitEventInitDeclaration::new(
-        bubbles,
-        cancelable,
-        submitter.unwrap_or_else(|| v8::null(scope).into()),
-    )
-    .bind(scope)
-    .ok()?;
-    construct_event(scope, "SubmitEvent", "submit", init)
+    let submitter = submitter.unwrap_or_else(|| v8::null(scope).into());
+    let init = SubmitEventInitDeclaration::new(bubbles, cancelable, submitter)
+        .bind(scope)
+        .ok()?;
+    let event = construct_event(scope, "SubmitEvent", "submit", init)?;
+    crate::document_runtime::mark_event_source_composed(scope, event, submitter);
+    Some(event)
 }
 
 pub(crate) fn construct_simple_event_for_target<'s>(
@@ -1029,7 +1028,9 @@ pub(crate) fn construct_command_event<'s>(
     let init = CommandEventInitDeclaration::new(false, true, false, source, command)
         .bind(scope)
         .ok()?;
-    construct_event(scope, "CommandEvent", "command", init)
+    let event = construct_event(scope, "CommandEvent", "command", init)?;
+    crate::document_runtime::mark_event_source_composed(scope, event, source);
+    Some(event)
 }
 
 pub(crate) fn construct_toggle_event<'s>(
@@ -1046,7 +1047,9 @@ pub(crate) fn construct_toggle_event<'s>(
         ToggleEventInitDeclaration::new(false, cancelable, false, source, old_state, new_state)
             .bind(scope)
             .ok()?;
-    construct_event(scope, "ToggleEvent", event_type, init)
+    let event = construct_event(scope, "ToggleEvent", event_type, init)?;
+    crate::document_runtime::mark_event_source_composed(scope, event, source);
+    Some(event)
 }
 
 pub(crate) fn construct_interest_event<'s>(
@@ -1057,7 +1060,9 @@ pub(crate) fn construct_interest_event<'s>(
     let init = InterestEventInitDeclaration::new(false, false, false, source)
         .bind(scope)
         .ok()?;
-    construct_event(scope, "InterestEvent", event_type, init)
+    let event = construct_event(scope, "InterestEvent", event_type, init)?;
+    crate::document_runtime::mark_event_source_composed(scope, event, source);
+    Some(event)
 }
 
 pub(in crate::native_bridge::element) fn construct_click_event<'s>(

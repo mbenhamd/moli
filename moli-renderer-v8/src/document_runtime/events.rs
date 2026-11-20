@@ -453,21 +453,23 @@ impl DocumentRuntime {
         let composed = crate::context_bootstrap::event_backing(scope, event)
             .get(scope, v8str(scope, "composed").into())
             .is_some_and(|value| value.boolean_value(scope));
-        let reference_related_target =
-            reference_related_target_for_event(scope, host_ptr, event, event_type.as_deref());
-        let (mut path, path_related_target) = match reference_related_target {
+        let reference_related_target = reference_related_target_for_event(scope, host_ptr, event);
+        let (mut path, entry_related_targets) = match reference_related_target {
             Some(Some(related_target)) => {
                 // Blink composes the source-bearing events it fires itself
-                // (popover toggles, command, interest), so their path leaves
-                // shadow trees up to where the source and target meet.
-                let trusted = crate::context_bootstrap::event_backing(scope, event)
-                    .get(scope, v8str(scope, "isTrusted").into())
-                    .is_some_and(|value| value.boolean_value(scope));
+                // (popover toggles, command, interest, submit) when it creates
+                // them, so a redispatch keeps that path too.
+                let source_composed = crate::context_bootstrap::event_private_value(
+                    scope,
+                    event,
+                    EVENT_SOURCE_COMPOSED_SLOT,
+                )
+                .is_some_and(|value| value.boolean_value(scope));
                 self.build_reference_target_propagation_path(
                     host_ptr,
                     dispatch_target,
                     related_target,
-                    composed || trusted,
+                    composed || source_composed,
                 )
             }
             Some(None) | None => (self.build_propagation_path(dispatch_target, composed), None),
@@ -491,7 +493,8 @@ impl DocumentRuntime {
                 host_ptr,
                 event,
                 &path,
-                path_related_target,
+                entry_related_targets.as_deref(),
+                result.last_handled_entry(),
             );
         }
         Ok(result)
@@ -500,14 +503,16 @@ impl DocumentRuntime {
     /// Blink's `EventPath::AdjustForReferenceTarget`: the related target is
     /// retargeted into each entry's tree, and the path ends before the first
     /// entry outside both original trees where the retargeted target and
-    /// related target meet. Returns the path and the related target used.
+    /// related target meet. Returns the path and, when the related target
+    /// applies, each entry's retargeted related target, fixed when the path
+    /// is built as Blink's event contexts are.
     fn build_reference_target_propagation_path(
         &self,
         host_ptr: *mut PageScriptHost,
         target: EventTargetHandle,
         related_target: EventTargetHandle,
         composed: bool,
-    ) -> (Vec<EventTargetHandle>, Option<NativeNodeId>) {
+    ) -> (Vec<EventTargetHandle>, Option<Vec<EventTargetHandle>>) {
         let mut path = self.build_propagation_path(target, composed);
         let (EventTargetHandle::Node(target_handle), EventTargetHandle::Node(source_handle)) =
             (target, related_target)
@@ -555,42 +560,58 @@ impl DocumentRuntime {
         if let Some(stop) = stop {
             path.truncate(stop);
         }
-        (path, Some(related_handle))
+        let entry_related_targets = path
+            .iter()
+            .map(|entry| {
+                crate::host::retarget_event_target(
+                    host_ptr,
+                    EventTargetHandle::Node(related_handle),
+                    *entry,
+                )
+            })
+            .collect();
+        (path, Some(entry_related_targets))
     }
 
-    /// The related target a Node dispatch leaves on a source-bearing event, as
-    /// Blink's per-entry `SetRelatedTarget` and final clearing do: retargeted
-    /// against the path's last entry, or null when the dispatch ends with a
-    /// null target (the path ends at a shadow root).
+    /// The related target a Node dispatch leaves on a source-bearing event,
+    /// as Blink's `HandleLocalEvents` and final clearing do: null when the
+    /// dispatch ends with a null target (the path ends at a shadow root),
+    /// otherwise the related target of the last entry the dispatch reached.
+    /// A dispatch that reached no entry keeps the previous one.
     fn record_reference_related_target(
         &self,
         scope: &mut v8::PinScope<'_, '_>,
         host_ptr: *mut PageScriptHost,
         event: v8::Local<'_, v8::Object>,
         path: &[EventTargetHandle],
-        path_related_target: Option<NativeNodeId>,
+        entry_related_targets: Option<&[EventTargetHandle]>,
+        last_handled_entry: Option<EventTargetHandle>,
     ) {
-        let Some(last) = path.last().copied() else {
-            return;
-        };
-        let value = if matches!(last, EventTargetHandle::Node(handle) if self.dom_host.is_shadow_root(handle))
-        {
+        let ends_at_shadow_root = matches!(
+            path.last(),
+            Some(EventTargetHandle::Node(handle)) if self.dom_host.is_shadow_root(*handle)
+        );
+        let value = if ends_at_shadow_root {
             v8::null(scope).into()
-        } else if let Some(related_handle) = path_related_target {
-            let retargeted = crate::host::retarget_event_target(
-                host_ptr,
-                EventTargetHandle::Node(related_handle),
-                last,
-            );
-            match crate::host::event_target_value(scope, host_ptr, retargeted) {
+        } else {
+            let Some(related_target) = entry_related_targets.and_then(|related_targets| {
+                let entry = last_handled_entry?;
+                let index = path.iter().position(|candidate| *candidate == entry)?;
+                related_targets.get(index).copied()
+            }) else {
+                return;
+            };
+            match crate::host::event_target_value(scope, host_ptr, related_target) {
                 Ok(value) => value,
                 Err(_) => return,
             }
-        } else {
-            return;
         };
-        let key = v8str(scope, EVENT_REFERENCE_RELATED_TARGET_KEY);
-        let _ = crate::context_bootstrap::event_backing(scope, event).set(scope, key.into(), value);
+        crate::context_bootstrap::set_event_private_value(
+            scope,
+            event,
+            EVENT_REFERENCE_RELATED_TARGET_SLOT,
+            value,
+        );
     }
 
     pub(crate) fn build_propagation_path(
@@ -613,19 +634,16 @@ impl DocumentRuntime {
                     continue;
                 }
                 if self.dom_host.is_shadow_root(current) {
-                    if !composed {
-                        let Some(host) = self.dom_host.shadow_root_host(current) else {
-                            break;
-                        };
-                        let EventTargetHandle::Node(original_target) = target else {
-                            break;
-                        };
-                        if !self.light_tree_contains(host, original_target) {
-                            break;
-                        }
-                        path.push(EventTargetHandle::Node(host));
-                        current = host;
-                        continue;
+                    // A non-composed event stops only at the shadow root of
+                    // its target's own tree; slotted paths cross the others.
+                    if !composed
+                        && matches!(
+                            target,
+                            EventTargetHandle::Node(original_target)
+                                if self.dom_host.root_node_handle(original_target) == Some(current)
+                        )
+                    {
+                        break;
                     }
                     let Some(host) = self.dom_host.shadow_root_host(current) else {
                         break;
@@ -690,20 +708,6 @@ impl DocumentRuntime {
             path.push(EventTargetHandle::ChildWindow(target));
         }
     }
-
-    fn light_tree_contains(&self, root: NativeNodeId, handle: NativeNodeId) -> bool {
-        let mut current = Some(handle);
-        while let Some(candidate) = current {
-            if candidate == root {
-                return true;
-            }
-            current = self
-                .dom_host
-                .node(candidate)
-                .and_then(moli_dom::native::Node::parent_node);
-        }
-        false
-    }
 }
 
 fn public_event_type(
@@ -731,36 +735,54 @@ fn trim_window_from_subresource_load_path(
     }
 }
 
-/// Backing key for the related target that shapes a source-bearing event's
-/// path: Blink's `related_target_` on CommandEvent, ToggleEvent,
+/// Private slot for the related target that shapes a source-bearing
+/// event's path: Blink's `related_target_` on CommandEvent, ToggleEvent,
 /// InterestEvent and SubmitEvent. It starts as the source or submitter and
 /// each Node dispatch updates it. The `source` getter never reads it.
-const EVENT_REFERENCE_RELATED_TARGET_KEY: &str = "referenceRelatedTarget";
+const EVENT_REFERENCE_RELATED_TARGET_SLOT: &str = "__moliEventReferenceRelatedTarget";
 
-/// `None` for an event type without a reference related target, otherwise
-/// that target when it is a Node of this runtime.
-fn reference_related_target_for_event(
+/// Private slot set when Moli fires a source-bearing event with a source,
+/// as Blink's `SetComposed` at creation: its path is composed on every
+/// dispatch, whatever the public `composed` attribute says.
+const EVENT_SOURCE_COMPOSED_SLOT: &str = "__moliEventSourceComposed";
+
+pub(crate) fn mark_event_source_composed(
     scope: &mut v8::PinScope<'_, '_>,
-    host_ptr: *mut PageScriptHost,
     event: v8::Local<'_, v8::Object>,
-    event_type: Option<&str>,
-) -> Option<Option<EventTargetHandle>> {
-    let event_type = event_type?;
-    if !matches!(
-        event_type,
-        "beforetoggle" | "command" | "interest" | "loseinterest" | "toggle" | "submit"
-    ) {
-        return None;
+    source: v8::Local<'_, v8::Value>,
+) {
+    if source.is_object() {
+        crate::context_bootstrap::set_event_private_value(
+            scope,
+            event,
+            EVENT_SOURCE_COMPOSED_SLOT,
+            v8::Boolean::new(scope, true).into(),
+        );
     }
-    let backing = crate::context_bootstrap::event_backing(scope, event);
-    let key = v8str(scope, EVENT_REFERENCE_RELATED_TARGET_KEY);
-    let value = if backing.has_own_property(scope, key.into()) == Some(true) {
-        backing.get(scope, key.into())
-    } else if event_type == "submit" {
-        crate::context_bootstrap::submit_event_submitter_value(scope, event)
-    } else {
-        crate::context_bootstrap::event_attribute(scope, event, "source")
-    };
+}
+
+/// `None` for an event whose interface has no reference related target,
+/// otherwise that target when it is a Node of this runtime. Blink selects
+/// the adjustment by interface, whatever the event's type.
+fn reference_related_target_for_event<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    host_ptr: *mut PageScriptHost,
+    event: v8::Local<'s, v8::Object>,
+) -> Option<Option<EventTargetHandle>> {
+    let interface = crate::context_bootstrap::reference_target_event_interface(scope, event)?;
+    let value = crate::context_bootstrap::event_private_value(
+        scope,
+        event,
+        EVENT_REFERENCE_RELATED_TARGET_SLOT,
+    )
+    .or_else(|| match interface {
+        crate::context_bootstrap::ReferenceTargetEventInterface::Submit => {
+            crate::context_bootstrap::submit_event_submitter_value(scope, event)
+        }
+        crate::context_bootstrap::ReferenceTargetEventInterface::Source => {
+            crate::context_bootstrap::event_attribute(scope, event, "source")
+        }
+    });
     let Some(object) = value.and_then(|value| v8::Local::<v8::Object>::try_from(value).ok()) else {
         return Some(None);
     };

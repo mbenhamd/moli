@@ -120,6 +120,10 @@ pub(crate) fn dispatch_popover_show_events(
     target: DomHandle,
     source_handle: DomHandle,
 ) {
+    // Blink shows an interest target only when it is a popover.
+    if !element_has_attribute(unsafe { &*runtime_ptr }, target, "popover") {
+        return;
+    }
     let _ = set_popover_open_state(scope, runtime_ptr, target, true, Some(source_handle));
 }
 
