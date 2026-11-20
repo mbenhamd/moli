@@ -392,8 +392,9 @@ pub(crate) fn run_css_transition_frame(
 ) {
     {
         let host = unsafe { &*host_ptr };
+        resolve_unresolved_css_transition_frame_roots(host);
         if update_styles {
-            update_css_transition_styles(host);
+            update_css_transition_styles(host, false);
         }
         let engine = host.style_engine_ref();
         engine.sample_css_transitions(host.dom_host());
@@ -433,7 +434,7 @@ pub(crate) fn end_css_transition_animation_frame(host: &PageScriptHost) {
     {
         return;
     }
-    update_css_transition_styles(host);
+    update_css_transition_styles(host, false);
     engine.note_css_transition_style_update();
     engine.end_css_transition_animation_frame();
 }
@@ -442,7 +443,15 @@ pub(crate) fn end_css_transition_animation_frame(host: &PageScriptHost) {
 /// transitions, when any style changed since the last update, and cancels
 /// the transitions of elements an ancestor's `display: none` stopped
 /// rendering.
-pub(crate) fn update_css_transition_styles(host: &PageScriptHost) {
+///
+/// The subtrees whose styles changed get their styles too. A style flush
+/// (`resolve_subtrees`) resolves them now. A frame's update leaves them to
+/// `resolve_unresolved_css_transition_frame_roots`, which the next task,
+/// command or frame runs before anything else: no script, DOM or style change
+/// can run in between, so their before-change styles are still the frame's,
+/// and the frame, which the tasks it queued wait on, ends without that work.
+pub(crate) fn update_css_transition_styles(host: &PageScriptHost, resolve_subtrees: bool) {
+    resolve_unresolved_css_transition_frame_roots(host);
     let engine = host.style_engine_ref();
     let dom = host.dom_host();
     // The frame's DOM changes become invalidation roots before the update
@@ -460,7 +469,11 @@ pub(crate) fn update_css_transition_styles(host: &PageScriptHost) {
     if targets.is_empty() && roots.is_empty() {
         return;
     }
-    update_changed_subtree_styles(host, roots);
+    if resolve_subtrees {
+        update_changed_subtree_styles(host, roots);
+    } else {
+        engine.defer_unresolved_css_transition_frame_roots(dom, roots);
+    }
     for handle in targets {
         if dom.is_connected(handle) {
             let _ = crate::native_bridge::element::computed_style_property_for_handle(
@@ -475,6 +488,17 @@ pub(crate) fn update_css_transition_styles(host: &PageScriptHost) {
             engine.cancel_css_transitions_for_element(dom, target);
         }
     }
+}
+
+/// Resolves the subtrees the last frame's style update left unresolved.
+/// Every task, command and frame runs this first: it must run before any DOM
+/// or style change after that frame.
+pub(crate) fn resolve_unresolved_css_transition_frame_roots(host: &PageScriptHost) {
+    let engine = host.style_engine_ref();
+    if !engine.has_unresolved_css_transition_frame_roots() {
+        return;
+    }
+    update_changed_subtree_styles(host, engine.take_unresolved_css_transition_frame_roots());
 }
 
 /// Resolves the styles of the subtrees whose styles changed, as the

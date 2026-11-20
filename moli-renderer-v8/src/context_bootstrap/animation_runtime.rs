@@ -19,7 +19,8 @@ mod css_transitions;
 mod element_registry;
 
 pub(crate) use css_transitions::{
-    end_css_transition_animation_frame, queue_css_transition_task_if_due, run_css_transition_frame,
+    end_css_transition_animation_frame, queue_css_transition_task_if_due,
+    resolve_unresolved_css_transition_frame_roots, run_css_transition_frame,
 };
 
 const ANIMATION_MICROTASK_ANIMATION_SLOT: &str = "__moliAnimationMicrotaskAnimation";
@@ -295,7 +296,7 @@ fn document_or_shadow_root_get_animations_callback<'s>(
     let mut script_animations = Vec::new();
     if let Ok((runtime_ptr, root)) = node_runtime_and_handle_from_object(scope, args.this()) {
         // `getAnimations()` flushes style first (Web Animations §6.10).
-        css_transitions::update_css_transition_styles(unsafe { &*runtime_ptr });
+        css_transitions::update_css_transition_styles(unsafe { &*runtime_ptr }, true);
         let elements = tree_element_handles(unsafe { &*runtime_ptr }, root);
         for handle in elements {
             let has_transitions = !unsafe { &*runtime_ptr }

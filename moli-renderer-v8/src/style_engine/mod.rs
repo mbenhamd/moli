@@ -1069,6 +1069,38 @@ impl MoliStyleEngine {
         roots
     }
 
+    /// Keeps subtrees a frame's style update must style for their documents,
+    /// to resolve before the next task, command or frame changes anything.
+    /// Resolving them there gives the same before-change styles as resolving
+    /// them at the end of the frame: nothing runs in between.
+    pub(crate) fn defer_unresolved_css_transition_frame_roots(
+        &self,
+        host: &DomHost,
+        roots: impl IntoIterator<Item = DomHandle>,
+    ) {
+        for root in roots {
+            if let Some(world) = self.active_owner_document_world(host, root) {
+                world.css_transitions.defer_unresolved_frame_roots([root]);
+            }
+        }
+    }
+
+    /// Takes the subtrees the last frame's style update left unresolved.
+    pub(crate) fn take_unresolved_css_transition_frame_roots(&self) -> Vec<DomHandle> {
+        self.document_worlds
+            .active_worlds()
+            .iter()
+            .flat_map(|world| world.css_transitions.take_unresolved_frame_roots())
+            .collect()
+    }
+
+    pub(crate) fn has_unresolved_css_transition_frame_roots(&self) -> bool {
+        self.document_worlds
+            .active_worlds()
+            .iter()
+            .any(|world| world.css_transitions.has_unresolved_frame_roots())
+    }
+
     /// `document` when no frame's style update has resolved its initial
     /// content yet: its parsed content is dirty, as the first rendering
     /// update's style recalc treats it.

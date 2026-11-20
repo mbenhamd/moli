@@ -247,6 +247,10 @@ pub(crate) struct DocumentCssTransitions {
     in_frame: Cell<bool>,
     /// A frame's style update has resolved the document's initial content.
     document_styled: Cell<bool>,
+    /// Subtrees the last frame's style update marked for styling but left
+    /// unresolved: they are resolved before anything else runs, so their
+    /// before-change styles are those of that frame.
+    unresolved_frame_roots: RefCell<Vec<DomHandle>>,
 }
 
 impl Default for DocumentCssTransitions {
@@ -259,6 +263,7 @@ impl Default for DocumentCssTransitions {
             updated_generation: Cell::new(None),
             in_frame: Cell::new(false),
             document_styled: Cell::new(false),
+            unresolved_frame_roots: RefCell::default(),
         }
     }
 }
@@ -289,6 +294,18 @@ impl DocumentCssTransitions {
     /// style update; marks it as taken.
     pub(super) fn take_unstyled_document(&self) -> bool {
         !self.document_styled.replace(true)
+    }
+
+    pub(super) fn defer_unresolved_frame_roots(&self, roots: impl IntoIterator<Item = DomHandle>) {
+        self.unresolved_frame_roots.borrow_mut().extend(roots);
+    }
+
+    pub(super) fn take_unresolved_frame_roots(&self) -> Vec<DomHandle> {
+        std::mem::take(&mut *self.unresolved_frame_roots.borrow_mut())
+    }
+
+    pub(super) fn has_unresolved_frame_roots(&self) -> bool {
+        !self.unresolved_frame_roots.borrow().is_empty()
     }
 
     /// Notes `target` when its newly resolved style specifies transitions.
