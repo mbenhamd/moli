@@ -155,12 +155,14 @@ impl PageScriptHost {
         {
             self.retire_svg_image_document(evicted.document);
         }
-        self.svg_image_documents.entries.push_back(SvgImageDocument {
-            source: source.clone(),
-            document,
-            root,
-            inline_images: RefCell::default(),
-        });
+        self.svg_image_documents
+            .entries
+            .push_back(SvgImageDocument {
+                source: source.clone(),
+                document,
+                root,
+                inline_images: RefCell::default(),
+            });
         Some(root)
     }
 

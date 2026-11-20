@@ -339,7 +339,10 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
         let ready = self
             .runtime
             .ready_css_image_for_layout(document, parsed.as_str())
-            .or_else(|| self.runtime.svg_image_inline_image(document, parsed.as_str()))?;
+            .or_else(|| {
+                self.runtime
+                    .svg_image_inline_image(document, parsed.as_str())
+            })?;
         Some(LayoutImageResource {
             intrinsic_width: ready.intrinsic_width,
             intrinsic_height: ready.intrinsic_height,

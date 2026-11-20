@@ -1141,7 +1141,7 @@ mod tests {
             .iter()
             .flat_map(|node| match node {
                 usvg::Node::Group(group) => group_images(group),
-                usvg::Node::Image(image) => vec![image],
+                usvg::Node::Image(image) => vec![image.as_ref()],
                 usvg::Node::Path(_) | usvg::Node::Text(_) => Vec::new(),
             })
             .collect()
