@@ -106,7 +106,7 @@ mod image_loads;
 mod image_resources;
 pub(crate) use image_resources::{
     CssImageResourceAdmission, CssImageResourceRequestIdentity, ImageResponseDescriptor,
-    ReadyImageForLayout, ScannedImagePreloadAdmission,
+    ScannedImagePreloadAdmission,
 };
 mod indexed_db_tasks;
 mod interaction_batch;
