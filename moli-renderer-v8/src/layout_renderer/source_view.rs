@@ -54,12 +54,12 @@ impl<'a> NativeLayoutSourceView<'a> {
         self.runtime.dom_host()
     }
 
-    /// The `data:` raster image of an `<img>` inside an SVG image document,
-    /// which loads no other resource.
+    /// The image of an `<img>` inside an SVG image document, which loads
+    /// only `data:` URLs.
     fn svg_image_inline_image(
         &self,
         node: DomHandle,
-    ) -> Option<crate::native_bridge::ReadyImageForLayout> {
+    ) -> Option<crate::native_bridge::SvgImageInlineImage> {
         let src = self.host().get_attribute(node, "src")?;
         self.runtime
             .svg_image_inline_image(self.document?, src.trim())
@@ -272,6 +272,7 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
                 (semantics.replaced == Some(LayoutReplacedKind::Image))
                     .then(|| self.svg_image_inline_image(node))
                     .flatten()
+                    .and_then(crate::native_bridge::SvgImageInlineImage::ready)
                     .map(|ready| (ready.intrinsic_width, ready.intrinsic_height))
             });
         Some(ReplacedMetrics {
@@ -299,10 +300,28 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
             .map(|element| layout_element_semantics_for_source(self.host(), node, element))?;
         match semantics.replaced {
             Some(LayoutReplacedKind::Image) => {
-                let ready = self
-                    .runtime
-                    .ready_image_for_layout(node)
-                    .or_else(|| self.svg_image_inline_image(node))?;
+                let ready = match self.runtime.ready_image_for_layout(node) {
+                    Some(ready) => ready,
+                    None => match self.svg_image_inline_image(node)? {
+                        crate::native_bridge::SvgImageInlineImage::Ready(ready) => ready,
+                        // Chromium paints a `data:` SVG, or pixels Moli's
+                        // budget refuses, so an outline would be wrong.
+                        // Paint transparent pixels instead.
+                        crate::native_bridge::SvgImageInlineImage::Unpainted => {
+                            return Some(LayoutImageResource {
+                                intrinsic_width: 1.0,
+                                intrinsic_height: 1.0,
+                                pixels: Some(std::sync::Arc::new(moli_image::RgbaImage {
+                                    width: 1,
+                                    height: 1,
+                                    rgba: vec![0; 4],
+                                })),
+                                svg: None,
+                            });
+                        }
+                        crate::native_bridge::SvgImageInlineImage::Failed => return None,
+                    },
+                };
                 Some(LayoutImageResource {
                     intrinsic_width: ready.intrinsic_width,
                     intrinsic_height: ready.intrinsic_height,
@@ -342,6 +361,7 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
             .or_else(|| {
                 self.runtime
                     .svg_image_inline_image(document, parsed.as_str())
+                    .and_then(crate::native_bridge::SvgImageInlineImage::ready)
             })?;
         Some(LayoutImageResource {
             intrinsic_width: ready.intrinsic_width,

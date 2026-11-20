@@ -19,7 +19,7 @@ use moli_layout::{LayoutViewport, PaintRect, PaintSnapshot, PaintTransform2D};
 
 use super::{
     PageScriptHost,
-    image_resources::{InlineImagePermit, ReadyImageForLayout},
+    image_resources::{InlineDataImage, ReadyImageForLayout},
 };
 use crate::{context_bootstrap::svg_runtime::screen, document_runtime::DomHandle};
 
@@ -42,10 +42,10 @@ struct SvgImageDocument {
     source: Arc<[u8]>,
     document: DomHandle,
     root: DomHandle,
-    /// `data:` raster images by URL, decoded on first use. A URL that does
-    /// not decode, or does not fit the image budget, is kept as `None`.
-    /// Evicting the document drops the pixels and returns their budget.
-    inline_images: RefCell<HashMap<String, Option<(ReadyImageForLayout, InlineImagePermit)>>>,
+    /// `data:` images by URL, decoded on first use. A URL refused by the
+    /// image budget is not kept, so a later draw retries it. Evicting the
+    /// document drops the pixels and returns their budget.
+    inline_images: RefCell<HashMap<String, InlineDataImage>>,
 }
 
 impl SvgImageDocuments {
@@ -57,6 +57,35 @@ impl SvgImageDocuments {
                     || (entry.source.len() == source.len() && entry.source[..] == source[..])
             })
             .map(|entry| entry.root)
+    }
+}
+
+/// An image inside an SVG image document.
+pub(crate) enum SvgImageInlineImage {
+    Ready(ReadyImageForLayout),
+    /// A `data:` image Moli cannot paint here yet: an SVG, or pixels over
+    /// the image budget. Chromium paints it, so it is not a failed image.
+    Unpainted,
+    /// The image failed, as Chromium reports it.
+    Failed,
+}
+
+fn inline_image(image: &InlineDataImage) -> SvgImageInlineImage {
+    match image {
+        InlineDataImage::Ready(ready, _) => SvgImageInlineImage::Ready(ready.clone()),
+        InlineDataImage::UnsupportedSvg | InlineDataImage::BudgetRefused => {
+            SvgImageInlineImage::Unpainted
+        }
+        InlineDataImage::Undecodable => SvgImageInlineImage::Failed,
+    }
+}
+
+impl SvgImageInlineImage {
+    pub(crate) fn ready(self) -> Option<ReadyImageForLayout> {
+        match self {
+            Self::Ready(ready) => Some(ready),
+            Self::Unpainted | Self::Failed => None,
+        }
     }
 }
 
@@ -166,29 +195,31 @@ impl PageScriptHost {
         Some(root)
     }
 
-    /// The `data:` raster image `url` names inside the SVG image `document`,
-    /// or `None` when `document` is not a cached SVG image document or the
-    /// URL yields no raster image.
+    /// The image `url` names inside the SVG image `document`, which loads
+    /// only `data:` URLs. `None` when `document` is not a cached SVG image
+    /// document.
     pub(crate) fn svg_image_inline_image(
         &self,
         document: DomHandle,
         url: &str,
-    ) -> Option<ReadyImageForLayout> {
+    ) -> Option<SvgImageInlineImage> {
         let entry = self
             .svg_image_documents
             .entries
             .iter()
             .find(|entry| entry.document == document)?;
         if let Some(cached) = entry.inline_images.borrow().get(url) {
-            return cached.as_ref().map(|(ready, _)| ready.clone());
+            return Some(inline_image(cached));
         }
         let decoded = self.decode_inline_data_raster_image(url);
-        let ready = decoded.as_ref().map(|(ready, _)| ready.clone());
-        entry
-            .inline_images
-            .borrow_mut()
-            .insert(url.to_owned(), decoded);
-        ready
+        let image = inline_image(&decoded);
+        if !matches!(decoded, InlineDataImage::BudgetRefused) {
+            entry
+                .inline_images
+                .borrow_mut()
+                .insert(url.to_owned(), decoded);
+        }
+        Some(image)
     }
 
     fn retire_svg_image_document(&mut self, document: DomHandle) {
@@ -205,7 +236,7 @@ mod tests {
     use crate::dom::native::NativeNodeId;
 
     #[test]
-    fn cached_documents_are_found_by_equal_bytes_and_missed_by_length() {
+    fn cached_documents_are_found_by_equal_bytes_only() {
         let mut documents = SvgImageDocuments::default();
         documents.entries.push_back(SvgImageDocument {
             source: Arc::from(&b"<svg/>"[..]),
@@ -216,7 +247,9 @@ mod tests {
 
         let equal_bytes: Arc<[u8]> = Arc::from(&b"<svg/>"[..]);
         let longer: Arc<[u8]> = Arc::from(&b"<svg/> "[..]);
+        let same_length: Arc<[u8]> = Arc::from(&b"<svh/>"[..]);
         assert_eq!(documents.get(&equal_bytes), Some(NativeNodeId::new(2)));
         assert_eq!(documents.get(&longer), None);
+        assert_eq!(documents.get(&same_length), None);
     }
 }

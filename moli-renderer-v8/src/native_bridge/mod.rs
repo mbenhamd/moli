@@ -9,6 +9,7 @@ mod current_input;
 #[cfg(feature = "devtools")]
 pub(crate) use context_host::MouseReleaseFollowUp;
 pub(crate) use context_host::ReadyImageForLayout;
+pub(crate) use context_host::SvgImageInlineImage;
 pub(crate) use context_host::{
     ChildDocumentFetch, PageScriptHost, PageScriptHostTaskCapabilities,
     PendingScrollObservableEffects, PostParseAutofocusAdmission, ServiceWorkerWindowOwner,

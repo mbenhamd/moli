@@ -2623,7 +2623,8 @@ fn html_canvas_draw_image_paints_a_data_raster_image_inside_an_svg_image() {
 fn html_canvas_draw_image_paints_data_images_inside_a_foreign_object() {
     // Chromium 156 paints both 40x40 red boxes (f1 img_data, img_bg_data),
     // lays out an auto-sized `data:` image at its natural 8x4, and paints
-    // Blink's outline for an image that fails (f9 img_rel).
+    // Blink's outline for an image that fails (f9 img_rel). Moli does not
+    // decode a `data:` SVG `<img>` there yet; it paints no outline for it.
     let mut vm = new_storage_test_vm("https://canvas-draw-svg-fo-images.test/");
     vm.set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
 
@@ -2644,6 +2645,8 @@ fn html_canvas_draw_image_paints_data_images_inside_a_foreign_object() {
     + '<img ' + xhtml + ' src="' + wide + '" style="display:block"/></foreignObject>'
     + '<foreignObject x="50" y="50" width="20" height="20">'
     + '<img ' + xhtml + ' src="missing.png" style="display:block;width:10px;height:10px"/></foreignObject>'
+    + '<foreignObject x="75" y="50" width="20" height="20">'
+    + '<img ' + xhtml + ' src="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22/%3E" width="10" height="10" style="display:block"/></foreignObject>'
     + '</svg>';
   const image = new Image();
   image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
@@ -2659,6 +2662,7 @@ fn html_canvas_draw_image_paints_data_images_inside_a_foreign_object() {
     gap: at(45, 20),
     auto: [at(7, 53), at(8, 53), at(0, 54)],
     failed: [at(50, 50), at(55, 55)],
+    svg: [at(75, 50), at(84, 59)],
   });
 })()
 "##,
@@ -2667,7 +2671,7 @@ fn html_canvas_draw_image_paints_data_images_inside_a_foreign_object() {
 
     assert_eq!(
         result,
-        r#"{"img":[[255,0,0,255],[255,0,0,255]],"background":[[255,0,0,255],[255,0,0,255]],"gap":[0,0,0,0],"auto":[[255,0,0,255],[0,0,0,0],[0,0,0,0]],"failed":[[211,211,211,255],[0,0,0,0]]}"#
+        r#"{"img":[[255,0,0,255],[255,0,0,255]],"background":[[255,0,0,255],[255,0,0,255]],"gap":[0,0,0,0],"auto":[[255,0,0,255],[0,0,0,0],[0,0,0,0]],"failed":[[211,211,211,255],[0,0,0,0]],"svg":[[0,0,0,0],[0,0,0,0]]}"#
     );
 }
 

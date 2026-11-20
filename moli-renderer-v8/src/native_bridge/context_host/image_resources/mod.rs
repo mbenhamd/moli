@@ -24,6 +24,17 @@ pub(in crate::native_bridge::context_host) struct InlineImagePermit {
     _permit: budget::ImageDecodedBytesPermit,
 }
 
+/// The outcome of decoding an inline `data:` image.
+pub(in crate::native_bridge::context_host) enum InlineDataImage {
+    Ready(ReadyImageForLayout, InlineImagePermit),
+    /// Not a `data:` URL, or a body no decoder accepts: the image failed.
+    Undecodable,
+    /// A `data:` SVG, which this path does not decode yet.
+    UnsupportedSvg,
+    /// The pixels do not fit the page's image budget now.
+    BudgetRefused,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct ImageResourceRequestIdentity {
     pub(super) element: DomHandle,
@@ -176,25 +187,39 @@ impl super::PageScriptHost {
     }
 
     /// Decodes a `data:` raster image synchronously, charging its pixels to
-    /// the page's decoded-image budget for as long as the permit lives. Any
-    /// other URL, an SVG, an undecodable body, or a charge over budget
-    /// yields `None`; nothing is ever fetched.
+    /// the page's decoded-image budget for as long as the permit lives.
+    /// Nothing is ever fetched.
     pub(in crate::native_bridge::context_host) fn decode_inline_data_raster_image(
         &self,
         url: &str,
-    ) -> Option<(ReadyImageForLayout, InlineImagePermit)> {
+    ) -> InlineDataImage {
         if !(url.len() > 5 && url.as_bytes()[..5].eq_ignore_ascii_case(b"data:")) {
-            return None;
+            return InlineDataImage::Undecodable;
         }
-        let (body, _) = data_url::DataUrl::process(url).ok()?.decode_to_vec().ok()?;
-        let metadata = moli_image::probe_raster_image(&body).ok()?;
-        let permit = self
+        let Ok(data_url) = data_url::DataUrl::process(url) else {
+            return InlineDataImage::Undecodable;
+        };
+        let mime = data_url.mime_type();
+        if mime.type_ == "image" && mime.subtype == "svg+xml" {
+            return InlineDataImage::UnsupportedSvg;
+        }
+        let Some(body) = data_url.decode_to_vec().ok().map(|(body, _)| body) else {
+            return InlineDataImage::Undecodable;
+        };
+        let Ok(metadata) = moli_image::probe_raster_image(&body) else {
+            return InlineDataImage::Undecodable;
+        };
+        let Ok(permit) = self
             .image_resources
             .decode
             .reserve_decoded(metadata.decoded_byte_len())
-            .ok()?;
-        let decoded = moli_image::decode_raster_image_with_metadata(&body, metadata).ok()?;
-        Some((
+        else {
+            return InlineDataImage::BudgetRefused;
+        };
+        let Ok(decoded) = moli_image::decode_raster_image_with_metadata(&body, metadata) else {
+            return InlineDataImage::Undecodable;
+        };
+        InlineDataImage::Ready(
             ReadyImageForLayout {
                 intrinsic_width: decoded.image.width as f32,
                 intrinsic_height: decoded.image.height as f32,
@@ -202,7 +227,7 @@ impl super::PageScriptHost {
                 svg: None,
             },
             InlineImagePermit { _permit: permit },
-        ))
+        )
     }
 
     pub(crate) fn ready_css_image_for_layout(
