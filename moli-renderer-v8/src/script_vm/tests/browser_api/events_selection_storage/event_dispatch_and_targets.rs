@@ -1793,6 +1793,117 @@ fn dispatch_sees_listeners_changed_mid_dispatch_and_stops_propagation() {
     assert_eq!(result.lines().collect::<Vec<_>>(), expected);
 }
 
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell), PF-9474. After dispatch, CommandEvent.source is
+// retargeted against the document whether or not any entry listened.
+#[test]
+fn command_event_source_after_dispatch_is_retargeted_against_the_document() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-post-dispatch-source.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              if (!document.documentElement) document.appendChild(document.createElement('html'));
+              if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+              const make = (id, mode) => {
+                const host = document.createElement('div'); host.id = id + 'Host';
+                document.body.append(host);
+                const root = host.attachShadow({ mode });
+                const inner = document.createElement('span'); inner.id = id + 'Inner';
+                const peer = document.createElement('span'); peer.id = id + 'Peer';
+                root.append(inner, peer);
+                return { host, root, inner, peer };
+              };
+              const a = make('a', 'open');
+              const b = make('b', 'closed');
+              const light = document.body.appendChild(document.createElement('p')); light.id = 'light';
+              const name = (n) => n === null ? 'null' : n === undefined ? 'undefined' : n === window ? 'window' : n === document ? 'document'
+                : n === a.root ? 'aRoot' : n === b.root ? 'bRoot' : (n.id || n.nodeName.toLowerCase());
+              const log = [];
+              const fire = (label, source, target, init, listen) => {
+                const e = new CommandEvent('command', { source, ...init });
+                const seen = [];
+                const listener = (ev) => seen.push(name(ev.source));
+                if (listen) listen.addEventListener('command', listener);
+                target.dispatchEvent(e);
+                if (listen) listen.removeEventListener('command', listener);
+                log.push([label, seen.join(',') || '-', name(e.source), name(e.target), e.composedPath().length].join(' '));
+              };
+              fire('other-shadow-no-listener', a.inner, b.inner, {}, null);
+              fire('same-shadow-no-listener', b.peer, b.inner, {}, null);
+              fire('same-shadow-target-listener', b.peer, b.inner, {}, b.inner);
+              fire('same-shadow-root-listener', b.peer, b.inner, { bubbles: true }, b.root);
+              fire('other-shadow-target-listener', a.inner, b.inner, {}, b.inner);
+              fire('light-target-no-listener', a.inner, light, { bubbles: true }, null);
+              return log.join('\n');
+            })()
+            "#,
+        )
+        .expect("post-dispatch CommandEvent source probe should evaluate");
+
+    let expected = [
+        "other-shadow-no-listener - aHost null 0",
+        "same-shadow-no-listener - bHost null 0",
+        "same-shadow-target-listener bPeer bHost null 0",
+        "same-shadow-root-listener bPeer bHost null 0",
+        "other-shadow-target-listener aHost aHost null 0",
+        "light-target-no-listener - aHost light 0",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell, a real Tab key press), PF-9474. The Tab focus
+// default action runs after dispatch ends: the focus handler sees no
+// currentTarget, phase or composedPath, even though the last entry that
+// listened is a closed shadow root.
+#[test]
+fn tab_focus_default_action_sees_the_ended_dispatch_state() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-tab-default-action.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              if (!document.documentElement) document.appendChild(document.createElement('html'));
+              if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+              const host = document.body.appendChild(document.createElement('div')); host.id = 'host';
+              const root = host.attachShadow({ mode: 'closed' });
+              const first = root.appendChild(document.createElement('input')); first.id = 'first';
+              const next = document.body.appendChild(document.createElement('input')); next.id = 'next';
+              const name = (n) => n === null ? 'null' : n === window ? 'window' : n === document ? 'document'
+                : n === root ? 'root' : (n.id || n.nodeName.toLowerCase());
+              const log = [];
+              let key = null;
+              root.addEventListener('keydown', (e) => {
+                key = e;
+                log.push(['keydown-root', e.eventPhase, name(e.currentTarget), name(e.target), e.composedPath().map(name).join('>')].join(' '));
+              });
+              next.addEventListener('focus', () => {
+                log.push(['focus-next', key ? key.eventPhase : '-', key ? name(key.currentTarget) : '-',
+                  key ? key.composedPath().length : '-', key ? key.composedPath().includes(first) : '-'].join(' '));
+              });
+              first.focus();
+              log.push('setup ' + name(document.activeElement));
+              __moliDispatchTrustedKey('keydown', 'Tab', 'Tab', false, false, false, false);
+              log.push(['after', key.eventPhase, name(key.currentTarget), name(key.target), key.composedPath().length,
+                name(document.activeElement)].join(' '));
+              return log.join('\n');
+            })()
+            "#,
+        )
+        .expect("Tab focus default action dispatch-state probe should evaluate");
+
+    let expected = [
+        "setup host",
+        "keydown-root 3 root first first>root>host>body>html>document>window",
+        "focus-next 0 null 0 false",
+        "after 0 null host 0 next",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
 #[test]
 fn relative_range_boundaries_share_selection_updates() {
     let mut vm = new_parsed_test_vm(

@@ -1637,8 +1637,11 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
     let post_dispatch_related_target = original_related_target.map(|original_related_target| {
         post_dispatch_retargeted_target(host_ptr, original_related_target, propagation_path)
     });
-    let post_dispatch_source_target = original_source_target.and_then(|source_target| {
-        post_dispatch_retargeted_target(host_ptr, source_target, propagation_path)
+    // CommandEvent.source with a null currentTarget is retargeted against the
+    // document, whatever the path's last entry is. The Window retargets the
+    // same way: it reaches into no shadow tree.
+    let post_dispatch_source_target = original_source_target.map(|source_target| {
+        retarget_event_target(host_ptr, source_target, EventTargetHandle::Window)
     });
     let invocation_targets_in_shadow_tree = propagation_path
         .iter()
@@ -1901,6 +1904,21 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
         post_dispatch_related_target,
     )?;
     set_event_post_dispatch_source(scope, host_ptr, event, post_dispatch_source_target)?;
+    // The dispatch ends before any default action runs. Script a default
+    // action reaches (a focus handler, a cancel or interest listener) sees no
+    // currentTarget, phase or composedPath, whichever entries had listeners.
+    set_event_phase(scope, event, 0);
+    set_event_internal_flag(scope, event, EVENT_DISPATCHING_SLOT, false);
+    set_event_internal_flag(scope, event, EVENT_STOP_PROPAGATION_SLOT, false);
+    set_event_internal_flag(scope, event, EVENT_STOP_IMMEDIATE_SLOT, false);
+    set_event_internal_flag(scope, event, EVENT_PASSIVE_SLOT, false);
+    let current_target_key = v8str(scope, "currentTarget");
+    let _ = crate::context_bootstrap::event_backing(scope, event).set(
+        scope,
+        current_target_key.into(),
+        v8::null(scope).into(),
+    );
+    clear_event_composed_path(scope, event);
     if event_type == "mouseover"
         && !event_default_prevented(scope, event)
         && let EventTargetHandle::Node(handle) = dispatch_target
@@ -1925,18 +1943,6 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
             );
         }
     }
-    set_event_phase(scope, event, 0);
-    set_event_internal_flag(scope, event, EVENT_DISPATCHING_SLOT, false);
-    set_event_internal_flag(scope, event, EVENT_STOP_PROPAGATION_SLOT, false);
-    set_event_internal_flag(scope, event, EVENT_STOP_IMMEDIATE_SLOT, false);
-    set_event_internal_flag(scope, event, EVENT_PASSIVE_SLOT, false);
-    let current_target_key = v8str(scope, "currentTarget");
-    let _ = crate::context_bootstrap::event_backing(scope, event).set(
-        scope,
-        current_target_key.into(),
-        v8::null(scope).into(),
-    );
-    clear_event_composed_path(scope, event);
     Ok(PublicEventDispatchResult {
         default_prevented: event_default_prevented(scope, event),
         canceled_before_dispatch: false,
