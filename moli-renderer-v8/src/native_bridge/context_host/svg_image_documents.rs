@@ -20,9 +20,10 @@ use crate::{context_bootstrap::svg_runtime::screen, document_runtime::DomHandle}
 /// Document that script dropped.
 const MAX_CACHED_SVG_IMAGE_DOCUMENTS: usize = 16;
 
-/// Documents in insertion order, keyed by the decoded image's source buffer.
-/// The entry holds that buffer, so its address cannot be reused while cached,
-/// and a lookup never hashes the source bytes.
+/// Documents in insertion order, keyed by the image's source bytes. A draw
+/// of an image whose decoded resource is shared finds its entry by pointer.
+/// A draw that decoded the source again finds it by length and then bytes.
+/// The entry holds its buffer, so that address cannot be reused while cached.
 #[derive(Default)]
 pub(super) struct SvgImageDocuments {
     entries: VecDeque<(Arc<[u8]>, (DomHandle, DomHandle))>,
@@ -32,7 +33,10 @@ impl SvgImageDocuments {
     fn get(&self, source: &Arc<[u8]>) -> Option<(DomHandle, DomHandle)> {
         self.entries
             .iter()
-            .find(|(cached, _)| Arc::ptr_eq(cached, source))
+            .find(|(cached, _)| {
+                Arc::ptr_eq(cached, source)
+                    || (cached.len() == source.len() && cached[..] == source[..])
+            })
             .map(|(_, documents)| *documents)
     }
 }
@@ -54,6 +58,10 @@ impl PageScriptHost {
         source: &Arc<[u8]>,
         image_size: (f64, f64),
     ) -> Vec<SvgImageForeignContent> {
+        // Without real layout nothing can be painted, so parse nothing.
+        if !self.layout_policy.uses_real_layout() {
+            return Vec::new();
+        }
         let Some(root) = self.svg_image_document_root(source) else {
             return Vec::new();
         };
@@ -132,6 +140,14 @@ impl PageScriptHost {
             .entries
             .push_back((source.clone(), (document, root)));
         Some(root)
+    }
+
+    /// Whether `document` is a cached SVG image Document.
+    pub(crate) fn is_svg_image_document(&self, document: DomHandle) -> bool {
+        self.svg_image_documents
+            .entries
+            .iter()
+            .any(|(_, (cached, _))| *cached == document)
     }
 
     fn retire_svg_image_document(&mut self, document: DomHandle) {

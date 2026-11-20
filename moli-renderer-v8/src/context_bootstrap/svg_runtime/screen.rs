@@ -203,8 +203,13 @@ pub(crate) fn svg_image_foreign_objects(
         // replaces it. The hint is dropped when the attribute is not also
         // valid CSS (`rotate(30)`, `rotate(90 20 10)`), and a computed value
         // that needs a reference box has no matrix here; both use the
-        // attribute. `transform: none` over a non-identity attribute
-        // therefore keeps the attribute, a known gap.
+        // attribute. Known gaps: an identity CSS transform (`none`,
+        // `translate(0px, 0px)`) over a non-identity attribute keeps the
+        // attribute, because computed values do not say whether the hint or
+        // author CSS supplied them; and the transform applies about
+        // `0 0`. An author `transform-origin` is ignored, because this
+        // stylesheet set leaves SVG elements at the CSS initial `50% 50%`, so
+        // an authored `center` cannot be told from the SVG default.
         let attribute_transform = svg_transform_for_handle(runtime, handle);
         let own_transform = styles
             .read(handle)
