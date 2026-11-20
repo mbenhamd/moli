@@ -2204,3 +2204,200 @@ fn selection_syncs_all_associations_after_shadow_host_adoption() {
         assert_eq!(result["failures"], serde_json::json!([]), "{result}");
     }
 }
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell), PF-9474. A source-bearing event shapes its path
+// with a related target, as Blink's AdjustForReferenceTarget does. Dispatch
+// leaves that related target retargeted against the path's last entry, or
+// null when the path ends at a shadow root, while `source` keeps the
+// original. A second composed dispatch to a light-DOM target still reaches
+// Window.
+#[test]
+fn command_event_path_retargets_its_related_source_like_blink() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-reference-path.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              if (!document.documentElement) document.appendChild(document.createElement('html'));
+              if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+              const name = (n) => n === null ? 'null' : n === undefined ? 'undefined' : n === window ? 'window' : n === document ? 'document'
+                : n instanceof ShadowRoot ? 'root' : (n.id || n.nodeName.toLowerCase());
+              const log = [];
+              const host = document.body.appendChild(document.createElement('div')); host.id = 'host';
+              const root = host.attachShadow({ mode: 'closed' });
+              const source = root.appendChild(document.createElement('button')); source.id = 'source';
+              const outside = document.body.appendChild(document.createElement('p')); outside.id = 'outside';
+              // A composed command dispatched twice to a light-DOM target reaches Window both times.
+              const composed = new CommandEvent('command', { source, bubbles: true, composed: true });
+              const seen = [];
+              const onWindow = (e) => seen.push(name(e.currentTarget) + ':' + name(e.source));
+              window.addEventListener('command', onWindow);
+              outside.dispatchEvent(composed);
+              outside.dispatchEvent(composed);
+              window.removeEventListener('command', onWindow);
+              log.push('window-twice ' + seen.length + ' ' + seen.join(','));
+              // The Codex probe: the Window listener is added after the first dispatch.
+              const again = new CommandEvent('command', { source, bubbles: true, composed: true });
+              outside.dispatchEvent(again);
+              let calls = 0;
+              window.addEventListener('command', () => ++calls, { once: true });
+              outside.dispatchEvent(again);
+              log.push('window-after-first ' + calls);
+              // A plain EventTarget as currentTarget.
+              const plain = new EventTarget();
+              plain.addEventListener('command', (e) => log.push('eventtarget-listener ' + name(e.source)));
+              plain.dispatchEvent(new CommandEvent('command', { source }));
+              // Source in a nested shadow tree, target in the outer one: the path ends at the outer root.
+              const outerRoot = root;
+              const inner = outerRoot.appendChild(document.createElement('span')); inner.id = 'innerHost';
+              const innerSource = inner.attachShadow({ mode: 'closed' }).appendChild(document.createElement('button'));
+              innerSource.id = 'innerSource';
+              const t = outerRoot.appendChild(document.createElement('i')); t.id = 't';
+              const reached = [];
+              const record = (e) => reached.push(name(e.currentTarget) + ':' + name(e.source));
+              for (const n of [t, outerRoot, host, document.body, window]) n.addEventListener('command', record);
+              const nested = new CommandEvent('command', { source: innerSource, bubbles: true, composed: true });
+              t.dispatchEvent(nested);
+              log.push('nested-path ' + reached.join(',') + ' after=' + name(nested.source));
+              reached.length = 0;
+              t.dispatchEvent(nested);
+              log.push('nested-path-again ' + reached.join(','));
+              for (const n of [t, outerRoot, host, document.body, window]) n.removeEventListener('command', record);
+              // Source inside the target's own shadow tree.
+              const own = [];
+              const recordOwn = (e) => own.push(name(e.currentTarget) + ':' + name(e.source));
+              for (const n of [host, document.body, window]) n.addEventListener('command', recordOwn);
+              host.dispatchEvent(new CommandEvent('command', { source, bubbles: true, composed: true }));
+              for (const n of [host, document.body, window]) n.removeEventListener('command', recordOwn);
+              log.push('own-host ' + own.join(','));
+              return JSON.stringify(log);
+            })()
+            "#,
+        )
+        .expect("reference target path probe should evaluate");
+
+    let expected = [
+        "window-twice 2 window:host,window:host",
+        "window-after-first 1",
+        "eventtarget-listener host",
+        "nested-path t:innerHost,root:innerHost after=host",
+        "nested-path-again t:innerHost,root:innerHost,host:host,body:host,window:host",
+        "own-host host:host,body:host,window:host",
+    ];
+    let actual: Vec<String> =
+        serde_json::from_str(&result).expect("reference target path probe should return JSON");
+    assert_eq!(actual, expected);
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell), PF-9474. Nodes created by a createHTMLDocument()
+// document retarget like any other node, as `source` and as currentTarget.
+#[test]
+fn event_source_getter_retargets_detached_document_wrappers() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-detached-source.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              if (!document.documentElement) document.appendChild(document.createElement('html'));
+              if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+              const name = (n) => n === null ? 'null' : n === undefined ? 'undefined' : n === window ? 'window' : n === document ? 'document'
+                : n instanceof ShadowRoot ? 'root' : (n.id || n.nodeName.toLowerCase());
+              const log = [];
+              const host = document.body.appendChild(document.createElement('div')); host.id = 'host';
+              const root = host.attachShadow({ mode: 'closed' });
+              const source = root.appendChild(document.createElement('button')); source.id = 'source';
+              // Detached-document wrappers as currentTarget and as source.
+              const inert = document.implementation.createHTMLDocument('');
+              const adopted = root.appendChild(inert.createElement('span'));
+              let inside = 'unset';
+              adopted.addEventListener('probe', (e) => { inside = name(e.source); });
+              adopted.dispatchEvent(new CommandEvent('probe', { source }));
+              log.push('detached-current-target ' + inside);
+              log.push('detached-source toggle=' + name(new ToggleEvent('toggle', { source: adopted }).source)
+                + ' command=' + name(new CommandEvent('command', { source: adopted }).source));
+              const doc = document.implementation.createHTMLDocument('');
+              const inertHost = doc.createElement('div'); inertHost.id = 'inertHost';
+              const inertSource = doc.createElement('span'); inertSource.id = 'inertSource';
+              inertHost.attachShadow({ mode: 'closed' }).appendChild(inertSource);
+              log.push('inert-document ' + [CommandEvent, ToggleEvent].map((C) => name(new C('x', { source: inertSource }).source)).join(','));
+              return JSON.stringify(log);
+            })()
+            "#,
+        )
+        .expect("detached source probe should evaluate");
+
+    let expected = [
+        "detached-current-target source",
+        "detached-source toggle=host command=host",
+        "inert-document inertHost,inertHost",
+    ];
+    let actual: Vec<String> =
+        serde_json::from_str(&result).expect("detached source probe should return JSON");
+    assert_eq!(actual, expected);
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell, a real Tab key press), PF-9474. After the Tab
+// default action, the keydown's target is the final target of its latest
+// Node path. A nested Node dispatch from the focus handler rebuilds that
+// path; a plain EventTarget dispatch does not.
+#[test]
+fn keydown_final_target_follows_a_nested_node_redispatch_in_the_default_action() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-tab-nested-redispatch.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              window.__pf9474tab3 = (action) => {
+                if (!document.documentElement) document.appendChild(document.createElement('html'));
+                if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+                const wrap = document.body.appendChild(document.createElement('div'));
+                const first = wrap.appendChild(document.createElement('input')); first.id = 'first';
+                const next = wrap.appendChild(document.createElement('input')); next.id = 'next';
+                const other = wrap.appendChild(document.createElement('div')); other.id = 'other';
+                const shadowHost = wrap.appendChild(document.createElement('div')); shadowHost.id = 'shadowHost';
+                const shadowNode = shadowHost.attachShadow({ mode: 'closed' }).appendChild(document.createElement('b'));
+                shadowNode.id = 'shadowNode';
+                const name = (n) => n === null ? 'null' : (n.id || n.constructor.name);
+                let saved = null;
+                let inner = '-';
+                first.addEventListener('keydown', (e) => { saved = e; });
+                next.addEventListener('focus', () => {
+                  if (action === 'eventtarget') new EventTarget().dispatchEvent(saved);
+                  else if (action === 'node') other.dispatchEvent(saved);
+                  else if (action === 'node-then-eventtarget') { other.dispatchEvent(saved); new EventTarget().dispatchEvent(saved); }
+                  else if (action === 'shadow-node') shadowNode.dispatchEvent(saved);
+                  inner = name(saved.target);
+                }, { once: true });
+                first.focus();
+                return () => {
+                  const line = [action, 'inner=' + inner, 'target=' + name(saved.target), 'active=' + name(document.activeElement)].join(' ');
+                  wrap.remove();
+                  return line;
+                };
+              };
+              const log = [];
+              for (const action of ['eventtarget', 'node', 'node-then-eventtarget', 'shadow-node']) {
+                const read = window.__pf9474tab3(action);
+                __moliDispatchTrustedKey('keydown', 'Tab', 'Tab', false, false, false, false);
+                log.push(read());
+              }
+              return log.join('\n');
+            })()
+            "#,
+        )
+        .expect("nested redispatch probe should evaluate");
+
+    let expected = [
+        "eventtarget inner=EventTarget target=first active=next",
+        "node inner=other target=other active=next",
+        "node-then-eventtarget inner=EventTarget target=other active=next",
+        "shadow-node inner=shadowHost target=shadowHost active=next",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}

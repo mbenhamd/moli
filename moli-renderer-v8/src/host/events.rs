@@ -870,6 +870,10 @@ pub(crate) struct PublicEventDispatchResult {
 }
 
 impl PublicEventDispatchResult {
+    pub(crate) fn canceled_before_dispatch(self) -> bool {
+        self.canceled_before_dispatch
+    }
+
     pub(crate) fn allows_default(self) -> bool {
         !self.default_prevented && !self.canceled_before_dispatch
     }
@@ -1887,6 +1891,9 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
         post_dispatch_target,
         post_dispatch_related_target,
     )?;
+    if matches!(dispatch_target, EventTargetHandle::Node(_)) {
+        record_event_path_final_targets(scope, event);
+    }
     // Default actions decide from the dispatched event as it ended, before
     // any script they reach can reinitialize or redispatch it.
     let default_action = DispatchedEventDefaultAction::select(
@@ -1913,15 +1920,22 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
     clear_event_composed_path(scope, event);
     if let Some(default_action) = default_action {
         default_action.perform(scope, host_ptr);
-        // Script reached by the default action can redispatch the event
-        // elsewhere. The outer dispatch's targets stay its final ones.
-        set_event_post_dispatch_targets(
-            scope,
-            host_ptr,
-            event,
-            post_dispatch_target,
-            post_dispatch_related_target,
-        )?;
+        // Script reached by the default action can redispatch the event. Like
+        // Blink, a Node dispatch ends with the final targets of the event's
+        // latest Node path: its own, or a nested Node dispatch's, which
+        // rebuilt that path. A plain EventTarget or Window redispatch builds
+        // no path, so its target is overwritten.
+        if matches!(dispatch_target, EventTargetHandle::Node(_)) {
+            restore_event_path_final_targets(scope, event);
+        } else {
+            set_event_post_dispatch_targets(
+                scope,
+                host_ptr,
+                event,
+                post_dispatch_target,
+                post_dispatch_related_target,
+            )?;
+        }
     }
     Ok(PublicEventDispatchResult {
         default_prevented: event_default_prevented(scope, event),
@@ -2419,6 +2433,44 @@ fn set_event_post_dispatch_targets<'s>(
     Ok(())
 }
 
+/// Backing keys for the target and relatedTarget a Node dispatch leaves on
+/// the event, Blink's final read of the event path's Window context.
+const EVENT_PATH_FINAL_TARGET_KEY: &str = "pathFinalTarget";
+const EVENT_PATH_FINAL_RELATED_TARGET_KEY: &str = "pathFinalRelatedTarget";
+
+fn record_event_path_final_targets(
+    scope: &mut v8::PinScope<'_, '_>,
+    event: v8::Local<'_, v8::Object>,
+) {
+    let backing = crate::context_bootstrap::event_backing(scope, event);
+    for (from, to) in [
+        ("target", EVENT_PATH_FINAL_TARGET_KEY),
+        ("relatedTarget", EVENT_PATH_FINAL_RELATED_TARGET_KEY),
+    ] {
+        let value = backing
+            .get(scope, v8str(scope, from).into())
+            .unwrap_or_else(|| v8::null(scope).into());
+        let _ = backing.set(scope, v8str(scope, to).into(), value);
+    }
+}
+
+fn restore_event_path_final_targets(
+    scope: &mut v8::PinScope<'_, '_>,
+    event: v8::Local<'_, v8::Object>,
+) {
+    let backing = crate::context_bootstrap::event_backing(scope, event);
+    let target = backing
+        .get(scope, v8str(scope, EVENT_PATH_FINAL_TARGET_KEY).into())
+        .unwrap_or_else(|| v8::null(scope).into());
+    set_event_target(scope, event, target);
+    if let Some(related_target) = backing.get(
+        scope,
+        v8str(scope, EVENT_PATH_FINAL_RELATED_TARGET_KEY).into(),
+    ) {
+        let _ = backing.set(scope, v8str(scope, "relatedTarget").into(), related_target);
+    }
+}
+
 fn post_dispatch_retargeted_target(
     host_ptr: *mut PageScriptHost,
     original_target: EventTargetHandle,
@@ -2486,7 +2538,7 @@ pub(crate) fn retargeted_event_source<'s>(
         return source;
     };
     let Ok((host_ptr, handle)) =
-        crate::native_bridge::node_runtime_and_handle_from_object(scope, object)
+        crate::native_bridge::node_runtime_and_handle_from_object_or_detached(scope, object)
     else {
         return source;
     };
@@ -2494,7 +2546,8 @@ pub(crate) fn retargeted_event_source<'s>(
         .get(scope, v8str(scope, "currentTarget").into())
         .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
         .and_then(|object| {
-            crate::native_bridge::node_runtime_and_handle_from_object(scope, object).ok()
+            crate::native_bridge::node_runtime_and_handle_from_object_or_detached(scope, object)
+                .ok()
         })
         .filter(|(runtime_ptr, _)| *runtime_ptr == host_ptr)
         .map_or(EventTargetHandle::Window, |(_, current)| {
@@ -2505,7 +2558,12 @@ pub(crate) fn retargeted_event_source<'s>(
     if retargeted == source_target {
         return source;
     }
-    event_target_value(scope, host_ptr, retargeted).unwrap_or(source)
+    // Never hand script the unretargeted node, which can be inside a closed
+    // shadow tree.
+    event_target_value(scope, host_ptr, retargeted).unwrap_or_else(|error| {
+        debug_assert!(false, "retargeted event source has no wrapper: {error}");
+        v8::null(scope).into()
+    })
 }
 
 /// The one default action a dispatched event selects, from its state when
@@ -2615,7 +2673,7 @@ fn target_has_inaccessible_shadow_root(
     }
 }
 
-fn retarget_event_target(
+pub(crate) fn retarget_event_target(
     host_ptr: *mut PageScriptHost,
     original_target: EventTargetHandle,
     current_target: EventTargetHandle,

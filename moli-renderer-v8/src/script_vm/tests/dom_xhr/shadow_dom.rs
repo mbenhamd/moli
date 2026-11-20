@@ -296,7 +296,10 @@ fn submit_event_private_submitter_controls_shadow_dispatch_path() {
     "#,
         )
         .unwrap();
-    assert_eq!(result, r#"[[["form",true,true],["host",true,true]],0]"#);
+    // Chromium 156 (Playwright 1.64.1 headless shell) for the same script: a
+    // constructed SubmitEvent is not composed, so its path ends at the form's
+    // shadow root and the host never sees it.
+    assert_eq!(result, r#"[[["form",true,true]],0]"#);
 }
 
 #[test]
@@ -5063,12 +5066,17 @@ fn command_events_follow_reference_target_source_path() {
         )
         .expect("command events should follow source scoped shadow paths");
 
+    // Chromium 156 (Playwright 1.64.1 headless shell) for the same script and
+    // markup. Blink composes the command and submit events it fires and ends
+    // their path where the retargeted source and target meet
+    // (AdjustForReferenceTarget), so the inner hosts are on the path despite
+    // their "unexpected" labels. The constructed CommandEvent is not composed.
     assert_eq!(
         result,
-        "target:true:true:true:targetDiv,#document-fragment,middleA,#document-fragment|middle:true:true;\
+        "target:true:true:true:targetDiv,#document-fragment,innerA,#document-fragment,middleA,#document-fragment|inner-unexpected|middle:true:true;\
 target:true:true:true:targetDiv,#document-fragment;\
-target:true:true:true:targetDiv,#document-fragment,middleF,#document-fragment|middle:true:true;\
-target:true:true:true:targetForm,#document-fragment,middleI,#document-fragment|middle:true:true"
+target:true:true:true:targetDiv,#document-fragment;\
+target:true:true:true:targetForm,#document-fragment,innerI,#document-fragment,middleI,#document-fragment|inner-unexpected|middle:true:true"
     );
 }
 #[tokio::test]
@@ -5243,11 +5251,16 @@ async fn toggle_and_interest_events_follow_reference_target_source_path() {
         )
         .expect("reference target event log should evaluate");
 
+    // Chromium 156 (Playwright 1.64.1 headless shell) for the same script,
+    // markup and interactions. Blink composes the toggle and interest events
+    // it fires and ends their path where the retargeted source and target
+    // meet (AdjustForReferenceTarget), so the inner hosts are on the path
+    // despite their "unexpected" labels.
     assert_eq!(
         result,
-        "before-target:true:true:true:closed:open:targetDiv,#document-fragment,middleG,#document-fragment|before-middle:true:true;\
-interest-target:true:true:true:targetDiv,#document-fragment,middleJ,#document-fragment|interest-middle:true:true|\
-lose-target:true:true:true:targetDiv,#document-fragment,middleJ,#document-fragment|lose-middle:true:true"
+        "before-target:true:true:true:closed:open:targetDiv,#document-fragment,innerG,#document-fragment,middleG,#document-fragment|inner-before-unexpected|before-middle:true:true|inner-before-unexpected;\
+interest-target:true:true:true:targetDiv,#document-fragment,innerJ,#document-fragment,middleJ,#document-fragment|inner-interest-unexpected|interest-middle:true:true|\
+lose-target:true:true:true:targetDiv,#document-fragment,innerJ,#document-fragment,middleJ,#document-fragment|inner-lose-unexpected|lose-middle:true:true"
     );
 
     assert!(
@@ -5272,8 +5285,9 @@ lose-target:true:true:true:targetDiv,#document-fragment,middleJ,#document-fragme
         .expect("queued reference-target popover toggle should be observable");
     assert_eq!(
         after_toggle,
-        "before-target:true:true:true:closed:open:targetDiv,#document-fragment,middleG,#document-fragment|before-middle:true:true|\
-toggle-target:true:true:true:closed:open:targetDiv,#document-fragment,middleG,#document-fragment|toggle-middle:true:true"
+        "before-target:true:true:true:closed:open:targetDiv,#document-fragment,innerG,#document-fragment,middleG,#document-fragment|inner-before-unexpected|before-middle:true:true|\
+toggle-target:true:true:true:closed:open:targetDiv,#document-fragment,innerG,#document-fragment,middleG,#document-fragment|inner-toggle-unexpected|toggle-middle:true:true|\
+inner-before-unexpected|inner-toggle-unexpected"
     );
     assert_eq!(
         vm.eval(

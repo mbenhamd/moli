@@ -453,23 +453,144 @@ impl DocumentRuntime {
         let composed = crate::context_bootstrap::event_backing(scope, event)
             .get(scope, v8str(scope, "composed").into())
             .is_some_and(|value| value.boolean_value(scope));
-        let mut path = if let Some(source_target) =
-            source_target_for_reference_event(scope, host_ptr, event)
-        {
-            self.build_source_scoped_propagation_path(dispatch_target, source_target)
-        } else {
-            self.build_propagation_path(dispatch_target, composed)
+        let reference_related_target =
+            reference_related_target_for_event(scope, host_ptr, event, event_type.as_deref());
+        let (mut path, path_related_target) = match reference_related_target {
+            Some(Some(related_target)) => {
+                // Blink composes the source-bearing events it fires itself
+                // (popover toggles, command, interest), so their path leaves
+                // shadow trees up to where the source and target meet.
+                let trusted = crate::context_bootstrap::event_backing(scope, event)
+                    .get(scope, v8str(scope, "isTrusted").into())
+                    .is_some_and(|value| value.boolean_value(scope));
+                self.build_reference_target_propagation_path(
+                    host_ptr,
+                    dispatch_target,
+                    related_target,
+                    composed || trusted,
+                )
+            }
+            Some(None) | None => (self.build_propagation_path(dispatch_target, composed), None),
         };
         self.append_child_document_window_to_path(scope, host_ptr, &mut path);
         trim_window_from_subresource_load_path(dispatch_target, event_type.as_deref(), &mut path);
-        dispatch_public_event(
+        let result = dispatch_public_event(
             &mut self.events,
             scope,
             host_ptr,
             dispatch_target,
             &path,
             event,
-        )
+        )?;
+        if reference_related_target.is_some()
+            && matches!(dispatch_target, EventTargetHandle::Node(_))
+            && !result.canceled_before_dispatch()
+        {
+            self.record_reference_related_target(
+                scope,
+                host_ptr,
+                event,
+                &path,
+                path_related_target,
+            );
+        }
+        Ok(result)
+    }
+
+    /// Blink's `EventPath::AdjustForReferenceTarget`: the related target is
+    /// retargeted into each entry's tree, and the path ends before the first
+    /// entry outside both original trees where the retargeted target and
+    /// related target meet. Returns the path and the related target used.
+    fn build_reference_target_propagation_path(
+        &self,
+        host_ptr: *mut PageScriptHost,
+        target: EventTargetHandle,
+        related_target: EventTargetHandle,
+        composed: bool,
+    ) -> (Vec<EventTargetHandle>, Option<NativeNodeId>) {
+        let mut path = self.build_propagation_path(target, composed);
+        let (EventTargetHandle::Node(target_handle), EventTargetHandle::Node(source_handle)) =
+            (target, related_target)
+        else {
+            return (path, None);
+        };
+        let target_document = self.dom_host.owner_document_handle(target_handle);
+        if target_document.is_none()
+            || target_document != self.dom_host.owner_document_handle(source_handle)
+        {
+            return (path, None);
+        }
+        // A source whose retargeting against the target is the target itself
+        // (a shadow-internal source of its own host) would remove the whole
+        // path, so Blink uses the target as the related target.
+        let related_handle =
+            if crate::host::retarget_event_target(host_ptr, related_target, target) == target {
+                target_handle
+            } else {
+                source_handle
+            };
+        let target_root = self.dom_host.root_node_handle(target_handle);
+        let related_root = self.dom_host.root_node_handle(related_handle);
+        let stop = path.iter().position(|entry| {
+            if !matches!(entry, EventTargetHandle::Node(_)) {
+                return false;
+            }
+            let adjusted_target = crate::host::retarget_event_target(host_ptr, target, *entry);
+            let adjusted_related = crate::host::retarget_event_target(
+                host_ptr,
+                EventTargetHandle::Node(related_handle),
+                *entry,
+            );
+            let (
+                EventTargetHandle::Node(adjusted_target),
+                EventTargetHandle::Node(adjusted_related),
+            ) = (adjusted_target, adjusted_related)
+            else {
+                return false;
+            };
+            adjusted_target == adjusted_related
+                && !(self.dom_host.root_node_handle(adjusted_target) == target_root
+                    && self.dom_host.root_node_handle(adjusted_related) == related_root)
+        });
+        if let Some(stop) = stop {
+            path.truncate(stop);
+        }
+        (path, Some(related_handle))
+    }
+
+    /// The related target a Node dispatch leaves on a source-bearing event, as
+    /// Blink's per-entry `SetRelatedTarget` and final clearing do: retargeted
+    /// against the path's last entry, or null when the dispatch ends with a
+    /// null target (the path ends at a shadow root).
+    fn record_reference_related_target(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+        host_ptr: *mut PageScriptHost,
+        event: v8::Local<'_, v8::Object>,
+        path: &[EventTargetHandle],
+        path_related_target: Option<NativeNodeId>,
+    ) {
+        let Some(last) = path.last().copied() else {
+            return;
+        };
+        let value = if matches!(last, EventTargetHandle::Node(handle) if self.dom_host.is_shadow_root(handle))
+        {
+            v8::null(scope).into()
+        } else if let Some(related_handle) = path_related_target {
+            let retargeted = crate::host::retarget_event_target(
+                host_ptr,
+                EventTargetHandle::Node(related_handle),
+                last,
+            );
+            match crate::host::event_target_value(scope, host_ptr, retargeted) {
+                Ok(value) => value,
+                Err(_) => return,
+            }
+        } else {
+            return;
+        };
+        let key = v8str(scope, EVENT_REFERENCE_RELATED_TARGET_KEY);
+        let _ = crate::context_bootstrap::event_backing(scope, event).set(scope, key.into(), value);
     }
 
     pub(crate) fn build_propagation_path(
@@ -570,78 +691,6 @@ impl DocumentRuntime {
         }
     }
 
-    fn build_source_scoped_propagation_path(
-        &self,
-        target: EventTargetHandle,
-        source: EventTargetHandle,
-    ) -> Vec<EventTargetHandle> {
-        let full_path = self.build_propagation_path(target, true);
-        let (EventTargetHandle::Node(target_handle), EventTargetHandle::Node(source_handle)) =
-            (target, source)
-        else {
-            return full_path;
-        };
-        let Some(source_root) = self.dom_host.root_node_handle(source_handle) else {
-            return full_path;
-        };
-        let source_root_is_shadow = self.dom_host.is_shadow_root(source_root);
-        let source_root_is_document = source_root == self.document_handle();
-        let mut filtered = Vec::new();
-        for entry in full_path {
-            let include = match entry {
-                EventTargetHandle::Window | EventTargetHandle::ChildWindow(_) => {
-                    source_root_is_document
-                }
-                EventTargetHandle::Node(handle) => {
-                    self.dom_host.root_node_handle(handle) == Some(source_root)
-                        || self.flat_tree_contains_for_event_path(handle, target_handle)
-                }
-            };
-            if include {
-                filtered.push(entry);
-            }
-            if source_root_is_shadow && entry == EventTargetHandle::Node(source_root) {
-                break;
-            }
-        }
-        if filtered.is_empty() {
-            self.build_propagation_path(target, false)
-        } else {
-            filtered
-        }
-    }
-
-    fn flat_tree_contains_for_event_path(&self, root: NativeNodeId, target: NativeNodeId) -> bool {
-        let mut stack = vec![root];
-        let mut visited = Vec::new();
-        while let Some(handle) = stack.pop() {
-            if handle == target {
-                return true;
-            }
-            if visited.contains(&handle) {
-                continue;
-            }
-            visited.push(handle);
-            if self.dom_host.is_html_element_named(handle, "slot")
-                && self.dom_host.containing_shadow_root(handle).is_some()
-            {
-                stack.extend(
-                    self.dom_host
-                        .assigned_nodes_for_slot_with_options(handle, true)
-                        .into_iter()
-                        .rev(),
-                );
-                continue;
-            }
-            let mut child = self.dom_host.first_child(handle);
-            while let Some(child_handle) = child {
-                stack.push(child_handle);
-                child = self.dom_host.next_sibling(child_handle);
-            }
-        }
-        false
-    }
-
     fn light_tree_contains(&self, root: NativeNodeId, handle: NativeNodeId) -> bool {
         let mut current = Some(handle);
         while let Some(candidate) = current {
@@ -682,24 +731,43 @@ fn trim_window_from_subresource_load_path(
     }
 }
 
-fn source_target_for_reference_event(
+/// Backing key for the related target that shapes a source-bearing event's
+/// path: Blink's `related_target_` on CommandEvent, ToggleEvent,
+/// InterestEvent and SubmitEvent. It starts as the source or submitter and
+/// each Node dispatch updates it. The `source` getter never reads it.
+const EVENT_REFERENCE_RELATED_TARGET_KEY: &str = "referenceRelatedTarget";
+
+/// `None` for an event type without a reference related target, otherwise
+/// that target when it is a Node of this runtime.
+fn reference_related_target_for_event(
     scope: &mut v8::PinScope<'_, '_>,
     host_ptr: *mut PageScriptHost,
     event: v8::Local<'_, v8::Object>,
-) -> Option<EventTargetHandle> {
-    let event_type = public_event_type(scope, event)?;
-    let source = match event_type.as_str() {
-        "beforetoggle" | "command" | "interest" | "loseinterest" | "toggle" => {
-            crate::context_bootstrap::event_attribute(scope, event, "source")?
-        }
-        "submit" => crate::context_bootstrap::submit_event_submitter_value(scope, event)?,
-        _ => return None,
-    };
-    if source.is_null_or_undefined() || !source.is_object() {
+    event_type: Option<&str>,
+) -> Option<Option<EventTargetHandle>> {
+    let event_type = event_type?;
+    if !matches!(
+        event_type,
+        "beforetoggle" | "command" | "interest" | "loseinterest" | "toggle" | "submit"
+    ) {
         return None;
     }
-    let object = v8::Local::<v8::Object>::try_from(source).ok()?;
-    let (runtime_ptr, handle) =
-        crate::native_bridge::node_runtime_and_handle_from_object(scope, object).ok()?;
-    (runtime_ptr == host_ptr).then_some(EventTargetHandle::Node(handle))
+    let backing = crate::context_bootstrap::event_backing(scope, event);
+    let key = v8str(scope, EVENT_REFERENCE_RELATED_TARGET_KEY);
+    let value = if backing.has_own_property(scope, key.into()) == Some(true) {
+        backing.get(scope, key.into())
+    } else if event_type == "submit" {
+        crate::context_bootstrap::submit_event_submitter_value(scope, event)
+    } else {
+        crate::context_bootstrap::event_attribute(scope, event, "source")
+    };
+    let Some(object) = value.and_then(|value| v8::Local::<v8::Object>::try_from(value).ok()) else {
+        return Some(None);
+    };
+    Some(
+        crate::native_bridge::node_runtime_and_handle_from_object_or_detached(scope, object)
+            .ok()
+            .filter(|(runtime_ptr, _)| *runtime_ptr == host_ptr)
+            .map(|(_, handle)| EventTargetHandle::Node(handle)),
+    )
 }
