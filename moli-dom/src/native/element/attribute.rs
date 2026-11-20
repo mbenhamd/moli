@@ -24,7 +24,9 @@ impl Attribute {
         Self {
             local_name: LocalName::from(local_name),
             namespace: Namespace::from(namespace),
-            prefix: prefix.map(Prefix::from),
+            // An attribute prefix is null or non-empty. html5ever adjusts a
+            // foreign `xmlns` attribute with an empty prefix.
+            prefix: prefix.filter(|prefix| !prefix.is_empty()).map(Prefix::from),
             value: value.into_boxed_str(),
         }
     }
