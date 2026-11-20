@@ -72,7 +72,7 @@ pub(crate) enum SvgImageInlineImage {
 
 fn inline_image(image: &InlineDataImage) -> SvgImageInlineImage {
     match image {
-        InlineDataImage::Ready(ready, _) => SvgImageInlineImage::Ready(ready.clone()),
+        InlineDataImage::Ready { ready, .. } => SvgImageInlineImage::Ready(ready.clone()),
         InlineDataImage::UnsupportedSvg | InlineDataImage::BudgetRefused => {
             SvgImageInlineImage::Unpainted
         }

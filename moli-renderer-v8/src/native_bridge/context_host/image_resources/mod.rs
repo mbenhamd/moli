@@ -26,7 +26,11 @@ pub(in crate::native_bridge::context_host) struct InlineImagePermit {
 
 /// The outcome of decoding an inline `data:` image.
 pub(in crate::native_bridge::context_host) enum InlineDataImage {
-    Ready(ReadyImageForLayout, InlineImagePermit),
+    /// The permit holds the pixels' budget charge while the image is kept.
+    Ready {
+        ready: ReadyImageForLayout,
+        _permit: InlineImagePermit,
+    },
     /// Not a `data:` URL, or a body no decoder accepts: the image failed.
     Undecodable,
     /// A `data:` SVG, which this path does not decode yet.
@@ -219,15 +223,15 @@ impl super::PageScriptHost {
         let Ok(decoded) = moli_image::decode_raster_image_with_metadata(&body, metadata) else {
             return InlineDataImage::Undecodable;
         };
-        InlineDataImage::Ready(
-            ReadyImageForLayout {
+        InlineDataImage::Ready {
+            ready: ReadyImageForLayout {
                 intrinsic_width: decoded.image.width as f32,
                 intrinsic_height: decoded.image.height as f32,
                 pixels: Some(std::sync::Arc::new(decoded.image)),
                 svg: None,
             },
-            InlineImagePermit { _permit: permit },
-        )
+            _permit: InlineImagePermit { _permit: permit },
+        }
     }
 
     pub(crate) fn ready_css_image_for_layout(
