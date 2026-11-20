@@ -1879,6 +1879,8 @@ fn tab_focus_default_action_sees_the_ended_dispatch_state() {
               root.addEventListener('keydown', (e) => {
                 key = e;
                 log.push(['keydown-root', e.eventPhase, name(e.currentTarget), name(e.target), e.composedPath().map(name).join('>')].join(' '));
+                // The root is the last entry that listens, whatever else the page has.
+                e.stopPropagation();
               });
               next.addEventListener('focus', () => {
                 log.push(['focus-next', key ? key.eventPhase : '-', key ? name(key.currentTarget) : '-',
