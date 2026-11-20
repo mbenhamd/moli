@@ -162,6 +162,13 @@ impl ImageDecodeCoordinator {
         })
     }
 
+    pub(super) fn reserve_decoded(
+        &self,
+        decoded_bytes: usize,
+    ) -> Result<ImageDecodedBytesPermit, ImageResourceBudgetError> {
+        self.inner.budget.reserve_decoded(decoded_bytes)
+    }
+
     fn submit_job(
         &self,
         runner: RendererResourceTaskRunner,
@@ -196,7 +203,7 @@ impl ImageDecodeCoordinator {
                     let retained_bytes = metadata
                         .retained_byte_len(encoded_len)
                         .ok_or_else(|| "decoded image byte estimate overflowed".to_owned())?;
-                    let decoded_bytes_permit =
+                    let mut decoded_bytes_permit =
                         budget.reserve_decoded(retained_bytes).map_err(|error| {
                             format!("decoded image budget rejected the resource: {error:?}")
                         })?;
@@ -208,9 +215,19 @@ impl ImageDecodeCoordinator {
                             DecodedImageContent::Raster(Arc::new(decoded.image))
                         }
                         ImageDecodeMetadata::Svg(metadata) => {
-                            let decoded =
+                            let mut decoded =
                                 moli_image::decode_svg_image_with_metadata(&snapshot, metadata)
                                     .map_err(|error| error.to_string())?;
+                            // Nested `data:` rasters are charged before their
+                            // pixels exist. Over budget, they stay unpainted
+                            // and the vector content still draws.
+                            let nested_bytes = decoded.nested_raster_byte_len();
+                            if nested_bytes > 0
+                                && let Ok(nested_permit) = budget.reserve_decoded(nested_bytes)
+                            {
+                                decoded_bytes_permit.absorb(nested_permit);
+                                decoded.decode_nested_rasters();
+                            }
                             DecodedImageContent::Svg(Arc::new(decoded))
                         }
                     };

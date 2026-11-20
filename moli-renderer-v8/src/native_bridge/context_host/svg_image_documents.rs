@@ -5,13 +5,22 @@
 //! paint as a page: the image's XML becomes an inert Document in this page's
 //! DOM arena, like one from `DOMParser`, with its own style sheets. Scripts in
 //! it never run and it fetches no subresources, as in Blink's isolated SVG
-//! image pages.
+//! image pages. The one exception is a `data:` raster image, which needs no
+//! fetch: an `<img>` or CSS image inside a `<foreignObject>` decodes it from
+//! the URL, as Blink does.
 
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use moli_layout::{LayoutViewport, PaintRect, PaintSnapshot, PaintTransform2D};
 
-use super::PageScriptHost;
+use super::{
+    PageScriptHost,
+    image_resources::{InlineDataImage, ReadyImageForLayout},
+};
 use crate::{context_bootstrap::svg_runtime::screen, document_runtime::DomHandle};
 
 /// Parsed documents kept for repeated draws of the same image. An evicted
@@ -26,18 +35,57 @@ const MAX_CACHED_SVG_IMAGE_DOCUMENTS: usize = 16;
 /// The entry holds its buffer, so that address cannot be reused while cached.
 #[derive(Default)]
 pub(super) struct SvgImageDocuments {
-    entries: VecDeque<(Arc<[u8]>, (DomHandle, DomHandle))>,
+    entries: VecDeque<SvgImageDocument>,
+}
+
+struct SvgImageDocument {
+    source: Arc<[u8]>,
+    document: DomHandle,
+    root: DomHandle,
+    /// `data:` images by URL, decoded on first use. A URL refused by the
+    /// image budget is not kept, so a later draw retries it. Evicting the
+    /// document drops the pixels and returns their budget.
+    inline_images: RefCell<HashMap<String, InlineDataImage>>,
 }
 
 impl SvgImageDocuments {
-    fn get(&self, source: &Arc<[u8]>) -> Option<(DomHandle, DomHandle)> {
+    fn get(&self, source: &Arc<[u8]>) -> Option<DomHandle> {
         self.entries
             .iter()
-            .find(|(cached, _)| {
-                Arc::ptr_eq(cached, source)
-                    || (cached.len() == source.len() && cached[..] == source[..])
+            .find(|entry| {
+                Arc::ptr_eq(&entry.source, source)
+                    || (entry.source.len() == source.len() && entry.source[..] == source[..])
             })
-            .map(|(_, documents)| *documents)
+            .map(|entry| entry.root)
+    }
+}
+
+/// An image inside an SVG image document.
+pub(crate) enum SvgImageInlineImage {
+    Ready(ReadyImageForLayout),
+    /// A `data:` image Moli cannot paint here yet: an SVG, or pixels over
+    /// the image budget. Chromium paints it, so it is not a failed image.
+    Unpainted,
+    /// The image failed, as Chromium reports it.
+    Failed,
+}
+
+fn inline_image(image: &InlineDataImage) -> SvgImageInlineImage {
+    match image {
+        InlineDataImage::Ready { ready, .. } => SvgImageInlineImage::Ready(ready.clone()),
+        InlineDataImage::UnsupportedSvg | InlineDataImage::BudgetRefused => {
+            SvgImageInlineImage::Unpainted
+        }
+        InlineDataImage::Undecodable => SvgImageInlineImage::Failed,
+    }
+}
+
+impl SvgImageInlineImage {
+    pub(crate) fn ready(self) -> Option<ReadyImageForLayout> {
+        match self {
+            Self::Ready(ready) => Some(ready),
+            Self::Unpainted | Self::Failed => None,
+        }
     }
 }
 
@@ -114,7 +162,7 @@ impl PageScriptHost {
     }
 
     fn svg_image_document_root(&mut self, source: &Arc<[u8]>) -> Option<DomHandle> {
-        if let Some((_, root)) = self.svg_image_documents.get(source) {
+        if let Some(root) = self.svg_image_documents.get(source) {
             return Some(root);
         }
         let xml = std::str::from_utf8(source).ok()?;
@@ -132,22 +180,46 @@ impl PageScriptHost {
             .child_handles(document)
             .find(|&node| self.dom_host().node(node).is_some_and(|n| n.is_element()))?;
         if self.svg_image_documents.entries.len() >= MAX_CACHED_SVG_IMAGE_DOCUMENTS
-            && let Some((_, (evicted, _))) = self.svg_image_documents.entries.pop_front()
+            && let Some(evicted) = self.svg_image_documents.entries.pop_front()
         {
-            self.retire_svg_image_document(evicted);
+            self.retire_svg_image_document(evicted.document);
         }
         self.svg_image_documents
             .entries
-            .push_back((source.clone(), (document, root)));
+            .push_back(SvgImageDocument {
+                source: source.clone(),
+                document,
+                root,
+                inline_images: RefCell::default(),
+            });
         Some(root)
     }
 
-    /// Whether `document` is a cached SVG image Document.
-    pub(crate) fn is_svg_image_document(&self, document: DomHandle) -> bool {
-        self.svg_image_documents
+    /// The image `url` names inside the SVG image `document`, which loads
+    /// only `data:` URLs. `None` when `document` is not a cached SVG image
+    /// document.
+    pub(crate) fn svg_image_inline_image(
+        &self,
+        document: DomHandle,
+        url: &str,
+    ) -> Option<SvgImageInlineImage> {
+        let entry = self
+            .svg_image_documents
             .entries
             .iter()
-            .any(|(_, (cached, _))| *cached == document)
+            .find(|entry| entry.document == document)?;
+        if let Some(cached) = entry.inline_images.borrow().get(url) {
+            return Some(inline_image(cached));
+        }
+        let decoded = self.decode_inline_data_raster_image(url);
+        let image = inline_image(&decoded);
+        if !matches!(decoded, InlineDataImage::BudgetRefused) {
+            entry
+                .inline_images
+                .borrow_mut()
+                .insert(url.to_owned(), decoded);
+        }
+        Some(image)
     }
 
     fn retire_svg_image_document(&mut self, document: DomHandle) {
@@ -155,5 +227,29 @@ impl PageScriptHost {
             .borrow_mut()
             .retire_embedded_document(document);
         self.style_engine.retire_document_style_world(document);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dom::native::NativeNodeId;
+
+    #[test]
+    fn cached_documents_are_found_by_equal_bytes_only() {
+        let mut documents = SvgImageDocuments::default();
+        documents.entries.push_back(SvgImageDocument {
+            source: Arc::from(&b"<svg/>"[..]),
+            document: NativeNodeId::new(1),
+            root: NativeNodeId::new(2),
+            inline_images: RefCell::default(),
+        });
+
+        let equal_bytes: Arc<[u8]> = Arc::from(&b"<svg/>"[..]);
+        let longer: Arc<[u8]> = Arc::from(&b"<svg/> "[..]);
+        let same_length: Arc<[u8]> = Arc::from(&b"<svh/>"[..]);
+        assert_eq!(documents.get(&equal_bytes), Some(NativeNodeId::new(2)));
+        assert_eq!(documents.get(&longer), None);
+        assert_eq!(documents.get(&same_length), None);
     }
 }
