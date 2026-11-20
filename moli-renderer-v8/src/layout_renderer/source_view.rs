@@ -53,6 +53,17 @@ impl<'a> NativeLayoutSourceView<'a> {
     fn host(&self) -> &DomHost {
         self.runtime.dom_host()
     }
+
+    /// The `data:` raster image of an `<img>` inside an SVG image document,
+    /// which loads no other resource.
+    fn svg_image_inline_image(
+        &self,
+        node: DomHandle,
+    ) -> Option<crate::native_bridge::ReadyImageForLayout> {
+        let src = self.host().get_attribute(node, "src")?;
+        self.runtime
+            .svg_image_inline_image(self.document?, src.trim())
+    }
 }
 
 impl LayoutSource for NativeLayoutSourceView<'_> {
@@ -254,7 +265,15 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
         }
         let attribute_width = numeric_dimension_attribute(self.host(), node, "width");
         let attribute_height = numeric_dimension_attribute(self.host(), node, "height");
-        let intrinsic = self.runtime.image_resource_intrinsic_size(node);
+        let intrinsic = self
+            .runtime
+            .image_resource_intrinsic_size(node)
+            .or_else(|| {
+                (semantics.replaced == Some(LayoutReplacedKind::Image))
+                    .then(|| self.svg_image_inline_image(node))
+                    .flatten()
+                    .map(|ready| (ready.intrinsic_width, ready.intrinsic_height))
+            });
         Some(ReplacedMetrics {
             intrinsic_width: intrinsic.map(|(width, _)| width),
             intrinsic_height: intrinsic.map(|(_, height)| height),
@@ -280,7 +299,10 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
             .map(|element| layout_element_semantics_for_source(self.host(), node, element))?;
         match semantics.replaced {
             Some(LayoutReplacedKind::Image) => {
-                let ready = self.runtime.ready_image_for_layout(node)?;
+                let ready = self
+                    .runtime
+                    .ready_image_for_layout(node)
+                    .or_else(|| self.svg_image_inline_image(node))?;
                 Some(LayoutImageResource {
                     intrinsic_width: ready.intrinsic_width,
                     intrinsic_height: ready.intrinsic_height,
@@ -313,9 +335,11 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
         if parsed.fragment().is_some() {
             return None;
         }
+        let document = self.document?;
         let ready = self
             .runtime
-            .ready_css_image_for_layout(self.document?, parsed.as_str())?;
+            .ready_css_image_for_layout(document, parsed.as_str())
+            .or_else(|| self.runtime.svg_image_inline_image(document, parsed.as_str()))?;
         Some(LayoutImageResource {
             intrinsic_width: ready.intrinsic_width,
             intrinsic_height: ready.intrinsic_height,

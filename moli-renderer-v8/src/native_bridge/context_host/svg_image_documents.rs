@@ -5,13 +5,22 @@
 //! paint as a page: the image's XML becomes an inert Document in this page's
 //! DOM arena, like one from `DOMParser`, with its own style sheets. Scripts in
 //! it never run and it fetches no subresources, as in Blink's isolated SVG
-//! image pages.
+//! image pages. The one exception is a `data:` raster image, which needs no
+//! fetch: an `<img>` or CSS image inside a `<foreignObject>` decodes it from
+//! the URL, as Blink does.
 
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use moli_layout::{LayoutViewport, PaintRect, PaintSnapshot, PaintTransform2D};
 
-use super::PageScriptHost;
+use super::{
+    PageScriptHost,
+    image_resources::{InlineImagePermit, ReadyImageForLayout},
+};
 use crate::{context_bootstrap::svg_runtime::screen, document_runtime::DomHandle};
 
 /// Parsed documents kept for repeated draws of the same image. An evicted
@@ -25,15 +34,25 @@ const MAX_CACHED_SVG_IMAGE_DOCUMENTS: usize = 16;
 /// and a lookup never hashes the source bytes.
 #[derive(Default)]
 pub(super) struct SvgImageDocuments {
-    entries: VecDeque<(Arc<[u8]>, (DomHandle, DomHandle))>,
+    entries: VecDeque<SvgImageDocument>,
+}
+
+struct SvgImageDocument {
+    source: Arc<[u8]>,
+    document: DomHandle,
+    root: DomHandle,
+    /// `data:` raster images by URL, decoded on first use. A URL that does
+    /// not decode, or does not fit the image budget, is kept as `None`.
+    /// Evicting the document drops the pixels and returns their budget.
+    inline_images: RefCell<HashMap<String, Option<(ReadyImageForLayout, InlineImagePermit)>>>,
 }
 
 impl SvgImageDocuments {
-    fn get(&self, source: &Arc<[u8]>) -> Option<(DomHandle, DomHandle)> {
+    fn get(&self, source: &Arc<[u8]>) -> Option<DomHandle> {
         self.entries
             .iter()
-            .find(|(cached, _)| Arc::ptr_eq(cached, source))
-            .map(|(_, documents)| *documents)
+            .find(|entry| Arc::ptr_eq(&entry.source, source))
+            .map(|entry| entry.root)
     }
 }
 
@@ -106,7 +125,7 @@ impl PageScriptHost {
     }
 
     fn svg_image_document_root(&mut self, source: &Arc<[u8]>) -> Option<DomHandle> {
-        if let Some((_, root)) = self.svg_image_documents.get(source) {
+        if let Some(root) = self.svg_image_documents.get(source) {
             return Some(root);
         }
         let xml = std::str::from_utf8(source).ok()?;
@@ -124,14 +143,42 @@ impl PageScriptHost {
             .child_handles(document)
             .find(|&node| self.dom_host().node(node).is_some_and(|n| n.is_element()))?;
         if self.svg_image_documents.entries.len() >= MAX_CACHED_SVG_IMAGE_DOCUMENTS
-            && let Some((_, (evicted, _))) = self.svg_image_documents.entries.pop_front()
+            && let Some(evicted) = self.svg_image_documents.entries.pop_front()
         {
-            self.retire_svg_image_document(evicted);
+            self.retire_svg_image_document(evicted.document);
         }
-        self.svg_image_documents
-            .entries
-            .push_back((source.clone(), (document, root)));
+        self.svg_image_documents.entries.push_back(SvgImageDocument {
+            source: source.clone(),
+            document,
+            root,
+            inline_images: RefCell::default(),
+        });
         Some(root)
+    }
+
+    /// The `data:` raster image `url` names inside the SVG image `document`,
+    /// or `None` when `document` is not a cached SVG image document or the
+    /// URL yields no raster image.
+    pub(crate) fn svg_image_inline_image(
+        &self,
+        document: DomHandle,
+        url: &str,
+    ) -> Option<ReadyImageForLayout> {
+        let entry = self
+            .svg_image_documents
+            .entries
+            .iter()
+            .find(|entry| entry.document == document)?;
+        if let Some(cached) = entry.inline_images.borrow().get(url) {
+            return cached.as_ref().map(|(ready, _)| ready.clone());
+        }
+        let decoded = self.decode_inline_data_raster_image(url);
+        let ready = decoded.as_ref().map(|(ready, _)| ready.clone());
+        entry
+            .inline_images
+            .borrow_mut()
+            .insert(url.to_owned(), decoded);
+        ready
     }
 
     fn retire_svg_image_document(&mut self, document: DomHandle) {

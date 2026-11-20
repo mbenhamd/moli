@@ -2584,6 +2584,44 @@ fn html_canvas_draw_image_paints_a_data_raster_image_inside_an_svg_image() {
     );
 }
 
+#[test]
+fn html_canvas_draw_image_paints_data_images_inside_a_foreign_object() {
+    // Chromium 156 paints both 40x40 red boxes (f1 img_data, img_bg_data).
+    let mut vm = new_storage_test_vm("https://canvas-draw-svg-fo-images.test/");
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
+
+    let result = vm
+        .eval(
+            r##"
+(() => {
+  const red = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
+  const xhtml = 'xmlns="http://www.w3.org/1999/xhtml"';
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40">'
+    + '<foreignObject width="40" height="40">'
+    + '<img ' + xhtml + ' src="' + red + '" style="display:block;width:40px;height:40px"/></foreignObject>'
+    + '<foreignObject x="50" width="40" height="40">'
+    + '<div ' + xhtml + ' style="width:40px;height:40px;background:url(' + red + ')"></div>'
+    + '</foreignObject></svg>';
+  const image = new Image();
+  image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  const canvas = document.createElement('canvas');
+  canvas.width = 100;
+  canvas.height = 40;
+  const context = canvas.getContext('2d');
+  context.drawImage(image, 0, 0);
+  const at = (x, y) => Array.from(context.getImageData(x, y, 1, 1).data);
+  return JSON.stringify({ img: [at(0, 0), at(39, 39)], background: [at(50, 0), at(89, 39)], gap: at(45, 20) });
+})()
+"##,
+        )
+        .expect("SVG image draw should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"img":[[255,0,0,255],[255,0,0,255]],"background":[[255,0,0,255],[255,0,0,255]],"gap":[0,0,0,0]}"#
+    );
+}
+
 #[tokio::test]
 async fn html_canvas_draw_image_rejects_a_broken_svg_image() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");

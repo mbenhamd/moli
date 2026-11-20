@@ -18,6 +18,12 @@ pub(crate) use preload::{ScannedImagePreloadAdmission, SharedScannedImagePreload
 pub(super) use state::ImageResourceStore;
 pub(crate) use state::ReadyImageForLayout;
 
+/// The decoded bytes of one inline image, held against the page's image
+/// budget until dropped.
+pub(in crate::native_bridge::context_host) struct InlineImagePermit {
+    _permit: budget::ImageDecodedBytesPermit,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct ImageResourceRequestIdentity {
     pub(super) element: DomHandle,
@@ -167,6 +173,36 @@ impl super::PageScriptHost {
 
     pub(crate) fn ready_image_for_layout(&self, element: DomHandle) -> Option<ReadyImageForLayout> {
         self.image_resources.ready_for_layout(element)
+    }
+
+    /// Decodes a `data:` raster image synchronously, charging its pixels to
+    /// the page's decoded-image budget for as long as the permit lives. Any
+    /// other URL, an SVG, an undecodable body, or a charge over budget
+    /// yields `None`; nothing is ever fetched.
+    pub(in crate::native_bridge::context_host) fn decode_inline_data_raster_image(
+        &self,
+        url: &str,
+    ) -> Option<(ReadyImageForLayout, InlineImagePermit)> {
+        if !(url.len() > 5 && url.as_bytes()[..5].eq_ignore_ascii_case(b"data:")) {
+            return None;
+        }
+        let (body, _) = data_url::DataUrl::process(url).ok()?.decode_to_vec().ok()?;
+        let metadata = moli_image::probe_raster_image(&body).ok()?;
+        let permit = self
+            .image_resources
+            .decode
+            .reserve_decoded(metadata.decoded_byte_len())
+            .ok()?;
+        let decoded = moli_image::decode_raster_image_with_metadata(&body, metadata).ok()?;
+        Some((
+            ReadyImageForLayout {
+                intrinsic_width: decoded.image.width as f32,
+                intrinsic_height: decoded.image.height as f32,
+                pixels: Some(std::sync::Arc::new(decoded.image)),
+                svg: None,
+            },
+            InlineImagePermit { _permit: permit },
+        ))
     }
 
     pub(crate) fn ready_css_image_for_layout(

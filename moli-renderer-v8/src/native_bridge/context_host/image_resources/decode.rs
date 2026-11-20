@@ -162,6 +162,13 @@ impl ImageDecodeCoordinator {
         })
     }
 
+    pub(super) fn reserve_decoded(
+        &self,
+        decoded_bytes: usize,
+    ) -> Result<ImageDecodedBytesPermit, ImageResourceBudgetError> {
+        self.inner.budget.reserve_decoded(decoded_bytes)
+    }
+
     fn submit_job(
         &self,
         runner: RendererResourceTaskRunner,
