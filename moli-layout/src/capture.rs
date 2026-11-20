@@ -49,10 +49,6 @@ pub struct PaintCaptureRequest {
     /// browsing contexts use transparent black so their owner element remains
     /// visible unless the child document supplies its own canvas background.
     pub base_background_color: PaintColor,
-    /// Whether an `<img>` without pixels paints Blink's light-gray outline.
-    /// An SVG image's isolated page loads no external images and paints
-    /// nothing for them.
-    pub paint_unavailable_images: bool,
     /// Maximum encoded image width in device pixels.
     pub max_width: Option<u32>,
     /// Maximum encoded image height in device pixels.
@@ -67,7 +63,6 @@ impl PaintCaptureRequest {
             include_backgrounds: true,
             include_viewport_controls: true,
             base_background_color: PaintColor::WHITE,
-            paint_unavailable_images: true,
             max_width: None,
             max_height: None,
         }
@@ -80,7 +75,6 @@ impl PaintCaptureRequest {
             include_backgrounds: true,
             include_viewport_controls: true,
             base_background_color: PaintColor::WHITE,
-            paint_unavailable_images: true,
             max_width,
             max_height,
         }
@@ -93,7 +87,6 @@ impl PaintCaptureRequest {
             include_backgrounds: true,
             include_viewport_controls: false,
             base_background_color: PaintColor::WHITE,
-            paint_unavailable_images: true,
             max_width: None,
             max_height: None,
         }
@@ -114,7 +107,6 @@ impl PaintCaptureRequest {
             include_backgrounds: true,
             include_viewport_controls: false,
             base_background_color: PaintColor::WHITE,
-            paint_unavailable_images: true,
             max_width: None,
             max_height: None,
         }
@@ -167,7 +159,6 @@ pub(crate) struct ResolvedPaintCapture {
     /// Chromium's compositor capture behavior.
     pub(crate) paint_root_scrollbars: bool,
     pub(crate) base_background_color: PaintColor,
-    pub(crate) paint_unavailable_images: bool,
 }
 
 impl PaintCaptureRequest {
@@ -270,7 +261,6 @@ impl PaintCaptureRequest {
             include_backgrounds: self.include_backgrounds,
             paint_root_scrollbars: self.include_viewport_controls,
             base_background_color: self.base_background_color,
-            paint_unavailable_images: self.paint_unavailable_images,
         })
     }
 }
@@ -403,7 +393,6 @@ mod tests {
             include_backgrounds: true,
             include_viewport_controls: false,
             base_background_color: PaintColor::WHITE,
-            paint_unavailable_images: true,
             max_width: Some(500),
             max_height: Some(200),
         }

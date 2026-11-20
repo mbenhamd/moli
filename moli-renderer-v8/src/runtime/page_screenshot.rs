@@ -278,7 +278,6 @@ impl PageVm {
             include_backgrounds: true,
             include_viewport_controls: true,
             base_background_color: paint_background_color(request.base_background_color),
-            paint_unavailable_images: true,
             max_width: request.max_width,
             max_height: request.max_height,
         };
@@ -487,7 +486,6 @@ impl RendererCaptureScreenshotRequest {
             include_backgrounds: true,
             include_viewport_controls,
             base_background_color: paint_background_color(self.base_background_color),
-            paint_unavailable_images: true,
             max_width: self.max_width,
             max_height: self.max_height,
         })

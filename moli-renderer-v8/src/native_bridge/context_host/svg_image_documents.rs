@@ -29,9 +29,10 @@ use crate::{context_bootstrap::svg_runtime::screen, document_runtime::DomHandle}
 /// Document that script dropped.
 const MAX_CACHED_SVG_IMAGE_DOCUMENTS: usize = 16;
 
-/// Documents in insertion order, keyed by the decoded image's source buffer.
-/// The entry holds that buffer, so its address cannot be reused while cached,
-/// and a lookup never hashes the source bytes.
+/// Documents in insertion order, keyed by the image's source bytes. A draw
+/// of an image whose decoded resource is shared finds its entry by pointer.
+/// A draw that decoded the source again finds it by length and then bytes.
+/// The entry holds its buffer, so that address cannot be reused while cached.
 #[derive(Default)]
 pub(super) struct SvgImageDocuments {
     entries: VecDeque<SvgImageDocument>,
@@ -51,7 +52,10 @@ impl SvgImageDocuments {
     fn get(&self, source: &Arc<[u8]>) -> Option<DomHandle> {
         self.entries
             .iter()
-            .find(|entry| Arc::ptr_eq(&entry.source, source))
+            .find(|entry| {
+                Arc::ptr_eq(&entry.source, source)
+                    || (entry.source.len() == source.len() && entry.source[..] == source[..])
+            })
             .map(|entry| entry.root)
     }
 }
@@ -73,6 +77,10 @@ impl PageScriptHost {
         source: &Arc<[u8]>,
         image_size: (f64, f64),
     ) -> Vec<SvgImageForeignContent> {
+        // Without real layout nothing can be painted, so parse nothing.
+        if !self.layout_policy.uses_real_layout() {
+            return Vec::new();
+        }
         let Some(root) = self.svg_image_document_root(source) else {
             return Vec::new();
         };

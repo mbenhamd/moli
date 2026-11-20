@@ -807,7 +807,6 @@ impl PageScriptHost {
         let mut capture = moli_layout::PaintCaptureRequest::viewport();
         capture.include_viewport_controls = false;
         capture.base_background_color = moli_layout::PaintColor::TRANSPARENT;
-        capture.paint_unavailable_images = false;
         let request = LayoutPassRequest::with_capture(
             viewport,
             moli_layout::LayoutFlushReason::Screenshot,

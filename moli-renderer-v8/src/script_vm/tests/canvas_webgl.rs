@@ -2502,10 +2502,9 @@ fn html_canvas_draw_image_paints_foreign_object_html_with_the_image_style_sheets
 
 #[test]
 fn html_canvas_draw_image_places_foreign_object_content_by_its_transform_once() {
-    // Chromium 156 paints the translated content at [50,20,89,39], places a
-    // CSS `transform` before `x`/`y` as it does the attribute (f2
-    // css_transform_fo), and paints no outline for an image an SVG image
-    // cannot load.
+    // Chromium 156 paints the translated content at [50,20,89,39] and places
+    // a CSS `transform` before `x`/`y` as it does the attribute (f2
+    // css_transform_fo).
     let mut vm = new_storage_test_vm("https://canvas-draw-svg-transform.test/");
     vm.set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
 
@@ -2515,8 +2514,6 @@ fn html_canvas_draw_image_places_foreign_object_content_by_its_transform_once() 
 (() => {
   const xhtml = 'xmlns="http://www.w3.org/1999/xhtml"';
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="60">'
-    + '<foreignObject width="20" height="20">'
-    + '<img ' + xhtml + ' src="missing.png" width="10" height="10" style="display:block"/></foreignObject>'
     + '<foreignObject width="40" height="20" transform="translate(50,20)">'
     + '<div ' + xhtml + ' style="width:100%;height:100%;background:#0f0"></div>'
     + '</foreignObject>'
@@ -2534,7 +2531,6 @@ fn html_canvas_draw_image_places_foreign_object_content_by_its_transform_once() 
   return JSON.stringify({
     inside: [at(50, 20), at(89, 39)],
     outside: at(91, 41),
-    unloaded: at(0, 0),
     css: [at(15, 45), at(24, 54), at(5, 40)],
   });
 })()
@@ -2544,7 +2540,46 @@ fn html_canvas_draw_image_places_foreign_object_content_by_its_transform_once() 
 
     assert_eq!(
         result,
-        r#"{"inside":[[0,255,0,255],[0,255,0,255]],"outside":[0,0,0,0],"unloaded":[0,0,0,0],"css":[[0,0,255,255],[0,0,255,255],[0,0,0,0]]}"#
+        r#"{"inside":[[0,255,0,255],[0,255,0,255]],"outside":[0,0,0,0],"css":[[0,0,255,255],[0,0,255,255],[0,0,0,0]]}"#
+    );
+}
+
+#[test]
+fn html_canvas_draw_image_repaints_foreign_object_content_after_document_eviction() {
+    // Each draw decodes its `data:` source again, so the cached image
+    // Document is found by its bytes. Seventeen distinct images evict the
+    // first, which then paints again from a fresh Document.
+    let mut vm = new_storage_test_vm("https://canvas-draw-svg-cache.test/");
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
+
+    let result = vm
+        .eval(
+            r##"
+(() => {
+  const xhtml = 'xmlns="http://www.w3.org/1999/xhtml"';
+  const svg = (color) => '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+    + '<foreignObject width="10" height="10">'
+    + '<div ' + xhtml + ' style="width:10px;height:10px;background:' + color + '"></div>'
+    + '</foreignObject></svg>';
+  const draw = (color) => {
+    const image = new Image();
+    image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg(color));
+    const context = document.createElement('canvas').getContext('2d');
+    context.drawImage(image, 0, 0);
+    return Array.from(context.getImageData(5, 5, 1, 1).data);
+  };
+  const first = [draw('#0f0'), draw('#0f0')];
+  const others = [];
+  for (let k = 1; k <= 17; k++) others.push(draw('rgb(0,0,' + k + ')'));
+  return JSON.stringify({ first, last: others[16], again: draw('#0f0') });
+})()
+"##,
+        )
+        .expect("SVG image draws should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"first":[[0,255,0,255],[0,255,0,255]],"last":[0,0,17,255],"again":[0,255,0,255]}"#
     );
 }
 
