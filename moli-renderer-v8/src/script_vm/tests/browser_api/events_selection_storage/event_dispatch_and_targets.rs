@@ -1906,6 +1906,227 @@ fn tab_focus_default_action_sees_the_ended_dispatch_state() {
     assert_eq!(result.lines().collect::<Vec<_>>(), expected);
 }
 
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell), PF-9474. The source getter retargets the stored
+// source on each read: against currentTarget during dispatch and against the
+// document otherwise. Dispatch never overwrites the stored source.
+#[test]
+fn command_event_source_getter_retargets_the_original_source_on_each_read() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-source-getter.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              if (!document.documentElement) document.appendChild(document.createElement('html'));
+              if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+              const host = document.body.appendChild(document.createElement('div')); host.id = 'host';
+              const root = host.attachShadow({ mode: 'closed' });
+              const source = root.appendChild(document.createElement('button')); source.id = 'source';
+              const target = root.appendChild(document.createElement('span')); target.id = 'target';
+              const other = document.body.appendChild(document.createElement('div')); other.id = 'other';
+              const name = (n) => n === null ? 'null' : n === undefined ? 'undefined' : n === window ? 'window' : n === document ? 'document'
+                : n === root ? 'root' : (n.id || n.nodeName.toLowerCase());
+              const log = [];
+              const event = new CommandEvent('command', { source });
+              log.push('before ' + name(event.source));
+              target.addEventListener('command', (e) => log.push('target-listener ' + name(e.source)));
+              other.addEventListener('command', (e) => log.push('other-listener ' + name(e.source)));
+              target.dispatchEvent(event);
+              log.push('after-1 ' + name(event.source));
+              target.dispatchEvent(event);
+              log.push('after-2 ' + name(event.source));
+              other.dispatchEvent(event);
+              log.push('after-3 ' + name(event.source));
+              document.body.append(source);
+              log.push('moved ' + name(event.source));
+              const toggle = new ToggleEvent('toggle', { source: target });
+              log.push('toggle-before ' + name(toggle.source));
+              return log.join('\n');
+            })()
+            "#,
+        )
+        .expect("CommandEvent source getter probe should evaluate");
+
+    let expected = [
+        "before host",
+        "target-listener source",
+        "after-1 host",
+        "target-listener source",
+        "after-2 host",
+        "other-listener host",
+        "after-3 host",
+        "moved source",
+        "toggle-before host",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell, a real Tab key press), PF-9474. The keydown's
+// default action is chosen when its dispatch ends. A focus handler that
+// reinitializes the event as Escape does not also close the modal dialog,
+// and one that redispatches it leaves the keydown's final target unchanged.
+#[test]
+fn tab_default_action_is_chosen_before_script_can_change_the_keydown() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-tab-default-snapshot.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              window.__pf9474tab = (action) => {
+                if (!document.documentElement) document.appendChild(document.createElement('html'));
+                if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+                const dialog = document.body.appendChild(document.createElement('dialog'));
+                const first = dialog.appendChild(document.createElement('input')); first.id = 'first';
+                const next = dialog.appendChild(document.createElement('input')); next.id = 'next';
+                const name = (n) => n === null ? 'null' : (n.id || n.constructor.name);
+                let saved = null;
+                let inner = '-';
+                first.addEventListener('keydown', (e) => { saved = e; });
+                next.addEventListener('focus', () => {
+                  try {
+                    if (action === 'reinit') {
+                      saved.initKeyboardEvent('keydown', true, true, window, 'Escape');
+                      inner = 'reinitialized';
+                    } else {
+                      new EventTarget().dispatchEvent(saved);
+                      inner = 'redispatched-to-' + name(saved.target);
+                    }
+                  } catch (e) { inner = 'threw-' + e.name; }
+                }, { once: true });
+                dialog.showModal();
+                first.focus();
+                return () => {
+                  const line = [action, inner, 'open=' + dialog.open, 'target=' + name(saved.target),
+                    'active=' + name(document.activeElement), 'trusted=' + saved.isTrusted].join(' ');
+                  if (dialog.open) dialog.close();
+                  dialog.remove();
+                  return line;
+                };
+              };
+              const log = [];
+              for (const action of ['reinit', 'redispatch']) {
+                const read = window.__pf9474tab(action);
+                __moliDispatchTrustedKey('keydown', 'Tab', 'Tab', false, false, false, false);
+                log.push(read());
+              }
+              return log.join('\n');
+            })()
+            "#,
+        )
+        .expect("Tab default action snapshot probe should evaluate");
+
+    let expected = [
+        "reinit reinitialized open=true target=first active=next trusted=false",
+        "redispatch redispatched-to-EventTarget open=true target=first active=next trusted=false",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell, a real Escape key press), PF-9474. The dialog's
+// cancel event fires from the Escape default action after the keydown's
+// dispatch ended: no currentTarget, phase or composedPath, though the last
+// entry that listened is a closed shadow root.
+#[test]
+fn escape_dialog_cancel_sees_the_ended_keydown_dispatch_state() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-escape-default-action.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              window.__pf9474escape = () => {
+                if (!document.documentElement) document.appendChild(document.createElement('html'));
+                if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+                const host = document.body.appendChild(document.createElement('div')); host.id = 'host';
+                const root = host.attachShadow({ mode: 'closed' });
+                const dialog = root.appendChild(document.createElement('dialog'));
+                const input = dialog.appendChild(document.createElement('input')); input.id = 'inner';
+                const name = (n) => n === null ? 'null' : n === window ? 'window' : n === document ? 'document'
+                  : n === root ? 'root' : (n.id || n.nodeName.toLowerCase());
+                const log = [];
+                let key = null;
+                root.addEventListener('keydown', (e) => {
+                  key = e;
+                  log.push(['keydown-root', e.eventPhase, name(e.currentTarget), e.composedPath().length].join(' '));
+                  // The root is the last entry that listens, whatever else the page has.
+                  e.stopPropagation();
+                });
+                dialog.addEventListener('cancel', () => {
+                  log.push(['cancel', key.eventPhase, name(key.currentTarget), key.composedPath().length,
+                    key.composedPath().includes(input)].join(' '));
+                });
+                dialog.showModal();
+                input.focus();
+                return () => {
+                  log.push(['after', key.eventPhase, name(key.currentTarget), name(key.target), key.composedPath().length,
+                    'open=' + dialog.open].join(' '));
+                  return log.join('\n');
+                };
+              };
+              const read = window.__pf9474escape();
+              __moliDispatchTrustedKey('keydown', 'Escape', 'Escape', false, false, false, false);
+              return read();
+            })()
+            "#,
+        )
+        .expect("Escape default action dispatch-state probe should evaluate");
+
+    let expected = [
+        "keydown-root 3 root 8",
+        "cancel 0 null 0 false",
+        "after 0 null host 0 open=false",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
+// Expected line is Chromium's output for the same script (Playwright 1.64.1
+// headless shell, a real mouse move onto the button), PF-9474. Only a
+// trusted mouseover runs the hover interest default action, so an interest
+// listener that redispatches the saved mouseover fires no second interest.
+#[test]
+fn redispatched_mouseover_runs_no_hover_interest_default_action() {
+    let mut vm = new_rendered_test_vm(
+        "https://event-dispatch-hover-interest.test/",
+        "<!doctype html><html><body><button id='button' interestfor='tip'>Hover</button><div id='tip' popover>Tip</div></body></html>",
+    );
+    vm.eval(
+        r#"
+        (() => {
+          window.__pf9474interest = () => {
+            const button = document.getElementById('button');
+            let over = null;
+            let interests = 0;
+            let redispatch = '-';
+            button.addEventListener('mouseover', (e) => { over = e; });
+            document.getElementById('tip').addEventListener('interest', () => {
+              if (++interests === 1) {
+                try { button.dispatchEvent(over); redispatch = 'ok'; } catch (e) { redispatch = e.name; }
+              }
+            });
+            return () => ['interests=' + interests, 'redispatch=' + redispatch, 'trusted=' + (over && over.isTrusted)].join(' ');
+          };
+          window.__read = window.__pf9474interest();
+        })()
+        "#,
+    )
+    .expect("hover interest probe setup should evaluate");
+    vm.publish_layout_for_test()
+        .expect("publish geometry before coordinate input");
+    vm.dispatch_mouse_event_at_point(300.0, 300.0, "mousemove", 0, Some(0), 0.0, 0.0)
+        .expect("mousemove away from the button should dispatch");
+    vm.dispatch_mouse_event_at_point(12.0, 12.0, "mousemove", 0, Some(0), 0.0, 0.0)
+        .expect("mousemove onto the button should dispatch");
+    let result = vm
+        .eval("window.__read()")
+        .expect("hover interest probe result should evaluate");
+
+    assert_eq!(result, "interests=1 redispatch=ok trusted=false");
+}
+
 #[test]
 fn relative_range_boundaries_share_selection_updates() {
     let mut vm = new_parsed_test_vm(

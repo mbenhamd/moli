@@ -590,7 +590,6 @@ struct PathEventContext<'s, 'p> {
     event: v8::Local<'s, v8::Object>,
     original_target: EventTargetHandle,
     original_related_target: Option<EventTargetHandle>,
-    original_source_target: Option<EventTargetHandle>,
     propagation_path: &'p [EventTargetHandle],
 }
 
@@ -658,13 +657,6 @@ impl<'s, 'p> PathEntryEventState<'s, 'p> {
             host_ptr,
             context.event,
             context.original_related_target,
-            self.current_target,
-        )?;
-        set_event_source_for_current_target(
-            scope,
-            host_ptr,
-            context.event,
-            context.original_source_target,
             self.current_target,
         )?;
         set_event_composed_path_for_current_target(
@@ -1619,7 +1611,6 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
 
     let bubbles = event_bool_property(scope, event, "bubbles");
     let original_related_target = event_related_target_handle(scope, host_ptr, event);
-    let original_source_target = event_source_target_handle(scope, host_ptr, event);
     let filtered_path;
     let propagation_path = if let Some(related_target) = original_related_target {
         filtered_path = propagation_path_for_related_target(
@@ -1637,12 +1628,6 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
     let post_dispatch_related_target = original_related_target.map(|original_related_target| {
         post_dispatch_retargeted_target(host_ptr, original_related_target, propagation_path)
     });
-    // CommandEvent.source with a null currentTarget is retargeted against the
-    // document, whatever the path's last entry is. The Window retargets the
-    // same way: it reaches into no shadow tree.
-    let post_dispatch_source_target = original_source_target.map(|source_target| {
-        retarget_event_target(host_ptr, source_target, EventTargetHandle::Window)
-    });
     let invocation_targets_in_shadow_tree = propagation_path
         .iter()
         .copied()
@@ -1652,7 +1637,6 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
         event,
         original_target,
         original_related_target,
-        original_source_target,
         propagation_path,
     };
 
@@ -1903,7 +1887,15 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
         post_dispatch_target,
         post_dispatch_related_target,
     )?;
-    set_event_post_dispatch_source(scope, host_ptr, event, post_dispatch_source_target)?;
+    // Default actions decide from the dispatched event as it ended, before
+    // any script they reach can reinitialize or redispatch it.
+    let default_action = DispatchedEventDefaultAction::select(
+        scope,
+        event,
+        &event_type,
+        dispatch_target,
+        keyboard_dispatch_document,
+    );
     // The dispatch ends before any default action runs. Script a default
     // action reaches (a focus handler, a cancel or interest listener) sees no
     // currentTarget, phase or composedPath, whichever entries had listeners.
@@ -1919,29 +1911,17 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
         v8::null(scope).into(),
     );
     clear_event_composed_path(scope, event);
-    if event_type == "mouseover"
-        && !event_default_prevented(scope, event)
-        && let EventTargetHandle::Node(handle) = dispatch_target
-    {
-        crate::native_bridge::element::perform_hover_interest_default_action_for_dispatched_event(
-            scope, host_ptr, handle,
-        );
-    }
-    if event_type == "keydown"
-        && event_bool_property(scope, event, "isTrusted")
-        && !event_default_prevented(scope, event)
-    {
-        crate::native_bridge::element::perform_tab_focus_default_action_for_dispatched_event(
-            scope, host_ptr, event,
-        );
-        if let Some(document) = keyboard_dispatch_document {
-            crate::native_bridge::element::perform_access_key_default_action_for_dispatched_event(
-                scope, host_ptr, event, document,
-            );
-            crate::native_bridge::element::perform_dialog_escape_default_action_for_dispatched_event(
-                scope, host_ptr, event, document,
-            );
-        }
+    if let Some(default_action) = default_action {
+        default_action.perform(scope, host_ptr);
+        // Script reached by the default action can redispatch the event
+        // elsewhere. The outer dispatch's targets stay its final ones.
+        set_event_post_dispatch_targets(
+            scope,
+            host_ptr,
+            event,
+            post_dispatch_target,
+            post_dispatch_related_target,
+        )?;
     }
     Ok(PublicEventDispatchResult {
         default_prevented: event_default_prevented(scope, event),
@@ -2343,26 +2323,6 @@ fn set_event_related_target_for_current_target<'s>(
     Ok(())
 }
 
-fn set_event_source_for_current_target<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    host_ptr: *mut PageScriptHost,
-    event: v8::Local<'s, v8::Object>,
-    original_source_target: Option<EventTargetHandle>,
-    current_target: EventTargetHandle,
-) -> std::result::Result<(), String> {
-    let Some(original_source_target) = original_source_target else {
-        return Ok(());
-    };
-    let source = retarget_event_target(host_ptr, original_source_target, current_target);
-    let source_value = event_target_value(scope, host_ptr, source)?;
-    let _ = crate::context_bootstrap::event_backing(scope, event).set(
-        scope,
-        v8str(scope, "source").into(),
-        source_value,
-    );
-    Ok(())
-}
-
 fn set_event_composed_path_for_current_target<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     host_ptr: *mut PageScriptHost,
@@ -2459,24 +2419,6 @@ fn set_event_post_dispatch_targets<'s>(
     Ok(())
 }
 
-fn set_event_post_dispatch_source<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    host_ptr: *mut PageScriptHost,
-    event: v8::Local<'s, v8::Object>,
-    post_dispatch_source: Option<EventTargetHandle>,
-) -> std::result::Result<(), String> {
-    let Some(source_target) = post_dispatch_source else {
-        return Ok(());
-    };
-    let source_value = event_target_value(scope, host_ptr, source_target)?;
-    let _ = crate::context_bootstrap::event_backing(scope, event).set(
-        scope,
-        v8str(scope, "source").into(),
-        source_value,
-    );
-    Ok(())
-}
-
 fn post_dispatch_retargeted_target(
     host_ptr: *mut PageScriptHost,
     original_target: EventTargetHandle,
@@ -2530,20 +2472,86 @@ fn event_related_target_handle(
         .map(EventTargetHandle::Node)
 }
 
-fn event_source_target_handle(
-    scope: &mut v8::PinScope<'_, '_>,
-    host_ptr: *mut PageScriptHost,
-    event: v8::Local<'_, v8::Object>,
-) -> Option<EventTargetHandle> {
-    let value = crate::context_bootstrap::event_backing(scope, event)
-        .get(scope, v8str(scope, "source").into())?;
-    if value.is_null_or_undefined() || !value.is_object() {
-        return None;
+/// An event's `source` (CommandEvent, ToggleEvent, InterestEvent) as its
+/// getter returns it: the stored source node retargeted against the event's
+/// currentTarget, or against the document when there is none. The stored
+/// value stays the original, so every read and every later dispatch sees the
+/// tree as it is then. A value that is not a Node is returned unchanged.
+pub(crate) fn retargeted_event_source<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    event: v8::Local<'s, v8::Object>,
+    source: v8::Local<'s, v8::Value>,
+) -> v8::Local<'s, v8::Value> {
+    let Ok(object) = v8::Local::<v8::Object>::try_from(source) else {
+        return source;
+    };
+    let Ok((host_ptr, handle)) =
+        crate::native_bridge::node_runtime_and_handle_from_object(scope, object)
+    else {
+        return source;
+    };
+    let current_target = crate::context_bootstrap::event_backing(scope, event)
+        .get(scope, v8str(scope, "currentTarget").into())
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+        .and_then(|object| {
+            crate::native_bridge::node_runtime_and_handle_from_object(scope, object).ok()
+        })
+        .filter(|(runtime_ptr, _)| *runtime_ptr == host_ptr)
+        .map_or(EventTargetHandle::Window, |(_, current)| {
+            EventTargetHandle::Node(current)
+        });
+    let source_target = EventTargetHandle::Node(handle);
+    let retargeted = retarget_event_target(host_ptr, source_target, current_target);
+    if retargeted == source_target {
+        return source;
     }
-    let object = v8::Local::<v8::Object>::try_from(value).ok()?;
-    let (runtime_ptr, handle) =
-        crate::native_bridge::node_runtime_and_handle_from_object(scope, object).ok()?;
-    (runtime_ptr == host_ptr).then_some(EventTargetHandle::Node(handle))
+    event_target_value(scope, host_ptr, retargeted).unwrap_or(source)
+}
+
+/// The one default action a dispatched event selects, from its state when
+/// the dispatch ended.
+enum DispatchedEventDefaultAction {
+    HoverInterest(NativeNodeId),
+    Keyboard(crate::native_bridge::element::KeyboardDefaultAction),
+}
+
+impl DispatchedEventDefaultAction {
+    fn select(
+        scope: &mut v8::PinScope<'_, '_>,
+        event: v8::Local<'_, v8::Object>,
+        event_type: &str,
+        dispatch_target: EventTargetHandle,
+        keyboard_dispatch_document: Option<NativeNodeId>,
+    ) -> Option<Self> {
+        if !event_bool_property(scope, event, "isTrusted") || event_default_prevented(scope, event)
+        {
+            return None;
+        }
+        match event_type {
+            "mouseover" => match dispatch_target {
+                EventTargetHandle::Node(handle) => Some(Self::HoverInterest(handle)),
+                _ => None,
+            },
+            "keydown" => crate::native_bridge::element::KeyboardDefaultAction::select(
+                scope,
+                event,
+                keyboard_dispatch_document,
+            )
+            .map(Self::Keyboard),
+            _ => None,
+        }
+    }
+
+    fn perform(self, scope: &mut v8::PinScope<'_, '_>, host_ptr: *mut PageScriptHost) {
+        match self {
+            Self::HoverInterest(handle) => {
+                crate::native_bridge::element::perform_hover_interest_default_action_for_dispatched_event(
+                    scope, host_ptr, handle,
+                );
+            }
+            Self::Keyboard(action) => action.perform(scope, host_ptr),
+        }
+    }
 }
 
 fn propagation_path_for_related_target(

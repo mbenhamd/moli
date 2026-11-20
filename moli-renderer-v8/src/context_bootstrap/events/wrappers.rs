@@ -24,6 +24,9 @@ enum AttributeProjection {
     Value,
     Target,
     PlatformObject,
+    /// `source` of CommandEvent, ToggleEvent and InterestEvent: the stored
+    /// original, retargeted on each read.
+    RetargetedSource,
     NavigationEntry,
     NavigationDestination,
 }
@@ -32,9 +35,10 @@ impl AttributeProjection {
     fn for_property(property: &str) -> Self {
         match property {
             "target" | "srcElement" | "currentTarget" => Self::Target,
-            "signal" | "formData" | "sourceElement" | "relatedTarget" | "submitter" | "source" => {
+            "signal" | "formData" | "sourceElement" | "relatedTarget" | "submitter" => {
                 Self::PlatformObject
             }
+            "source" => Self::RetargetedSource,
             "from" => Self::NavigationEntry,
             "destination" => Self::NavigationDestination,
             // Arbitrary JS payloads have their own value access semantics;
@@ -63,6 +67,10 @@ impl AttributeProjection {
                 Err(_) => value,
             }),
             Self::PlatformObject => {
+                crate::context_bootstrap::platform_object_worlds::in_realm(scope, value, context)
+            }
+            Self::RetargetedSource => {
+                let value = crate::host::retargeted_event_source(scope, wrapper, value);
                 crate::context_bootstrap::platform_object_worlds::in_realm(scope, value, context)
             }
             Self::NavigationEntry => Some(entry_wrappers::value_in_realm(scope, value, context)),
@@ -242,6 +250,11 @@ fn bind_attribute<'s>(
                     .data(property)
                     .build(scope)
             }
+            AttributeProjection::RetargetedSource => {
+                v8::Function::builder(event_attribute_getter::<5>)
+                    .data(property)
+                    .build(scope)
+            }
             AttributeProjection::NavigationEntry => {
                 v8::Function::builder(event_attribute_getter::<3>)
                     .data(property)
@@ -297,6 +310,7 @@ fn event_attribute_getter<'s, const PROJECTION: u8>(
         2 => AttributeProjection::PlatformObject,
         3 => AttributeProjection::NavigationEntry,
         4 => AttributeProjection::NavigationDestination,
+        5 => AttributeProjection::RetargetedSource,
         _ => unreachable!("Event getter projection"),
     };
     if let Some(value) = projection.project(scope, args.this(), value) {
