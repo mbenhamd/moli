@@ -121,6 +121,7 @@ mod media_element_events;
 mod media_loads;
 mod misc_platform_api_tasks;
 mod svg_image_documents;
+pub(crate) use svg_image_documents::SvgImageInlineImage;
 mod web_locks;
 pub(crate) use media_loads::PendingMediaLoadTerminalFollowup;
 pub(crate) use web_locks::{

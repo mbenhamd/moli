@@ -118,16 +118,60 @@ pub(super) fn paint_svg_image(
             );
     let transform = device_transform(image.transform, scale) * image_to_destination;
 
-    // Blitz's SVG executor reports unsupported nodes by painting red boxes.
-    // Paint output must not invent visible fallback pixels, so retain
-    // supported vector content and silently omit unsupported masks, filters,
-    // patterns, or embedded raster nodes until their backends are wired.
+    // Blitz's SVG executor reports nodes it does not paint itself by
+    // painting red boxes. Paint output must not invent visible fallback
+    // pixels: nested raster images paint from the pixels the image resource
+    // decoded, and unsupported masks, filters or patterns stay omitted.
     anyrender_svg::render_svg_tree_with(
         scene,
         resource.image.tree(),
         transform,
-        &mut |_scene, _node| {},
+        &mut |scene, node| {
+            if let anyrender_svg::usvg::Node::Image(nested) = node {
+                paint_nested_raster(scene, &resource.image, nested, transform);
+            }
+        },
     );
+}
+
+/// Draws a raster `<image>` at its natural pixel size under its absolute
+/// transform, as resvg renders one.
+fn paint_nested_raster(
+    scene: &mut impl PaintScene,
+    image: &moli_image::SvgImage,
+    nested: &anyrender_svg::usvg::Image,
+    transform: Affine,
+) {
+    use anyrender_svg::usvg::ImageRendering;
+    let Some(pixels) = image.nested_raster(nested) else {
+        return;
+    };
+    let quality = match nested.rendering_mode() {
+        ImageRendering::OptimizeSpeed | ImageRendering::CrispEdges | ImageRendering::Pixelated => {
+            ImageQuality::Low
+        }
+        ImageRendering::OptimizeQuality | ImageRendering::Smooth | ImageRendering::HighQuality => {
+            ImageQuality::Medium
+        }
+    };
+    let brush = ImageBrush {
+        image: ImageData {
+            data: Blob::new(pixels.clone()),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: pixels.width,
+            height: pixels.height,
+        },
+        sampler: ImageSampler {
+            x_extend: Extend::Pad,
+            y_extend: Extend::Pad,
+            quality,
+            alpha: 1.0,
+        },
+    };
+    let t = nested.abs_transform();
+    let node_transform = Affine::new([t.sx, t.ky, t.kx, t.sy, t.tx, t.ty].map(f64::from));
+    scene.draw_image(brush.as_ref(), transform * node_transform);
 }
 
 fn pixel_snapped_image_destination(destination: PaintRect) -> Option<PaintRect> {

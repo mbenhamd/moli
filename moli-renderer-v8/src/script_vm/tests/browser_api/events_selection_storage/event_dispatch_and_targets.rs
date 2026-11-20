@@ -1632,6 +1632,167 @@ fn bubble_stop_propagation_keeps_current_ancestor_listeners() {
     assert_eq!(result, "handler,listener|handler|first,second");
 }
 
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell), PF-9460.
+#[test]
+fn dispatch_exposes_each_listening_entry_state_across_shadow_roots() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-entry-state.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              if (!document.documentElement) document.appendChild(document.createElement('html'));
+              if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+              const outer = document.createElement('div'); outer.id = 'outer';
+              const openHost = document.createElement('div'); openHost.id = 'openHost';
+              outer.append(openHost);
+              document.body.append(outer);
+              const openRoot = openHost.attachShadow({ mode: 'open' });
+              const closedHost = document.createElement('div'); closedHost.id = 'closedHost';
+              openRoot.append(closedHost);
+              const closedRoot = closedHost.attachShadow({ mode: 'closed' });
+              const inner = document.createElement('div'); inner.id = 'inner';
+              closedRoot.append(inner);
+              const name = (n) => n === null ? 'null' : n === window ? 'window' : n === document ? 'document'
+                : n === openRoot ? 'openRoot' : n === closedRoot ? 'closedRoot' : (n.id || n.nodeName.toLowerCase());
+              const log = [];
+              const record = (where) => (e) => log.push([e.type, where, e.eventPhase, name(e.currentTarget), name(e.target), e.composedPath().map(name).join('>')].join(' '));
+              // Listeners on a sparse subset of the path: body, html, document, openHost and closedRoot have none.
+              window.addEventListener('t', record('window-capture'), true);
+              window.addEventListener('t', record('window-bubble'));
+              outer.addEventListener('t', record('outer-bubble'));
+              openRoot.addEventListener('t', record('openRoot-capture'), true);
+              const closedHostCapture = record('closedHost-capture');
+              closedHost.addEventListener('t', closedHostCapture, true);
+              closedHost.addEventListener('t', record('closedHost-bubble'));
+              inner.addEventListener('t', record('inner'));
+              const fire = (init) => {
+                const e = new Event('t', init);
+                inner.dispatchEvent(e);
+                log.push(['after', JSON.stringify(init), e.eventPhase, name(e.currentTarget), name(e.target), e.composedPath().length].join(' '));
+              };
+              fire({ bubbles: true, composed: true });
+              closedHost.removeEventListener('t', closedHostCapture, true);
+              fire({ bubbles: false, composed: true });
+              fire({ bubbles: true, composed: false });
+              return log.join('\n');
+            })()
+            "#,
+        )
+        .expect("shadow-root dispatch entry-state probe should evaluate");
+
+    let expected = [
+        "t window-capture 1 window openHost closedHost>openRoot>openHost>outer>body>html>document>window",
+        "t openRoot-capture 1 openRoot closedHost closedHost>openRoot>openHost>outer>body>html>document>window",
+        "t closedHost-capture 2 closedHost closedHost closedHost>openRoot>openHost>outer>body>html>document>window",
+        "t inner 2 inner inner inner>closedRoot>closedHost>openRoot>openHost>outer>body>html>document>window",
+        "t closedHost-bubble 2 closedHost closedHost closedHost>openRoot>openHost>outer>body>html>document>window",
+        "t outer-bubble 3 outer openHost closedHost>openRoot>openHost>outer>body>html>document>window",
+        "t window-bubble 3 window openHost closedHost>openRoot>openHost>outer>body>html>document>window",
+        "after {\"bubbles\":true,\"composed\":true} 0 null openHost 0",
+        "t window-capture 1 window openHost closedHost>openRoot>openHost>outer>body>html>document>window",
+        "t openRoot-capture 1 openRoot closedHost closedHost>openRoot>openHost>outer>body>html>document>window",
+        "t inner 2 inner inner inner>closedRoot>closedHost>openRoot>openHost>outer>body>html>document>window",
+        "t closedHost-bubble 2 closedHost closedHost closedHost>openRoot>openHost>outer>body>html>document>window",
+        "after {\"bubbles\":false,\"composed\":true} 0 null openHost 0",
+        "t inner 2 inner inner inner>closedRoot",
+        "after {\"bubbles\":true,\"composed\":false} 0 null null 0",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell), PF-9460.
+#[test]
+fn dispatch_sees_listeners_changed_mid_dispatch_and_stops_propagation() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-mid-dispatch-changes.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              if (!document.documentElement) document.appendChild(document.createElement('html'));
+              if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+              const outer = document.createElement('div'); outer.id = 'outer';
+              const host = document.createElement('div'); host.id = 'host';
+              outer.append(host);
+              document.body.append(outer);
+              const root = host.attachShadow({ mode: 'closed' });
+              const mid = document.createElement('div'); mid.id = 'mid';
+              const inner = document.createElement('div'); inner.id = 'inner';
+              mid.append(inner); root.append(mid);
+              const name = (n) => n === null ? 'null' : n === window ? 'window' : n === document ? 'document'
+                : n === root ? 'root' : (n.id || n.nodeName.toLowerCase());
+              const log = [];
+              const record = (where) => (e) => log.push([where, e.eventPhase, name(e.currentTarget), name(e.target), e.composedPath().map(name).join('>')].join(' '));
+              const run = (label, from) => {
+                log.push('-- ' + label);
+                const e = new TransitionEvent('transitionrun', { bubbles: true, composed: true, propertyName: 'transform' });
+                from.dispatchEvent(e);
+                log.push(['after', e.eventPhase, name(e.currentTarget), name(e.target), e.composedPath().length].join(' '));
+              };
+              const on = (target, listener, capture) => target.addEventListener('transitionrun', listener, capture);
+              const off = (target, listener, capture) => target.removeEventListener('transitionrun', listener, capture);
+
+              // Listeners and an event handler added or removed during dispatch, on entries
+              // where nothing listened when dispatch began.
+              const hostCapture = record('host-capture');
+              const lateBubble = record('outer-added-mid-dispatch');
+              const lateCapture = record('body-capture-added-mid-dispatch');
+              const removed = record('document-removed-mid-dispatch');
+              const adder = (e) => {
+                record('inner-adds-and-removes')(e);
+                on(outer, lateBubble);
+                on(document.body, lateCapture, true);
+                document.documentElement.ontransitionrun = record('html-handler-set-mid-dispatch');
+                off(document, removed);
+              };
+              on(host, hostCapture, true);
+              on(document, removed);
+              on(inner, adder);
+              run('mid-dispatch-changes', inner);
+              off(inner, adder); off(outer, lateBubble); off(document.body, lateCapture, true);
+              document.documentElement.ontransitionrun = null;
+
+              // stopImmediatePropagation skips the entry's later listeners and every later entry.
+              const stopImmediate = (e) => { record('mid-stopImmediate')(e); e.stopImmediatePropagation(); };
+              const afterImmediate = record('mid-after-stopImmediate');
+              const windowBubble = record('window-bubble');
+              on(mid, stopImmediate); on(mid, afterImmediate); on(window, windowBubble);
+              run('stopImmediatePropagation', inner);
+              off(mid, stopImmediate); off(mid, afterImmediate);
+
+              // stopPropagation keeps the entry's other listeners and skips later entries.
+              on(outer, (e) => { record('outer-stop')(e); e.stopPropagation(); });
+              on(outer, record('outer-after-stop'));
+              run('stopPropagation', inner);
+              return log.join('\n');
+            })()
+            "#,
+        )
+        .expect("mid-dispatch listener change probe should evaluate");
+
+    let expected = [
+        "-- mid-dispatch-changes",
+        "host-capture 2 host host host>outer>body>html>document>window",
+        "inner-adds-and-removes 2 inner inner inner>mid>root>host>outer>body>html>document>window",
+        "outer-added-mid-dispatch 3 outer host host>outer>body>html>document>window",
+        "html-handler-set-mid-dispatch 3 html host host>outer>body>html>document>window",
+        "after 0 null host 0",
+        "-- stopImmediatePropagation",
+        "host-capture 2 host host host>outer>body>html>document>window",
+        "mid-stopImmediate 3 mid inner inner>mid>root>host>outer>body>html>document>window",
+        "after 0 null host 0",
+        "-- stopPropagation",
+        "host-capture 2 host host host>outer>body>html>document>window",
+        "outer-stop 3 outer host host>outer>body>html>document>window",
+        "outer-after-stop 3 outer host host>outer>body>html>document>window",
+        "after 0 null host 0",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
 #[test]
 fn relative_range_boundaries_share_selection_updates() {
     let mut vm = new_parsed_test_vm(

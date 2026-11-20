@@ -54,13 +54,15 @@ impl<'a> NativeLayoutSourceView<'a> {
         self.runtime.dom_host()
     }
 
-    fn is_data_image_in_svg_image(&self, node: DomHandle) -> bool {
-        self.document
-            .is_some_and(|document| self.runtime.is_svg_image_document(document))
-            && self.host().get_attribute(node, "src").is_some_and(|src| {
-                let src = src.trim();
-                src.len() > 5 && src.as_bytes()[..5].eq_ignore_ascii_case(b"data:")
-            })
+    /// The image of an `<img>` inside an SVG image document, which loads
+    /// only `data:` URLs.
+    fn svg_image_inline_image(
+        &self,
+        node: DomHandle,
+    ) -> Option<crate::native_bridge::SvgImageInlineImage> {
+        let src = self.host().get_attribute(node, "src")?;
+        self.runtime
+            .svg_image_inline_image(self.document?, src.trim())
     }
 }
 
@@ -263,7 +265,16 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
         }
         let attribute_width = numeric_dimension_attribute(self.host(), node, "width");
         let attribute_height = numeric_dimension_attribute(self.host(), node, "height");
-        let intrinsic = self.runtime.image_resource_intrinsic_size(node);
+        let intrinsic = self
+            .runtime
+            .image_resource_intrinsic_size(node)
+            .or_else(|| {
+                (semantics.replaced == Some(LayoutReplacedKind::Image))
+                    .then(|| self.svg_image_inline_image(node))
+                    .flatten()
+                    .and_then(crate::native_bridge::SvgImageInlineImage::ready)
+                    .map(|ready| (ready.intrinsic_width, ready.intrinsic_height))
+            });
         Some(ReplacedMetrics {
             intrinsic_width: intrinsic.map(|(width, _)| width),
             intrinsic_height: intrinsic.map(|(_, height)| height),
@@ -289,22 +300,27 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
             .map(|element| layout_element_semantics_for_source(self.host(), node, element))?;
         match semantics.replaced {
             Some(LayoutReplacedKind::Image) => {
-                let Some(ready) = self.runtime.ready_image_for_layout(node) else {
-                    // Chromium decodes a `data:` image inside an SVG image,
-                    // where Moli does not yet. Paint it as transparent pixels
-                    // rather than Blink's outline for an image that failed.
-                    return self
-                        .is_data_image_in_svg_image(node)
-                        .then(|| LayoutImageResource {
-                            intrinsic_width: 1.0,
-                            intrinsic_height: 1.0,
-                            pixels: Some(std::sync::Arc::new(moli_image::RgbaImage {
-                                width: 1,
-                                height: 1,
-                                rgba: vec![0; 4],
-                            })),
-                            svg: None,
-                        });
+                let ready = match self.runtime.ready_image_for_layout(node) {
+                    Some(ready) => ready,
+                    None => match self.svg_image_inline_image(node)? {
+                        crate::native_bridge::SvgImageInlineImage::Ready(ready) => ready,
+                        // Chromium paints a `data:` SVG, or pixels Moli's
+                        // budget refuses, so an outline would be wrong.
+                        // Paint transparent pixels instead.
+                        crate::native_bridge::SvgImageInlineImage::Unpainted => {
+                            return Some(LayoutImageResource {
+                                intrinsic_width: 1.0,
+                                intrinsic_height: 1.0,
+                                pixels: Some(std::sync::Arc::new(moli_image::RgbaImage {
+                                    width: 1,
+                                    height: 1,
+                                    rgba: vec![0; 4],
+                                })),
+                                svg: None,
+                            });
+                        }
+                        crate::native_bridge::SvgImageInlineImage::Failed => return None,
+                    },
                 };
                 Some(LayoutImageResource {
                     intrinsic_width: ready.intrinsic_width,
@@ -338,9 +354,15 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
         if parsed.fragment().is_some() {
             return None;
         }
+        let document = self.document?;
         let ready = self
             .runtime
-            .ready_css_image_for_layout(self.document?, parsed.as_str())?;
+            .ready_css_image_for_layout(document, parsed.as_str())
+            .or_else(|| {
+                self.runtime
+                    .svg_image_inline_image(document, parsed.as_str())
+                    .and_then(crate::native_bridge::SvgImageInlineImage::ready)
+            })?;
         Some(LayoutImageResource {
             intrinsic_width: ready.intrinsic_width,
             intrinsic_height: ready.intrinsic_height,

@@ -18,6 +18,27 @@ pub(crate) use preload::{ScannedImagePreloadAdmission, SharedScannedImagePreload
 pub(super) use state::ImageResourceStore;
 pub(crate) use state::ReadyImageForLayout;
 
+/// The decoded bytes of one inline image, held against the page's image
+/// budget until dropped.
+pub(in crate::native_bridge::context_host) struct InlineImagePermit {
+    _permit: budget::ImageDecodedBytesPermit,
+}
+
+/// The outcome of decoding an inline `data:` image.
+pub(in crate::native_bridge::context_host) enum InlineDataImage {
+    /// The permit holds the pixels' budget charge while the image is kept.
+    Ready {
+        ready: ReadyImageForLayout,
+        _permit: InlineImagePermit,
+    },
+    /// Not a `data:` URL, or a body no decoder accepts: the image failed.
+    Undecodable,
+    /// A `data:` SVG, which this path does not decode yet.
+    UnsupportedSvg,
+    /// The pixels do not fit the page's image budget now.
+    BudgetRefused,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct ImageResourceRequestIdentity {
     pub(super) element: DomHandle,
@@ -167,6 +188,50 @@ impl super::PageScriptHost {
 
     pub(crate) fn ready_image_for_layout(&self, element: DomHandle) -> Option<ReadyImageForLayout> {
         self.image_resources.ready_for_layout(element)
+    }
+
+    /// Decodes a `data:` raster image synchronously, charging its pixels to
+    /// the page's decoded-image budget for as long as the permit lives.
+    /// Nothing is ever fetched.
+    pub(in crate::native_bridge::context_host) fn decode_inline_data_raster_image(
+        &self,
+        url: &str,
+    ) -> InlineDataImage {
+        if !(url.len() > 5 && url.as_bytes()[..5].eq_ignore_ascii_case(b"data:")) {
+            return InlineDataImage::Undecodable;
+        }
+        let Ok(data_url) = data_url::DataUrl::process(url) else {
+            return InlineDataImage::Undecodable;
+        };
+        let mime = data_url.mime_type();
+        if mime.type_ == "image" && mime.subtype == "svg+xml" {
+            return InlineDataImage::UnsupportedSvg;
+        }
+        let Some(body) = data_url.decode_to_vec().ok().map(|(body, _)| body) else {
+            return InlineDataImage::Undecodable;
+        };
+        let Ok(metadata) = moli_image::probe_raster_image(&body) else {
+            return InlineDataImage::Undecodable;
+        };
+        let Ok(permit) = self
+            .image_resources
+            .decode
+            .reserve_decoded(metadata.decoded_byte_len())
+        else {
+            return InlineDataImage::BudgetRefused;
+        };
+        let Ok(decoded) = moli_image::decode_raster_image_with_metadata(&body, metadata) else {
+            return InlineDataImage::Undecodable;
+        };
+        InlineDataImage::Ready {
+            ready: ReadyImageForLayout {
+                intrinsic_width: decoded.image.width as f32,
+                intrinsic_height: decoded.image.height as f32,
+                pixels: Some(std::sync::Arc::new(decoded.image)),
+                svg: None,
+            },
+            _permit: InlineImagePermit { _permit: permit },
+        }
     }
 
     pub(crate) fn ready_css_image_for_layout(

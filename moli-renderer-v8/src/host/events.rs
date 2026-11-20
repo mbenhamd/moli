@@ -50,6 +50,18 @@ enum ListenerFilter {
     All,
 }
 
+impl ListenerFilter {
+    /// Whether a listener registered with `capture` runs in this pass. The
+    /// dispatch skip check and the listener snapshot share it.
+    fn matches(self, capture: bool) -> bool {
+        match self {
+            Self::Capturing => capture,
+            Self::Bubbling => !capture,
+            Self::All => true,
+        }
+    }
+}
+
 pub(crate) struct EventListenerRegistration {
     callback_id: crate::native_bridge::EventCallbackId,
     function_name: String,
@@ -283,6 +295,7 @@ fn invoke_prepared_event_callback_with_receiver<'s>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn invoke_event_handler_property<'s>(
     registry: &mut HostEventTargetRegistry,
     scope: &mut v8::PinScope<'s, '_>,
@@ -292,16 +305,17 @@ fn invoke_event_handler_property<'s>(
     target_object: v8::Local<'s, v8::Object>,
     event_type: &str,
     event: v8::Local<'s, v8::Object>,
-) {
+    path_entry: Option<&PathEntryEventState<'s, '_>>,
+) -> std::result::Result<(), String> {
     let Some(handler_name) =
         crate::native_bridge::element::event_handler_content_attribute_name(event_type)
     else {
-        return;
+        return Ok(());
     };
     let (callback_id, temporary) = match registry.event_handler_property_value(target, event_type) {
         Some(EventHandlerPropertyValue::Callback(callback_id)) => (callback_id, false),
         Some(EventHandlerPropertyValue::Null) => {
-            return;
+            return Ok(());
         }
         None => {
             if !crate::context_bootstrap::event_handler_property_is_exposed(
@@ -309,7 +323,7 @@ fn invoke_event_handler_property<'s>(
                 target_object,
                 &handler_name,
             ) {
-                return;
+                return Ok(());
             }
             let wrapper_handler = matches!(target, EventTargetHandle::Node(_))
                 .then(|| {
@@ -323,6 +337,14 @@ fn invoke_event_handler_property<'s>(
             let native_inline = if wrapper_handler.is_some() {
                 None
             } else {
+                // Compiling a content attribute can report a window `error`
+                // synchronously, so the entry's state is set first.
+                if unsafe { &*host_ptr }
+                    .event_handler_content_attribute_node(target, event_type)
+                    .is_some()
+                {
+                    apply_path_entry(scope, host_ptr, path_entry)?;
+                }
                 match target {
                 EventTargetHandle::Window if matches!(event_type, "load" | "pageshow") => Some(
                     crate::native_bridge::element::compile_window_body_event_attribute(
@@ -351,20 +373,22 @@ fn invoke_event_handler_property<'s>(
             };
             let (handler, persistent) = if let Some(value) = wrapper_handler {
                 let Ok(handler) = v8::Local::<v8::Function>::try_from(value) else {
-                    return;
+                    return Ok(());
                 };
                 // A foreign wrapper can still be updated in its producer realm.
                 // Do not cache a second registration in its new document.
                 (handler, false)
             } else if let Some(handler) = native_inline {
                 let Some(handler) = handler else {
-                    return;
+                    return Ok(());
                 };
                 (handler, true)
             } else {
                 let Some(key) = v8_string(scope, &handler_name) else {
-                    return;
+                    return Ok(());
                 };
+                // The property can be an author accessor.
+                apply_path_entry(scope, host_ptr, path_entry)?;
                 let handler = target_object
                     .get(scope, key.into())
                     .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok());
@@ -373,10 +397,10 @@ fn invoke_event_handler_property<'s>(
                     None if target == EventTargetHandle::Window && event_type == "messageerror" => {
                         let Some(handler) = crate::native_bridge::element::compile_window_body_onmessageerror_attribute(
                             scope, host_ptr,
-                        ) else { return; };
+                        ) else { return Ok(()); };
                         (handler, true)
                     }
-                    None => return,
+                    None => return Ok(()),
                 }
             };
             // Native inline compilation already installed its exact callback
@@ -418,8 +442,14 @@ fn invoke_event_handler_property<'s>(
         if temporary {
             unsafe { &mut *host_ptr }.release_event_callback(callback_id);
         }
-        return;
+        return Ok(());
     };
+    if let Err(error) = apply_path_entry(scope, host_ptr, path_entry) {
+        if temporary {
+            unsafe { &mut *host_ptr }.release_event_callback(callback_id);
+        }
+        return Err(error);
+    }
 
     let timing_started = moli_trace::cdp_nav_timing_enabled().then(Instant::now);
     if target == EventTargetHandle::Window
@@ -460,7 +490,7 @@ fn invoke_event_handler_property<'s>(
                 elapsed_ms = timing_started.elapsed().as_millis(),
             );
         }
-        return;
+        return Ok(());
     }
 
     let returned = invoke_prepared_event_callback(
@@ -497,8 +527,21 @@ fn invoke_event_handler_property<'s>(
             elapsed_ms = timing_started.elapsed().as_millis(),
         );
     }
+    Ok(())
 }
 
+fn apply_path_entry<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    host_ptr: *mut PageScriptHost,
+    path_entry: Option<&PathEntryEventState<'s, '_>>,
+) -> std::result::Result<(), String> {
+    match path_entry {
+        Some(path_entry) => path_entry.apply(scope, host_ptr),
+        None => Ok(()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn invoke_event_target_handler_property<'s>(
     registry: &mut HostEventTargetRegistry,
     scope: &mut v8::PinScope<'s, '_>,
@@ -508,11 +551,12 @@ fn invoke_event_target_handler_property<'s>(
     target_object: v8::Local<'s, v8::Object>,
     event_type: &str,
     event: v8::Local<'s, v8::Object>,
-) {
+    path_entry: &PathEntryEventState<'s, '_>,
+) -> std::result::Result<(), String> {
     if matches!(target, EventTargetHandle::ChildWindow(_)) {
         // Child Window event-handler properties share the native listener
         // registry and are invoked in registration order by the listener phase.
-        return;
+        return Ok(());
     }
     invoke_event_handler_property(
         registry,
@@ -523,7 +567,126 @@ fn invoke_event_target_handler_property<'s>(
         target_object,
         event_type,
         event,
-    );
+        Some(path_entry),
+    )
+}
+
+/// Whether a listener of `target` matching `filter` can run for
+/// `event_type`. A child Window's path listeners live in its own registry,
+/// so it always counts as listening.
+fn path_entry_has_listeners(
+    registry: &HostEventTargetRegistry,
+    target: EventTargetHandle,
+    event_type: &str,
+    filter: ListenerFilter,
+) -> bool {
+    matches!(target, EventTargetHandle::ChildWindow(_))
+        || registry.has_listener_matching(target, event_type, filter)
+}
+
+/// What a dispatch's every propagation path entry shares.
+#[derive(Clone, Copy)]
+struct PathEventContext<'s, 'p> {
+    event: v8::Local<'s, v8::Object>,
+    original_target: EventTargetHandle,
+    original_related_target: Option<EventTargetHandle>,
+    original_source_target: Option<EventTargetHandle>,
+    propagation_path: &'p [EventTargetHandle],
+}
+
+#[derive(Clone, Copy)]
+enum PathEntryPhase {
+    AtTarget,
+    /// Capturing (1) or bubbling (3), unless the entry is the target after
+    /// retargeting.
+    Around(u32),
+}
+
+/// The event's currentTarget, target, relatedTarget, source, composedPath
+/// and eventPhase as seen at one propagation path entry. Dispatch sets them
+/// before any script of that entry can run: a listener, an event handler, or
+/// the handler's content-attribute compile or property lookup. Only script
+/// can observe them during dispatch, and an entry where nothing runs leaves
+/// nothing to observe them. A failed set is not recorded as applied.
+struct PathEntryEventState<'s, 'p> {
+    context: PathEventContext<'s, 'p>,
+    current_target: EventTargetHandle,
+    current_target_object: Option<v8::Local<'s, v8::Object>>,
+    phase: PathEntryPhase,
+    applied: std::cell::Cell<bool>,
+}
+
+impl<'s, 'p> PathEntryEventState<'s, 'p> {
+    fn new(
+        context: PathEventContext<'s, 'p>,
+        current_target: EventTargetHandle,
+        current_target_object: Option<v8::Local<'s, v8::Object>>,
+        phase: PathEntryPhase,
+    ) -> Self {
+        Self {
+            context,
+            current_target,
+            current_target_object,
+            phase,
+            applied: std::cell::Cell::new(false),
+        }
+    }
+
+    fn apply(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        host_ptr: *mut PageScriptHost,
+    ) -> std::result::Result<(), String> {
+        if self.applied.get() {
+            return Ok(());
+        }
+        let context = self.context;
+        let current_target_object = match self.current_target_object {
+            Some(object) => object,
+            None => event_target_object(scope, host_ptr, self.current_target)?,
+        };
+        set_event_current_target(scope, context.event, current_target_object.into());
+        set_event_target_for_current_target(
+            scope,
+            host_ptr,
+            context.event,
+            context.original_target,
+            self.current_target,
+        )?;
+        set_event_related_target_for_current_target(
+            scope,
+            host_ptr,
+            context.event,
+            context.original_related_target,
+            self.current_target,
+        )?;
+        set_event_source_for_current_target(
+            scope,
+            host_ptr,
+            context.event,
+            context.original_source_target,
+            self.current_target,
+        )?;
+        set_event_composed_path_for_current_target(
+            scope,
+            host_ptr,
+            context.event,
+            context.propagation_path,
+            self.current_target,
+        )?;
+        let phase = match self.phase {
+            PathEntryPhase::AtTarget => 2,
+            PathEntryPhase::Around(phase) => event_phase_for_current_target(
+                host_ptr,
+                context.original_target,
+                self.current_target,
+                phase,
+            ),
+        };
+        set_event_phase(scope, context.event, phase);
+        self.applied.set(true);
+        Ok(())
+    }
 }
 
 fn call_event_target_listeners_filtered<'s>(
@@ -1066,6 +1229,22 @@ impl HostEventTargetRegistry {
             .is_some_and(|entries| entries.iter().any(|entry| !entry.removed))
     }
 
+    fn has_listener_matching(
+        &self,
+        target: EventTargetHandle,
+        event_type: &str,
+        filter: ListenerFilter,
+    ) -> bool {
+        self.listeners
+            .get(&target)
+            .and_then(|listeners| listeners.get(event_type))
+            .is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| !entry.removed && filter.matches(entry.capture))
+            })
+    }
+
     pub(crate) fn has_listener_in_dispatch_path(
         &self,
         target: EventTargetHandle,
@@ -1202,11 +1381,7 @@ impl HostEventTargetRegistry {
             entries
                 .iter()
                 .filter(|entry| !entry.removed)
-                .filter(|entry| match filter {
-                    ListenerFilter::Capturing => entry.capture,
-                    ListenerFilter::Bubbling => !entry.capture,
-                    ListenerFilter::All => true,
-                })
+                .filter(|entry| filter.matches(entry.capture))
                 .map(|entry| {
                     (
                         entry.id,
@@ -1470,6 +1645,13 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
         .copied()
         .filter(|target| invocation_target_is_in_shadow_tree(host_ptr, *target))
         .collect::<Vec<_>>();
+    let path_context = PathEventContext {
+        event,
+        original_target,
+        original_related_target,
+        original_source_target,
+        propagation_path,
+    };
 
     set_event_internal_flag(scope, event, EVENT_DISPATCHING_SLOT, true);
     // Per DOM spec § "event dispatch": each invocation of the inner-invoke
@@ -1487,41 +1669,16 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
                 stopped = true;
                 break;
             }
-            let ancestor_obj = event_target_object(scope, host_ptr, *ancestor)?;
-            set_event_current_target(scope, event, ancestor_obj.into());
-            set_event_target_for_current_target(
-                scope,
-                host_ptr,
-                event,
-                original_target,
+            if !path_entry_has_listeners(
+                registry,
                 *ancestor,
-            )?;
-            set_event_related_target_for_current_target(
-                scope,
-                host_ptr,
-                event,
-                original_related_target,
-                *ancestor,
-            )?;
-            set_event_source_for_current_target(
-                scope,
-                host_ptr,
-                event,
-                original_source_target,
-                *ancestor,
-            )?;
-            set_event_composed_path_for_current_target(
-                scope,
-                host_ptr,
-                event,
-                propagation_path,
-                *ancestor,
-            )?;
-            set_event_phase(
-                scope,
-                event,
-                event_phase_for_current_target(host_ptr, original_target, *ancestor, 1),
-            );
+                &event_type,
+                ListenerFilter::Capturing,
+            ) {
+                continue;
+            }
+            PathEntryEventState::new(path_context, *ancestor, None, PathEntryPhase::Around(1))
+                .apply(scope, host_ptr)?;
 
             let status = call_event_target_listeners_filtered(
                 registry,
@@ -1543,37 +1700,12 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
     }
 
     if !stopped && !propagation_path.is_empty() {
-        set_event_current_target(scope, event, target_object.into());
-        set_event_target_for_current_target(
-            scope,
-            host_ptr,
-            event,
-            original_target,
+        let target_entry = PathEntryEventState::new(
+            path_context,
             dispatch_target,
-        )?;
-        set_event_related_target_for_current_target(
-            scope,
-            host_ptr,
-            event,
-            original_related_target,
-            dispatch_target,
-        )?;
-        set_event_source_for_current_target(
-            scope,
-            host_ptr,
-            event,
-            original_source_target,
-            dispatch_target,
-        )?;
-        set_event_composed_path_for_current_target(
-            scope,
-            host_ptr,
-            event,
-            propagation_path,
-            dispatch_target,
-        )?;
-        set_event_phase(scope, event, 2);
-
+            Some(target_object),
+            PathEntryPhase::AtTarget,
+        );
         invoke_event_target_handler_property(
             registry,
             scope,
@@ -1583,7 +1715,11 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
             target_object,
             &event_type,
             event,
-        );
+            &target_entry,
+        )?;
+        if path_entry_has_listeners(registry, dispatch_target, &event_type, ListenerFilter::All) {
+            target_entry.apply(scope, host_ptr)?;
+        }
 
         let stop_immediate = event_internal_bool_flag(scope, event, EVENT_STOP_IMMEDIATE_SLOT);
         let stop_prop = event_internal_bool_flag(scope, event, EVENT_STOP_PROPAGATION_SLOT);
@@ -1655,37 +1791,11 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
             if retarget_event_target(host_ptr, original_target, *ancestor) != *ancestor {
                 continue;
             }
-            let ancestor_obj = event_target_object(scope, host_ptr, *ancestor)?;
-            set_event_current_target(scope, event, ancestor_obj.into());
-            set_event_target_for_current_target(
-                scope,
-                host_ptr,
-                event,
-                original_target,
-                *ancestor,
-            )?;
-            set_event_related_target_for_current_target(
-                scope,
-                host_ptr,
-                event,
-                original_related_target,
-                *ancestor,
-            )?;
-            set_event_source_for_current_target(
-                scope,
-                host_ptr,
-                event,
-                original_source_target,
-                *ancestor,
-            )?;
-            set_event_composed_path_for_current_target(
-                scope,
-                host_ptr,
-                event,
-                propagation_path,
-                *ancestor,
-            )?;
-            set_event_phase(scope, event, 2);
+            if !path_entry_has_listeners(registry, *ancestor, &event_type, ListenerFilter::All) {
+                continue;
+            }
+            PathEntryEventState::new(path_context, *ancestor, None, PathEntryPhase::AtTarget)
+                .apply(scope, host_ptr)?;
 
             let status = call_event_target_listeners_filtered(
                 registry,
@@ -1738,39 +1848,11 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
                 break;
             }
             let ancestor_obj = event_target_object(scope, host_ptr, *ancestor)?;
-            set_event_current_target(scope, event, ancestor_obj.into());
-            set_event_target_for_current_target(
-                scope,
-                host_ptr,
-                event,
-                original_target,
+            let ancestor_entry = PathEntryEventState::new(
+                path_context,
                 *ancestor,
-            )?;
-            set_event_related_target_for_current_target(
-                scope,
-                host_ptr,
-                event,
-                original_related_target,
-                *ancestor,
-            )?;
-            set_event_source_for_current_target(
-                scope,
-                host_ptr,
-                event,
-                original_source_target,
-                *ancestor,
-            )?;
-            set_event_composed_path_for_current_target(
-                scope,
-                host_ptr,
-                event,
-                propagation_path,
-                *ancestor,
-            )?;
-            set_event_phase(
-                scope,
-                event,
-                event_phase_for_current_target(host_ptr, original_target, *ancestor, 3),
+                Some(ancestor_obj),
+                PathEntryPhase::Around(3),
             );
 
             invoke_event_target_handler_property(
@@ -1782,9 +1864,14 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
                 ancestor_obj,
                 &event_type,
                 event,
-            );
+                &ancestor_entry,
+            )?;
             if event_internal_bool_flag(scope, event, EVENT_STOP_IMMEDIATE_SLOT) {
                 break;
+            }
+            if path_entry_has_listeners(registry, *ancestor, &event_type, ListenerFilter::Bubbling)
+            {
+                ancestor_entry.apply(scope, host_ptr)?;
             }
             let status = call_event_target_listeners_filtered(
                 registry,
@@ -1935,7 +2022,8 @@ fn run_host_event_dispatch<'s>(
         target_object,
         event_type,
         event,
-    );
+        None,
+    )?;
 
     if dispatch_target == EventTargetHandle::Window {
         registry.call_listeners_filtered(
