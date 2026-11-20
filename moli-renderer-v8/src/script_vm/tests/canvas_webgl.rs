@@ -2621,7 +2621,9 @@ fn html_canvas_draw_image_paints_a_data_raster_image_inside_an_svg_image() {
 
 #[test]
 fn html_canvas_draw_image_paints_data_images_inside_a_foreign_object() {
-    // Chromium 156 paints both 40x40 red boxes (f1 img_data, img_bg_data).
+    // Chromium 156 paints both 40x40 red boxes (f1 img_data, img_bg_data),
+    // lays out an auto-sized `data:` image at its natural 8x4, and paints
+    // Blink's outline for an image that fails (f9 img_rel).
     let mut vm = new_storage_test_vm("https://canvas-draw-svg-fo-images.test/");
     vm.set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
 
@@ -2631,21 +2633,33 @@ fn html_canvas_draw_image_paints_data_images_inside_a_foreign_object() {
 (() => {
   const red = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
   const xhtml = 'xmlns="http://www.w3.org/1999/xhtml"';
-  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="40">'
+  const wide = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAECAYAAACzzX7wAAAAEklEQVR4nGP4z8DwHx9moL0CAHD0P8F+ACg+AAAAAElFTkSuQmCC';
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80">'
     + '<foreignObject width="40" height="40">'
     + '<img ' + xhtml + ' src="' + red + '" style="display:block;width:40px;height:40px"/></foreignObject>'
     + '<foreignObject x="50" width="40" height="40">'
     + '<div ' + xhtml + ' style="width:40px;height:40px;background:url(' + red + ')"></div>'
-    + '</foreignObject></svg>';
+    + '</foreignObject>'
+    + '<foreignObject y="50" width="20" height="20">'
+    + '<img ' + xhtml + ' src="' + wide + '" style="display:block"/></foreignObject>'
+    + '<foreignObject x="50" y="50" width="20" height="20">'
+    + '<img ' + xhtml + ' src="missing.png" style="display:block;width:10px;height:10px"/></foreignObject>'
+    + '</svg>';
   const image = new Image();
   image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
   const canvas = document.createElement('canvas');
   canvas.width = 100;
-  canvas.height = 40;
+  canvas.height = 80;
   const context = canvas.getContext('2d');
   context.drawImage(image, 0, 0);
   const at = (x, y) => Array.from(context.getImageData(x, y, 1, 1).data);
-  return JSON.stringify({ img: [at(0, 0), at(39, 39)], background: [at(50, 0), at(89, 39)], gap: at(45, 20) });
+  return JSON.stringify({
+    img: [at(0, 0), at(39, 39)],
+    background: [at(50, 0), at(89, 39)],
+    gap: at(45, 20),
+    auto: [at(7, 53), at(8, 53), at(0, 54)],
+    failed: [at(50, 50), at(55, 55)],
+  });
 })()
 "##,
         )
@@ -2653,7 +2667,7 @@ fn html_canvas_draw_image_paints_data_images_inside_a_foreign_object() {
 
     assert_eq!(
         result,
-        r#"{"img":[[255,0,0,255],[255,0,0,255]],"background":[[255,0,0,255],[255,0,0,255]],"gap":[0,0,0,0]}"#
+        r#"{"img":[[255,0,0,255],[255,0,0,255]],"background":[[255,0,0,255],[255,0,0,255]],"gap":[0,0,0,0],"auto":[[255,0,0,255],[0,0,0,0],[0,0,0,0]],"failed":[[211,211,211,255],[0,0,0,0]]}"#
     );
 }
 

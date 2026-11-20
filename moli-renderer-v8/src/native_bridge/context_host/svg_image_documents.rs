@@ -196,3 +196,25 @@ impl PageScriptHost {
         self.style_engine.retire_document_style_world(document);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dom::native::NativeNodeId;
+
+    #[test]
+    fn cached_documents_are_found_by_equal_bytes_and_missed_by_length() {
+        let mut documents = SvgImageDocuments::default();
+        documents.entries.push_back(SvgImageDocument {
+            source: Arc::from(&b"<svg/>"[..]),
+            document: NativeNodeId::new(1),
+            root: NativeNodeId::new(2),
+            inline_images: RefCell::default(),
+        });
+
+        let equal_bytes: Arc<[u8]> = Arc::from(&b"<svg/>"[..]);
+        let longer: Arc<[u8]> = Arc::from(&b"<svg/> "[..]);
+        assert_eq!(documents.get(&equal_bytes), Some(NativeNodeId::new(2)));
+        assert_eq!(documents.get(&longer), None);
+    }
+}
