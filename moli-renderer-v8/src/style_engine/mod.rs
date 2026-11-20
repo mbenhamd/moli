@@ -177,6 +177,9 @@ pub(crate) struct MoliStyleEngine {
     inline_style_metadata_documents: RefCell<HashMap<DomHandle, DomHandle>>,
     css_transition_task_due: Cell<Option<f64>>,
     css_transition_frame_timestamp: Cell<Option<f64>>,
+    /// Settled transition events whose dispatch waits for the microtask
+    /// checkpoint that follows their animations' settlement.
+    css_transition_dispatch_queue: std::cell::RefCell<Vec<transitions::CssTransitionEvent>>,
 }
 
 impl Default for MoliStyleEngine {
@@ -203,6 +206,7 @@ impl MoliStyleEngine {
             inline_style_metadata_documents: RefCell::new(HashMap::new()),
             css_transition_task_due: Cell::new(None),
             css_transition_frame_timestamp: Cell::new(None),
+            css_transition_dispatch_queue: std::cell::RefCell::default(),
         }
     }
 
@@ -730,6 +734,7 @@ impl MoliStyleEngine {
             &self.dom_adapter,
             &world.pseudo_style_cache,
             &world.document_state,
+            world.css_transitions.transition_styles_seen(),
         )
     }
 
@@ -743,9 +748,30 @@ impl MoliStyleEngine {
         document: DomHandle,
         sizes: moli_selector::ContainerQuerySizes,
     ) -> bool {
+        // A container sized for the first time replaces the pre-layout
+        // estimate its descendants' styles used: those are no before-change
+        // styles, as Chromium's first style already sees the used size. A
+        // later resize is a style change.
+        let previous = self
+            .world_for_document(document)
+            .css_transitions
+            .transition_styles_seen()
+            .then(|| {
+                self.dom_adapter
+                    .container_query_sizes_snapshot(document)
+                    .unwrap_or_default()
+            });
         let changed = self
             .dom_adapter
             .update_container_query_sizes(document, sizes);
+        if let Some(previous) = previous {
+            let first_sized = changed
+                .iter()
+                .copied()
+                .filter(|container| !previous.contains_key(container))
+                .collect::<Vec<_>>();
+            self.reset_css_transitions_for_estimated_containers(host, document, first_sized);
+        }
         self.invalidate_changed_query_containers(host, document, changed)
     }
 
@@ -753,6 +779,7 @@ impl MoliStyleEngine {
     /// from a pre-layout `style=` estimate then restyle against used sizes.
     pub(crate) fn begin_container_query_store(&self, host: &DomHost, document: DomHandle) {
         if self.dom_adapter.begin_container_query_store(document) {
+            self.reset_css_transitions_for_estimated_containers(host, document, vec![document]);
             self.invalidate_changed_query_containers(host, document, vec![document]);
         }
     }
@@ -793,9 +820,26 @@ impl MoliStyleEngine {
         true
     }
 
+    /// Styles resolved from the pre-layout size estimate of `containers` are
+    /// no before-change styles.
+    fn reset_css_transitions_for_estimated_containers(
+        &self,
+        host: &DomHost,
+        document: DomHandle,
+        containers: Vec<DomHandle>,
+    ) {
+        if containers.is_empty() {
+            return;
+        }
+        let roots = with_slotted_flat_tree_descendants(host, containers);
+        let world = self.world_for_document(document);
+        Self::reset_css_transitions_in_subtrees(host, &world, &roots, false);
+    }
+
     pub(crate) fn clear_for_document_replacement(&mut self, document: DomHandle) {
         self.css_transition_task_due.set(None);
         self.css_transition_frame_timestamp.set(None);
+        self.css_transition_dispatch_queue.borrow_mut().clear();
         self.clear_owner_document_indexes_for_document(document);
         self.dom_adapter.clear_element_data_for_document(document);
         self.dom_adapter
@@ -988,6 +1032,33 @@ impl MoliStyleEngine {
             .collect()
     }
 
+    /// Holds settled transition events until their dispatch.
+    pub(crate) fn defer_css_transition_dispatch(
+        &self,
+        events: Vec<transitions::CssTransitionEvent>,
+    ) {
+        self.css_transition_dispatch_queue
+            .borrow_mut()
+            .extend(events);
+    }
+
+    pub(crate) fn take_deferred_css_transition_dispatch(
+        &self,
+    ) -> Vec<transitions::CssTransitionEvent> {
+        std::mem::take(&mut *self.css_transition_dispatch_queue.borrow_mut())
+    }
+
+    /// The undelivered end and cancel events of every Document.
+    pub(crate) fn pending_css_transition_settlements(
+        &self,
+    ) -> Vec<transitions::CssTransitionEvent> {
+        self.document_worlds
+            .active_worlds()
+            .iter()
+            .flat_map(|world| world.css_transitions.pending_settlements())
+            .collect()
+    }
+
     /// Milliseconds until the CSS transitions need a task: zero when events
     /// are pending, the next frame or phase change while transitions run,
     /// and `None` when there are none.
@@ -1122,9 +1193,10 @@ impl MoliStyleEngine {
             .iter()
             .filter(|world| self.css_transition_style_update_due_for_world(world))
             .flat_map(|world| {
-                world
-                    .css_transitions
-                    .style_update_targets(|handle| host.is_connected(handle))
+                world.css_transitions.style_update_targets(
+                    |handle| host.is_connected(handle),
+                    |handle| host.node(handle).is_some(),
+                )
             })
             .collect()
     }
@@ -1147,9 +1219,8 @@ impl MoliStyleEngine {
         }
     }
 
-    /// An animation frame callback runs: transitions its style changes start
-    /// begin at this frame.
-    /// Opens the animation frame at `timestamp` for its callbacks.
+    /// Opens the animation frame at `timestamp` for its callbacks: the
+    /// transitions their style changes start begin at this frame.
     pub(crate) fn begin_css_transition_animation_frame(&self, timestamp: f64) {
         self.css_transition_frame_timestamp.set(Some(timestamp));
         for world in self.document_worlds.active_worlds() {
@@ -1164,13 +1235,13 @@ impl MoliStyleEngine {
             .any(|world| world.css_transitions.in_animation_frame())
     }
 
-    /// Ends the animation frame callbacks' part of a frame after its style
-    /// update: the transitions they started start at the frame's time.
     /// The timestamp of the open animation frame.
     pub(crate) fn css_transition_frame_timestamp(&self) -> Option<f64> {
         self.css_transition_frame_timestamp.get()
     }
 
+    /// Ends the animation frame callbacks' part of a frame after its style
+    /// update: the transitions they started start at the frame's time.
     pub(crate) fn end_css_transition_animation_frame(&self) {
         self.css_transition_frame_timestamp.set(None);
         for world in self.document_worlds.active_worlds() {
@@ -1206,6 +1277,70 @@ impl MoliStyleEngine {
         self.active_owner_document_world(host, element)
             .map(|world| world.css_transitions.records_for_element(element))
             .unwrap_or_default()
+    }
+
+    /// Leaves the transition candidates inside `roots` without a
+    /// before-change style, so their next style change event starts no
+    /// transition; with `cancel`, also cancels their running transitions, as
+    /// a removal does (Chromium clears an element's animations when it
+    /// detaches).
+    fn reset_css_transitions_in_subtrees(
+        host: &DomHost,
+        world: &DocumentStyleWorld,
+        roots: &[DomHandle],
+        cancel: bool,
+    ) -> Vec<DomHandle> {
+        if roots.is_empty() || !world.css_transitions.transition_styles_seen() {
+            return Vec::new();
+        }
+        let roots = roots
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let within = |handle: DomHandle| {
+            let mut current = Some(handle);
+            while let Some(node) = current {
+                if roots.contains(&node) {
+                    return true;
+                }
+                current = host
+                    .node(node)
+                    .and_then(|node| node.parent_node())
+                    .or_else(|| host.shadow_root_host(node));
+            }
+            false
+        };
+        let targets = world
+            .css_transitions
+            .candidates_and_running_targets()
+            .into_iter()
+            .filter(|&target| within(target))
+            .collect::<Vec<_>>();
+        world.css_transitions.mark_fresh(targets.iter().copied());
+        if !cancel {
+            return Vec::new();
+        }
+        targets
+            .into_iter()
+            .filter(|&target| world.css_transitions.cancel_for_element(target))
+            .collect()
+    }
+
+    /// Cancels the transitions in subtrees removed from `document` and drops
+    /// their before-change styles.
+    pub(super) fn reset_css_transitions_for_detached_subtrees(
+        &self,
+        host: &DomHost,
+        document: DomHandle,
+        roots: &[DomHandle],
+    ) {
+        let world = self.world_for_document(document);
+        let canceled = Self::reset_css_transitions_in_subtrees(host, &world, roots, true);
+        if !canceled.is_empty() {
+            world.document_state.note_visual_input_change();
+            self.invalidation_cleanup_for_world(&world)
+                .invalidate_subtrees(host, canceled);
+        }
     }
 
     /// Ends (`finish`) or cancels CSS transition `id` and restyles its element.

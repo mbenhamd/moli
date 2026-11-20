@@ -261,6 +261,7 @@ impl MoliStyleEngine {
             roots_by_document.entry(document).or_default().push(root);
         }
         for (document, roots) in roots_by_document {
+            self.reset_css_transitions_for_detached_subtrees(host, document, &roots);
             let world = self.world_for_document(document);
             self.invalidation_cleanup_for_world(&world)
                 .invalidate_detached_subtrees(host, roots);

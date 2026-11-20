@@ -288,8 +288,9 @@ pub(super) fn settle_css_transition_from_script<'s>(
     queue_css_transition_task_if_due(scope);
 }
 
-/// The `CSSTransition`s of `element`, in composite order, after flushing its
-/// style so a pending style change starts its transitions first.
+/// The `CSSTransition`s of `element`, in composite order. The caller flushed
+/// its style, so a pending style change started its transitions, and queues
+/// the transition task once it no longer holds `runtime`.
 pub(super) fn element_css_transitions<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     runtime: &PageScriptHost,
@@ -299,46 +300,58 @@ pub(super) fn element_css_transitions<'s>(
     let records = runtime
         .style_engine_ref()
         .css_transitions_for_element(runtime.dom_host(), handle);
-    let animations = records
+    records
         .iter()
         .filter_map(|record| css_transition_object(scope, record, target))
-        .collect::<Vec<_>>();
-    if !animations.is_empty() {
-        queue_css_transition_task_if_due(scope);
-    }
-    animations
+        .collect()
 }
 
 /// Queues the transition task when transition events are pending or a
 /// running transition next changes phase, unless a queued one runs first.
+///
+/// The task belongs to the page's main Window, which outlives every child
+/// frame: a task owned by a child Window would be dropped with it while the
+/// page-wide due time still holds back the next one.
 pub(crate) fn queue_css_transition_task_if_due(scope: &mut v8::PinScope<'_, '_>) {
     let Some(host_ptr) = crate::util::context_host_ptr_from_global_bridge(scope) else {
         return;
     };
-    let host = unsafe { &mut *host_ptr };
-    // A queued animation frame runs the transitions' frame work and queues
-    // the task after it.
-    if host.has_pending_animation_frame() {
-        return;
-    }
-    let engine = host.style_engine_ref();
-    let Some(delay_ms) = engine.css_transition_task_delay_ms() else {
+    let delay_ms = {
+        let host = unsafe { &*host_ptr };
+        // A queued animation frame runs the transitions' frame work and
+        // queues the task after it.
+        if host.has_pending_animation_frame() {
+            return;
+        }
+        let engine = host.style_engine_ref();
+        let Some(delay_ms) = engine.css_transition_task_delay_ms() else {
+            return;
+        };
+        let due = animation_clock_now() + delay_ms / 1000.0;
+        if engine
+            .css_transition_task_due()
+            .get()
+            .is_some_and(|queued| queued <= due)
+        {
+            return;
+        }
+        delay_ms
+    };
+    let Some(main_context) = ({
+        let host = unsafe { &*host_ptr };
+        host.node_event_execution_context(scope, host.document_handle())
+    }) else {
         return;
     };
-    let due = animation_clock_now() + delay_ms / 1000.0;
-    if engine
-        .css_transition_task_due()
-        .get()
-        .is_some_and(|queued| queued <= due)
-    {
-        return;
-    }
+    let scope = &mut v8::ContextScope::new(scope, main_context);
     let Some(callback) = v8::FunctionTemplate::builder(css_transition_task_callback)
         .build(scope)
         .get_function(scope)
     else {
         return;
     };
+    let due = animation_clock_now() + delay_ms / 1000.0;
+    let host = unsafe { &mut *host_ptr };
     if host.queue_internal_task_after(scope, callback, delay_ms.ceil() as u64) {
         host.style_engine_ref()
             .css_transition_task_due()
@@ -395,6 +408,10 @@ pub(crate) fn run_css_transition_frame(
         resolve_unresolved_css_transition_frame_roots(host);
         if update_styles {
             update_css_transition_styles(host, false);
+        } else {
+            // Removals since the last update cancel their transitions before
+            // the sample (`update_css_transition_styles` drains them too).
+            host.drain_pending_style_invalidations_for_computed_style_read();
         }
         let engine = host.style_engine_ref();
         engine.sample_css_transitions(host.dom_host());
@@ -413,8 +430,74 @@ fn deliver_pending_css_transition_events(
     let events = unsafe { &*host_ptr }
         .style_engine_ref()
         .take_css_transition_events();
-    for event in events {
-        deliver_css_transition_event(scope, host_ptr, &event);
+    if events.is_empty() {
+        return;
+    }
+    // "Update animations and send events": the animations settle, a
+    // microtask checkpoint runs their `finished` reactions, then the events
+    // dispatch (Web Animations §4.4.21).
+    for event in &events {
+        settle_css_transition_object_for_event(scope, host_ptr, event);
+    }
+    if crate::custom_elements::can_perform_custom_element_microtask_checkpoint(scope) {
+        crate::script_vm::perform_microtask_checkpoint_and_report_pending_promise_rejections(scope);
+        for event in &events {
+            dispatch_css_transition_event(scope, host_ptr, event);
+        }
+        return;
+    }
+    // Inside the transition task's callback no checkpoint can run: the
+    // events dispatch from a microtask queued after the settlement's
+    // reactions, so `finished` reactions still run first.
+    unsafe { &*host_ptr }
+        .style_engine_ref()
+        .defer_css_transition_dispatch(events);
+    if let Some(callback) = v8::Function::builder(css_transition_dispatch_microtask).build(scope) {
+        scope.enqueue_microtask(callback);
+    }
+}
+
+fn css_transition_dispatch_microtask<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    _args: v8::FunctionCallbackArguments<'s>,
+    _rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    let Some(host_ptr) = crate::util::context_host_ptr_from_global_bridge(scope) else {
+        return;
+    };
+    flush_deferred_css_transition_dispatch(scope, host_ptr);
+}
+
+/// Dispatches the settled events still waiting for their microtask. An
+/// animation frame dispatches them before its callback batch closes, so a
+/// callback that a listener requests joins the frame; there the `finished`
+/// reactions run after the events, as no checkpoint can run inside the
+/// frame's callback task.
+pub(crate) fn flush_deferred_css_transition_dispatch(
+    scope: &mut v8::PinScope<'_, '_>,
+    host_ptr: *mut PageScriptHost,
+) {
+    let events = unsafe { &*host_ptr }
+        .style_engine_ref()
+        .take_deferred_css_transition_dispatch();
+    for event in &events {
+        dispatch_css_transition_event(scope, host_ptr, event);
+    }
+}
+
+/// Settles the `CSSTransition`s of the engine's transitions that ended or
+/// were canceled and whose events still wait for delivery, so script that
+/// flushes style sees them settled at once, as the style update that
+/// settled them does in Chromium.
+pub(super) fn settle_pending_css_transition_objects(
+    scope: &mut v8::PinScope<'_, '_>,
+    host_ptr: *mut PageScriptHost,
+) {
+    let events = unsafe { &*host_ptr }
+        .style_engine_ref()
+        .pending_css_transition_settlements();
+    for event in &events {
+        settle_css_transition_object_for_event(scope, host_ptr, event);
     }
 }
 
@@ -544,14 +627,32 @@ fn update_changed_subtree_styles(host: &PageScriptHost, roots: Vec<DomHandle>) {
     }
 }
 
+/// Flushes `element`'s style for `Element.getAnimations()`: a pending style
+/// change starts or cancels its transitions, and an ancestor's
+/// `display: none` cancels them.
+pub(super) fn flush_element_css_transitions(host: &PageScriptHost, element: DomHandle) {
+    resolve_unresolved_css_transition_frame_roots(host);
+    let _ = crate::native_bridge::element::computed_style_property_for_handle(
+        host,
+        element,
+        "transition-property",
+    );
+    let engine = host.style_engine_ref();
+    if !engine
+        .css_transitions_for_element(host.dom_host(), element)
+        .is_empty()
+        && has_undisplayed_ancestor(host, element)
+    {
+        engine.cancel_css_transitions_for_element(host.dom_host(), element);
+    }
+}
+
 fn has_undisplayed_ancestor(host: &PageScriptHost, element: DomHandle) -> bool {
     let dom = host.dom_host();
-    let mut current = dom.node(element).and_then(|node| node.parent_node());
+    // The flat tree: a shadow root's children are rendered under its host.
+    let mut current = dom.flat_tree_parent(element);
     while let Some(handle) = current {
-        let Some(node) = dom.node(handle) else {
-            return false;
-        };
-        if !node.is_element() {
+        if !dom.node(handle).is_some_and(|node| node.is_element()) {
             return false;
         }
         if crate::native_bridge::element::computed_style_property_for_handle(
@@ -560,19 +661,24 @@ fn has_undisplayed_ancestor(host: &PageScriptHost, element: DomHandle) -> bool {
         {
             return true;
         }
-        current = node.parent_node();
+        current = dom.flat_tree_parent(handle);
     }
     false
 }
 
-fn deliver_css_transition_event(
+fn settle_css_transition_object_for_event(
     scope: &mut v8::PinScope<'_, '_>,
     host_ptr: *mut PageScriptHost,
     event: &CssTransitionEvent,
 ) {
-    // The transition task can run in any Window of this host. The
-    // `CSSTransition` objects and the event belong to the realm of the
-    // element's Document (a same-origin child frame has its own).
+    if !matches!(
+        event.kind,
+        CssTransitionEventKind::End | CssTransitionEventKind::Cancel
+    ) {
+        return;
+    }
+    // The `CSSTransition` objects belong to the realm of the element's
+    // Document (a same-origin child frame has its own).
     let Some(context) = unsafe { &*host_ptr }.node_event_execution_context(scope, event.target)
     else {
         return;
@@ -591,9 +697,23 @@ fn deliver_css_transition_event(
             CssTransitionEventKind::Run | CssTransitionEventKind::Start => {}
         }
     }
+}
+
+fn dispatch_css_transition_event(
+    scope: &mut v8::PinScope<'_, '_>,
+    host_ptr: *mut PageScriptHost,
+    event: &CssTransitionEvent,
+) {
     if !event.dispatch {
         return;
     }
+    // The transition task can run in any Window of this host. The event
+    // belongs to the realm of the element's Document.
+    let Some(context) = unsafe { &*host_ptr }.node_event_execution_context(scope, event.target)
+    else {
+        return;
+    };
+    let scope = &mut v8::ContextScope::new(scope, context);
     let Some(constructor) = global_constructor_object(scope, "TransitionEvent")
         .and_then(|constructor| v8::Local::<v8::Function>::try_from(constructor).ok())
     else {

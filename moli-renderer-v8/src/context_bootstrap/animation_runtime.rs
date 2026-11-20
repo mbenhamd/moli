@@ -19,8 +19,9 @@ mod css_transitions;
 mod element_registry;
 
 pub(crate) use css_transitions::{
-    end_css_transition_animation_frame, queue_css_transition_task_if_due,
-    resolve_unresolved_css_transition_frame_roots, run_css_transition_frame,
+    end_css_transition_animation_frame, flush_deferred_css_transition_dispatch,
+    queue_css_transition_task_if_due, resolve_unresolved_css_transition_frame_roots,
+    run_css_transition_frame,
 };
 
 const ANIMATION_MICROTASK_ANIMATION_SLOT: &str = "__moliAnimationMicrotaskAnimation";
@@ -132,7 +133,9 @@ pub(super) fn animation_start_time_setter<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_animation_receiver(scope, args.this(), "startTime setter") {
+    if !require_animation_receiver(scope, args.this(), "startTime setter")
+        || reject_css_transition_control(scope, args.this())
+    {
         return;
     }
     set_animation_start_time_value(scope, args.this(), args.get(0));
@@ -144,6 +147,9 @@ pub(super) fn animation_play_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    if reject_css_transition_control(scope, args.this()) {
+        return;
+    }
     animation_play(scope, args.this());
     rv.set_undefined();
 }
@@ -153,6 +159,9 @@ pub(super) fn animation_pause_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    if reject_css_transition_control(scope, args.this()) {
+        return;
+    }
     set_animation_play_state(scope, args.this(), "paused");
     bump_animation_finish_token(scope, args.this());
     rv.set_undefined();
@@ -189,12 +198,34 @@ pub(super) fn animation_finish_callback<'s>(
     rv.set_undefined();
 }
 
-pub(super) fn animation_reverse_callback(
-    _scope: &mut v8::PinScope<'_, '_>,
-    _args: v8::FunctionCallbackArguments<'_>,
+pub(super) fn animation_reverse_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    if reject_css_transition_control(scope, args.this()) {
+        return;
+    }
     rv.set_undefined();
+}
+
+/// A `CSSTransition` supports only `cancel()` and `finish()` until its
+/// playback control is wired to the engine (PF-9486); the other controls
+/// throw instead of silently diverging from the running transition.
+fn reject_css_transition_control<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    animation: v8::Local<'s, v8::Object>,
+) -> bool {
+    if css_transitions::css_transition_id(scope, animation).is_none() {
+        return false;
+    }
+    crate::native_bridge::throw_dom_exception(
+        scope,
+        "NotSupportedError",
+        9,
+        "This CSSTransition control is not supported",
+    );
+    true
 }
 
 pub(super) fn animation_commit_styles_callback<'s>(
@@ -248,20 +279,21 @@ fn element_get_animations_callback<'s>(
     // animations (Web Animations §5.4.2; CSS Transitions Level 2 §5.1).
     let mut animations: Vec<v8::Local<v8::Value>> = Vec::new();
     let mut css_animations: Vec<v8::Local<v8::Value>> = Vec::new();
+    let mut queue_transition_task = false;
     if let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, args.this()) {
-        let runtime = unsafe { &*runtime_ptr };
         // `getAnimations()` flushes style first, so a pending style change
-        // starts its transitions now (Web Animations §6.10).
-        let _ = crate::native_bridge::element::computed_style_property_for_handle(
-            runtime,
-            handle,
-            "transition-property",
-        );
-        animations.extend(
-            css_transitions::element_css_transitions(scope, runtime, handle, args.this())
-                .into_iter()
-                .map(v8::Local::<v8::Value>::from),
-        );
+        // starts or cancels its transitions now, and their animations settle
+        // at once (Web Animations §6.10).
+        css_transitions::flush_element_css_transitions(unsafe { &*runtime_ptr }, handle);
+        css_transitions::settle_pending_css_transition_objects(scope, runtime_ptr);
+        let runtime = unsafe { &*runtime_ptr };
+        let transitions =
+            css_transitions::element_css_transitions(scope, runtime, handle, args.this());
+        queue_transition_task = !transitions.is_empty()
+            || runtime
+                .style_engine_ref()
+                .has_pending_css_transition_events();
+        animations.extend(transitions.into_iter().map(v8::Local::<v8::Value>::from));
         if crate::native_bridge::element::css_animation_start_applies(runtime, handle)
             && let Some(animation) = new_running_animation(scope)
         {
@@ -273,6 +305,10 @@ fn element_get_animations_callback<'s>(
             );
             css_animations.push(animation.into());
         }
+    }
+    // Queued once no reference to the runtime is held.
+    if queue_transition_task {
+        css_transitions::queue_css_transition_task_if_due(scope);
     }
     animations.extend(css_animations);
     animations.extend(
@@ -297,6 +333,7 @@ fn document_or_shadow_root_get_animations_callback<'s>(
     if let Ok((runtime_ptr, root)) = node_runtime_and_handle_from_object(scope, args.this()) {
         // `getAnimations()` flushes style first (Web Animations §6.10).
         css_transitions::update_css_transition_styles(unsafe { &*runtime_ptr }, true);
+        css_transitions::settle_pending_css_transition_objects(scope, runtime_ptr);
         let elements = tree_element_handles(unsafe { &*runtime_ptr }, root);
         for handle in elements {
             let has_transitions = !unsafe { &*runtime_ptr }
@@ -351,6 +388,9 @@ fn document_or_shadow_root_get_animations_callback<'s>(
         })
         .collect::<Vec<_>>();
     script_animations.sort_by(|(left, _), (right, _)| left.total_cmp(right));
+    if !css_transitions.is_empty() {
+        css_transitions::queue_css_transition_task_if_due(scope);
+    }
     let animations = css_transitions
         .into_iter()
         .chain(css_animations)

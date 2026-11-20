@@ -27,7 +27,11 @@
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap, HashSet},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use style::{
@@ -69,12 +73,28 @@ pub(super) struct TransitionSample {
     pub(super) paint_roots: Vec<DomHandle>,
 }
 
-/// Seconds since the Unix epoch: the time base of the document animation clock.
+/// Seconds since the Unix epoch, read from a monotonic clock: the time base
+/// of the document animation clock. The epoch offset is taken once, so
+/// wall-clock adjustments do not move animations (High Resolution Time §4:
+/// document timelines use a monotonic clock).
 pub(crate) fn animation_clock_now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs_f64()
+    static ANCHOR: OnceLock<(Instant, f64)> = OnceLock::new();
+    let (instant, epoch) = ANCHOR.get_or_init(|| {
+        let epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs_f64();
+        (Instant::now(), epoch)
+    });
+    epoch + instant.elapsed().as_secs_f64()
+}
+
+/// Transition ids are unique across Documents and Document replacements:
+/// `CSSTransition` objects and `finish()`/`cancel()` find their transition by
+/// id alone.
+fn next_transition_id() -> u64 {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Stylo keeps `<time>` values as `f32` seconds; script sees the specified
@@ -222,7 +242,6 @@ impl CssTransitionRecord {
 
 #[derive(Default)]
 struct TransitionStore {
-    next_id: u64,
     next_generation: u64,
     /// Per element, the record ids of Stylo's `ElementAnimationSet`
     /// transitions, index for index.
@@ -251,6 +270,13 @@ pub(crate) struct DocumentCssTransitions {
     /// unresolved: they are resolved before anything else runs, so their
     /// before-change styles are those of that frame.
     unresolved_frame_roots: RefCell<Vec<DomHandle>>,
+    /// Elements whose published primary style is not a before-change style:
+    /// it was resolved while not rendered, from the pre-layout container
+    /// size estimate, or before a removal. Their next style change event starts
+    /// no transition (CSS Transitions Level 1 §3: no before-change style).
+    fresh: RefCell<HashSet<DomHandle>>,
+    /// Some resolved style in this document specified transitions.
+    transition_styles_seen: Cell<bool>,
 }
 
 impl Default for DocumentCssTransitions {
@@ -264,6 +290,8 @@ impl Default for DocumentCssTransitions {
             in_frame: Cell::new(false),
             document_styled: Cell::new(false),
             unresolved_frame_roots: RefCell::default(),
+            fresh: RefCell::default(),
+            transition_styles_seen: Cell::new(false),
         }
     }
 }
@@ -288,6 +316,34 @@ impl DocumentCssTransitions {
         self.updated_generation.set(None);
         self.in_frame.set(false);
         self.document_styled.set(false);
+        self.unresolved_frame_roots.borrow_mut().clear();
+        self.fresh.borrow_mut().clear();
+        self.transition_styles_seen.set(false);
+    }
+
+    /// Marks `elements` as having no before-change style.
+    pub(super) fn mark_fresh(&self, elements: impl IntoIterator<Item = DomHandle>) {
+        self.fresh.borrow_mut().extend(elements);
+    }
+
+    /// Whether any resolved style of the document specified transitions, so
+    /// a frame must run style change events.
+    pub(super) fn transition_styles_seen(&self) -> bool {
+        self.transition_styles_seen.get()
+    }
+
+    /// The elements whose style specifies transitions, which a removal of
+    /// their subtree leaves without a before-change style.
+    pub(super) fn candidates_and_running_targets(&self) -> Vec<DomHandle> {
+        let mut targets = self.candidates.borrow().clone();
+        targets.extend(
+            self.store
+                .borrow()
+                .records
+                .values()
+                .map(|record| record.target),
+        );
+        targets.into_iter().collect()
     }
 
     /// Whether the document's initial content still awaits its first frame
@@ -314,6 +370,7 @@ impl DocumentCssTransitions {
     fn note_candidate(&self, target: DomHandle, specifies_transitions: bool) {
         if specifies_transitions {
             self.candidates.borrow_mut().insert(target);
+            self.transition_styles_seen.set(true);
         }
     }
 
@@ -323,10 +380,12 @@ impl DocumentCssTransitions {
     pub(super) fn style_update_targets(
         &self,
         connected: impl Fn(DomHandle) -> bool,
+        exists: impl Fn(DomHandle) -> bool,
     ) -> Vec<DomHandle> {
         self.candidates
             .borrow_mut()
             .retain(|&target| connected(target));
+        self.fresh.borrow_mut().retain(|&target| exists(target));
         let mut targets = self
             .candidates
             .borrow()
@@ -408,6 +467,22 @@ impl DocumentCssTransitions {
 
     pub(crate) fn has_pending_events(&self) -> bool {
         !self.store.borrow().events.is_empty()
+    }
+
+    /// The undelivered end and cancel events, which settle `CSSTransition`s.
+    pub(crate) fn pending_settlements(&self) -> Vec<CssTransitionEvent> {
+        self.store
+            .borrow()
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.kind,
+                    CssTransitionEventKind::End | CssTransitionEventKind::Cancel
+                )
+            })
+            .cloned()
+            .collect()
     }
 
     pub(crate) fn take_events(&self) -> Vec<CssTransitionEvent> {
@@ -609,8 +684,7 @@ impl DocumentCssTransitions {
         let mut started = false;
         for transition in set.transitions.iter_mut().skip(ids.len()) {
             transition.is_new = false;
-            store.next_id += 1;
-            let id = store.next_id;
+            let id = next_transition_id();
             ids.push(id);
             started = true;
             let animation = &transition.property_animation;
@@ -700,15 +774,24 @@ pub(super) fn process_css_transitions<E>(
     let Some(new_primary) = styles.primary.take() else {
         return;
     };
+    let handle = DomHandle::new(element.as_node().debug_id());
     let key = AnimationSetKey::new_for_non_pseudo(element.as_node().opaque());
-    transitions.note_candidate(
-        DomHandle::new(element.as_node().debug_id()),
-        new_primary.get_ui().specifies_transitions(),
-    );
-    if old.is_none()
-        || (!new_primary.get_ui().specifies_transitions()
-            && !context.shared.animations.sets.read().contains_key(&key))
-    {
+    let specifies_transitions = new_primary.get_ui().specifies_transitions();
+    transitions.note_candidate(handle, specifies_transitions);
+    if !specifies_transitions && !context.shared.animations.sets.read().contains_key(&key) {
+        styles.primary = Some(new_primary);
+        return;
+    }
+    // An element in a `display: none` subtree is not rendered: it has no
+    // before-change style and starts no transition. The frame's style update
+    // cancels the transitions it still runs.
+    if has_undisplayed_flat_tree_ancestor(element) {
+        transitions.fresh.borrow_mut().insert(handle);
+        styles.primary = Some(new_primary);
+        return;
+    }
+    let fresh = transitions.fresh.borrow_mut().remove(&handle);
+    if old.is_none() || fresh {
         styles.primary = Some(new_primary);
         return;
     }
@@ -716,4 +799,23 @@ pub(super) fn process_css_transitions<E>(
         element.process_transitions_for_resolved_style(context, old.as_ref(), new_primary);
     styles.primary = Some(primary);
     transitions.sync_after_style_change(&key, DomHandle::new(element.as_node().debug_id()));
+}
+
+/// Whether a flat-tree ancestor of `element` has a resolved `display: none`
+/// style. Ancestors resolve before their descendants.
+fn has_undisplayed_flat_tree_ancestor<E: TElement>(element: E) -> bool {
+    let mut current = element.traversal_parent();
+    while let Some(ancestor) = current {
+        let undisplayed = ancestor.borrow_data().is_some_and(|data| {
+            data.styles
+                .primary
+                .as_ref()
+                .is_some_and(|style| style.get_box().clone_display().is_none())
+        });
+        if undisplayed {
+            return true;
+        }
+        current = ancestor.traversal_parent();
+    }
+    false
 }

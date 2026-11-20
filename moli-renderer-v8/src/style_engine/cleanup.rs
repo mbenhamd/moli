@@ -20,6 +20,9 @@ pub(super) struct StyleInvalidationCleanup<'a> {
     dom_adapter: &'a StyloDomStyleAdapter,
     pseudo_style_cache: &'a PseudoStyleCache,
     document_state: &'a StyleDocumentState,
+    /// The document has transition-specifying styles, so a frame's style
+    /// update needs the roots of its style changes.
+    transition_styles_seen: bool,
 }
 
 impl<'a> StyleInvalidationCleanup<'a> {
@@ -28,12 +31,14 @@ impl<'a> StyleInvalidationCleanup<'a> {
         dom_adapter: &'a StyloDomStyleAdapter,
         pseudo_style_cache: &'a PseudoStyleCache,
         document_state: &'a StyleDocumentState,
+        transition_styles_seen: bool,
     ) -> Self {
         Self {
             document,
             dom_adapter,
             pseudo_style_cache,
             document_state,
+            transition_styles_seen,
         }
     }
 
@@ -262,8 +267,10 @@ impl<'a> StyleInvalidationCleanup<'a> {
             self.document,
             roots.iter().copied(),
         );
-        self.document_state
-            .note_transition_style_roots(roots.iter().copied());
+        if self.transition_styles_seen {
+            self.document_state
+                .note_transition_style_roots(roots.iter().copied());
+        }
 
         // Dirty the roots themselves immediately. Descendants are handled
         // lazily from the retained root generation, avoiding O(P * depth)
