@@ -152,6 +152,13 @@ impl DocumentLayoutState {
         }
     }
 
+    /// Drops the layout services and web fonts of a Document that renders
+    /// no more.
+    pub(super) fn retire_embedded_document(&mut self, document: DomHandle) {
+        self.embedded_document_services.remove(&document);
+        self.retire_embedded_document_fonts(document);
+    }
+
     pub(super) const fn visual_state_generation(&self) -> u64 {
         self.visual_state_generation
     }

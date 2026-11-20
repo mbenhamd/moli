@@ -1688,6 +1688,18 @@ pub(super) fn svg_bbox_has_non_rendered_ancestor(
     runtime: &crate::native_bridge::PageScriptHost,
     handle: crate::document_runtime::DomHandle,
 ) -> bool {
+    svg_has_non_rendered_ancestor_with(runtime, handle, |candidate| {
+        svg_element_has_display_none(runtime, candidate)
+    })
+}
+
+/// As `svg_bbox_has_non_rendered_ancestor`, with `display: none` answered in
+/// the caller's style context.
+pub(super) fn svg_has_non_rendered_ancestor_with(
+    runtime: &crate::native_bridge::PageScriptHost,
+    handle: crate::document_runtime::DomHandle,
+    mut has_display_none: impl FnMut(crate::document_runtime::DomHandle) -> bool,
+) -> bool {
     let mut current = Some(handle);
     while let Some(candidate) = current {
         let Some(node) = runtime.dom_host().node(candidate) else {
@@ -1696,7 +1708,7 @@ pub(super) fn svg_bbox_has_non_rendered_ancestor(
         if node
             .local_name()
             .is_some_and(svg_local_name_is_non_rendered_container)
-            || svg_element_has_display_none(runtime, candidate)
+            || has_display_none(candidate)
         {
             return true;
         }

@@ -10,8 +10,10 @@ use moli_svg::SvgMatrixComponents;
 use super::builders::{
     parse_svg_preserve_aspect_ratio_value, parse_svg_view_box_value, svg_bbox_for_handle,
     svg_bbox_has_non_rendered_ancestor, svg_computed_pixel_value,
-    svg_geometry_optional_length_attribute_for_handle, svg_transform_for_handle,
+    svg_geometry_optional_length_attribute_for_handle, svg_has_non_rendered_ancestor_with,
+    svg_transform_for_handle,
 };
+use super::hit_test::computed_transform_matrix;
 use super::{
     SVG_MEET_OR_SLICE_SLICE, SVG_PRESERVE_ASPECT_RATIO_NONE, SVG_PRESERVE_ASPECT_RATIO_X_MAX_Y_MAX,
     SVG_PRESERVE_ASPECT_RATIO_X_MAX_Y_MID, SVG_PRESERVE_ASPECT_RATIO_X_MAX_Y_MIN,
@@ -21,6 +23,7 @@ use super::{
 };
 use crate::document_runtime::DomHandle;
 use crate::native_bridge::PageScriptHost;
+use crate::native_bridge::element::StyleObservation;
 
 fn is_svg_element(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     runtime
@@ -111,6 +114,127 @@ pub(crate) fn svg_foreign_object_content_transform(
     svg_root_content_transform(runtime, root, root_border_box)
         .multiply(svg_ctm_below_root(runtime, foreign_object, Some(root)))
         .multiply(SvgMatrixComponents::translate(offset("x"), offset("y")))
+}
+
+/// One rendered `<foreignObject>` of an SVG image document.
+pub(crate) struct SvgImageForeignObject {
+    pub(crate) handle: DomHandle,
+    pub(crate) width: f64,
+    pub(crate) height: f64,
+    /// From the CSS content space (origin at `x`/`y`) to image pixels.
+    pub(crate) content_to_image: SvgMatrixComponents,
+}
+
+/// The size percentages resolve against in an SVG image document: the root
+/// viewBox when it has one, otherwise the image's own size.
+pub(crate) fn svg_image_user_viewport(
+    runtime: &PageScriptHost,
+    root: DomHandle,
+    image_size: (f64, f64),
+) -> (f64, f64) {
+    runtime
+        .dom_host()
+        .get_attribute(root, "viewBox")
+        .as_deref()
+        .and_then(parse_svg_view_box_value)
+        .filter(|[_, _, width, height]| *width > 0.0 && *height > 0.0)
+        .map_or(image_size, |[_, _, width, height]| (width, height))
+}
+
+/// Every rendered `<foreignObject>` below the root `<svg>` of an image
+/// document, in document order. Percentages use the root's user viewport, also
+/// below a nested `<svg>`. `styles` reads the image document's own styles.
+pub(crate) fn svg_image_foreign_objects(
+    runtime: &PageScriptHost,
+    styles: &mut StyleObservation<'_>,
+    root: DomHandle,
+    image_size: (f64, f64),
+) -> Vec<SvgImageForeignObject> {
+    let (viewport_width, viewport_height) = svg_image_user_viewport(runtime, root, image_size);
+    let root_transform = svg_view_box_transform(runtime, root, image_size.0, image_size.1);
+    let length = |handle: DomHandle, attribute: &str, reference: f64| {
+        let parsed = runtime
+            .dom_host()
+            .get_attribute(handle, attribute)
+            .as_deref()
+            .and_then(moli_svg::parse_length)
+            .filter(|length| length.value.is_finite())?;
+        Some(if parsed.unit == moli_svg::SvgLengthUnit::Percentage {
+            parsed.value / 100.0 * reference
+        } else {
+            parsed.value
+        })
+    };
+    let mut found = Vec::new();
+    let mut pending = runtime.dom_host().child_handles(root).collect::<Vec<_>>();
+    pending.reverse();
+    while let Some(handle) = pending.pop() {
+        if !is_svg_element(runtime, handle) {
+            continue;
+        }
+        let is_foreign_object = runtime
+            .dom_host()
+            .node(handle)
+            .and_then(|node| node.local_name())
+            == Some("foreignObject");
+        if !is_foreign_object {
+            let start = pending.len();
+            pending.extend(runtime.dom_host().child_handles(handle));
+            pending[start..].reverse();
+            continue;
+        }
+        let width = length(handle, "width", viewport_width).unwrap_or(0.0);
+        let height = length(handle, "height", viewport_height).unwrap_or(0.0);
+        if width <= 0.0
+            || height <= 0.0
+            || svg_has_non_rendered_ancestor_with(runtime, handle, |candidate| {
+                styles
+                    .read(candidate)
+                    .computed_values()
+                    .is_some_and(|computed| computed.get_box().display.is_none())
+            })
+        {
+            continue;
+        }
+        let x = length(handle, "x", viewport_width).unwrap_or(0.0);
+        let y = length(handle, "y", viewport_height).unwrap_or(0.0);
+        // The element's own transform is its computed `transform`, which
+        // carries the attribute as a presentation hint unless author CSS
+        // replaces it. The hint is dropped when the attribute is not also
+        // valid CSS (`rotate(30)`, `rotate(90 20 10)`), and a computed value
+        // that needs a reference box has no matrix here; both use the
+        // attribute. Known gaps: an identity CSS transform (`none`,
+        // `translate(0px, 0px)`) over a non-identity attribute keeps the
+        // attribute, because computed values do not say whether the hint or
+        // author CSS supplied them; and the transform applies about
+        // `0 0`. An author `transform-origin` is ignored, because this
+        // stylesheet set leaves SVG elements at the CSS initial `50% 50%`, so
+        // an authored `center` cannot be told from the SVG default.
+        let attribute_transform = svg_transform_for_handle(runtime, handle);
+        let own_transform = styles
+            .read(handle)
+            .computed_values()
+            .and_then(|computed| computed_transform_matrix(&computed))
+            .filter(|computed| *computed != SvgMatrixComponents::identity())
+            .unwrap_or(attribute_transform);
+        let parent = runtime
+            .dom_host()
+            .node(handle)
+            .and_then(|node| node.parent_node_id());
+        let parent_ctm = parent.map_or_else(SvgMatrixComponents::identity, |parent| {
+            svg_ctm_below_root(runtime, parent, Some(root))
+        });
+        found.push(SvgImageForeignObject {
+            handle,
+            width,
+            height,
+            content_to_image: root_transform
+                .multiply(parent_ctm)
+                .multiply(own_transform)
+                .multiply(SvgMatrixComponents::translate(x, y)),
+        });
+    }
+    found
 }
 
 /// Client bounds `[x, y, width, height]` of `handle`, given the client

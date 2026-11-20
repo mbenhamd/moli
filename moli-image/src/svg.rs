@@ -35,7 +35,11 @@ pub struct SvgScene {
 /// before `usvg` receives attacker-controlled bytes.
 pub const MAX_ENCODED_SVG_BYTES: usize = 16 * 1024 * 1024;
 
-const FOREIGN_OBJECT_NAME: &[u8] = b"foreignObject";
+const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
+const XLINK_NAMESPACE: &str = "http://www.w3.org/1999/xlink";
+const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
+/// Nested `data:` SVG images checked for `<foreignObject>`, as levels deep.
+const MAX_NESTED_SVG_IMAGE_DEPTH: u8 = 4;
 const DEFAULT_OBJECT_WIDTH: f32 = 300.0;
 const DEFAULT_OBJECT_HEIGHT: f32 = 150.0;
 
@@ -313,6 +317,7 @@ impl SvgImageMetadata {
 pub struct SvgImage {
     tree: usvg::Tree,
     metadata: SvgImageMetadata,
+    foreign_object_source: Option<Arc<[u8]>>,
     contains_foreign_object: bool,
 }
 
@@ -325,8 +330,17 @@ impl SvgImage {
         self.metadata
     }
 
-    /// Whether the encoded document may hold `<foreignObject>` content, which
-    /// [`Self::tree`] omits. Canvas origin tainting depends on it.
+    /// The encoded document when it may hold `<foreignObject>` content.
+    ///
+    /// `usvg` omits that content from [`Self::tree`]. CSS layout and paint own
+    /// it, so a consumer drawing the whole image needs the original XML.
+    pub fn foreign_object_source(&self) -> Option<&Arc<[u8]>> {
+        self.foreign_object_source.as_ref()
+    }
+
+    /// Whether the document holds an SVG `<foreignObject>` element anywhere,
+    /// rendered or not, itself or in a nested `data:` SVG `<image>`. Blink
+    /// treats such an image as having more than one security origin.
     pub const fn contains_foreign_object(&self) -> bool {
         self.contains_foreign_object
     }
@@ -501,6 +515,7 @@ pub fn decode_inline_svg_scene(
         image: SvgImage {
             tree,
             metadata,
+            foreign_object_source: None,
             contains_foreign_object: false,
         },
         objects,
@@ -541,13 +556,146 @@ fn decode_svg_image_with_fonts(
         ..Default::default()
     };
     let tree = usvg::Tree::from_data(bytes, &options)?;
-    let contains_foreign_object = bytes
-        .windows(FOREIGN_OBJECT_NAME.len())
-        .any(|window| window == FOREIGN_OBJECT_NAME);
+    let foreign_objects = std::str::from_utf8(bytes)
+        .map(|source| scan_foreign_objects(source, 0))
+        .unwrap_or_default();
     Ok(SvgImage {
         tree,
         metadata,
-        contains_foreign_object,
+        foreign_object_source: foreign_objects.own.then(|| Arc::from(bytes)),
+        contains_foreign_object: foreign_objects.own || foreign_objects.nested,
+    })
+}
+
+#[derive(Default)]
+struct ForeignObjectScan {
+    /// The document itself holds an SVG `<foreignObject>` element.
+    own: bool,
+    /// A nested `data:` SVG `<image>` holds one.
+    nested: bool,
+}
+
+/// Finds SVG-namespace `<foreignObject>` elements by their resolved
+/// namespace, so text, comments, ids and other namespaces never count. A
+/// malformed document reports what it found before the error.
+fn scan_foreign_objects(source: &str, depth: u8) -> ForeignObjectScan {
+    let mut scan = ForeignObjectScan::default();
+    // In-scope namespace bindings, innermost last, as (prefix, namespace);
+    // the empty prefix is the default namespace. `scopes` records how many
+    // bindings each open element added.
+    let mut bindings: Vec<(&str, &str)> = Vec::new();
+    let mut scopes: Vec<usize> = Vec::new();
+    let mut element: Option<(&str, &str)> = None;
+    let mut attributes: Vec<(&str, &str, &str)> = Vec::new();
+    for token in xmlparser::Tokenizer::from(source) {
+        let Ok(token) = token else {
+            break;
+        };
+        match token {
+            xmlparser::Token::ElementStart { prefix, local, .. } => {
+                element = Some((prefix.as_str(), local.as_str()));
+                attributes.clear();
+            }
+            xmlparser::Token::Attribute {
+                prefix,
+                local,
+                value,
+                ..
+            } => attributes.push((prefix.as_str(), local.as_str(), value.as_str())),
+            xmlparser::Token::ElementEnd { end, .. } => match end {
+                xmlparser::ElementEnd::Open | xmlparser::ElementEnd::Empty => {
+                    let Some((prefix, local)) = element.take() else {
+                        continue;
+                    };
+                    let added = bindings.len();
+                    for &(attribute_prefix, attribute_local, value) in &attributes {
+                        match (attribute_prefix, attribute_local) {
+                            ("", "xmlns") => bindings.push(("", value)),
+                            ("xmlns", name) => bindings.push((name, value)),
+                            _ => {}
+                        }
+                    }
+                    let namespace = resolve_namespace(&bindings, prefix);
+                    if namespace == Some(SVG_NAMESPACE) {
+                        if local == "foreignObject" {
+                            scan.own = true;
+                        } else if local == "image"
+                            && depth < MAX_NESTED_SVG_IMAGE_DEPTH
+                            && nested_image_has_foreign_object(&bindings, &attributes, depth)
+                        {
+                            scan.nested = true;
+                        }
+                    }
+                    if scan.own && scan.nested {
+                        break;
+                    }
+                    if end == xmlparser::ElementEnd::Open {
+                        scopes.push(bindings.len() - added);
+                    } else {
+                        bindings.truncate(added);
+                    }
+                }
+                xmlparser::ElementEnd::Close(..) => {
+                    let added = scopes.pop().unwrap_or_default();
+                    bindings.truncate(bindings.len().saturating_sub(added));
+                }
+            },
+            _ => {}
+        }
+    }
+    scan
+}
+
+fn resolve_namespace<'a>(bindings: &[(&str, &'a str)], prefix: &str) -> Option<&'a str> {
+    match prefix {
+        "xml" => Some("http://www.w3.org/XML/1998/namespace"),
+        "xmlns" => Some(XMLNS_NAMESPACE),
+        _ => bindings
+            .iter()
+            .rev()
+            .find(|(bound, _)| *bound == prefix)
+            .map(|(_, namespace)| *namespace)
+            .filter(|namespace| !namespace.is_empty()),
+    }
+}
+
+/// Whether an SVG `<image>` references a `data:` SVG that holds a
+/// `<foreignObject>` itself or further down.
+fn nested_image_has_foreign_object(
+    bindings: &[(&str, &str)],
+    attributes: &[(&str, &str, &str)],
+    depth: u8,
+) -> bool {
+    // SVG 2 `href` wins over `xlink:href`.
+    let href = attributes
+        .iter()
+        .find(|(prefix, local, _)| prefix.is_empty() && *local == "href")
+        .or_else(|| {
+            attributes.iter().find(|(prefix, local, _)| {
+                *local == "href"
+                    && !prefix.is_empty()
+                    && resolve_namespace(bindings, prefix) == Some(XLINK_NAMESPACE)
+            })
+        })
+        .map(|(_, _, value)| value.trim());
+    let Some(href) =
+        href.filter(|href| href.len() > 5 && href.as_bytes()[..5].eq_ignore_ascii_case(b"data:"))
+    else {
+        return false;
+    };
+    let Ok(url) = data_url::DataUrl::process(href) else {
+        return false;
+    };
+    let mime = url.mime_type();
+    if !(mime.type_ == "image" && mime.subtype == "svg+xml") {
+        return false;
+    }
+    let Ok((body, _)) = url.decode_to_vec() else {
+        return false;
+    };
+    std::str::from_utf8(&body).is_ok_and(|nested| {
+        let scan = scan_foreign_objects(nested, depth + 1);
+        scan.own || scan.nested
     })
 }
 
@@ -1020,5 +1168,61 @@ mod tests {
             "text node must survive an uninstalled family"
         );
         assert!(!texts[0].flattened().children().is_empty());
+    }
+
+    #[test]
+    fn foreign_object_is_found_by_its_svg_namespace_not_its_text() {
+        // Chromium 156 taints a canvas drawing these from a blob: URL exactly
+        // when the document holds an SVG <foreignObject> element: in <defs>,
+        // under a prefix, or inside a nested data: SVG <image>.
+        let fo = r#"<svg xmlns="http://www.w3.org/2000/svg"><foreignObject width="4" height="4"><div xmlns="http://www.w3.org/1999/xhtml">x</div></foreignObject></svg>"#;
+        let nested = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><image width="4" height="4" href="data:image/svg+xml,{}"/></svg>"#,
+            fo.replace('<', "%3C")
+                .replace('>', "%3E")
+                .replace('"', "%22")
+                .replace('#', "%23")
+        );
+        let cases = [
+            (
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><!-- foreignObject --><rect/></svg>"#,
+                false,
+            ),
+            (
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><text>foreignObject</text></svg>"#,
+                false,
+            ),
+            (
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><rect id="foreignObject"/></svg>"#,
+                false,
+            ),
+            (
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><foreignObject xmlns="urn:x"/></svg>"#,
+                false,
+            ),
+            (
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><defs><foreignObject/></defs></svg>"#,
+                true,
+            ),
+            (
+                r#"<s:svg xmlns:s="http://www.w3.org/2000/svg"><s:foreignObject/></s:svg>"#,
+                true,
+            ),
+            (
+                r#"<svg xmlns="http://www.w3.org/2000/svg"><image width="4" height="4" href="日本.png"/></svg>"#,
+                false,
+            ),
+            (fo, true),
+            (nested.as_str(), true),
+        ];
+        for (source, expected) in cases {
+            let image = decode_svg_image(source.as_bytes()).unwrap();
+            assert_eq!(image.contains_foreign_object(), expected, "{source}");
+        }
+        let nested_image = decode_svg_image(nested.as_bytes()).unwrap();
+        assert!(
+            nested_image.foreign_object_source().is_none(),
+            "only the image's own <foreignObject> content is painted from its XML"
+        );
     }
 }

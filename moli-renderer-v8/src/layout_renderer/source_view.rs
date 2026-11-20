@@ -53,6 +53,15 @@ impl<'a> NativeLayoutSourceView<'a> {
     fn host(&self) -> &DomHost {
         self.runtime.dom_host()
     }
+
+    fn is_data_image_in_svg_image(&self, node: DomHandle) -> bool {
+        self.document
+            .is_some_and(|document| self.runtime.is_svg_image_document(document))
+            && self.host().get_attribute(node, "src").is_some_and(|src| {
+                let src = src.trim();
+                src.len() > 5 && src.as_bytes()[..5].eq_ignore_ascii_case(b"data:")
+            })
+    }
 }
 
 impl LayoutSource for NativeLayoutSourceView<'_> {
@@ -145,7 +154,19 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
     }
 
     fn flat_children(&self, node: Self::NodeId) -> Self::ChildIter<'_> {
-        flat_children(self.host(), self.root, node).into_iter()
+        let host = self.host();
+        let mut children = flat_children(host, self.root, node);
+        // Below a non-SVG element, an SVG-namespace child makes a CSS box only
+        // when it is an `<svg>`, which starts its own SVG root, as in Blink: an
+        // SVG `<style>` or `<rect>` inside HTML content makes none. Children of
+        // SVG elements, `<foreignObject>` included, are not filtered here.
+        if !is_svg_namespace_element(host, node) {
+            children.retain(|&child| {
+                !is_svg_namespace_element(host, child)
+                    || host.node(child).and_then(Node::local_name) == Some("svg")
+            });
+        }
+        children.into_iter()
     }
 
     fn details_slots(&self, node: Self::NodeId) -> Option<LayoutDetailsSlots<Self::NodeId>> {
@@ -268,7 +289,23 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
             .map(|element| layout_element_semantics_for_source(self.host(), node, element))?;
         match semantics.replaced {
             Some(LayoutReplacedKind::Image) => {
-                let ready = self.runtime.ready_image_for_layout(node)?;
+                let Some(ready) = self.runtime.ready_image_for_layout(node) else {
+                    // Chromium decodes a `data:` image inside an SVG image,
+                    // where Moli does not yet. Paint it as transparent pixels
+                    // rather than Blink's outline for an image that failed.
+                    return self
+                        .is_data_image_in_svg_image(node)
+                        .then(|| LayoutImageResource {
+                            intrinsic_width: 1.0,
+                            intrinsic_height: 1.0,
+                            pixels: Some(std::sync::Arc::new(moli_image::RgbaImage {
+                                width: 1,
+                                height: 1,
+                                rgba: vec![0; 4],
+                            })),
+                            svg: None,
+                        });
+                };
                 Some(LayoutImageResource {
                     intrinsic_width: ready.intrinsic_width,
                     intrinsic_height: ready.intrinsic_height,
@@ -329,6 +366,11 @@ impl LayoutSource for NativeLayoutSourceView<'_> {
             self.paint_resources,
         )
     }
+}
+
+fn is_svg_namespace_element(host: &DomHost, node: DomHandle) -> bool {
+    host.node(node)
+        .is_some_and(|node| node.is_element() && node.namespace() == Some(LayoutNamespace::SVG_URI))
 }
 
 fn document_text_selections(

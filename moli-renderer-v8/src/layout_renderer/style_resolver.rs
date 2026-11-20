@@ -300,8 +300,11 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
             && !matches!(resolved.display(), LayoutDisplay::None)
         {
             // Blink lays out a <foreignObject> as a block box: the root of
-            // the CSS content it embeds in the SVG.
+            // the CSS content it embeds in the SVG. Its own transform is in
+            // the CTM that maps this content into the image, so the box
+            // must not apply it again.
             resolved.force_layout_display(LayoutDisplay::Block);
+            resolved.force_embedder_applied_transform();
         }
         if let Some(profile) = self.profile.as_mut() {
             profile.primary_policy_ns = profile.primary_policy_ns.saturating_add(

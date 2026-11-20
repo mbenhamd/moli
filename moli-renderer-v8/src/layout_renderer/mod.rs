@@ -42,6 +42,16 @@ pub(crate) fn build_native_layout_pass(
     )
 }
 
+/// The style observation `build_foreign_object_layout_pass` reads `document`
+/// in for `viewport`.
+pub(crate) fn foreign_object_style_scope(
+    runtime: &PageScriptHost,
+    document: DomHandle,
+    viewport: moli_layout::LayoutViewport,
+) -> crate::native_bridge::element::StyleObservation<'_> {
+    style_resolver::layout_style_read_scope(runtime, document, viewport, None)
+}
+
 /// Lays out the HTML content of one `<foreignObject>` as its own block root
 /// in its Document's current style world.
 ///

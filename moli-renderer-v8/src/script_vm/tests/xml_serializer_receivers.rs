@@ -28,6 +28,25 @@ fn xml_serialization_keeps_sibling_namespace_scopes_and_generated_prefix_order()
 }
 
 #[test]
+fn xml_serialization_keeps_the_parsed_default_namespace_of_foreign_content() {
+    let mut vm = new_storage_html_test_vm("https://xml-parsed-foreign-xmlns.test/");
+    // Chromium 156: the parsed `xmlns` attribute has a null prefix and keeps
+    // the nested `<svg>` in its namespace when serialized under HTML.
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+        const host = document.createElement('div');
+        host.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="4"><rect/></svg>';
+        return JSON.stringify([host.firstChild.attributes[0].prefix,
+            new XMLSerializer().serializeToString(host.cloneNode(true))]);
+    })()"#
+        )
+        .unwrap(),
+        r#"[null,"<div xmlns=\"http://www.w3.org/1999/xhtml\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\"><rect/></svg></div>"]"#
+    );
+}
+
+#[test]
 #[ignore = "manual XML serialization scaling benchmark"]
 fn xml_runtime_scaling_microbenchmark() {
     let mut vm = new_storage_html_test_vm("https://xml-scaling-bench.test/");

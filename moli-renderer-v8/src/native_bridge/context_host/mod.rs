@@ -120,6 +120,7 @@ mod main_document_lifecycle;
 mod media_element_events;
 mod media_loads;
 mod misc_platform_api_tasks;
+mod svg_image_documents;
 mod web_locks;
 pub(crate) use media_loads::PendingMediaLoadTerminalFollowup;
 pub(crate) use web_locks::{
@@ -917,6 +918,7 @@ pub(crate) struct PageScriptHost {
     frame_owner_store: FrameOwnerStore,
     inert_document_execution_contexts:
         Option<Box<document_execution_context::InertDocumentExecutionContexts>>,
+    svg_image_documents: svg_image_documents::SvgImageDocuments,
     frame_parser_classic_scripts: FrameParserClassicScriptRunnerStore,
     frame_parser_deferred_script_order: FrameParserDeferredScriptOrderStore,
     frame_document_stylesheets: FrameDocumentStylesheetStore,

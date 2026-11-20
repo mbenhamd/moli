@@ -2463,6 +2463,126 @@ fn html_canvas_draw_image_paints_svg_data_url_images_as_vectors() {
     );
 }
 
+#[test]
+fn html_canvas_draw_image_paints_foreign_object_html_with_the_image_style_sheets() {
+    let mut vm = new_storage_test_vm("https://canvas-draw-svg-image.test/");
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
+
+    let result = vm
+        .eval(
+            r##"
+(() => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 40 20">'
+    + '<style>.g{background:#0f0}</style><rect width="20" height="20" fill="#00f"/>'
+    + '<foreignObject x="50%" y="0" width="50%" height="100%">'
+    + '<div xmlns="http://www.w3.org/1999/xhtml" class="g" style="width:100%;height:100%"></div>'
+    + '</foreignObject></svg>';
+  const image = new Image();
+  image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  const canvas = document.createElement('canvas');
+  canvas.width = 80;
+  canvas.height = 40;
+  const context = canvas.getContext('2d');
+  context.drawImage(image, 0, 0, 80, 40);
+  return JSON.stringify({
+    vector: Array.from(context.getImageData(20, 20, 1, 1).data),
+    html: Array.from(context.getImageData(60, 20, 1, 1).data),
+    exportable: canvas.toDataURL().startsWith('data:image/png')
+  });
+})()
+"##,
+        )
+        .expect("SVG image draw should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"vector":[0,0,255,255],"html":[0,255,0,255],"exportable":true}"#
+    );
+}
+
+#[test]
+fn html_canvas_draw_image_places_foreign_object_content_by_its_transform_once() {
+    // Chromium 156 paints the translated content at [50,20,89,39] and places
+    // a CSS `transform` before `x`/`y` as it does the attribute (f2
+    // css_transform_fo).
+    let mut vm = new_storage_test_vm("https://canvas-draw-svg-transform.test/");
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
+
+    let result = vm
+        .eval(
+            r##"
+(() => {
+  const xhtml = 'xmlns="http://www.w3.org/1999/xhtml"';
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="60">'
+    + '<foreignObject width="40" height="20" transform="translate(50,20)">'
+    + '<div ' + xhtml + ' style="width:100%;height:100%;background:#0f0"></div>'
+    + '</foreignObject>'
+    + '<foreignObject x="5" y="40" width="10" height="10" style="transform:translate(10px,5px)">'
+    + '<div ' + xhtml + ' style="width:100%;height:100%;background:#00f"></div>'
+    + '</foreignObject></svg>';
+  const image = new Image();
+  image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  const canvas = document.createElement('canvas');
+  canvas.width = 100;
+  canvas.height = 60;
+  const context = canvas.getContext('2d');
+  context.drawImage(image, 0, 0);
+  const at = (x, y) => Array.from(context.getImageData(x, y, 1, 1).data);
+  return JSON.stringify({
+    inside: [at(50, 20), at(89, 39)],
+    outside: at(91, 41),
+    css: [at(15, 45), at(24, 54), at(5, 40)],
+  });
+})()
+"##,
+        )
+        .expect("SVG image draw should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"inside":[[0,255,0,255],[0,255,0,255]],"outside":[0,0,0,0],"css":[[0,0,255,255],[0,0,255,255],[0,0,0,0]]}"#
+    );
+}
+
+#[test]
+fn html_canvas_draw_image_repaints_foreign_object_content_after_document_eviction() {
+    // Each draw decodes its `data:` source again, so the cached image
+    // Document is found by its bytes. Seventeen distinct images evict the
+    // first, which then paints again from a fresh Document.
+    let mut vm = new_storage_test_vm("https://canvas-draw-svg-cache.test/");
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
+
+    let result = vm
+        .eval(
+            r##"
+(() => {
+  const xhtml = 'xmlns="http://www.w3.org/1999/xhtml"';
+  const svg = (color) => '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+    + '<foreignObject width="10" height="10">'
+    + '<div ' + xhtml + ' style="width:10px;height:10px;background:' + color + '"></div>'
+    + '</foreignObject></svg>';
+  const draw = (color) => {
+    const image = new Image();
+    image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg(color));
+    const context = document.createElement('canvas').getContext('2d');
+    context.drawImage(image, 0, 0);
+    return Array.from(context.getImageData(5, 5, 1, 1).data);
+  };
+  const first = [draw('#0f0'), draw('#0f0')];
+  const others = [];
+  for (let k = 1; k <= 17; k++) others.push(draw('rgb(0,0,' + k + ')'));
+  return JSON.stringify({ first, last: others[16], again: draw('#0f0') });
+})()
+"##,
+        )
+        .expect("SVG image draws should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"first":[[0,255,0,255],[0,255,0,255]],"last":[0,0,17,255],"again":[0,255,0,255]}"#
+    );
+}
+
 #[tokio::test]
 async fn html_canvas_draw_image_rejects_a_broken_svg_image() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
@@ -2494,6 +2614,70 @@ async fn html_canvas_draw_image_rejects_a_broken_svg_image() {
         vm.eval("globalThis.__lmBrokenSvg.result")
             .expect("broken SVG image result should be readable"),
         "InvalidStateError"
+    );
+}
+
+#[tokio::test]
+async fn offscreen_canvas_keeps_origin_taint_through_blob_and_bitmap_exports() {
+    // Chromium 156: a canvas tainted by a blob: SVG with <foreignObject>
+    // taints an OffscreenCanvas it is drawn into; convertToBlob() rejects and
+    // an ImageBitmap it creates or transfers taints the canvas it is drawn into.
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    // Only real layout with image fetch decodes the blob: SVG for drawing.
+    loader.set_image_fetch_enabled(true);
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+        "https://offscreen-canvas-taint.test/",
+        &loader,
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
+
+    vm.eval(
+        r#"
+(() => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">'
+    + '<foreignObject width="4" height="4"/></svg>';
+  const image = new Image();
+  const result = globalThis.__lmOffscreenTaint = {};
+  image.onload = () => {
+    const source = document.createElement('canvas');
+    source.getContext('2d').drawImage(image, 0, 0);
+    try { source.toDataURL(); result.source = 'clean'; } catch (error) { result.source = error.name; }
+    const offscreen = new OffscreenCanvas(4, 4);
+    offscreen.getContext('2d').drawImage(source, 0, 0);
+    offscreen.convertToBlob().then(() => { result.blob = 'resolved'; }, (error) => { result.blob = error.name; });
+    createImageBitmap(offscreen).then((created) => {
+      const sink = document.createElement('canvas');
+      sink.getContext('2d').drawImage(created, 0, 0);
+      try { sink.toDataURL(); result.created = 'clean'; } catch (error) { result.created = error.name; }
+    }, (error) => { result.created = 'rejected ' + error.name; });
+    const target = document.createElement('canvas');
+    target.getContext('2d').drawImage(offscreen.transferToImageBitmap(), 0, 0);
+    try {
+      target.toDataURL();
+      result.bitmap = 'clean';
+    } catch (error) {
+      result.bitmap = error.name;
+    }
+  };
+  image.src = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+})()
+"#,
+    )
+    .expect("offscreen taint setup should evaluate");
+
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String('blob' in globalThis.__lmOffscreenTaint && 'created' in globalThis.__lmOffscreenTaint)",
+        "true",
+        "offscreen_canvas_keeps_origin_taint_through_blob_and_bitmap_exports",
+    )
+    .await;
+
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__lmOffscreenTaint)")
+            .expect("offscreen taint result should be readable"),
+        r#"{"source":"SecurityError","bitmap":"SecurityError","blob":"SecurityError","created":"SecurityError"}"#
     );
 }
 

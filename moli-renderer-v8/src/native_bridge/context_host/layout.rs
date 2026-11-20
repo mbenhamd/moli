@@ -788,6 +788,50 @@ impl PageScriptHost {
         Ok(Some(self.answer_layout_query(&pass.tree, query)))
     }
 
+    /// Lays out and paints `foreign_object`'s content as its own block root.
+    ///
+    /// `viewport` is the containing block of that root, so percentage sizes
+    /// resolve against it. The transparent base keeps pixels the content does
+    /// not cover clear. `None` without real layout or a Document.
+    pub(crate) fn paint_foreign_object_content(
+        &self,
+        foreign_object: DomHandle,
+        viewport: LayoutViewport,
+    ) -> Result<Option<moli_layout::PaintSnapshot>, LayoutError> {
+        if !self.layout_policy.uses_real_layout() {
+            return Ok(None);
+        }
+        let Some(document) = self.layout_document_for_source(foreign_object) else {
+            return Ok(None);
+        };
+        let mut capture = moli_layout::PaintCaptureRequest::viewport();
+        capture.include_viewport_controls = false;
+        capture.base_background_color = moli_layout::PaintColor::TRANSPARENT;
+        let request = LayoutPassRequest::with_capture(
+            viewport,
+            moli_layout::LayoutFlushReason::Screenshot,
+            capture,
+        );
+        let pass = {
+            let _active = ActiveLayoutPass::enter(&self.layout_pass_active)?;
+            let mut state = self.document_layout_state.borrow_mut();
+            state.with_services_for_document(
+                document,
+                self.document_handle(),
+                |services, embedded_document_services| {
+                    crate::layout_renderer::build_foreign_object_layout_pass(
+                        self,
+                        foreign_object,
+                        services,
+                        embedded_document_services,
+                        request,
+                    )
+                },
+            )?
+        };
+        pass.into_paint_snapshot().map(Some)
+    }
+
     pub(crate) fn answer_layout_query_for_document(
         &self,
         document: DomHandle,

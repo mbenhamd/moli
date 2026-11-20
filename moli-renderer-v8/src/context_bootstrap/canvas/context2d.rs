@@ -12,7 +12,7 @@ use crate::context_bootstrap::image_data::{
 };
 use crate::context_bootstrap::shared::with_font_services;
 use crate::native_bridge::element::image_selected_source;
-use crate::native_bridge::throw_dom_exception;
+use crate::native_bridge::{PageScriptHost, throw_dom_exception};
 use crate::util::{get_private_value, set_private_value};
 use crate::web_api_interfaces;
 use crate::webidl;
@@ -1824,12 +1824,14 @@ pub(crate) fn canvas_context_draw_image_callback<'s>(
         }
         HtmlImageDrawSource::Raster(pixels, width, height) => (pixels, width, height),
         HtmlImageDrawSource::None => {
-            let Some(copy) = canvas_like_pixels_copy(scope, source) else {
-                return;
-            };
+            // A canvas or an ImageBitmap that is not origin-clean taints this
+            // canvas, even where Moli has no pixels to copy from it.
             if canvas_is_origin_tainted(scope, source) {
                 mark_canvas_origin_tainted(scope, canvas);
             }
+            let Some(copy) = canvas_like_pixels_copy(scope, source) else {
+                return;
+            };
             copy
         }
     };
@@ -1873,6 +1875,7 @@ enum HtmlImageDrawSource {
 }
 
 struct SvgDrawImage {
+    host: *mut PageScriptHost,
     image: std::sync::Arc<moli_image::SvgImage>,
     natural_width: f64,
     natural_height: f64,
@@ -1903,6 +1906,7 @@ fn html_image_draw_source<'s>(
     {
         if let Some(image) = ready.svg {
             return HtmlImageDrawSource::Svg(SvgDrawImage {
+                host: runtime_ptr,
                 image,
                 natural_width: f64::from(ready.intrinsic_width),
                 natural_height: f64::from(ready.intrinsic_height),
@@ -1922,6 +1926,7 @@ fn html_image_draw_source<'s>(
         .and_then(|image| {
             let metadata = image.metadata();
             Some(HtmlImageDrawSource::Svg(SvgDrawImage {
+                host: runtime_ptr,
                 natural_width: f64::from(metadata.concrete_dimensions()?.0),
                 natural_height: f64::from(metadata.concrete_dimensions()?.1),
                 image: std::sync::Arc::new(image),
@@ -1953,6 +1958,15 @@ fn draw_svg_image<'s>(
     {
         return;
     }
+    let foreign_content = source
+        .image
+        .foreign_object_source()
+        .map(|document| {
+            // No V8 call happens while this exclusive borrow is alive.
+            unsafe { &mut *source.host }
+                .svg_image_foreign_content(document, (source.natural_width, source.natural_height))
+        })
+        .unwrap_or_default();
     // Blink treats `<foreignObject>` in a non-`data:` image as a second
     // security origin, even for a same-origin blob.
     if source.from_blob && source.image.contains_foreign_object() {
@@ -2006,6 +2020,13 @@ fn draw_svg_image<'s>(
             destination: image_rect,
             transform: image_to_canvas,
         }));
+        for content in foreign_content {
+            snapshot.append_embedded_snapshot(
+                content.snapshot,
+                content.clip,
+                image_to_canvas.concatenate(content.content_to_image),
+            );
+        }
         snapshot.push_fragment(PaintFragment::PopLayer);
         if let Ok(raster) = moli_paint::raster_snapshot(&snapshot)
             && raster.width == width

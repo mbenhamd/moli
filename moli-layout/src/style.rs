@@ -1754,6 +1754,15 @@ impl ResolvedLayoutStyle {
         self.sticky_inset
     }
 
+    /// Paints this box without its own CSS transform, which its embedder
+    /// already applies, while it stays a containing block for positioned
+    /// descendants. An SVG `<foreignObject>`'s transform is part of the CTM
+    /// that places its CSS content.
+    pub fn force_embedder_applied_transform(&mut self) {
+        self.establishes_transform_containing_block = true;
+        self.synthetic_transform = Some(LayoutTransform2D::IDENTITY);
+    }
+
     /// Applies an HTML-level `display: none` override such as the `hidden`
     /// attribute after Stylo has produced the underlying computed values.
     pub fn force_display_none(&mut self) {
