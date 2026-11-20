@@ -224,6 +224,14 @@ const DIRECT_V8_CALL_ALLOWLIST: &[AllowedDirectCallFile] = &[
         DirectCallOwner::NativeForwardingOrScript,
     ),
     allowed(
+        "native_bridge/element/canvas.rs",
+        // The HTMLCanvasElement.toBlob BlobCallback call in its queued task
+        // landed on fork main d74b1a56be without an entry here; classified
+        // in PF-9297 so the inventory test passes again.
+        1,
+        DirectCallOwner::NativeForwardingOrScript,
+    ),
+    allowed(
         "native_bridge/element/focus.rs",
         1,
         DirectCallOwner::NativeForwardingOrScript,
