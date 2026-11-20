@@ -734,7 +734,6 @@ impl MoliStyleEngine {
             &self.dom_adapter,
             &world.pseudo_style_cache,
             &world.document_state,
-            world.css_transitions.transition_styles_seen(),
         )
     }
 
