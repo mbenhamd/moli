@@ -1977,10 +1977,6 @@ fn parse_timer_delay_ms<'s>(
     webidl::timer_milliseconds_arg(scope, args, 1, prefix)
 }
 
-/// Marks the animation frame at `timestamp` as started for the Window that
-/// requested it. The frame bookkeeping lives on that Window's global, which
-/// is not necessarily the current context while the timer task runs.
-/// Returns whether this call started the frame.
 /// Whether the animation frame at `timestamp` has not started yet: its first
 /// callback is about to run.
 pub(crate) fn animation_frame_callback_batch_pending(
@@ -1997,6 +1993,10 @@ pub(crate) fn animation_frame_callback_batch_pending(
         == Some(timestamp)
 }
 
+/// Marks the animation frame at `timestamp` as started for the Window that
+/// requested it. The frame bookkeeping lives on that Window's global, which
+/// is not necessarily the current context while the timer task runs.
+/// Returns whether this call started the frame.
 pub(crate) fn finish_animation_frame_callback_batch(
     scope: &mut v8::PinScope<'_, '_>,
     window: v8::Local<'_, v8::Object>,
