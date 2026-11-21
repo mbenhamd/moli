@@ -2639,3 +2639,97 @@ fn hover_interest_listener_redispatch_keeps_its_plain_event_target() {
 
     assert_eq!(result, "interest inner=plain after=plain");
 }
+
+#[test]
+fn source_bearing_redispatch_keeps_creation_path_and_load_clears_related_target() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-reference-redispatch.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+            const out = [];
+            if (!document.documentElement) document.appendChild(document.createElement('html'));
+            if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+            const body = document.body;
+            const add = (parent, tag = 'div') => parent.appendChild(document.createElement(tag));
+            const shadow = host => host.attachShadow({mode: 'open'});
+            function reachesWindow(target, event) {
+              let seen = false;
+              const listener = () => { seen = true };
+              window.addEventListener(event.type, listener, true);
+              target.dispatchEvent(event);
+              window.removeEventListener(event.type, listener, true);
+              return seen;
+            }
+            function hostAndWindow(event) {
+              const host = add(body), target = add(shadow(host));
+              let hit = 0;
+              host.addEventListener(event.type, () => hit++);
+              window.addEventListener(event.type, () => hit += 10, {once: true});
+              target.dispatchEvent(event);
+              return hit;
+            }
+            const fresh = () => { body.replaceChildren(); };
+            // Native events whose first path ended at their own shadow root.
+            { fresh();
+              const root = shadow(add(body)), button = add(root, 'button'), dest = add(root);
+              dest.id = 'dest';
+              button.setAttribute('commandfor', 'dest'); button.setAttribute('command', '--probe');
+              let saved; dest.addEventListener('command', e => saved = e); button.click();
+              out.push('command ' + hostAndWindow(saved)); }
+            { fresh();
+              const root = shadow(add(body)), form = add(root, 'form'), button = add(form, 'button');
+              let saved; form.addEventListener('submit', e => { e.preventDefault(); saved = e; });
+              form.requestSubmit(button);
+              out.push('submit ' + hostAndWindow(saved)); }
+            { fresh();
+              const root = shadow(add(body)), form = add(root, 'form'), button = add(form, 'button');
+              let saved; form.onsubmit = e => { e.preventDefault(); saved = e; };
+              form.requestSubmit(button); body.append(button);
+              out.push('submit-moved ' + reachesWindow(form, saved)); }
+            // A listener that reparents the target keeps the hosts the path was built with.
+            { fresh();
+              const host = add(body), target = add(host), root = shadow(host);
+              const source = add(root), container = add(root);
+              add(container, 'slot');
+              const e = new CommandEvent('probe', {source, composed: true});
+              target.addEventListener('probe', () => {
+                body.append(container); shadow(container).append(target);
+              }, {once: true});
+              target.dispatchEvent(e);
+              container.shadowRoot.append(source);
+              out.push('reparent ' + reachesWindow(target, e)); }
+            { fresh();
+              const host = add(body), target = add(shadow(host), 'i');
+              let calls = 0;
+              host.addEventListener('command', () => ++calls);
+              target.addEventListener('command', () => body.append(target));
+              target.dispatchEvent(new CommandEvent('command', {source: body, composed: true}));
+              out.push('moved-target ' + calls); }
+            // A load has no Window context, so its related target clears.
+            { fresh();
+              const host = add(body), target = add(shadow(host), 'i');
+              const e = new CommandEvent('load', {source: host, bubbles: true, composed: true});
+              body.dispatchEvent(e);
+              let calls = 0;
+              host.addEventListener('load', () => ++calls, true);
+              target.dispatchEvent(e);
+              out.push('load-host ' + calls); }
+            { fresh();
+              const root = shadow(add(body)), source = add(root), target = add(root);
+              const e = new CommandEvent('load', {source, bubbles: true, composed: true});
+              body.dispatchEvent(e);
+              e.initEvent('probe', true, false);
+              out.push('load-renamed ' + reachesWindow(target, e)); }
+            return out.join('\n');
+            })()
+            "#,
+        )
+        .unwrap();
+    // Chromium 156.0.8078.4 gives these lines for the same script.
+    assert_eq!(
+        result,
+        "command 1\nsubmit 11\nsubmit-moved true\nreparent true\nmoved-target 1\nload-host 1\nload-renamed true"
+    );
+}

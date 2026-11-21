@@ -454,28 +454,34 @@ impl DocumentRuntime {
             .get(scope, v8str(scope, "composed").into())
             .is_some_and(|value| value.boolean_value(scope));
         let reference_related_target = reference_related_target_for_event(scope, host_ptr, event);
-        let (mut path, entry_related_targets) = match reference_related_target {
-            Some(Some(related_target)) => {
-                // Blink composes the source-bearing events it fires itself
-                // (popover toggles, command, interest, submit) when it creates
-                // them, so a redispatch keeps that path too.
-                let source_composed = crate::context_bootstrap::event_private_value(
-                    scope,
-                    event,
-                    EVENT_SOURCE_COMPOSED_SLOT,
-                )
-                .is_some_and(|value| value.boolean_value(scope));
-                self.build_reference_target_propagation_path(
-                    host_ptr,
-                    dispatch_target,
-                    related_target,
-                    composed || source_composed,
-                )
-            }
+        // Blink composes the source-bearing events it fires itself (popover
+        // toggles, command, interest, submit) when it creates them, so every
+        // redispatch keeps that path, whatever the related target is now.
+        let composed = composed
+            || crate::context_bootstrap::event_private_value(
+                scope,
+                event,
+                EVENT_SOURCE_COMPOSED_SLOT,
+            )
+            .is_some_and(|value| value.boolean_value(scope));
+        let (mut path, entry_related_target) = match reference_related_target {
+            Some(Some(related_target)) => self.build_reference_target_propagation_path(
+                host_ptr,
+                dispatch_target,
+                related_target,
+                composed,
+            ),
             Some(None) | None => (self.build_propagation_path(dispatch_target, composed), None),
         };
         self.append_child_document_window_to_path(scope, host_ptr, &mut path);
         trim_window_from_subresource_load_path(dispatch_target, event_type.as_deref(), &mut path);
+        // Each entry's related target is fixed with the final path, before
+        // any listener runs, as Blink's event contexts are.
+        let entry_related_targets = entry_related_target.map(|related_target| {
+            path.iter()
+                .map(|entry| crate::host::retarget_event_target(host_ptr, related_target, *entry))
+                .collect::<Vec<_>>()
+        });
         let result = dispatch_public_event(
             &mut self.events,
             scope,
@@ -492,6 +498,7 @@ impl DocumentRuntime {
                 scope,
                 host_ptr,
                 event,
+                event_type.as_deref(),
                 &path,
                 entry_related_targets.as_deref(),
                 result.last_handled_entry(),
@@ -504,15 +511,14 @@ impl DocumentRuntime {
     /// retargeted into each entry's tree, and the path ends before the first
     /// entry outside both original trees where the retargeted target and
     /// related target meet. Returns the path and, when the related target
-    /// applies, each entry's retargeted related target, fixed when the path
-    /// is built as Blink's event contexts are.
+    /// applies, the related target each entry's snapshot retargets.
     fn build_reference_target_propagation_path(
         &self,
         host_ptr: *mut PageScriptHost,
         target: EventTargetHandle,
         related_target: EventTargetHandle,
         composed: bool,
-    ) -> (Vec<EventTargetHandle>, Option<Vec<EventTargetHandle>>) {
+    ) -> (Vec<EventTargetHandle>, Option<EventTargetHandle>) {
         let mut path = self.build_propagation_path(target, composed);
         let (EventTargetHandle::Node(target_handle), EventTargetHandle::Node(source_handle)) =
             (target, related_target)
@@ -560,29 +566,22 @@ impl DocumentRuntime {
         if let Some(stop) = stop {
             path.truncate(stop);
         }
-        let entry_related_targets = path
-            .iter()
-            .map(|entry| {
-                crate::host::retarget_event_target(
-                    host_ptr,
-                    EventTargetHandle::Node(related_handle),
-                    *entry,
-                )
-            })
-            .collect();
-        (path, Some(entry_related_targets))
+        (path, Some(EventTargetHandle::Node(related_handle)))
     }
 
     /// The related target a Node dispatch leaves on a source-bearing event,
     /// as Blink's `HandleLocalEvents` and final clearing do: null when the
-    /// dispatch ends with a null target (the path ends at a shadow root),
+    /// dispatch ends with a null Window-context target (the path ends at a
+    /// shadow root, or the event is a `load`, which has no Window context),
     /// otherwise the related target of the last entry the dispatch reached.
     /// A dispatch that reached no entry keeps the previous one.
+    #[allow(clippy::too_many_arguments)]
     fn record_reference_related_target(
         &self,
         scope: &mut v8::PinScope<'_, '_>,
         host_ptr: *mut PageScriptHost,
         event: v8::Local<'_, v8::Object>,
+        event_type: Option<&str>,
         path: &[EventTargetHandle],
         entry_related_targets: Option<&[EventTargetHandle]>,
         last_handled_entry: Option<EventTargetHandle>,
@@ -591,7 +590,7 @@ impl DocumentRuntime {
             path.last(),
             Some(EventTargetHandle::Node(handle)) if self.dom_host.is_shadow_root(*handle)
         );
-        let value = if ends_at_shadow_root {
+        let value = if ends_at_shadow_root || event_type == Some("load") {
             v8::null(scope).into()
         } else {
             let Some(related_target) = entry_related_targets.and_then(|related_targets| {

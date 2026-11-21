@@ -1646,6 +1646,19 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
         .copied()
         .filter(|target| invocation_target_is_in_shadow_tree(host_ptr, *target))
         .collect::<Vec<_>>();
+    // The hosts a non-bubbling event revisits at target are the entries its
+    // target retargets to when the path is built, as Blink's event contexts
+    // fix them; a listener that moves the target cannot change them.
+    let at_target_hosts = if bubbles {
+        Vec::new()
+    } else {
+        propagation_path
+            .iter()
+            .skip(1)
+            .copied()
+            .filter(|entry| retarget_event_target(host_ptr, original_target, *entry) == *entry)
+            .collect::<Vec<_>>()
+    };
     let path_context = PathEventContext {
         event,
         original_target,
@@ -1791,7 +1804,7 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
             if !event_target_is_current(host_ptr, *ancestor) {
                 break;
             }
-            if retarget_event_target(host_ptr, original_target, *ancestor) != *ancestor {
+            if !at_target_hosts.contains(ancestor) {
                 continue;
             }
             last_handled_entry = Some(*ancestor);
@@ -2588,12 +2601,29 @@ pub(crate) fn retargeted_event_source<'s>(
     if retargeted == source_target {
         return source;
     }
+    // The wrapper script already holds belongs to the source's realm, which
+    // can outlive its window (a closed popup), so look there first.
+    if let EventTargetHandle::Node(retargeted_handle) = retargeted
+        && let Some(creation_context) = object.get_creation_context(scope)
+    {
+        let cached = {
+            let scope = &mut v8::ContextScope::new(scope, creation_context);
+            unsafe { &*host_ptr }
+                .native_bridge()
+                .cached_handle_wrapper(scope, retargeted_handle)
+                .map(|wrapper| {
+                    let wrapper = get_private_object(scope, wrapper, DOM_PARSER_FOREIGN_NODE_SLOT)
+                        .unwrap_or(wrapper);
+                    v8::Global::new(scope, wrapper)
+                })
+        };
+        if let Some(wrapper) = cached {
+            return v8::Local::new(scope, &wrapper).into();
+        }
+    }
     // Never hand script the unretargeted node, which can be inside a closed
-    // shadow tree.
-    event_target_value(scope, host_ptr, retargeted).unwrap_or_else(|error| {
-        debug_assert!(false, "retargeted event source has no wrapper: {error}");
-        v8::null(scope).into()
-    })
+    // shadow tree. A host whose realm is gone has no wrapper to return.
+    event_target_value(scope, host_ptr, retargeted).unwrap_or_else(|_| v8::null(scope).into())
 }
 
 /// The one default action a dispatched event selects, from its state when
