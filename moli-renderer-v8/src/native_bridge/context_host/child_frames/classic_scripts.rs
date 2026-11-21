@@ -750,7 +750,9 @@ impl PageScriptHost {
                 source_document,
                 crate::types::PendingSubresourceFetchInfo {
                     internal_id: 0,
-                    network_request_handle: None,
+                    // The native request was already announced; the paused
+                    // request reports it as its networkId.
+                    network_request_handle: network_attribution.request_handle,
                     frame_id: network_attribution.frame_id.clone(),
                     document_url: network_attribution.document_url.clone(),
                     url: script.url.clone(),

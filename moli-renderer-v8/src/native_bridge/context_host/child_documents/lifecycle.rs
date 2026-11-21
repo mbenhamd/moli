@@ -895,6 +895,15 @@ impl PageScriptHost {
         else {
             return;
         };
+        // Only the current Document's registered execution realm takes part:
+        // a WindowProxy parked on a facade awaiting its replacement realm
+        // fires nothing.
+        if unsafe { &mut *host_ptr }
+            .existing_child_browsing_context_document_wrapper(scope, handle)
+            .is_none()
+        {
+            return;
+        }
         let Some(document_handle) =
             unsafe { &*host_ptr }.child_browsing_context_document_handle(handle)
         else {

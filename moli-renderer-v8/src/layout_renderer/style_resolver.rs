@@ -43,6 +43,7 @@ struct NativeLayoutStyleResolverProfile {
     anonymous_projection_ns: u128,
 }
 
+#[cfg(test)]
 pub(super) fn with_layout_styles<R>(
     runtime: &PageScriptHost,
     document: DomHandle,

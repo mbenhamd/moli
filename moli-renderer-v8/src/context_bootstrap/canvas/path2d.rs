@@ -103,13 +103,14 @@ fn add_path_callback<'s>(
     let Some(parsed) = webidl::parse_args::<AddPathArgs>(scope, &args) else {
         return;
     };
+    // Like Blink, conflicting matrix aliases throw even for an empty source.
+    let Some(transform) = transform_init_coefficients(scope, &parsed.transform) else {
+        return;
+    };
     let source = canvas_path_state(scope, parsed.path);
     if source.borrow().is_empty() {
         return;
     }
-    let Some(transform) = transform_init_coefficients(scope, &parsed.transform) else {
-        return;
-    };
     // Copy before borrowing the destination, since addPath can append itself.
     let source = source.borrow().clone();
     canvas_path_state(scope, args.this())

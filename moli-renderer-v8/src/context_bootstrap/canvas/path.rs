@@ -34,12 +34,10 @@ impl Default for Canvas2dPathState {
 const TWO_PI: f64 = std::f64::consts::TAU;
 
 impl Canvas2dPathState {
+    /// Like Blink, a Path2D built from SVG path data keeps its last subpath
+    /// open, so later commands continue its contour.
     pub(super) fn from_svg(data: &str) -> Self {
-        let mut path = Self::from_svg_path_data(data);
-        if path.has_subpath {
-            path.move_to(path.current.0, path.current.1);
-        }
-        path
+        Self::from_svg_path_data(data)
     }
 
     pub(super) fn add_path(&mut self, path: &Self, transform: [f64; 6]) {
@@ -48,8 +46,16 @@ impl Canvas2dPathState {
         }
         let transform = kurbo::Affine::new(transform);
         self.elements.extend(path.transformed_elements(transform));
-        let end = transform * kurbo::Point::from(path.current);
-        self.move_to(end.x, end.y);
+        // Like Blink, the added path's open contour stays current: later
+        // commands continue it rather than starting a new subpath.
+        let mapped = |(x, y): (f64, f64)| {
+            let p = transform * kurbo::Point::new(x, y);
+            (p.x, p.y)
+        };
+        self.current = mapped(path.current);
+        self.current_subpath_start = mapped(path.current_subpath_start);
+        self.has_subpath = path.has_subpath;
+        self.just_closed = path.just_closed;
     }
 
     pub(super) fn begin_path(&mut self) {
@@ -636,9 +642,8 @@ mod tests {
                 PaintPathElement::Close,
                 PaintPathElement::MoveTo(c),
                 PaintPathElement::LineTo(d),
-                PaintPathElement::MoveTo(e),
-            ] if (a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y, e.x, e.y)
-                == (11.0, 22.0, 13.0, 24.0, 11.0, 22.0, 15.0, 26.0, 15.0, 26.0)
+            ] if (a.x, a.y, b.x, b.y, c.x, c.y, d.x, d.y)
+                == (11.0, 22.0, 13.0, 24.0, 11.0, 22.0, 15.0, 26.0)
         ));
         assert_eq!(target.current, (15.0, 26.0));
     }

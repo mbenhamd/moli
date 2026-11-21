@@ -1,7 +1,7 @@
 use style::{
     counter_style::CounterStyle,
     properties::ComputedValues,
-    values::computed::{Content, Image},
+    values::computed::{Content, ContentItem, Image},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +26,15 @@ pub(crate) fn marker_style_decision(
     }
     match &marker.get_counters().content {
         Content::None => Suppressed,
+        // Like Chromium 156, `::marker { content: '' }` generates no marker
+        // box: the list item's text starts where it would with `content: none`.
+        Content::Items(items)
+            if items.items[..items.alt_start]
+                .iter()
+                .all(|item| matches!(item, ContentItem::String(text) if text.is_empty())) =>
+        {
+            Suppressed
+        }
         Content::Items(_) => ExplicitContent,
         Content::Normal => {
             let list = owner.get_list();

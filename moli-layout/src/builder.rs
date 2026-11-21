@@ -462,15 +462,12 @@ where
         if style.display().is_list_item()
             && let Some(marker) = self.styles.marker_style(source_node)?
         {
-            let marker = marker.into_style();
-            if marker.generates_marker_box() {
-                children.extend(self.build_generated_pseudo(
-                    world,
-                    source_node,
-                    LayoutPseudo::Marker,
-                    marker,
-                )?);
-            }
+            children.extend(self.build_generated_pseudo(
+                world,
+                source_node,
+                LayoutPseudo::Marker,
+                marker.into_style(),
+            )?);
         }
         children.extend(self.build_pseudo(world, source_node, LayoutPseudo::Before, before)?);
         // Only a closed details gets a `::details-content` slot box. Stylo

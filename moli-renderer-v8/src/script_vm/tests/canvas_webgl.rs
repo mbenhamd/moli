@@ -125,6 +125,8 @@ fn canvas_html_and_offscreen_draw_with_modern_fill_and_stroke_colors() {
       ['hsl(120 100% 50%)', [0, 255, 0, 255]],
       ['color(srgb 1 0 0 / 0.5)', [255, 0, 0, 128]],
       ['color-mix(in srgb, red 50%, blue 50%)', [128, 0, 128, 255]],
+      ['COLOR(srgb 100% 50% 0% / 50%)', [255, 128, 0, 128]],
+      ['color(srgb none 1 1)', [0, 255, 255, 255]],
     ]) {
       ctx.fillStyle = 'black';
       ctx.strokeStyle = 'black';
