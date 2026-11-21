@@ -35,7 +35,8 @@ pub(super) use self::events::{
     DispatchStatus, HostEventTargetRegistry, PublicEventDispatchResult, create_host_event,
     dispatch_host_event, dispatch_public_event, dispatch_public_event_with_original_target,
     event_dispatch_status, event_target_value, host_event_defaults, invoke_prepared_event_callback,
-    report_event_callback_exception, report_event_listener_exception,
+    report_event_callback_exception, report_event_listener_exception, retarget_event_target,
+    retargeted_event_source,
 };
 pub(super) use self::scripts::{
     CommittedInlineClassicScript, FailedDynamicScript, HostScriptScheduler, ModuleFailurePolicy,

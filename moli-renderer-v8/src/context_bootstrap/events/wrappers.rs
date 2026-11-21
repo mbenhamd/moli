@@ -24,6 +24,9 @@ enum AttributeProjection {
     Value,
     Target,
     PlatformObject,
+    /// `source` of CommandEvent, ToggleEvent and InterestEvent: the stored
+    /// original, retargeted on each read.
+    RetargetedSource,
     NavigationEntry,
     NavigationDestination,
 }
@@ -32,9 +35,10 @@ impl AttributeProjection {
     fn for_property(property: &str) -> Self {
         match property {
             "target" | "srcElement" | "currentTarget" => Self::Target,
-            "signal" | "formData" | "sourceElement" | "relatedTarget" | "submitter" | "source" => {
+            "signal" | "formData" | "sourceElement" | "relatedTarget" | "submitter" => {
                 Self::PlatformObject
             }
+            "source" => Self::RetargetedSource,
             "from" => Self::NavigationEntry,
             "destination" => Self::NavigationDestination,
             // Arbitrary JS payloads have their own value access semantics;
@@ -64,6 +68,28 @@ impl AttributeProjection {
             }),
             Self::PlatformObject => {
                 crate::context_bootstrap::platform_object_worlds::in_realm(scope, value, context)
+            }
+            Self::RetargetedSource => {
+                let value = crate::host::retargeted_event_source(scope, wrapper, value);
+                // A retained host whose realm has no wrapper in this one (a
+                // closed popup's node) is still the source in the main world.
+                // Across isolated worlds, or on any other failure, it is null.
+                Some(
+                    crate::context_bootstrap::platform_object_worlds::in_realm(
+                        scope, value, context,
+                    )
+                    .or_else(|| {
+                        let source_context = v8::Local::<v8::Object>::try_from(value)
+                            .ok()?
+                            .get_creation_context(scope)?;
+                        (crate::native_bridge::isolated_window_world_for_context(source_context)
+                            .is_none()
+                            && crate::native_bridge::isolated_window_world_for_context(context)
+                                .is_none())
+                        .then_some(value)
+                    })
+                    .unwrap_or_else(|| v8::null(scope).into()),
+                )
             }
             Self::NavigationEntry => Some(entry_wrappers::value_in_realm(scope, value, context)),
             Self::NavigationDestination => {
@@ -242,6 +268,11 @@ fn bind_attribute<'s>(
                     .data(property)
                     .build(scope)
             }
+            AttributeProjection::RetargetedSource => {
+                v8::Function::builder(event_attribute_getter::<5>)
+                    .data(property)
+                    .build(scope)
+            }
             AttributeProjection::NavigationEntry => {
                 v8::Function::builder(event_attribute_getter::<3>)
                     .data(property)
@@ -297,6 +328,7 @@ fn event_attribute_getter<'s, const PROJECTION: u8>(
         2 => AttributeProjection::PlatformObject,
         3 => AttributeProjection::NavigationEntry,
         4 => AttributeProjection::NavigationDestination,
+        5 => AttributeProjection::RetargetedSource,
         _ => unreachable!("Event getter projection"),
     };
     if let Some(value) = projection.project(scope, args.this(), value) {

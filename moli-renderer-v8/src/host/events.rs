@@ -590,8 +590,39 @@ struct PathEventContext<'s, 'p> {
     event: v8::Local<'s, v8::Object>,
     original_target: EventTargetHandle,
     original_related_target: Option<EventTargetHandle>,
-    original_source_target: Option<EventTargetHandle>,
     propagation_path: &'p [EventTargetHandle],
+    entry_scopes: &'p [PathEntryScope],
+}
+
+/// The target, relatedTarget, composedPath and at-target state one path
+/// entry sees. Like Blink's NodeEventContext, they are fixed when the path is
+/// built, so a listener that moves the target or a host between shadow trees
+/// cannot change what a later entry sees.
+struct PathEntryScope {
+    target: EventTargetHandle,
+    related_target: Option<EventTargetHandle>,
+    visible_path: Vec<EventTargetHandle>,
+    at_target: bool,
+}
+
+impl PathEntryScope {
+    fn new(
+        host_ptr: *mut PageScriptHost,
+        original_target: EventTargetHandle,
+        original_related_target: Option<EventTargetHandle>,
+        propagation_path: &[EventTargetHandle],
+        current_target: EventTargetHandle,
+    ) -> Self {
+        let target = retarget_event_target(host_ptr, original_target, current_target);
+        Self {
+            target,
+            related_target: original_related_target.map(|related_target| {
+                retarget_event_target(host_ptr, related_target, current_target)
+            }),
+            visible_path: visible_event_path(host_ptr, propagation_path, current_target),
+            at_target: target == current_target,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -645,43 +676,45 @@ impl<'s, 'p> PathEntryEventState<'s, 'p> {
             Some(object) => object,
             None => event_target_object(scope, host_ptr, self.current_target)?,
         };
+        let built_scope;
+        let entry_scope = match context
+            .propagation_path
+            .iter()
+            .position(|entry| *entry == self.current_target)
+            .and_then(|index| context.entry_scopes.get(index))
+        {
+            Some(entry_scope) => entry_scope,
+            None => {
+                built_scope = PathEntryScope::new(
+                    host_ptr,
+                    context.original_target,
+                    context.original_related_target,
+                    context.propagation_path,
+                    self.current_target,
+                );
+                &built_scope
+            }
+        };
         set_event_current_target(scope, context.event, current_target_object.into());
-        set_event_target_for_current_target(
-            scope,
-            host_ptr,
-            context.event,
-            context.original_target,
-            self.current_target,
-        )?;
+        let target_value = event_target_value(scope, host_ptr, entry_scope.target)?;
+        set_event_target(scope, context.event, target_value);
         set_event_related_target_for_current_target(
             scope,
             host_ptr,
             context.event,
-            context.original_related_target,
-            self.current_target,
-        )?;
-        set_event_source_for_current_target(
-            scope,
-            host_ptr,
-            context.event,
-            context.original_source_target,
-            self.current_target,
+            entry_scope.related_target,
         )?;
         set_event_composed_path_for_current_target(
             scope,
             host_ptr,
             context.event,
             context.propagation_path,
-            self.current_target,
+            &entry_scope.visible_path,
         )?;
         let phase = match self.phase {
             PathEntryPhase::AtTarget => 2,
-            PathEntryPhase::Around(phase) => event_phase_for_current_target(
-                host_ptr,
-                context.original_target,
-                self.current_target,
-                phase,
-            ),
+            PathEntryPhase::Around(_) if entry_scope.at_target => 2,
+            PathEntryPhase::Around(phase) => phase,
         };
         set_event_phase(scope, context.event, phase);
         self.applied.set(true);
@@ -875,9 +908,21 @@ fn event_listener_error_event_from_report<'s>(
 pub(crate) struct PublicEventDispatchResult {
     pub default_prevented: bool,
     canceled_before_dispatch: bool,
+    /// The path entry whose local event handling ran last, as Blink's
+    /// `HandleLocalEvents` reaches each entry whether or not it has
+    /// listeners. `None` when no entry was reached.
+    last_handled_entry: Option<EventTargetHandle>,
 }
 
 impl PublicEventDispatchResult {
+    pub(crate) fn canceled_before_dispatch(self) -> bool {
+        self.canceled_before_dispatch
+    }
+
+    pub(crate) fn last_handled_entry(self) -> Option<EventTargetHandle> {
+        self.last_handled_entry
+    }
+
     pub(crate) fn allows_default(self) -> bool {
         !self.default_prevented && !self.canceled_before_dispatch
     }
@@ -1598,6 +1643,7 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
         return Ok(PublicEventDispatchResult {
             canceled_before_dispatch: true,
             default_prevented: event_default_prevented(scope, event),
+            last_handled_entry: None,
         });
     }
     let target_object = event_target_object(scope, host_ptr, dispatch_target)?;
@@ -1619,7 +1665,6 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
 
     let bubbles = event_bool_property(scope, event, "bubbles");
     let original_related_target = event_related_target_handle(scope, host_ptr, event);
-    let original_source_target = event_source_target_handle(scope, host_ptr, event);
     let filtered_path;
     let propagation_path = if let Some(related_target) = original_related_target {
         filtered_path = propagation_path_for_related_target(
@@ -1632,25 +1677,45 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
     } else {
         propagation_path
     };
-    let post_dispatch_target =
-        post_dispatch_retargeted_target(host_ptr, original_target, propagation_path);
+    // Blink's Window event context skips load, so a Node load dispatch ends
+    // with no target or relatedTarget.
+    let node_load_dispatch =
+        matches!(dispatch_target, EventTargetHandle::Node(_)) && event_type == "load";
+    let post_dispatch_target = if node_load_dispatch {
+        None
+    } else {
+        post_dispatch_retargeted_target(host_ptr, original_target, propagation_path)
+    };
     let post_dispatch_related_target = original_related_target.map(|original_related_target| {
-        post_dispatch_retargeted_target(host_ptr, original_related_target, propagation_path)
-    });
-    let post_dispatch_source_target = original_source_target.and_then(|source_target| {
-        post_dispatch_retargeted_target(host_ptr, source_target, propagation_path)
+        if node_load_dispatch {
+            None
+        } else {
+            post_dispatch_retargeted_target(host_ptr, original_related_target, propagation_path)
+        }
     });
     let invocation_targets_in_shadow_tree = propagation_path
         .iter()
         .copied()
         .filter(|target| invocation_target_is_in_shadow_tree(host_ptr, *target))
         .collect::<Vec<_>>();
+    let entry_scopes = propagation_path
+        .iter()
+        .map(|entry| {
+            PathEntryScope::new(
+                host_ptr,
+                original_target,
+                original_related_target,
+                propagation_path,
+                *entry,
+            )
+        })
+        .collect::<Vec<_>>();
     let path_context = PathEventContext {
         event,
         original_target,
         original_related_target,
-        original_source_target,
         propagation_path,
+        entry_scopes: &entry_scopes,
     };
 
     set_event_internal_flag(scope, event, EVENT_DISPATCHING_SLOT, true);
@@ -1662,6 +1727,7 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
     // flag rather than always starting at false.
     let mut stopped = event_internal_bool_flag(scope, event, EVENT_STOP_PROPAGATION_SLOT)
         || event_internal_bool_flag(scope, event, EVENT_STOP_IMMEDIATE_SLOT);
+    let mut last_handled_entry = None;
 
     if !stopped && propagation_path.len() > 1 {
         for ancestor in propagation_path[1..].iter().rev() {
@@ -1669,6 +1735,7 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
                 stopped = true;
                 break;
             }
+            last_handled_entry = Some(*ancestor);
             if !path_entry_has_listeners(
                 registry,
                 *ancestor,
@@ -1700,6 +1767,7 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
     }
 
     if !stopped && !propagation_path.is_empty() {
+        last_handled_entry = Some(dispatch_target);
         let target_entry = PathEntryEventState::new(
             path_context,
             dispatch_target,
@@ -1784,35 +1852,26 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
     }
 
     if !stopped && !bubbles && propagation_path.len() > 1 {
-        for ancestor in propagation_path[1..].iter() {
+        // The hosts a non-bubbling event revisits at target are the entries
+        // its target retargeted to when the path was built.
+        for (ancestor, entry_scope) in propagation_path[1..].iter().zip(&entry_scopes[1..]) {
             if !event_target_is_current(host_ptr, *ancestor) {
                 break;
             }
-            if retarget_event_target(host_ptr, original_target, *ancestor) != *ancestor {
+            if !entry_scope.at_target {
                 continue;
             }
-            if !path_entry_has_listeners(registry, *ancestor, &event_type, ListenerFilter::All) {
+            last_handled_entry = Some(*ancestor);
+            // Blink's bubbling pass revisits a host the target retargets to
+            // with only its non-capture listeners; the capture pass already
+            // ran its capture listeners.
+            if !path_entry_has_listeners(registry, *ancestor, &event_type, ListenerFilter::Bubbling)
+            {
                 continue;
             }
             PathEntryEventState::new(path_context, *ancestor, None, PathEntryPhase::AtTarget)
                 .apply(scope, host_ptr)?;
 
-            let status = call_event_target_listeners_filtered(
-                registry,
-                scope,
-                host_ptr,
-                *ancestor,
-                invocation_targets_in_shadow_tree.contains(ancestor),
-                &event_type,
-                event,
-                true,
-                true,
-            )?;
-            if status == DispatchStatus::StopImmediate || status == DispatchStatus::StopPropagation
-            {
-                stopped = true;
-                break;
-            }
             let status = call_event_target_listeners_filtered(
                 registry,
                 scope,
@@ -1837,6 +1896,7 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
             if !event_target_is_current(host_ptr, *ancestor) {
                 break;
             }
+            last_handled_entry = Some(*ancestor);
             // HTMLFormElement's local event handling stops a nested submit/reset before the
             // ancestor form's bubble listeners run. Capture still traverses the full path.
             if stops_submit_or_reset_at_ancestor_form(
@@ -1900,31 +1960,21 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
         post_dispatch_target,
         post_dispatch_related_target,
     )?;
-    set_event_post_dispatch_source(scope, host_ptr, event, post_dispatch_source_target)?;
-    if event_type == "mouseover"
-        && !event_default_prevented(scope, event)
-        && let EventTargetHandle::Node(handle) = dispatch_target
-    {
-        crate::native_bridge::element::perform_hover_interest_default_action_for_dispatched_event(
-            scope, host_ptr, handle,
-        );
+    if matches!(dispatch_target, EventTargetHandle::Node(_)) {
+        record_event_path_final_targets(scope, event);
     }
-    if event_type == "keydown"
-        && event_bool_property(scope, event, "isTrusted")
-        && !event_default_prevented(scope, event)
-    {
-        crate::native_bridge::element::perform_tab_focus_default_action_for_dispatched_event(
-            scope, host_ptr, event,
-        );
-        if let Some(document) = keyboard_dispatch_document {
-            crate::native_bridge::element::perform_access_key_default_action_for_dispatched_event(
-                scope, host_ptr, event, document,
-            );
-            crate::native_bridge::element::perform_dialog_escape_default_action_for_dispatched_event(
-                scope, host_ptr, event, document,
-            );
-        }
-    }
+    // Default actions decide from the dispatched event as it ended, before
+    // any script they reach can reinitialize or redispatch it.
+    let default_action = DispatchedEventDefaultAction::select(
+        scope,
+        event,
+        &event_type,
+        dispatch_target,
+        keyboard_dispatch_document,
+    );
+    // The dispatch ends before any default action runs. Script a default
+    // action reaches (a focus handler, a cancel or interest listener) sees no
+    // currentTarget, phase or composedPath, whichever entries had listeners.
     set_event_phase(scope, event, 0);
     set_event_internal_flag(scope, event, EVENT_DISPATCHING_SLOT, false);
     set_event_internal_flag(scope, event, EVENT_STOP_PROPAGATION_SLOT, false);
@@ -1937,9 +1987,34 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
         v8::null(scope).into(),
     );
     clear_event_composed_path(scope, event);
+    if let Some(default_action) = default_action {
+        let restores_targets = default_action.restores_targets_after_perform();
+        default_action.perform(scope, host_ptr);
+        // Script reached by a keyboard default action can redispatch the
+        // event. Like Blink, a Node dispatch ends with the final targets of
+        // the event's latest Node path: its own, or a nested Node dispatch's,
+        // which rebuilt that path. A plain EventTarget or Window redispatch
+        // builds no path, so its target is overwritten. Hover interest is a
+        // later task in Blink, so what its listeners redispatch keeps its own
+        // targets.
+        if restores_targets {
+            if matches!(dispatch_target, EventTargetHandle::Node(_)) {
+                restore_event_path_final_targets(scope, event);
+            } else {
+                set_event_post_dispatch_targets(
+                    scope,
+                    host_ptr,
+                    event,
+                    post_dispatch_target,
+                    post_dispatch_related_target,
+                )?;
+            }
+        }
+    }
     Ok(PublicEventDispatchResult {
         default_prevented: event_default_prevented(scope, event),
         canceled_before_dispatch: false,
+        last_handled_entry,
     })
 }
 
@@ -2304,30 +2379,15 @@ fn event_target_receiver<'s>(
     }
 }
 
-fn set_event_target_for_current_target<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    host_ptr: *mut PageScriptHost,
-    event: v8::Local<'s, v8::Object>,
-    original_target: EventTargetHandle,
-    current_target: EventTargetHandle,
-) -> std::result::Result<(), String> {
-    let target = retarget_event_target(host_ptr, original_target, current_target);
-    let target_value = event_target_value(scope, host_ptr, target)?;
-    set_event_target(scope, event, target_value);
-    Ok(())
-}
-
 fn set_event_related_target_for_current_target<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     host_ptr: *mut PageScriptHost,
     event: v8::Local<'s, v8::Object>,
-    original_related_target: Option<EventTargetHandle>,
-    current_target: EventTargetHandle,
+    related_target: Option<EventTargetHandle>,
 ) -> std::result::Result<(), String> {
-    let Some(original_related_target) = original_related_target else {
+    let Some(related_target) = related_target else {
         return Ok(());
     };
-    let related_target = retarget_event_target(host_ptr, original_related_target, current_target);
     let related_value = event_target_value(scope, host_ptr, related_target)?;
     let _ = crate::context_bootstrap::event_backing(scope, event).set(
         scope,
@@ -2337,36 +2397,16 @@ fn set_event_related_target_for_current_target<'s>(
     Ok(())
 }
 
-fn set_event_source_for_current_target<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    host_ptr: *mut PageScriptHost,
-    event: v8::Local<'s, v8::Object>,
-    original_source_target: Option<EventTargetHandle>,
-    current_target: EventTargetHandle,
-) -> std::result::Result<(), String> {
-    let Some(original_source_target) = original_source_target else {
-        return Ok(());
-    };
-    let source = retarget_event_target(host_ptr, original_source_target, current_target);
-    let source_value = event_target_value(scope, host_ptr, source)?;
-    let _ = crate::context_bootstrap::event_backing(scope, event).set(
-        scope,
-        v8str(scope, "source").into(),
-        source_value,
-    );
-    Ok(())
-}
-
 fn set_event_composed_path_for_current_target<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     host_ptr: *mut PageScriptHost,
     event: v8::Local<'s, v8::Object>,
     propagation_path: &[EventTargetHandle],
-    current_target: EventTargetHandle,
+    visible_path: &[EventTargetHandle],
 ) -> std::result::Result<(), String> {
-    let visible_path = visible_event_path(host_ptr, propagation_path, current_target);
     let path = visible_path
-        .into_iter()
+        .iter()
+        .copied()
         .map(|handle| match handle {
             EventTargetHandle::Window => Ok(event_window_value_for_path(
                 scope,
@@ -2412,19 +2452,6 @@ fn event_window_value_for_path<'s>(
     scope.get_current_context().global(scope).into()
 }
 
-fn event_phase_for_current_target(
-    host_ptr: *mut PageScriptHost,
-    original_target: EventTargetHandle,
-    current_target: EventTargetHandle,
-    ancestor_phase: u32,
-) -> u32 {
-    if retarget_event_target(host_ptr, original_target, current_target) == current_target {
-        2
-    } else {
-        ancestor_phase
-    }
-}
-
 fn set_event_post_dispatch_targets<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     host_ptr: *mut PageScriptHost,
@@ -2453,22 +2480,64 @@ fn set_event_post_dispatch_targets<'s>(
     Ok(())
 }
 
-fn set_event_post_dispatch_source<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    host_ptr: *mut PageScriptHost,
-    event: v8::Local<'s, v8::Object>,
-    post_dispatch_source: Option<EventTargetHandle>,
-) -> std::result::Result<(), String> {
-    let Some(source_target) = post_dispatch_source else {
-        return Ok(());
-    };
-    let source_value = event_target_value(scope, host_ptr, source_target)?;
-    let _ = crate::context_bootstrap::event_backing(scope, event).set(
+/// Private slots for the target and relatedTarget a Node dispatch leaves on
+/// the event, Blink's final read of the event path's Window context. They
+/// stay off every world's wrapper.
+const EVENT_PATH_FINAL_TARGET_SLOT: &str = "__moliEventPathFinalTarget";
+const EVENT_PATH_FINAL_RELATED_TARGET_SLOT: &str = "__moliEventPathFinalRelatedTarget";
+
+fn record_event_path_final_targets(
+    scope: &mut v8::PinScope<'_, '_>,
+    event: v8::Local<'_, v8::Object>,
+) {
+    let backing = crate::context_bootstrap::event_backing(scope, event);
+    let target = backing
+        .get(scope, v8str(scope, "target").into())
+        .filter(|value| !value.is_undefined())
+        .unwrap_or_else(|| v8::null(scope).into());
+    crate::context_bootstrap::set_event_private_value(
         scope,
-        v8str(scope, "source").into(),
-        source_value,
+        event,
+        EVENT_PATH_FINAL_TARGET_SLOT,
+        target,
     );
-    Ok(())
+    // Only an event with a relatedTarget attribute keeps one; undefined
+    // leaves the slot unset, so the restore adds no relatedTarget field.
+    let related_key = v8str(scope, "relatedTarget");
+    let related_target = if backing.has_own_property(scope, related_key.into()) == Some(true) {
+        backing
+            .get(scope, related_key.into())
+            .unwrap_or_else(|| v8::undefined(scope).into())
+    } else {
+        v8::undefined(scope).into()
+    };
+    crate::context_bootstrap::set_event_private_value(
+        scope,
+        event,
+        EVENT_PATH_FINAL_RELATED_TARGET_SLOT,
+        related_target,
+    );
+}
+
+fn restore_event_path_final_targets(
+    scope: &mut v8::PinScope<'_, '_>,
+    event: v8::Local<'_, v8::Object>,
+) {
+    let target =
+        crate::context_bootstrap::event_private_value(scope, event, EVENT_PATH_FINAL_TARGET_SLOT)
+            .unwrap_or_else(|| v8::null(scope).into());
+    set_event_target(scope, event, target);
+    if let Some(related_target) = crate::context_bootstrap::event_private_value(
+        scope,
+        event,
+        EVENT_PATH_FINAL_RELATED_TARGET_SLOT,
+    ) {
+        let _ = crate::context_bootstrap::event_backing(scope, event).set(
+            scope,
+            v8str(scope, "relatedTarget").into(),
+            related_target,
+        );
+    }
 }
 
 fn post_dispatch_retargeted_target(
@@ -2524,20 +2593,128 @@ fn event_related_target_handle(
         .map(EventTargetHandle::Node)
 }
 
-fn event_source_target_handle(
-    scope: &mut v8::PinScope<'_, '_>,
-    host_ptr: *mut PageScriptHost,
-    event: v8::Local<'_, v8::Object>,
-) -> Option<EventTargetHandle> {
-    let value = crate::context_bootstrap::event_backing(scope, event)
-        .get(scope, v8str(scope, "source").into())?;
-    if value.is_null_or_undefined() || !value.is_object() {
-        return None;
+/// An event's `source` (CommandEvent, ToggleEvent, InterestEvent) as its
+/// getter returns it: the stored source node retargeted against the event's
+/// currentTarget, or against the document when there is none. The stored
+/// value stays the original, so every read and every later dispatch sees the
+/// tree as it is then. A value that is not a Node is returned unchanged.
+pub(crate) fn retargeted_event_source<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    event: v8::Local<'s, v8::Object>,
+    source: v8::Local<'s, v8::Value>,
+) -> v8::Local<'s, v8::Value> {
+    let Ok(object) = v8::Local::<v8::Object>::try_from(source) else {
+        return source;
+    };
+    let Ok((host_ptr, handle)) =
+        crate::native_bridge::node_runtime_and_handle_from_object_or_detached(scope, object)
+    else {
+        return source;
+    };
+    let current_target = crate::context_bootstrap::event_backing(scope, event)
+        .get(scope, v8str(scope, "currentTarget").into())
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+        // Only a Node currentTarget has a tree to retarget against. The brand
+        // check reads no author-visible state; another EventTarget (an XHR, a
+        // plain EventTarget) takes the document path.
+        .filter(|object| crate::web_api_interfaces::Node::is_instance(scope, *object))
+        .and_then(|object| {
+            crate::native_bridge::node_runtime_and_handle_from_object_or_detached(scope, object)
+                .ok()
+        })
+        .filter(|(runtime_ptr, _)| *runtime_ptr == host_ptr)
+        .map_or(EventTargetHandle::Window, |(_, current)| {
+            EventTargetHandle::Node(current)
+        });
+    let source_target = EventTargetHandle::Node(handle);
+    let retargeted = retarget_event_target(host_ptr, source_target, current_target);
+    if retargeted == source_target {
+        return source;
     }
-    let object = v8::Local::<v8::Object>::try_from(value).ok()?;
-    let (runtime_ptr, handle) =
-        crate::native_bridge::node_runtime_and_handle_from_object(scope, object).ok()?;
-    (runtime_ptr == host_ptr).then_some(EventTargetHandle::Node(handle))
+    // The wrapper script already holds belongs to the source's realm, which
+    // can outlive its window (a closed popup), so look there first. Handles
+    // are Page-local and that realm's cache can hold another Page's nodes, so
+    // only a wrapper whose native node is the retargeted one is returned.
+    if let EventTargetHandle::Node(retargeted_handle) = retargeted
+        && let Some(creation_context) = object.get_creation_context(scope)
+    {
+        let cached = {
+            let scope = &mut v8::ContextScope::new(scope, creation_context);
+            unsafe { &*host_ptr }
+                .native_bridge()
+                .cached_handle_wrapper(scope, retargeted_handle)
+                .map(|wrapper| {
+                    get_private_object(scope, wrapper, DOM_PARSER_FOREIGN_NODE_SLOT)
+                        .unwrap_or(wrapper)
+                })
+                .filter(|wrapper| {
+                    crate::native_bridge::node_runtime_and_handle_from_object_or_detached(
+                        scope, *wrapper,
+                    )
+                    .is_ok_and(|node| node == (host_ptr, retargeted_handle))
+                })
+                .map(|wrapper| v8::Global::new(scope, wrapper))
+        };
+        if let Some(wrapper) = cached {
+            return v8::Local::new(scope, &wrapper).into();
+        }
+    }
+    // Never hand script the unretargeted node, which can be inside a closed
+    // shadow tree. A host whose realm is gone has no wrapper to return.
+    event_target_value(scope, host_ptr, retargeted).unwrap_or_else(|_| v8::null(scope).into())
+}
+
+/// The one default action a dispatched event selects, from its state when
+/// the dispatch ended.
+enum DispatchedEventDefaultAction {
+    HoverInterest(NativeNodeId),
+    Keyboard(crate::native_bridge::element::KeyboardDefaultAction),
+}
+
+impl DispatchedEventDefaultAction {
+    fn select(
+        scope: &mut v8::PinScope<'_, '_>,
+        event: v8::Local<'_, v8::Object>,
+        event_type: &str,
+        dispatch_target: EventTargetHandle,
+        keyboard_dispatch_document: Option<NativeNodeId>,
+    ) -> Option<Self> {
+        if !event_bool_property(scope, event, "isTrusted") || event_default_prevented(scope, event)
+        {
+            return None;
+        }
+        match event_type {
+            "mouseover" => match dispatch_target {
+                EventTargetHandle::Node(handle) => Some(Self::HoverInterest(handle)),
+                _ => None,
+            },
+            "keydown" => crate::native_bridge::element::KeyboardDefaultAction::select(
+                scope,
+                event,
+                keyboard_dispatch_document,
+            )
+            .map(Self::Keyboard),
+            _ => None,
+        }
+    }
+
+    /// Whether the dispatch restores its final targets after the action.
+    /// Hover interest is a separate task in Blink (PF-9505 owns its delay),
+    /// so its listeners run after the dispatch has already ended.
+    fn restores_targets_after_perform(&self) -> bool {
+        matches!(self, Self::Keyboard(_))
+    }
+
+    fn perform(self, scope: &mut v8::PinScope<'_, '_>, host_ptr: *mut PageScriptHost) {
+        match self {
+            Self::HoverInterest(handle) => {
+                crate::native_bridge::element::perform_hover_interest_default_action_for_dispatched_event(
+                    scope, host_ptr, handle,
+                );
+            }
+            Self::Keyboard(action) => action.perform(scope, host_ptr),
+        }
+    }
 }
 
 fn propagation_path_for_related_target(
@@ -2601,7 +2778,7 @@ fn target_has_inaccessible_shadow_root(
     }
 }
 
-fn retarget_event_target(
+pub(crate) fn retarget_event_target(
     host_ptr: *mut PageScriptHost,
     original_target: EventTargetHandle,
     current_target: EventTargetHandle,

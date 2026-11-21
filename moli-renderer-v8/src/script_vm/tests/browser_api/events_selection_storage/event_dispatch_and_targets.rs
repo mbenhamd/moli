@@ -1793,6 +1793,340 @@ fn dispatch_sees_listeners_changed_mid_dispatch_and_stops_propagation() {
     assert_eq!(result.lines().collect::<Vec<_>>(), expected);
 }
 
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell), PF-9474. After dispatch, CommandEvent.source is
+// retargeted against the document whether or not any entry listened.
+#[test]
+fn command_event_source_after_dispatch_is_retargeted_against_the_document() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-post-dispatch-source.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              if (!document.documentElement) document.appendChild(document.createElement('html'));
+              if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+              const make = (id, mode) => {
+                const host = document.createElement('div'); host.id = id + 'Host';
+                document.body.append(host);
+                const root = host.attachShadow({ mode });
+                const inner = document.createElement('span'); inner.id = id + 'Inner';
+                const peer = document.createElement('span'); peer.id = id + 'Peer';
+                root.append(inner, peer);
+                return { host, root, inner, peer };
+              };
+              const a = make('a', 'open');
+              const b = make('b', 'closed');
+              const light = document.body.appendChild(document.createElement('p')); light.id = 'light';
+              const name = (n) => n === null ? 'null' : n === undefined ? 'undefined' : n === window ? 'window' : n === document ? 'document'
+                : n === a.root ? 'aRoot' : n === b.root ? 'bRoot' : (n.id || n.nodeName.toLowerCase());
+              const log = [];
+              const fire = (label, source, target, init, listen) => {
+                const e = new CommandEvent('command', { source, ...init });
+                const seen = [];
+                const listener = (ev) => seen.push(name(ev.source));
+                if (listen) listen.addEventListener('command', listener);
+                target.dispatchEvent(e);
+                if (listen) listen.removeEventListener('command', listener);
+                log.push([label, seen.join(',') || '-', name(e.source), name(e.target), e.composedPath().length].join(' '));
+              };
+              fire('other-shadow-no-listener', a.inner, b.inner, {}, null);
+              fire('same-shadow-no-listener', b.peer, b.inner, {}, null);
+              fire('same-shadow-target-listener', b.peer, b.inner, {}, b.inner);
+              fire('same-shadow-root-listener', b.peer, b.inner, { bubbles: true }, b.root);
+              fire('other-shadow-target-listener', a.inner, b.inner, {}, b.inner);
+              fire('light-target-no-listener', a.inner, light, { bubbles: true }, null);
+              return log.join('\n');
+            })()
+            "#,
+        )
+        .expect("post-dispatch CommandEvent source probe should evaluate");
+
+    let expected = [
+        "other-shadow-no-listener - aHost null 0",
+        "same-shadow-no-listener - bHost null 0",
+        "same-shadow-target-listener bPeer bHost null 0",
+        "same-shadow-root-listener bPeer bHost null 0",
+        "other-shadow-target-listener aHost aHost null 0",
+        "light-target-no-listener - aHost light 0",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell, a real Tab key press), PF-9474. The Tab focus
+// default action runs after dispatch ends: the focus handler sees no
+// currentTarget, phase or composedPath, even though the last entry that
+// listened is a closed shadow root.
+#[test]
+fn tab_focus_default_action_sees_the_ended_dispatch_state() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-tab-default-action.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              if (!document.documentElement) document.appendChild(document.createElement('html'));
+              if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+              const host = document.body.appendChild(document.createElement('div')); host.id = 'host';
+              const root = host.attachShadow({ mode: 'closed' });
+              const first = root.appendChild(document.createElement('input')); first.id = 'first';
+              const next = document.body.appendChild(document.createElement('input')); next.id = 'next';
+              const name = (n) => n === null ? 'null' : n === window ? 'window' : n === document ? 'document'
+                : n === root ? 'root' : (n.id || n.nodeName.toLowerCase());
+              const log = [];
+              let key = null;
+              root.addEventListener('keydown', (e) => {
+                key = e;
+                log.push(['keydown-root', e.eventPhase, name(e.currentTarget), name(e.target), e.composedPath().map(name).join('>')].join(' '));
+                // The root is the last entry that listens, whatever else the page has.
+                e.stopPropagation();
+              });
+              next.addEventListener('focus', () => {
+                log.push(['focus-next', key ? key.eventPhase : '-', key ? name(key.currentTarget) : '-',
+                  key ? key.composedPath().length : '-', key ? key.composedPath().includes(first) : '-'].join(' '));
+              });
+              first.focus();
+              log.push('setup ' + name(document.activeElement));
+              __moliDispatchTrustedKey('keydown', 'Tab', 'Tab', false, false, false, false);
+              log.push(['after', key.eventPhase, name(key.currentTarget), name(key.target), key.composedPath().length,
+                name(document.activeElement)].join(' '));
+              return log.join('\n');
+            })()
+            "#,
+        )
+        .expect("Tab focus default action dispatch-state probe should evaluate");
+
+    let expected = [
+        "setup host",
+        "keydown-root 3 root first first>root>host>body>html>document>window",
+        "focus-next 0 null 0 false",
+        "after 0 null host 0 next",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell), PF-9474. The source getter retargets the stored
+// source on each read: against currentTarget during dispatch and against the
+// document otherwise. Dispatch never overwrites the stored source.
+#[test]
+fn command_event_source_getter_retargets_the_original_source_on_each_read() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-source-getter.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              if (!document.documentElement) document.appendChild(document.createElement('html'));
+              if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+              const host = document.body.appendChild(document.createElement('div')); host.id = 'host';
+              const root = host.attachShadow({ mode: 'closed' });
+              const source = root.appendChild(document.createElement('button')); source.id = 'source';
+              const target = root.appendChild(document.createElement('span')); target.id = 'target';
+              const other = document.body.appendChild(document.createElement('div')); other.id = 'other';
+              const name = (n) => n === null ? 'null' : n === undefined ? 'undefined' : n === window ? 'window' : n === document ? 'document'
+                : n === root ? 'root' : (n.id || n.nodeName.toLowerCase());
+              const log = [];
+              const event = new CommandEvent('command', { source });
+              log.push('before ' + name(event.source));
+              target.addEventListener('command', (e) => log.push('target-listener ' + name(e.source)));
+              other.addEventListener('command', (e) => log.push('other-listener ' + name(e.source)));
+              target.dispatchEvent(event);
+              log.push('after-1 ' + name(event.source));
+              target.dispatchEvent(event);
+              log.push('after-2 ' + name(event.source));
+              other.dispatchEvent(event);
+              log.push('after-3 ' + name(event.source));
+              document.body.append(source);
+              log.push('moved ' + name(event.source));
+              const toggle = new ToggleEvent('toggle', { source: target });
+              log.push('toggle-before ' + name(toggle.source));
+              return log.join('\n');
+            })()
+            "#,
+        )
+        .expect("CommandEvent source getter probe should evaluate");
+
+    let expected = [
+        "before host",
+        "target-listener source",
+        "after-1 host",
+        "target-listener source",
+        "after-2 host",
+        "other-listener host",
+        "after-3 host",
+        "moved source",
+        "toggle-before host",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell, a real Tab key press), PF-9474. The keydown's
+// default action is chosen when its dispatch ends. A focus handler that
+// reinitializes the event as Escape does not also close the modal dialog,
+// and one that redispatches it leaves the keydown's final target unchanged.
+#[test]
+fn tab_default_action_is_chosen_before_script_can_change_the_keydown() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-tab-default-snapshot.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              window.__pf9474tab = (action) => {
+                if (!document.documentElement) document.appendChild(document.createElement('html'));
+                if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+                const dialog = document.body.appendChild(document.createElement('dialog'));
+                const first = dialog.appendChild(document.createElement('input')); first.id = 'first';
+                const next = dialog.appendChild(document.createElement('input')); next.id = 'next';
+                const name = (n) => n === null ? 'null' : (n.id || n.constructor.name);
+                let saved = null;
+                let inner = '-';
+                first.addEventListener('keydown', (e) => { saved = e; });
+                next.addEventListener('focus', () => {
+                  try {
+                    if (action === 'reinit') {
+                      saved.initKeyboardEvent('keydown', true, true, window, 'Escape');
+                      inner = 'reinitialized';
+                    } else {
+                      new EventTarget().dispatchEvent(saved);
+                      inner = 'redispatched-to-' + name(saved.target);
+                    }
+                  } catch (e) { inner = 'threw-' + e.name; }
+                }, { once: true });
+                dialog.showModal();
+                first.focus();
+                return () => {
+                  const line = [action, inner, 'open=' + dialog.open, 'target=' + name(saved.target),
+                    'active=' + name(document.activeElement), 'trusted=' + saved.isTrusted].join(' ');
+                  if (dialog.open) dialog.close();
+                  dialog.remove();
+                  return line;
+                };
+              };
+              const log = [];
+              for (const action of ['reinit', 'redispatch']) {
+                const read = window.__pf9474tab(action);
+                __moliDispatchTrustedKey('keydown', 'Tab', 'Tab', false, false, false, false);
+                log.push(read());
+              }
+              return log.join('\n');
+            })()
+            "#,
+        )
+        .expect("Tab default action snapshot probe should evaluate");
+
+    let expected = [
+        "reinit reinitialized open=true target=first active=next trusted=false",
+        "redispatch redispatched-to-EventTarget open=true target=first active=next trusted=false",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell, a real Escape key press), PF-9474. The dialog's
+// cancel event fires from the Escape default action after the keydown's
+// dispatch ended: no currentTarget, phase or composedPath, though the last
+// entry that listened is a closed shadow root.
+#[test]
+fn escape_dialog_cancel_sees_the_ended_keydown_dispatch_state() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-escape-default-action.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              window.__pf9474escape = () => {
+                if (!document.documentElement) document.appendChild(document.createElement('html'));
+                if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+                const host = document.body.appendChild(document.createElement('div')); host.id = 'host';
+                const root = host.attachShadow({ mode: 'closed' });
+                const dialog = root.appendChild(document.createElement('dialog'));
+                const input = dialog.appendChild(document.createElement('input')); input.id = 'inner';
+                const name = (n) => n === null ? 'null' : n === window ? 'window' : n === document ? 'document'
+                  : n === root ? 'root' : (n.id || n.nodeName.toLowerCase());
+                const log = [];
+                let key = null;
+                root.addEventListener('keydown', (e) => {
+                  key = e;
+                  log.push(['keydown-root', e.eventPhase, name(e.currentTarget), e.composedPath().length].join(' '));
+                  // The root is the last entry that listens, whatever else the page has.
+                  e.stopPropagation();
+                });
+                dialog.addEventListener('cancel', () => {
+                  log.push(['cancel', key.eventPhase, name(key.currentTarget), key.composedPath().length,
+                    key.composedPath().includes(input)].join(' '));
+                });
+                dialog.showModal();
+                input.focus();
+                return () => {
+                  log.push(['after', key.eventPhase, name(key.currentTarget), name(key.target), key.composedPath().length,
+                    'open=' + dialog.open].join(' '));
+                  return log.join('\n');
+                };
+              };
+              const read = window.__pf9474escape();
+              __moliDispatchTrustedKey('keydown', 'Escape', 'Escape', false, false, false, false);
+              return read();
+            })()
+            "#,
+        )
+        .expect("Escape default action dispatch-state probe should evaluate");
+
+    let expected = [
+        "keydown-root 3 root 8",
+        "cancel 0 null 0 false",
+        "after 0 null host 0 open=false",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
+// Expected line is Chromium's output for the same script (Playwright 1.64.1
+// headless shell, a real mouse move onto the button), PF-9474. Only a
+// trusted mouseover runs the hover interest default action, so an interest
+// listener that redispatches the saved mouseover fires no second interest.
+#[test]
+fn redispatched_mouseover_runs_no_hover_interest_default_action() {
+    let mut vm = new_rendered_test_vm(
+        "https://event-dispatch-hover-interest.test/",
+        "<!doctype html><html><body><button id='button' interestfor='tip'>Hover</button><div id='tip' popover>Tip</div></body></html>",
+    );
+    vm.eval(
+        r#"
+        (() => {
+          window.__pf9474interest = () => {
+            const button = document.getElementById('button');
+            let over = null;
+            let interests = 0;
+            let redispatch = '-';
+            button.addEventListener('mouseover', (e) => { over = e; });
+            document.getElementById('tip').addEventListener('interest', () => {
+              if (++interests === 1) {
+                try { button.dispatchEvent(over); redispatch = 'ok'; } catch (e) { redispatch = e.name; }
+              }
+            });
+            return () => ['interests=' + interests, 'redispatch=' + redispatch, 'trusted=' + (over && over.isTrusted)].join(' ');
+          };
+          window.__read = window.__pf9474interest();
+        })()
+        "#,
+    )
+    .expect("hover interest probe setup should evaluate");
+    vm.publish_layout_for_test()
+        .expect("publish geometry before coordinate input");
+    vm.dispatch_mouse_event_at_point(300.0, 300.0, "mousemove", 0, Some(0), 0.0, 0.0)
+        .expect("mousemove away from the button should dispatch");
+    vm.dispatch_mouse_event_at_point(12.0, 12.0, "mousemove", 0, Some(0), 0.0, 0.0)
+        .expect("mousemove onto the button should dispatch");
+    let result = vm
+        .eval("window.__read()")
+        .expect("hover interest probe result should evaluate");
+
+    assert_eq!(result, "interests=1 redispatch=ok trusted=false");
+}
+
 #[test]
 fn relative_range_boundaries_share_selection_updates() {
     let mut vm = new_parsed_test_vm(
@@ -1869,4 +2203,595 @@ fn selection_syncs_all_associations_after_shadow_host_adoption() {
         assert_eq!(result["cases"], 40, "{result}");
         assert_eq!(result["failures"], serde_json::json!([]), "{result}");
     }
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell), PF-9474. A source-bearing event shapes its path
+// with a related target, as Blink's AdjustForReferenceTarget does. Dispatch
+// leaves the related target of the last path entry it reached, or null when
+// the path ends at a shadow root, while `source` keeps the original. A second composed dispatch to a light-DOM target still reaches
+// Window.
+#[test]
+fn command_event_path_retargets_its_related_source_like_blink() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-reference-path.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              if (!document.documentElement) document.appendChild(document.createElement('html'));
+              if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+              const name = (n) => n === null ? 'null' : n === undefined ? 'undefined' : n === window ? 'window' : n === document ? 'document'
+                : n instanceof ShadowRoot ? 'root' : (n.id || n.nodeName.toLowerCase());
+              const log = [];
+              const host = document.body.appendChild(document.createElement('div')); host.id = 'host';
+              const root = host.attachShadow({ mode: 'closed' });
+              const source = root.appendChild(document.createElement('button')); source.id = 'source';
+              const outside = document.body.appendChild(document.createElement('p')); outside.id = 'outside';
+              // A composed command dispatched twice to a light-DOM target reaches Window both times.
+              const composed = new CommandEvent('command', { source, bubbles: true, composed: true });
+              const seen = [];
+              const onWindow = (e) => seen.push(name(e.currentTarget) + ':' + name(e.source));
+              window.addEventListener('command', onWindow);
+              outside.dispatchEvent(composed);
+              outside.dispatchEvent(composed);
+              window.removeEventListener('command', onWindow);
+              log.push('window-twice ' + seen.length + ' ' + seen.join(','));
+              // The Codex probe: the Window listener is added after the first dispatch.
+              const again = new CommandEvent('command', { source, bubbles: true, composed: true });
+              outside.dispatchEvent(again);
+              let calls = 0;
+              window.addEventListener('command', () => ++calls, { once: true });
+              outside.dispatchEvent(again);
+              log.push('window-after-first ' + calls);
+              // A plain EventTarget as currentTarget.
+              const plain = new EventTarget();
+              plain.addEventListener('command', (e) => log.push('eventtarget-listener ' + name(e.source)));
+              plain.dispatchEvent(new CommandEvent('command', { source }));
+              // Source in a nested shadow tree, target in the outer one: the path ends at the outer root.
+              const outerRoot = root;
+              const inner = outerRoot.appendChild(document.createElement('span')); inner.id = 'innerHost';
+              const innerSource = inner.attachShadow({ mode: 'closed' }).appendChild(document.createElement('button'));
+              innerSource.id = 'innerSource';
+              const t = outerRoot.appendChild(document.createElement('i')); t.id = 't';
+              const reached = [];
+              const record = (e) => reached.push(name(e.currentTarget) + ':' + name(e.source));
+              for (const n of [t, outerRoot, host, document.body, window]) n.addEventListener('command', record);
+              const nested = new CommandEvent('command', { source: innerSource, bubbles: true, composed: true });
+              t.dispatchEvent(nested);
+              log.push('nested-path ' + reached.join(',') + ' after=' + name(nested.source));
+              reached.length = 0;
+              t.dispatchEvent(nested);
+              log.push('nested-path-again ' + reached.join(','));
+              for (const n of [t, outerRoot, host, document.body, window]) n.removeEventListener('command', record);
+              // Source inside the target's own shadow tree.
+              const own = [];
+              const recordOwn = (e) => own.push(name(e.currentTarget) + ':' + name(e.source));
+              for (const n of [host, document.body, window]) n.addEventListener('command', recordOwn);
+              host.dispatchEvent(new CommandEvent('command', { source, bubbles: true, composed: true }));
+              for (const n of [host, document.body, window]) n.removeEventListener('command', recordOwn);
+              log.push('own-host ' + own.join(','));
+              return JSON.stringify(log);
+            })()
+            "#,
+        )
+        .expect("reference target path probe should evaluate");
+
+    let expected = [
+        "window-twice 2 window:host,window:host",
+        "window-after-first 1",
+        "eventtarget-listener host",
+        "nested-path t:innerHost,root:innerHost after=host",
+        "nested-path-again t:innerHost,root:innerHost,host:host,body:host,window:host",
+        "own-host host:host,body:host,window:host",
+    ];
+    let actual: Vec<String> =
+        serde_json::from_str(&result).expect("reference target path probe should return JSON");
+    assert_eq!(actual, expected);
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell), PF-9474. Nodes created by a createHTMLDocument()
+// document retarget like any other node, as `source` and as currentTarget.
+#[test]
+fn event_source_getter_retargets_detached_document_wrappers() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-detached-source.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              if (!document.documentElement) document.appendChild(document.createElement('html'));
+              if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+              const name = (n) => n === null ? 'null' : n === undefined ? 'undefined' : n === window ? 'window' : n === document ? 'document'
+                : n instanceof ShadowRoot ? 'root' : (n.id || n.nodeName.toLowerCase());
+              const log = [];
+              const host = document.body.appendChild(document.createElement('div')); host.id = 'host';
+              const root = host.attachShadow({ mode: 'closed' });
+              const source = root.appendChild(document.createElement('button')); source.id = 'source';
+              // Detached-document wrappers as currentTarget and as source.
+              const inert = document.implementation.createHTMLDocument('');
+              const adopted = root.appendChild(inert.createElement('span'));
+              let inside = 'unset';
+              adopted.addEventListener('probe', (e) => { inside = name(e.source); });
+              adopted.dispatchEvent(new CommandEvent('probe', { source }));
+              log.push('detached-current-target ' + inside);
+              log.push('detached-source toggle=' + name(new ToggleEvent('toggle', { source: adopted }).source)
+                + ' command=' + name(new CommandEvent('command', { source: adopted }).source));
+              const doc = document.implementation.createHTMLDocument('');
+              const inertHost = doc.createElement('div'); inertHost.id = 'inertHost';
+              const inertSource = doc.createElement('span'); inertSource.id = 'inertSource';
+              inertHost.attachShadow({ mode: 'closed' }).appendChild(inertSource);
+              log.push('inert-document ' + [CommandEvent, ToggleEvent].map((C) => name(new C('x', { source: inertSource }).source)).join(','));
+              return JSON.stringify(log);
+            })()
+            "#,
+        )
+        .expect("detached source probe should evaluate");
+
+    let expected = [
+        "detached-current-target source",
+        "detached-source toggle=host command=host",
+        "inert-document inertHost,inertHost",
+    ];
+    let actual: Vec<String> =
+        serde_json::from_str(&result).expect("detached source probe should return JSON");
+    assert_eq!(actual, expected);
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell, a real Tab key press), PF-9474. After the Tab
+// default action, the keydown's target is the final target of its latest
+// Node path. A nested Node dispatch from the focus handler rebuilds that
+// path; a plain EventTarget dispatch does not.
+#[test]
+fn keydown_final_target_follows_a_nested_node_redispatch_in_the_default_action() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-tab-nested-redispatch.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              window.__pf9474tab3 = (action) => {
+                if (!document.documentElement) document.appendChild(document.createElement('html'));
+                if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+                const wrap = document.body.appendChild(document.createElement('div'));
+                const first = wrap.appendChild(document.createElement('input')); first.id = 'first';
+                const next = wrap.appendChild(document.createElement('input')); next.id = 'next';
+                const other = wrap.appendChild(document.createElement('div')); other.id = 'other';
+                const shadowHost = wrap.appendChild(document.createElement('div')); shadowHost.id = 'shadowHost';
+                const shadowNode = shadowHost.attachShadow({ mode: 'closed' }).appendChild(document.createElement('b'));
+                shadowNode.id = 'shadowNode';
+                const name = (n) => n === null ? 'null' : (n.id || n.constructor.name);
+                let saved = null;
+                let inner = '-';
+                first.addEventListener('keydown', (e) => { saved = e; });
+                next.addEventListener('focus', () => {
+                  if (action === 'eventtarget') new EventTarget().dispatchEvent(saved);
+                  else if (action === 'node') other.dispatchEvent(saved);
+                  else if (action === 'node-then-eventtarget') { other.dispatchEvent(saved); new EventTarget().dispatchEvent(saved); }
+                  else if (action === 'shadow-node') shadowNode.dispatchEvent(saved);
+                  inner = name(saved.target);
+                }, { once: true });
+                first.focus();
+                return () => {
+                  const line = [action, 'inner=' + inner, 'target=' + name(saved.target), 'active=' + name(document.activeElement)].join(' ');
+                  wrap.remove();
+                  return line;
+                };
+              };
+              const log = [];
+              for (const action of ['eventtarget', 'node', 'node-then-eventtarget', 'shadow-node']) {
+                const read = window.__pf9474tab3(action);
+                __moliDispatchTrustedKey('keydown', 'Tab', 'Tab', false, false, false, false);
+                log.push(read());
+              }
+              return log.join('\n');
+            })()
+            "#,
+        )
+        .expect("nested redispatch probe should evaluate");
+
+    let expected = [
+        "eventtarget inner=EventTarget target=first active=next",
+        "node inner=other target=other active=next",
+        "node-then-eventtarget inner=EventTarget target=other active=next",
+        "shadow-node inner=shadowHost target=shadowHost active=next",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
+// Expected lines are Chromium's output for the same script (Playwright
+// 1.64.1 headless shell), PF-9474. Blink selects the reference-target path
+// by event interface and composes the source-bearing events it fires when
+// it creates them, so a script redispatch keeps that path. Each path entry's
+// related target is fixed when the path is built, and the event keeps the
+// one of the last entry its dispatch reached. A non-composed event stops
+// only at its target's own shadow root, and a host the target retargets to
+// runs its capture listeners once.
+#[test]
+fn source_bearing_event_paths_follow_blink_reference_target_rules() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-reference-rules.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+            const out = [];
+            if (!document.documentElement) document.appendChild(document.createElement('html'));
+            if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+            const body = document.body;
+            const add = (parent, tag = 'div') => parent.appendChild(document.createElement(tag));
+            const shadow = host => host.attachShadow({mode: 'open'});
+            function reachesWindow(target, event) {
+              let seen = false;
+              const listener = () => { seen = true };
+              window.addEventListener(event.type, listener, true);
+              target.dispatchEvent(event);
+              window.removeEventListener(event.type, listener, true);
+              return seen;
+            }
+            const fresh = () => { body.replaceChildren(); };
+            // 1a saved native submit
+            { fresh();
+              const form = add(body, 'form'), button = add(form, 'button');
+              let saved;
+              form.addEventListener('submit', e => { e.preventDefault(); saved = e });
+              form.requestSubmit(button);
+              const target = add(shadow(add(body, 'div')), 'i');
+              out.push('native-submit-redispatch ' + reachesWindow(target, saved)); }
+            // 1b saved native command
+            { fresh();
+              const button = add(body, 'button'), dest = add(body); dest.id = 'dest';
+              button.setAttribute('commandfor', 'dest'); button.setAttribute('command', '--probe');
+              let saved; dest.addEventListener('command', e => saved = e); button.click();
+              const host = add(body), root = host.attachShadow({mode: 'open'});
+              let calls = 0; host.addEventListener('command', () => ++calls);
+              add(root).dispatchEvent(saved);
+              out.push('native-command-redispatch ' + calls); }
+            // 2a std replay
+            { function replay(stopped) {
+                fresh();
+                const root = shadow(add(body, 'div')), target = add(root, 'i');
+                const source = add(stopped ? root : body, 'button');
+                const e = new CommandEvent('command', {source, bubbles: true, composed: true});
+                if (stopped) e.stopPropagation();
+                else body.addEventListener('command', () => root.append(source), {once: true});
+                body.dispatchEvent(e);
+                body.append(source);
+                return reachesWindow(target, e);
+              }
+              out.push('related-snapshot-std ' + replay(false) + ' ' + replay(true)); }
+            // 2b spec replay
+            { function replay(stopAtSlot) {
+                fresh();
+                const host = add(body), root = host.attachShadow({mode: 'open'});
+                const source = add(root), peer = add(root);
+                const e = new CommandEvent('command', {source, bubbles: true, composed: true});
+                if (stopAtSlot) {
+                  add(root, 'slot').addEventListener('command', x => x.stopPropagation(), {once: true});
+                  add(host).dispatchEvent(e);
+                  body.append(source);
+                } else {
+                  body.addEventListener('command', () => body.append(source), {once: true});
+                  body.dispatchEvent(e);
+                }
+                let escaped = false;
+                host.addEventListener('command', () => escaped = true);
+                peer.dispatchEvent(e);
+                return escaped;
+              }
+              out.push('related-snapshot-spec ' + replay(false) + ' ' + replay(true)); }
+            // 3 nested slot non-composed
+            { fresh();
+              const host = add(body, 'div'), target = add(host, 'b');
+              const innerHost = add(shadow(host), 'div');
+              add(innerHost, 'slot'); add(shadow(innerHost), 'slot');
+              out.push('nested-slot-std ' + reachesWindow(target, new CommandEvent('command', {source: body}))); }
+            { fresh();
+              const outer = add(body), outerRoot = outer.attachShadow({mode: 'open'});
+              const inner = add(outerRoot); add(inner, 'slot'); add(inner.attachShadow({mode: 'open'}), 'slot');
+              let calls = 0; const l = () => ++calls; window.addEventListener('command', l);
+              add(outer).dispatchEvent(new CommandEvent('command', {source: body, bubbles: true}));
+              window.removeEventListener('command', l);
+              out.push('nested-slot-spec ' + calls); }
+            // 4 capture twice
+            { fresh();
+              const outer = shadow(add(body, 'div')), source = add(outer, 'button');
+              const middle = add(outer, 'div'), inner = add(shadow(middle), 'div');
+              const target = add(shadow(inner), 'i');
+              const log = [];
+              inner.addEventListener('command', e => log.push('cap' + e.eventPhase), true);
+              inner.addEventListener('command', e => log.push('bub' + e.eventPhase));
+              target.dispatchEvent(new CommandEvent('command', {source, composed: true}));
+              out.push('capture-once ' + log.join(','));
+              const log2 = [];
+              inner.addEventListener('command', e => log2.push('c'), true);
+              target.dispatchEvent(new CommandEvent('command', {source, composed: true, bubbles: true}));
+              out.push('capture-once-bubbles ' + log2.join(',')); }
+            // 6 interface selection, custom names
+            { fresh();
+              const source = add(shadow(add(body, 'div')), 'button');
+              const root = shadow(add(body, 'div')), target = add(root, 'i');
+              const e = new CommandEvent('probe', {source, composed: true});
+              body.dispatchEvent(e); root.append(source);
+              e.initEvent('command', true, false);
+              out.push('custom-name-std ' + reachesWindow(target, e)); }
+            { fresh();
+              const host = add(body), root = host.attachShadow({mode: 'open'});
+              const target = add(root), source = add(root);
+              let calls = 0; host.addEventListener('probe', () => ++calls);
+              const res = [];
+              for (const C of [CommandEvent, ToggleEvent, (typeof InterestEvent === 'function' ? InterestEvent : null), SubmitEvent]) {
+                if (!C) { res.push('none'); continue; }
+                const before = calls;
+                target.dispatchEvent(new C('probe', {source, submitter: source, bubbles: true, composed: true}));
+                res.push(C.name + '=' + (calls - before));
+              }
+              out.push('custom-name-spec ' + res.join(',')); }
+            return out.join('\n');
+            })()
+            "#,
+        )
+        .expect("reference-target rules probe should evaluate");
+
+    let expected = [
+        "native-submit-redispatch true",
+        "native-command-redispatch 1",
+        "related-snapshot-std true true",
+        "related-snapshot-spec false true",
+        "nested-slot-std true",
+        "nested-slot-spec 1",
+        "capture-once cap2,bub2",
+        "capture-once-bubbles c",
+        "custom-name-std true",
+        "custom-name-spec CommandEvent=0,ToggleEvent=0,InterestEvent=0,SubmitEvent=0",
+    ];
+    assert_eq!(result.lines().collect::<Vec<_>>(), expected);
+}
+
+// Expected line is Chromium's output for the same scripts (Playwright 1.64.1
+// headless shell, a CDP isolated world), PF-9474. The dispatch bookkeeping a
+// Node dispatch keeps on an event is not visible on a wrapper an isolated
+// world first creates after that dispatch.
+#[test]
+fn event_dispatch_bookkeeping_stays_off_isolated_world_wrappers() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-isolated-bookkeeping.test/");
+    vm.eval(
+        r#"
+        (() => {
+          if (!document.documentElement) document.appendChild(document.createElement('html'));
+          if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+          window.savedCommand = new CommandEvent('command', { source: document.body });
+          document.dispatchEvent(savedCommand);
+          window.savedKey = new KeyboardEvent('keydown', { key: 'a' });
+          document.dispatchEvent(savedKey);
+        })()
+        "#,
+    )
+    .expect("main-world dispatch setup should evaluate");
+    let isolated = vm
+        .create_isolated_world("event-bookkeeping", false)
+        .expect("isolated world should be created");
+    vm.eval_in_isolated_context(
+        isolated,
+        r#"
+        for (const type of ['command', 'keydown']) {
+          document.addEventListener(type, (e) => {
+            const own = Object.getOwnPropertyNames(e).filter((k) => !['isTrusted'].includes(k));
+            const named = ['pathFinalTarget', 'pathFinalRelatedTarget', 'referenceRelatedTarget', 'relatedTarget'].filter((k) => k in e);
+            document.body.dataset[type] = 'own=' + (own.join('|') || 'none') + ' named=' + (named.join('|') || 'none');
+          });
+        }
+        "#,
+    )
+    .expect("isolated-world listeners should register");
+    let result = vm
+        .eval(
+            r#"
+            document.dispatchEvent(window.savedCommand);
+            document.dispatchEvent(window.savedKey);
+            'command ' + document.body.dataset.command.split(' ')[1] + '; keydown ' + document.body.dataset.keydown.split(' ')[1]
+            "#,
+        )
+        .expect("main-world redispatch should evaluate");
+
+    assert_eq!(result, "command named=none; keydown named=none");
+}
+
+// Expected line is Chromium's output for the same script (Playwright 1.64.1
+// headless shell, a real mouse move onto the button), PF-9474. Blink runs
+// hover interest after the mouseover dispatch has ended, so a plain
+// EventTarget redispatch from the interest listener keeps its target.
+#[test]
+fn hover_interest_listener_redispatch_keeps_its_plain_event_target() {
+    let mut vm = new_rendered_test_vm(
+        "https://event-dispatch-hover-interest-redispatch.test/",
+        "<!doctype html><html><body><button id='button' interestfor='tip'>Hover</button><div id='tip' popover>Tip</div></body></html>",
+    );
+    vm.eval(
+        r#"
+        (() => {
+          const button = document.getElementById('button');
+          const plain = new EventTarget();
+          const name = (t) => t === plain ? 'plain' : t === button ? 'button' : String(t);
+          let over = null;
+          const log = [];
+          button.addEventListener('mouseover', (e) => { over = e; });
+          document.getElementById('tip').addEventListener('interest', () => {
+            plain.dispatchEvent(over);
+            log.push('interest inner=' + name(over.target));
+          }, { once: true });
+          window.__read = () => log.concat('after=' + (over ? name(over.target) : 'none')).join(' ');
+        })()
+        "#,
+    )
+    .expect("hover interest redispatch setup should evaluate");
+    vm.publish_layout_for_test()
+        .expect("publish geometry before coordinate input");
+    vm.dispatch_mouse_event_at_point(300.0, 300.0, "mousemove", 0, Some(0), 0.0, 0.0)
+        .expect("mousemove away from the button should dispatch");
+    vm.dispatch_mouse_event_at_point(12.0, 12.0, "mousemove", 0, Some(0), 0.0, 0.0)
+        .expect("mousemove onto the button should dispatch");
+    let result = vm
+        .eval("window.__read()")
+        .expect("hover interest redispatch result should evaluate");
+
+    assert_eq!(result, "interest inner=plain after=plain");
+}
+
+#[test]
+fn source_bearing_redispatch_keeps_creation_path_and_load_clears_related_target() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-reference-redispatch.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+            const out = [];
+            if (!document.documentElement) document.appendChild(document.createElement('html'));
+            if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+            const body = document.body;
+            const add = (parent, tag = 'div') => parent.appendChild(document.createElement(tag));
+            const shadow = host => host.attachShadow({mode: 'open'});
+            function reachesWindow(target, event) {
+              let seen = false;
+              const listener = () => { seen = true };
+              window.addEventListener(event.type, listener, true);
+              target.dispatchEvent(event);
+              window.removeEventListener(event.type, listener, true);
+              return seen;
+            }
+            function hostAndWindow(event) {
+              const host = add(body), target = add(shadow(host));
+              let hit = 0;
+              host.addEventListener(event.type, () => hit++);
+              window.addEventListener(event.type, () => hit += 10, {once: true});
+              target.dispatchEvent(event);
+              return hit;
+            }
+            const fresh = () => { body.replaceChildren(); };
+            // Native events whose first path ended at their own shadow root.
+            { fresh();
+              const root = shadow(add(body)), button = add(root, 'button'), dest = add(root);
+              dest.id = 'dest';
+              button.setAttribute('commandfor', 'dest'); button.setAttribute('command', '--probe');
+              let saved; dest.addEventListener('command', e => saved = e); button.click();
+              out.push('command ' + hostAndWindow(saved)); }
+            { fresh();
+              const root = shadow(add(body)), form = add(root, 'form'), button = add(form, 'button');
+              let saved; form.addEventListener('submit', e => { e.preventDefault(); saved = e; });
+              form.requestSubmit(button);
+              out.push('submit ' + hostAndWindow(saved)); }
+            { fresh();
+              const root = shadow(add(body)), form = add(root, 'form'), button = add(form, 'button');
+              let saved; form.onsubmit = e => { e.preventDefault(); saved = e; };
+              form.requestSubmit(button); body.append(button);
+              out.push('submit-moved ' + reachesWindow(form, saved)); }
+            // A listener that reparents the target keeps the hosts the path was built with.
+            { fresh();
+              const host = add(body), target = add(host), root = shadow(host);
+              const source = add(root), container = add(root);
+              add(container, 'slot');
+              const e = new CommandEvent('probe', {source, composed: true});
+              target.addEventListener('probe', () => {
+                body.append(container); shadow(container).append(target);
+              }, {once: true});
+              target.dispatchEvent(e);
+              container.shadowRoot.append(source);
+              out.push('reparent ' + reachesWindow(target, e)); }
+            // The host still sees the target and composedPath of the built path.
+            { fresh();
+              const host = add(body), target = add(host.attachShadow({mode: 'closed'}), 'i');
+              let calls = 0, seen = 'none';
+              host.addEventListener('command', e => {
+                ++calls;
+                seen = [e.eventPhase, e.target === host, e.composedPath().includes(target),
+                  e.composedPath().length].join(' ');
+              });
+              target.addEventListener('command', () => body.append(target));
+              target.dispatchEvent(new CommandEvent('command', {source: body, composed: true}));
+              out.push('moved-target ' + calls + ' ' + seen); }
+            // A load has no Window context, so its related target clears.
+            { fresh();
+              const host = add(body), target = add(shadow(host), 'i');
+              const e = new CommandEvent('load', {source: host, bubbles: true, composed: true});
+              body.dispatchEvent(e);
+              let calls = 0;
+              host.addEventListener('load', () => ++calls, true);
+              target.dispatchEvent(e);
+              out.push('load-host ' + calls); }
+            { fresh();
+              const root = shadow(add(body)), source = add(root), target = add(root);
+              const e = new CommandEvent('load', {source, bubbles: true, composed: true});
+              body.dispatchEvent(e);
+              e.initEvent('probe', true, false);
+              out.push('load-renamed ' + reachesWindow(target, e)); }
+            // A Node load dispatch ends with no target, even redispatched from a shadow tree.
+            { fresh();
+              const plain = new Event('load');
+              add(body).dispatchEvent(plain);
+              const form = add(body, 'form'), button = add(form, 'button');
+              let saved; form.onsubmit = e => { e.preventDefault(); saved = e; };
+              form.requestSubmit(button);
+              saved.initEvent('load', true, false);
+              add(shadow(add(body)), 'i').dispatchEvent(saved);
+              out.push('load-target ' + (plain.target === null) + ' ' + (saved.target === null)); }
+            // A non-Node currentTarget is never read as a Node: no coercion of its internals.
+            { fresh();
+              const xhr = new XMLHttpRequest();
+              let calls = 0, delta = -1, source = '';
+              xhr.upload[Symbol.toPrimitive] = () => { ++calls; return 0; };
+              xhr.addEventListener('probe', e => {
+                const before = calls;
+                const value = e.source;
+                delta = calls - before;
+                source = value === body ? 'body' : String(value);
+              });
+              xhr.dispatchEvent(new CommandEvent('probe', {source: body}));
+              out.push('xhr-source ' + delta + ' ' + source); }
+            return out.join('\n');
+            })()
+            "#,
+        )
+        .unwrap();
+    // Chromium 156.0.8078.4 gives these lines for the same script.
+    assert_eq!(
+        result,
+        "command 1\nsubmit 11\nsubmit-moved true\nreparent true\nmoved-target 1 2 true false 5\nload-host 1\nload-renamed true\nload-target true true\nxhr-source 0 body"
+    );
+}
+
+// Expected line is Chromium 156.0.8078.4's output for the same script,
+// PF-9474. A Tab focus handler redispatches the keydown as a load on a Node,
+// then on a plain EventTarget. The keyboard dispatch ends with the latest
+// Node dispatch's final target, which a load leaves null.
+#[test]
+fn tab_default_action_restores_the_null_target_of_a_nested_load() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-tab-nested-load.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              if (!document.documentElement) document.appendChild(document.createElement('html'));
+              if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+              const first = document.body.appendChild(document.createElement('input'));
+              const next = document.body.appendChild(document.createElement('input'));
+              let saved = null;
+              first.onkeydown = (e) => { saved = e; };
+              next.onfocus = () => {
+                saved.initEvent('load', true, false);
+                document.body.dispatchEvent(saved);
+                new EventTarget().dispatchEvent(saved);
+              };
+              first.focus();
+              __moliDispatchTrustedKey('keydown', 'Tab', 'Tab', false, false, false, false);
+              return [document.activeElement === next, saved.target === null].join(' ');
+            })()
+            "#,
+        )
+        .expect("nested load redispatch probe should evaluate");
+
+    assert_eq!(result, "true true");
 }

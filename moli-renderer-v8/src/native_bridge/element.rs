@@ -282,9 +282,8 @@ use details_dialog::{
     perform_summary_click_default_action,
 };
 pub(crate) use details_dialog::{
-    is_main_summary, perform_dialog_escape_default_action_for_dispatched_event,
-    queue_details_toggle_event_for_attribute_change, queue_parser_details_toggle_event,
-    queue_parser_details_toggle_events_in_subtree,
+    is_main_summary, queue_details_toggle_event_for_attribute_change,
+    queue_parser_details_toggle_event, queue_parser_details_toggle_events_in_subtree,
 };
 pub(crate) use event_handlers::compile_window_body_onmessageerror_attribute;
 use event_handlers::install_global_event_handler_template_bindings as install_global_event_handler_templates_for_owner;
@@ -331,10 +330,9 @@ use focus::is_focusable;
 #[cfg(feature = "devtools")]
 pub(crate) use focus::perform_mouse_focus_default_action;
 pub(crate) use focus::{
-    blur_active_element_that_lost_focusability, contenteditable_editing_host, focus_element,
-    initial_contenteditable_caret, perform_access_key_default_action_for_dispatched_event,
-    perform_hover_interest_default_action_for_dispatched_event,
-    perform_tab_focus_default_action_for_dispatched_event, post_parse_autofocus_is_pending,
+    KeyboardDefaultAction, blur_active_element_that_lost_focusability,
+    contenteditable_editing_host, focus_element, initial_contenteditable_caret,
+    perform_hover_interest_default_action_for_dispatched_event, post_parse_autofocus_is_pending,
     process_post_parse_autofocus, reset_focus_from_previous_handle,
     reset_focus_from_previous_handle_with_previous_focus_within, schedule_focus_blur_if_needed,
     update_focus, update_focus_preserving_selection,
