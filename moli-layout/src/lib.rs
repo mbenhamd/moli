@@ -76,8 +76,8 @@ pub use normalize_source::{
 pub use pass::{
     EmbeddedFrameRenderer, EmbeddedFrameSnapshot, LayoutPassPreparation, LayoutPassRequest,
     LayoutPassStep, PreparedLayoutPass, ScreenshotLayoutRequest, build_layout_pass,
-    build_layout_pass_with_embedded_frames, build_screenshot_snapshot,
-    finish_prepared_layout_pass, verify_incremental_layout_pass,
+    build_layout_pass_with_embedded_frames, build_screenshot_snapshot, finish_prepared_layout_pass,
+    verify_incremental_layout_pass,
 };
 #[cfg(feature = "test-support")]
 pub use retention::{

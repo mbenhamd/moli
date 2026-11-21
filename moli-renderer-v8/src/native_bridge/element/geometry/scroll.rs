@@ -4,8 +4,8 @@ use crate::{document_runtime::DomHandle, dom::native::Node, native_bridge::PageS
 mod input;
 #[cfg(feature = "devtools")]
 pub(crate) use input::{
-    KeyboardScroll, perform_keyboard_scroll_default_action, perform_scrollbar_scroll_default_action,
-    perform_wheel_scroll_default_action,
+    KeyboardScroll, perform_keyboard_scroll_default_action,
+    perform_scrollbar_scroll_default_action, perform_wheel_scroll_default_action,
 };
 
 use super::super::{queue_revealed_lazy_image_loads, queue_revealed_lazy_media_loads};

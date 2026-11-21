@@ -124,8 +124,7 @@ pub(crate) use styles::{
     STYLE_DECLARATION_TARGET_CONTEXT_EPOCH_SLOT, STYLE_DECLARATION_TARGET_EMPTY_COMPUTED_SLOT,
     STYLE_DECLARATION_VIEWPORT_HEIGHT_SLOT, STYLE_DECLARATION_VIEWPORT_WIDTH_SLOT,
     StyleObservation, computed_style_target_context, iframe_handle_viewport,
-    iframe_handle_viewport_for_script,
-    style_viewport_for_document,
+    iframe_handle_viewport_for_script, style_viewport_for_document,
 };
 mod stylesheets;
 mod template_install;

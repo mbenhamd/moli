@@ -329,9 +329,7 @@ pub fn is_point_in_shape_hit_area(
             )
         }
         SvgGeometryElement::Path { d } => {
-            let Some(path) = path_geometry(d) else {
-                return Ok(false);
-            };
+            let path = parse_path_data(d);
             if path.elements().is_empty() || outside(path.control_box()) {
                 return Ok(false);
             }

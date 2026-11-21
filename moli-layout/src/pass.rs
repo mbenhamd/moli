@@ -348,9 +348,7 @@ where
     }
 
     /// The container sizes last handed to the style resolver.
-    pub fn applied_query_container_sizes(
-        &self,
-    ) -> Option<&[(N, crate::LayoutQueryContainerSize)]> {
+    pub fn applied_query_container_sizes(&self) -> Option<&[(N, crate::LayoutQueryContainerSize)]> {
         self.applied_sizes.as_deref()
     }
 }
