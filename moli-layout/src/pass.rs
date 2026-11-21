@@ -231,7 +231,7 @@ where
     let mut preparation = LayoutPassPreparation::new(services, request);
     let prepared = loop {
         match preparation.prepare(source, styles, services)? {
-            LayoutPassStep::Ready(prepared) => break prepared,
+            LayoutPassStep::Ready(prepared) => break *prepared,
             LayoutPassStep::Restyle(next) => preparation = next,
         }
     };
@@ -317,7 +317,7 @@ where
     N: Copy + std::fmt::Debug + Eq + std::hash::Hash,
 {
     /// Container-query sizes converged; the style resolver can be released.
-    Ready(PreparedLayoutPass<N>),
+    Ready(Box<PreparedLayoutPass<N>>),
     /// The resolver accepted changed container sizes; prepare again.
     Restyle(LayoutPassPreparation<N>),
 }
@@ -456,7 +456,7 @@ where
         if converged {
             let used_retained_world = self.used_retained_world;
             let applied_sizes = self.applied_sizes.clone();
-            return Ok(LayoutPassStep::Ready(PreparedLayoutPass {
+            return Ok(LayoutPassStep::Ready(Box::new(PreparedLayoutPass {
                 state: self,
                 world,
                 numeric_metrics,
@@ -465,7 +465,7 @@ where
                 built_policy,
                 used_retained_world,
                 applied_sizes,
-            }));
+            })));
         }
         self.seen_sizes.push(sizes);
         if self.can_retain {

@@ -457,6 +457,7 @@ pub(crate) fn select_contenteditable_contents(
 /// inside its nearest block, bounded by `<br>`, block-level boxes and
 /// preserved newlines. The caret collapses to (or, with Shift, extends to)
 /// that line's first or last position, as Chromium does for an unwrapped line.
+#[cfg(feature = "devtools")]
 pub(crate) fn move_contenteditable_caret_to_line_boundary(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
@@ -517,6 +518,7 @@ pub(crate) fn move_contenteditable_caret_to_line_boundary(
 /// pointer becomes the selection. A paragraph is the run of inline content
 /// bounded by `<br>`, block-level boxes and preserved newlines, as for the
 /// Home/End line model above. Text controls keep their own selection.
+#[cfg(feature = "devtools")]
 pub(crate) fn perform_triple_click_selection_default_action(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
@@ -609,6 +611,7 @@ pub(crate) fn perform_triple_click_selection_default_action(
 /// the existing selection, and `user-select: none` content starts none.
 /// The nearest editing host or explicit `user-select` decides, as in
 /// Chromium 156.
+#[cfg(feature = "devtools")]
 fn triple_click_can_start_selection(runtime: &PageScriptHost, hit: DomHandle) -> bool {
     let mut current = Some(hit);
     while let Some(handle) = current {
@@ -642,6 +645,7 @@ fn triple_click_can_start_selection(runtime: &PageScriptHost, hit: DomHandle) ->
     true
 }
 
+#[cfg(feature = "devtools")]
 fn node_is_inclusive_descendant(
     runtime: &PageScriptHost,
     node: DomHandle,
@@ -660,6 +664,7 @@ fn node_is_inclusive_descendant(
 
 /// One piece of a block's inline content, in document order.
 #[derive(Clone, Copy, PartialEq)]
+#[cfg(feature = "devtools")]
 enum LineItem {
     Text(DomHandle),
     /// A `<br>` or a block-level box: either ends the line.
@@ -671,6 +676,7 @@ enum LineItem {
 }
 
 /// The first or last position of the caret's line.
+#[cfg(feature = "devtools")]
 fn caret_line_boundary(
     runtime: &PageScriptHost,
     host: DomHandle,
@@ -766,6 +772,7 @@ fn caret_line_boundary(
 
 /// Append `node`'s inline content to `items`, without entering block-level or
 /// atomic boxes, and mark the caret when it sits between element children.
+#[cfg(feature = "devtools")]
 fn flatten_line_items(
     runtime: &PageScriptHost,
     node: DomHandle,
@@ -823,6 +830,7 @@ fn flatten_line_items(
 }
 
 /// Whether a Text node's newlines render as line breaks.
+#[cfg(feature = "devtools")]
 fn text_preserves_newlines(runtime: &PageScriptHost, text: DomHandle) -> bool {
     runtime
         .dom_host()
@@ -844,6 +852,7 @@ fn text_preserves_newlines(runtime: &PageScriptHost, text: DomHandle) -> bool {
 
 /// The focus's nearest element inside the editing host that is not an
 /// inline box, whose contents therefore form their own lines.
+#[cfg(feature = "devtools")]
 fn line_block_container(runtime: &PageScriptHost, focus: DomHandle, host: DomHandle) -> DomHandle {
     let dom = runtime.dom_host().dom();
     let mut current = Some(focus);
@@ -1603,6 +1612,7 @@ pub(crate) fn finish_legacy_activation_for_dispatched_click(
 /// Page keys, Home and End move the slider, then `input` and `change` fire
 /// when the value changed (Blink `RangeInputType::HandleKeydownEvent`).
 /// Returns whether the control consumed the key, so it does not also scroll.
+#[cfg(feature = "devtools")]
 pub(crate) fn perform_range_keyboard_default_action(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
@@ -1645,6 +1655,7 @@ pub(crate) fn perform_range_keyboard_default_action(
 /// `change` fire when it changed (Blink
 /// `TextFieldInputType::HandleKeydownEventForSpinButton`, which calls
 /// `StepUpFromLayoutObject`). Returns whether the field consumed the key.
+#[cfg(feature = "devtools")]
 pub(crate) fn perform_number_spin_keyboard_default_action(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
@@ -1673,6 +1684,7 @@ pub(crate) fn perform_number_spin_keyboard_default_action(
 /// `SpinButtonElement::ForwardEvent` calls `DoStepAction(wheelDeltaY)` when
 /// `ShouldSpinButtonRespondToWheelEvents`, then marks the event handled).
 /// Returns whether the field consumed the wheel, which then does not scroll.
+#[cfg(feature = "devtools")]
 pub(crate) fn perform_number_spin_wheel_default_action(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
@@ -1721,6 +1733,7 @@ pub(crate) fn perform_number_spin_wheel_default_action(
     }
 }
 
+#[cfg(feature = "devtools")]
 fn is_steppable_number_field(runtime: &PageScriptHost, handle: DomHandle) -> bool {
     runtime
         .dom_host()
@@ -1737,6 +1750,7 @@ fn is_steppable_number_field(runtime: &PageScriptHost, handle: DomHandle) -> boo
 /// Blink `StepUpFromLayoutObject` for a number field's spin button: `None`
 /// when `handle` is not an enabled, writable number field; otherwise whether
 /// one step changed its value.
+#[cfg(feature = "devtools")]
 fn step_number_field_from_spin_button(
     runtime_ptr: *mut PageScriptHost,
     handle: DomHandle,

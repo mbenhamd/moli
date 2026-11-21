@@ -277,7 +277,7 @@ impl NativeLayoutStyleScope<'_> {
                 },
             )?;
             match step {
-                LayoutPassStep::Ready(prepared) => return Ok(prepared),
+                LayoutPassStep::Ready(prepared) => return Ok(*prepared),
                 LayoutPassStep::Restyle(next) => preparation = Some(next),
             }
         }
