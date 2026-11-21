@@ -31,6 +31,8 @@ use self::document::{EVENT_STOP_IMMEDIATE_SLOT, EVENT_STOP_PROPAGATION_SLOT};
 #[cfg(feature = "devtools")]
 pub(crate) use self::events::EventListenerInspectorSnapshot;
 pub(crate) use self::events::EventListenerRegistration;
+#[cfg(test)]
+pub(super) use self::events::visible_event_path_builds;
 pub(super) use self::events::{
     DispatchStatus, HostEventTargetRegistry, PublicEventDispatchResult, create_host_event,
     dispatch_host_event, dispatch_public_event, dispatch_public_event_with_original_target,

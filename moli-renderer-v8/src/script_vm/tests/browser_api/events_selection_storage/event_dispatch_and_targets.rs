@@ -2795,3 +2795,78 @@ fn tab_default_action_restores_the_null_target_of_a_nested_load() {
 
     assert_eq!(result, "true true");
 }
+
+// PF-9474. A dispatch builds each tree scope's visible composedPath only
+// when one of its entries runs script, and once per scope. A listener-free
+// dispatch on a deep chain builds none, so its cost stays linear in depth.
+#[test]
+fn visible_event_paths_are_built_lazily_once_per_tree_scope() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-lazy-visible-path.test/");
+    vm.eval(
+        r#"
+        (() => {
+          if (!document.documentElement) document.appendChild(document.createElement('html'));
+          if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+          let leaf = document.body;
+          for (let i = 0; i < 2048; i++) leaf = leaf.appendChild(document.createElement('div'));
+          window.deepLeaf = leaf;
+          const host = document.body.appendChild(document.createElement('div'));
+          const root = host.attachShadow({ mode: 'closed' });
+          const inner = root.appendChild(document.createElement('p'));
+          window.shadowLeaf = inner.appendChild(document.createElement('i'));
+          window.shadowHost = host;
+          window.shadowInner = inner;
+        })()
+        "#,
+    )
+    .expect("deep chain setup should evaluate");
+
+    let builds = crate::host::visible_event_path_builds;
+    // The first turn after setup counted one build that no listener of this
+    // dispatch asked for, likely page work the setup queued. A warm-up turn
+    // absorbs it, so the counted turn measures only its own dispatch.
+    let probe = "deepLeaf.dispatchEvent(new Event('probe', { bubbles: true, composed: true }))";
+    vm.eval(probe).expect("warm-up dispatch should evaluate");
+    let before = builds();
+    vm.eval(probe)
+        .expect("listener-free dispatch should evaluate");
+    let listener_free = builds() - before;
+
+    let before = builds();
+    vm.eval(
+        r#"
+        (() => {
+          const record = (e) => e.composedPath().length;
+          deepLeaf.addEventListener('light', record);
+          document.body.addEventListener('light', record);
+          deepLeaf.dispatchEvent(new Event('light', { bubbles: true, composed: true }));
+        })()
+        "#,
+    )
+    .expect("light-tree dispatch should evaluate");
+    let light_tree = builds() - before;
+
+    let before = builds();
+    let lengths = vm
+        .eval(
+            r#"
+            (() => {
+              const lengths = [];
+              const record = (e) => lengths.push(e.composedPath().length);
+              shadowLeaf.addEventListener('scoped', record);
+              shadowInner.addEventListener('scoped', record);
+              shadowHost.addEventListener('scoped', record);
+              document.body.addEventListener('scoped', record);
+              shadowLeaf.dispatchEvent(new Event('scoped', { bubbles: true, composed: true }));
+              return lengths.join(' ');
+            })()
+            "#,
+        )
+        .expect("shadow-tree dispatch should evaluate");
+    let two_scopes = builds() - before;
+
+    assert_eq!(
+        (listener_free, light_tree, two_scopes, lengths.as_str()),
+        (0, 1, 2, "8 8 5 5")
+    );
+}

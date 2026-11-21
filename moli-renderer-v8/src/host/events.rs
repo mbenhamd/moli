@@ -588,40 +588,229 @@ fn path_entry_has_listeners(
 #[derive(Clone, Copy)]
 struct PathEventContext<'s, 'p> {
     event: v8::Local<'s, v8::Object>,
-    original_target: EventTargetHandle,
-    original_related_target: Option<EventTargetHandle>,
     propagation_path: &'p [EventTargetHandle],
-    entry_scopes: &'p [PathEntryScope],
+    tree_scopes: &'p PathTreeScopes,
 }
 
-/// The target, relatedTarget, composedPath and at-target state one path
-/// entry sees. Like Blink's NodeEventContext, they are fixed when the path is
-/// built, so a listener that moves the target or a host between shadow trees
-/// cannot change what a later entry sees.
-struct PathEntryScope {
+/// The tree scopes of a propagation path, fixed when the path is built, as
+/// Blink's NodeEventContext and TreeScopeEventContext fix them. Entries of
+/// one tree scope share its retargeted target and relatedTarget, so a
+/// listener that moves the target or a host between trees changes nothing a
+/// later entry sees. The visible composedPath is built only when an entry
+/// runs script, once per tree scope, or once for the whole path when no
+/// closed shadow root is on it.
+struct PathTreeScopes {
+    /// Each path entry's index into `scopes`.
+    entry_scope: Vec<usize>,
+    scopes: Vec<PathTreeScope>,
+    target_steps: RetargetSteps,
+    related_target_steps: Option<RetargetSteps>,
+    /// The closed shadow roots on the path.
+    closed_roots: Vec<NativeNodeId>,
+    whole_path: std::cell::OnceCell<std::rc::Rc<[EventTargetHandle]>>,
+}
+
+struct PathTreeScope {
+    /// The shadow roots that shadow-including contain this scope, innermost
+    /// first. Empty outside any shadow tree, and for a Window.
+    roots: Vec<NativeNodeId>,
     target: EventTargetHandle,
     related_target: Option<EventTargetHandle>,
-    visible_path: Vec<EventTargetHandle>,
-    at_target: bool,
+    visible_path: std::cell::OnceCell<std::rc::Rc<[EventTargetHandle]>>,
 }
 
-impl PathEntryScope {
-    fn new(
+/// A target and the (shadow root, host) steps that retargeting it can take,
+/// innermost first.
+struct RetargetSteps {
+    original: EventTargetHandle,
+    steps: Vec<(NativeNodeId, NativeNodeId)>,
+}
+
+impl RetargetSteps {
+    fn new(dom: &moli_dom::native::DomHost, original: EventTargetHandle) -> Self {
+        let mut steps = Vec::new();
+        if let EventTargetHandle::Node(mut candidate) = original {
+            while let Some(root) = dom.containing_shadow_root(candidate)
+                && let Some(host) = dom.shadow_root_host(root)
+            {
+                steps.push((root, host));
+                candidate = host;
+            }
+        }
+        Self { original, steps }
+    }
+
+    /// The target as seen from a scope with these containing shadow roots.
+    fn retarget(&self, roots: &[NativeNodeId]) -> EventTargetHandle {
+        let mut candidate = self.original;
+        for (root, host) in &self.steps {
+            if roots.contains(root) {
+                return candidate;
+            }
+            candidate = EventTargetHandle::Node(*host);
+        }
+        candidate
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static VISIBLE_PATH_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many visible composedPath vectors this thread's dispatches built.
+#[cfg(test)]
+pub(crate) fn visible_event_path_builds() -> usize {
+    VISIBLE_PATH_BUILDS.with(std::cell::Cell::get)
+}
+
+impl PathTreeScopes {
+    fn build(
         host_ptr: *mut PageScriptHost,
         original_target: EventTargetHandle,
         original_related_target: Option<EventTargetHandle>,
         propagation_path: &[EventTargetHandle],
-        current_target: EventTargetHandle,
     ) -> Self {
-        let target = retarget_event_target(host_ptr, original_target, current_target);
-        Self {
-            target,
-            related_target: original_related_target.map(|related_target| {
-                retarget_event_target(host_ptr, related_target, current_target)
-            }),
-            visible_path: visible_event_path(host_ptr, propagation_path, current_target),
-            at_target: target == current_target,
+        let dom = unsafe { &*host_ptr }.dom_host();
+        let mut tree_scopes = Self {
+            entry_scope: Vec::with_capacity(propagation_path.len()),
+            scopes: Vec::new(),
+            target_steps: RetargetSteps::new(dom, original_target),
+            related_target_steps: original_related_target
+                .map(|related_target| RetargetSteps::new(dom, related_target)),
+            closed_roots: Vec::new(),
+            whole_path: std::cell::OnceCell::new(),
+        };
+        let mut previous: Option<(NativeNodeId, usize)> = None;
+        for entry in propagation_path {
+            let index = match *entry {
+                EventTargetHandle::Node(handle) => {
+                    // A parent shares its child's tree scope. Only a step
+                    // into another tree (a host, a slot) looks up its root.
+                    let index = previous
+                        .filter(|(child, _)| {
+                            !dom.is_shadow_root(*child)
+                                && dom
+                                    .node(*child)
+                                    .and_then(moli_dom::native::Node::parent_node)
+                                    == Some(handle)
+                        })
+                        .map_or_else(
+                            || tree_scopes.scope_index(dom, dom.containing_shadow_root(handle)),
+                            |(_, index)| index,
+                        );
+                    if dom.is_shadow_root(handle)
+                        && dom.shadow_root_mode(handle).as_deref() == Some("closed")
+                    {
+                        tree_scopes.closed_roots.push(handle);
+                    }
+                    previous = Some((handle, index));
+                    index
+                }
+                EventTargetHandle::Window | EventTargetHandle::ChildWindow(_) => {
+                    previous = None;
+                    tree_scopes.scope_index(dom, None)
+                }
+            };
+            tree_scopes.entry_scope.push(index);
         }
+        tree_scopes
+    }
+
+    fn scope_index(
+        &mut self,
+        dom: &moli_dom::native::DomHost,
+        innermost_root: Option<NativeNodeId>,
+    ) -> usize {
+        if let Some(index) = self
+            .scopes
+            .iter()
+            .position(|scope| scope.roots.first().copied() == innermost_root)
+        {
+            return index;
+        }
+        let scope = self.scope_with_innermost_root(dom, innermost_root);
+        self.scopes.push(scope);
+        self.scopes.len() - 1
+    }
+
+    fn scope_with_innermost_root(
+        &self,
+        dom: &moli_dom::native::DomHost,
+        innermost_root: Option<NativeNodeId>,
+    ) -> PathTreeScope {
+        let mut roots = Vec::new();
+        let mut root = innermost_root;
+        while let Some(current) = root {
+            roots.push(current);
+            root = dom
+                .shadow_root_host(current)
+                .and_then(|host| dom.containing_shadow_root(host));
+        }
+        PathTreeScope {
+            target: self.target_steps.retarget(&roots),
+            related_target: self
+                .related_target_steps
+                .as_ref()
+                .map(|steps| steps.retarget(&roots)),
+            roots,
+            visible_path: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// The scope of an entry the path does not list, built on demand.
+    fn scope_outside_path(
+        &self,
+        host_ptr: *mut PageScriptHost,
+        current_target: EventTargetHandle,
+    ) -> PathTreeScope {
+        let dom = unsafe { &*host_ptr }.dom_host();
+        let innermost_root = match current_target {
+            EventTargetHandle::Node(handle) => dom.containing_shadow_root(handle),
+            EventTargetHandle::Window | EventTargetHandle::ChildWindow(_) => None,
+        };
+        self.scope_with_innermost_root(dom, innermost_root)
+    }
+
+    fn is_at_target(&self, index: usize, entry: EventTargetHandle) -> bool {
+        self.scopes[self.entry_scope[index]].target == entry
+    }
+
+    /// The path an entry of this scope sees: every entry except those inside
+    /// a closed shadow root that does not contain the scope.
+    fn visible_path(
+        &self,
+        propagation_path: &[EventTargetHandle],
+        scope: &PathTreeScope,
+    ) -> std::rc::Rc<[EventTargetHandle]> {
+        let build = |hidden: Option<Vec<bool>>| {
+            #[cfg(test)]
+            VISIBLE_PATH_BUILDS.with(|builds| builds.set(builds.get() + 1));
+            propagation_path
+                .iter()
+                .zip(&self.entry_scope)
+                .filter(|(_, index)| !hidden.as_ref().is_some_and(|hidden| hidden[**index]))
+                .map(|(entry, _)| *entry)
+                .collect::<std::rc::Rc<[EventTargetHandle]>>()
+        };
+        if self.closed_roots.is_empty() {
+            return self.whole_path.get_or_init(|| build(None)).clone();
+        }
+        scope
+            .visible_path
+            .get_or_init(|| {
+                build(Some(
+                    self.scopes
+                        .iter()
+                        .map(|other| {
+                            other.roots.iter().any(|root| {
+                                self.closed_roots.contains(root) && !scope.roots.contains(root)
+                            })
+                        })
+                        .collect(),
+                ))
+            })
+            .clone()
     }
 }
 
@@ -676,44 +865,39 @@ impl<'s, 'p> PathEntryEventState<'s, 'p> {
             Some(object) => object,
             None => event_target_object(scope, host_ptr, self.current_target)?,
         };
-        let built_scope;
-        let entry_scope = match context
+        let tree_scopes = context.tree_scopes;
+        let outside_scope;
+        let tree_scope = match context
             .propagation_path
             .iter()
             .position(|entry| *entry == self.current_target)
-            .and_then(|index| context.entry_scopes.get(index))
         {
-            Some(entry_scope) => entry_scope,
+            Some(index) => &tree_scopes.scopes[tree_scopes.entry_scope[index]],
             None => {
-                built_scope = PathEntryScope::new(
-                    host_ptr,
-                    context.original_target,
-                    context.original_related_target,
-                    context.propagation_path,
-                    self.current_target,
-                );
-                &built_scope
+                outside_scope = tree_scopes.scope_outside_path(host_ptr, self.current_target);
+                &outside_scope
             }
         };
+        let visible_path = tree_scopes.visible_path(context.propagation_path, tree_scope);
         set_event_current_target(scope, context.event, current_target_object.into());
-        let target_value = event_target_value(scope, host_ptr, entry_scope.target)?;
+        let target_value = event_target_value(scope, host_ptr, tree_scope.target)?;
         set_event_target(scope, context.event, target_value);
         set_event_related_target_for_current_target(
             scope,
             host_ptr,
             context.event,
-            entry_scope.related_target,
+            tree_scope.related_target,
         )?;
         set_event_composed_path_for_current_target(
             scope,
             host_ptr,
             context.event,
             context.propagation_path,
-            &entry_scope.visible_path,
+            &visible_path,
         )?;
         let phase = match self.phase {
             PathEntryPhase::AtTarget => 2,
-            PathEntryPhase::Around(_) if entry_scope.at_target => 2,
+            PathEntryPhase::Around(_) if tree_scope.target == self.current_target => 2,
             PathEntryPhase::Around(phase) => phase,
         };
         set_event_phase(scope, context.event, phase);
@@ -1698,24 +1882,16 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
         .copied()
         .filter(|target| invocation_target_is_in_shadow_tree(host_ptr, *target))
         .collect::<Vec<_>>();
-    let entry_scopes = propagation_path
-        .iter()
-        .map(|entry| {
-            PathEntryScope::new(
-                host_ptr,
-                original_target,
-                original_related_target,
-                propagation_path,
-                *entry,
-            )
-        })
-        .collect::<Vec<_>>();
-    let path_context = PathEventContext {
-        event,
+    let tree_scopes = PathTreeScopes::build(
+        host_ptr,
         original_target,
         original_related_target,
         propagation_path,
-        entry_scopes: &entry_scopes,
+    );
+    let path_context = PathEventContext {
+        event,
+        propagation_path,
+        tree_scopes: &tree_scopes,
     };
 
     set_event_internal_flag(scope, event, EVENT_DISPATCHING_SLOT, true);
@@ -1854,11 +2030,11 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
     if !stopped && !bubbles && propagation_path.len() > 1 {
         // The hosts a non-bubbling event revisits at target are the entries
         // its target retargeted to when the path was built.
-        for (ancestor, entry_scope) in propagation_path[1..].iter().zip(&entry_scopes[1..]) {
+        for (index, ancestor) in propagation_path.iter().enumerate().skip(1) {
             if !event_target_is_current(host_ptr, *ancestor) {
                 break;
             }
-            if !entry_scope.at_target {
+            if !tree_scopes.is_at_target(index, *ancestor) {
                 continue;
             }
             last_handled_entry = Some(*ancestor);
@@ -2799,39 +2975,6 @@ pub(crate) fn retarget_event_target(
         };
         candidate = host;
     }
-}
-
-fn visible_event_path(
-    host_ptr: *mut PageScriptHost,
-    propagation_path: &[EventTargetHandle],
-    current_target: EventTargetHandle,
-) -> Vec<EventTargetHandle> {
-    let runtime = unsafe { &*host_ptr };
-    let inaccessible_closed_roots = propagation_path
-        .iter()
-        .filter_map(|entry| {
-            let EventTargetHandle::Node(handle) = entry else {
-                return None;
-            };
-            (runtime.dom_host().is_shadow_root(*handle)
-                && runtime.dom_host().shadow_root_mode(*handle).as_deref() == Some("closed")
-                && !current_target_can_access_shadow_root(host_ptr, current_target, *handle))
-            .then_some(*handle)
-        })
-        .collect::<Vec<_>>();
-
-    propagation_path
-        .iter()
-        .copied()
-        .filter(|entry| {
-            let EventTargetHandle::Node(handle) = entry else {
-                return true;
-            };
-            !inaccessible_closed_roots.iter().any(|closed_root| {
-                shadow_including_tree_contains(runtime.dom_host(), *closed_root, *handle)
-            })
-        })
-        .collect()
 }
 
 fn current_target_can_access_shadow_root(
