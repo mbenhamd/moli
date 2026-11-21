@@ -1532,7 +1532,6 @@ pub(crate) fn perform_mouse_focus_default_action(
     update_focus(scope, runtime_ptr, None);
 }
 
-#[cfg(feature = "devtools")]
 fn flat_tree_parent(runtime: &PageScriptHost, handle: DomHandle) -> Option<DomHandle> {
     if let Some(slot) = runtime.dom_host().assigned_slot_for_node(handle) {
         return Some(slot);
