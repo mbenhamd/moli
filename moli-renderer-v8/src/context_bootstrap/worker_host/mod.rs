@@ -20,11 +20,10 @@ const WORKER_ONERROR_SLOT: &str = "__moliWorkerOnError";
 
 mod constructor;
 mod dispatch;
-mod error_event;
 mod methods;
 
 pub(in crate::context_bootstrap) use constructor::{
-    WorkerOptionsMembers, document_query_encoding_override, is_cross_origin_http_worker_script,
+    document_query_encoding_override, is_cross_origin_http_worker_script,
     materialize_worker_script_source, resolve_worker_script_url, throw_worker_dom_exception,
     trusted_worker_script_url_string_or_throw, worker_constructor_base_url,
     worker_creator_secure_context, worker_script_resource_url, worker_script_scheme_can_load,
@@ -35,8 +34,9 @@ pub(crate) use dispatch::{
     dispatch_worker_error_event_with_kind, dispatch_worker_event,
     flush_pending_worker_messages_for_listener, worker_has_message_delivery_listener,
 };
-pub(super) use error_event::new_worker_host_error_event;
+pub(crate) use methods::terminate_worker_handle;
 pub(super) use methods::{worker_post_message_callback, worker_terminate_callback};
+pub(super) use moli_webapi::events::fallback::new_worker_host_error_event;
 
 #[cfg(test)]
 mod tests;

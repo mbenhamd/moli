@@ -1,3 +1,4 @@
+#[cfg(feature = "devtools")]
 pub(crate) use moli_command_types::InspectorPauseEffect as RendererInspectorPauseCommandEffect;
 #[cfg(debug_assertions)]
 use std::thread::ThreadId;
@@ -41,6 +42,9 @@ use super::{
 pub(crate) enum RendererPageStateCapturePolicy {
     FullReport,
     ProtocolTurn,
+    /// Target-owned session initialization has no result observer. Its facts
+    /// still publish in turn order, without a snapshot or completion lease.
+    BackgroundInitialization,
 }
 
 mod access;
@@ -88,6 +92,7 @@ pub(crate) mod page_dom;
 #[cfg(feature = "devtools")]
 mod page_dom_snapshot;
 mod page_entry_residence;
+#[cfg(feature = "devtools")]
 mod page_generated_dom;
 mod page_geometry;
 mod page_network;
@@ -326,7 +331,8 @@ pub use self::owner_local::{
 };
 #[cfg(feature = "devtools")]
 pub use self::owner_local::{
-    RendererPageProtocolCommandTarget, RendererRuntimeInspectorSessionDetachGuard,
+    RendererPageInspectorEndpoint, RendererPageProtocolCommandTarget,
+    RendererRuntimeInspectorSessionDetachGuard, RendererRuntimeInspectorSessionRetirement,
 };
 pub(crate) use self::owner_local_store::RendererPageToken;
 pub use self::page::{

@@ -102,6 +102,17 @@ pub(super) struct PageRevealInit<'s> {
     view_transition: Option<v8::Local<'s, v8::Object>>,
 }
 
+#[derive(webidl::WebIdlDictionary)]
+#[webidl(prefix = "PageSwapEventInit", snapshot)]
+pub(super) struct PageSwapInit<'s> {
+    #[webidl(inherit)]
+    base: EventInit,
+    #[webidl(nullable, interface = web_api_interfaces::NavigationActivation, snapshot_slot = PAGE_SWAP_EVENT_ACTIVATION_SLOT)]
+    activation: Option<v8::Local<'s, v8::Object>>,
+    #[webidl(nullable, interface = web_api_interfaces::ViewTransition, snapshot_slot = PAGE_SWAP_EVENT_VIEW_TRANSITION_SLOT)]
+    view_transition: Option<v8::Local<'s, v8::Object>>,
+}
+
 pub(super) enum ValueEventInit<'s> {
     Clipboard(ClipboardInit<'s>),
     Close(CloseInit),
@@ -112,6 +123,7 @@ pub(super) enum ValueEventInit<'s> {
     HashChange(HashChangeInit),
     PageTransition(PageTransitionInit),
     PageReveal(PageRevealInit<'s>),
+    PageSwap(PageSwapInit<'s>),
 }
 
 impl<'s> ValueEventInit<'s> {
@@ -145,6 +157,9 @@ impl<'s> ValueEventInit<'s> {
             EventSubclassKind::PageRevealEvent => {
                 Self::PageReveal(parse_event_dictionary(scope, args, "PageRevealEvent")?)
             }
+            EventSubclassKind::PageSwapEvent => {
+                Self::PageSwap(parse_event_dictionary(scope, args, "PageSwapEvent")?)
+            }
             EventSubclassKind::PageTransitionEvent => {
                 Self::PageTransition(parse_event_dictionary(scope, args, "PageTransitionEvent")?)
             }
@@ -163,6 +178,7 @@ impl<'s> ValueEventInit<'s> {
             Self::HashChange(init) => &init.base,
             Self::PageTransition(init) => &init.base,
             Self::PageReveal(init) => &init.base,
+            Self::PageSwap(init) => &init.base,
         };
         (base.bubbles, base.cancelable, base.composed)
     }
@@ -182,9 +198,90 @@ impl<'s> ValueEventInit<'s> {
             Self::HashChange(init) => init.initialize_snapshot(scope, event),
             Self::PageTransition(init) => init.initialize_snapshot(scope, event),
             Self::PageReveal(init) => init.initialize_snapshot(scope, event),
+            Self::PageSwap(init) => init.initialize_snapshot(scope, event),
         }
         .expect("value event dictionary state");
     }
+}
+
+fn native_source_element<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+    prefix: &'static str,
+) -> Option<Option<v8::Local<'s, v8::Object>>> {
+    nullable_native_event_interface(
+        scope,
+        Some(value),
+        prefix,
+        "source",
+        webidl::InterfaceOptions {
+            name: "Element",
+            brand_check: web_api_interfaces::Element::is_instance,
+        },
+    )
+}
+
+pub fn construct_native_command_event<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    command: &str,
+    source: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let init = CommandInit {
+        base: EventInit {
+            cancelable: true,
+            ..EventInit::default()
+        },
+        command: webidl::DomString16(command.encode_utf16().collect()),
+        source: native_source_element(scope, source, "CommandEventInit")?,
+    };
+    construct_trusted_subclass(
+        scope,
+        EventSubclassKind::CommandEvent,
+        "command",
+        SubclassInit::Values(ValueEventInit::Command(init)),
+    )
+}
+
+pub fn construct_native_toggle_event<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    event_type: &str,
+    old_state: &str,
+    new_state: &str,
+    cancelable: bool,
+    source: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let init = ToggleInit {
+        base: EventInit {
+            cancelable,
+            ..EventInit::default()
+        },
+        old_state: webidl::DomString16(old_state.encode_utf16().collect()),
+        new_state: webidl::DomString16(new_state.encode_utf16().collect()),
+        source: native_source_element(scope, source, "ToggleEventInit")?,
+    };
+    construct_trusted_subclass(
+        scope,
+        EventSubclassKind::ToggleEvent,
+        event_type,
+        SubclassInit::Values(ValueEventInit::Toggle(init)),
+    )
+}
+
+pub fn construct_native_interest_event<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    event_type: &str,
+    source: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let init = InterestInit {
+        base: EventInit::default(),
+        source: native_source_element(scope, source, "InterestEventInit")?,
+    };
+    construct_trusted_subclass(
+        scope,
+        EventSubclassKind::InterestEvent,
+        event_type,
+        SubclassInit::Values(ValueEventInit::Interest(init)),
+    )
 }
 
 pub fn construct_original_page_transition_event<'s>(
@@ -192,7 +289,6 @@ pub fn construct_original_page_transition_event<'s>(
     event_type: &str,
     persisted: bool,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let event_type = moli_v8_util::v8_string(scope, event_type)?;
     let init = ValueEventInit::PageTransition(PageTransitionInit {
         base: EventInit {
             bubbles: true,
@@ -201,18 +297,45 @@ pub fn construct_original_page_transition_event<'s>(
         },
         persisted,
     });
-    let wrapper = moli_v8_util::new_intrinsic_interface_instance(scope, "PageTransitionEvent")?;
-    let event = super::construct_subclass(
+    construct_trusted_subclass(
         scope,
-        wrapper,
         EventSubclassKind::PageTransitionEvent,
         event_type,
-        init.event_flags(),
-        |scope, event| {
-            init.initialize(scope, event);
-            true
-        },
-    )?;
-    super::mark_event_trusted(scope, event);
-    Some(event)
+        SubclassInit::Values(init),
+    )
+}
+
+pub fn construct_native_popstate_event<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    state: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let init = ValueEventInit::PopState(PopStateInit {
+        base: EventInit::default(),
+        state: (!state.is_undefined()).then_some(state),
+        has_ua_visual_transition: false,
+    });
+    construct_trusted_subclass(
+        scope,
+        EventSubclassKind::PopStateEvent,
+        "popstate",
+        SubclassInit::Values(init),
+    )
+}
+
+pub fn construct_native_hash_change_event<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    old_url: &str,
+    new_url: &str,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let init = ValueEventInit::HashChange(HashChangeInit {
+        base: EventInit::default(),
+        old_url: webidl::DomString16(old_url.encode_utf16().collect()),
+        new_url: webidl::DomString16(new_url.encode_utf16().collect()),
+    });
+    construct_trusted_subclass(
+        scope,
+        EventSubclassKind::HashChangeEvent,
+        "hashchange",
+        SubclassInit::Values(init),
+    )
 }

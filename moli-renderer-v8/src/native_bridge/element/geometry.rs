@@ -1,4 +1,5 @@
 mod client_rect;
+#[cfg(any(test, feature = "devtools"))]
 mod hit_test;
 mod metrics;
 mod mock;
@@ -33,9 +34,10 @@ pub(crate) use mock::{
 };
 pub(crate) use provider::{
     observable_bounding_client_rects, observable_caret_position, observable_document_metrics,
-    observable_event_offset, observable_geometry_batch, observable_sources_with_fragments,
-    observable_used_grid_tracks, published_geometry_batch, read_bounding_client_rect,
-    read_client_rects, read_element_metrics, svg_viewport_root_geometry,
+    observable_event_offset, observable_geometry_batch, observable_hit_test,
+    observable_hit_test_all, observable_sources_with_fragments, observable_used_grid_tracks,
+    published_geometry_batch, read_bounding_client_rect, read_client_rects, read_element_metrics,
+    svg_viewport_root_geometry,
 };
 #[cfg(feature = "devtools")]
 pub(crate) use provider::{observable_geometry_query, read_svg_content_stroke_bounds};

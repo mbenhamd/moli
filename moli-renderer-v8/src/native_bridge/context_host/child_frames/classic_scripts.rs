@@ -27,6 +27,7 @@ use crate::{
         FrameRequestKind, FrameScriptJob, LocalWindowId, PendingChildExternalClassicDocumentScript,
         frame_script_job_kind_from_parser_classic_ready_kind,
     },
+    network::loads::{ResourceLoadDisposition, ResourceLoadKind},
     page_task_queue::RendererPageChildClassicScriptSourceLoadTarget,
     parser_script::action::{
         ParserPendingClassicScriptExecution, ParserPendingClassicScriptNotification,
@@ -34,6 +35,7 @@ use crate::{
     planning::{PreparedScript, ScriptSource},
     types::{
         ChildClassicScriptLoadCompletion, ChildClassicScriptNetworkAttribution,
+        SubresourceRequestInitiatorType, SubresourceRequestSnapshot, SubresourceRequestStart,
         SubresourceResourceType,
     },
 };
@@ -140,6 +142,7 @@ impl PageScriptHost {
             return None;
         }
         Some(ChildClassicScriptNetworkAttribution {
+            request_handle: None,
             frame_id: Some(snapshot.frame_id.0),
             document_url: snapshot.document_url,
             request_url,
@@ -306,6 +309,7 @@ impl PageScriptHost {
             loader,
             script_for_load,
             document_character_set,
+            None,
             ChildClassicScriptLoadCompletionTarget {
                 owner,
                 load_id,
@@ -358,19 +362,6 @@ impl PageScriptHost {
         });
         let owner_current = realm_currentness
             .is_some_and(crate::frame_owner_model::FrameDocumentTaskRealmCurrentness::names_current_document_realm);
-        if let Some(network_result) = completion.network_result.as_deref() {
-            if owner_current {
-                self.record_get_subresource_network_result(
-                    completion.network_attribution.frame_id.clone(),
-                    completion.network_attribution.document_url.clone(),
-                    completion.network_attribution.request_url.clone(),
-                    SubresourceResourceType::Script,
-                    network_result,
-                );
-            } else {
-                self.record_historical_child_classic_script_network_result(completion);
-            }
-        }
         let document_script_admission = if owner_current {
             let work = PendingChildExternalClassicDocumentScript {
                 child_handle: pending.child_handle,
@@ -663,7 +654,7 @@ impl PageScriptHost {
         &mut self,
         request: crate::frame_owner_model::FrameDocumentClassicScriptSourceLoadRequest,
         loader: crate::network::context::DocumentResourceLoader,
-        network_attribution: ChildClassicScriptNetworkAttribution,
+        mut network_attribution: ChildClassicScriptNetworkAttribution,
     ) {
         let request_target = *request.target();
         let document_character_set = self
@@ -705,10 +696,16 @@ impl PageScriptHost {
             }
             return;
         }
+        let resource_load = self.begin_child_classic_script_network_load(
+            &script_for_load,
+            &loader,
+            &mut network_attribution,
+        );
         self.start_child_classic_script_source_fetch(
             loader,
             script_for_load,
             document_character_set,
+            resource_load,
             ChildClassicScriptLoadCompletionTarget {
                 owner: request_target.task_owner(),
                 load_id,
@@ -732,6 +729,7 @@ impl PageScriptHost {
         loader: crate::network::context::DocumentResourceLoader,
         script: PreparedScript,
         document_character_set: String,
+        resource_load: Option<crate::network::loads::ResourceLoadLease>,
         target: ChildClassicScriptLoadCompletionTarget,
         network_attribution: ChildClassicScriptNetworkAttribution,
     ) {
@@ -802,6 +800,7 @@ impl PageScriptHost {
                             browser_context_runtime,
                             client_id,
                             document_url,
+                            resource_load,
                         )
                         .await;
                     finish(outcome);
@@ -837,6 +836,49 @@ impl PageScriptHost {
         }
     }
 
+    fn begin_child_classic_script_network_load(
+        &mut self,
+        script: &PreparedScript,
+        loader: &crate::network::context::DocumentResourceLoader,
+        attribution: &mut ChildClassicScriptNetworkAttribution,
+    ) -> Option<crate::network::loads::ResourceLoadLease> {
+        if !matches!(script.source, ScriptSource::External) {
+            return None;
+        }
+        let load = loader
+            .register_load(
+                ResourceLoadKind::Script,
+                ResourceLoadDisposition::Ordinary,
+                None,
+            )
+            .expect("child classic source start requires an active Document resource authority");
+        let handle = self.next_subresource_network_request_handle();
+        let request = crate::planning::external_script_request(
+            script,
+            &loader.fetch_context().request_origin(),
+            None,
+        );
+        let (headers, cookie_report) = loader
+            .request_client()
+            .prepare_subresource_request_observation(request);
+        self.record_subresource_request_started(SubresourceRequestSnapshot::new(
+            handle,
+            attribution.frame_id.clone(),
+            attribution.document_url.clone(),
+            attribution.request_url.clone(),
+            "GET".to_owned(),
+            headers,
+            None,
+            SubresourceResourceType::Script,
+            SubresourceRequestInitiatorType::Script,
+            cookie_report,
+        ));
+        attribution.request_handle = Some(handle);
+        self.pending_child_classic_script_network_loads
+            .insert(handle, load.clone());
+        Some(load)
+    }
+
     fn child_classic_script_source_load_client_for_owner(
         &self,
         handle: DomHandle,
@@ -858,20 +900,22 @@ impl PageScriptHost {
         &mut self,
         completion: ChildClassicScriptLoadCompletion,
     ) -> Option<ChildClassicScriptLoadCompletionApplication> {
+        // Network completion belongs to the request's Document authority,
+        // independently of whether its parser runner still accepts source.
+        if self.current_child_document_task_owner(completion.handle) == Some(completion.owner) {
+            self.record_child_classic_script_network_result(&completion);
+        } else {
+            self.record_historical_child_classic_script_network_result(&completion);
+        }
         if let Some(application) =
             self.apply_child_external_classic_document_script_load_completion(&completion)
         {
             return Some(application);
         }
-        let Some(current_task_owner) = self
+        let current_task_owner = self
             .frame_owner_store
-            .current_child_document_task_owner(completion.handle)
-        else {
-            self.record_historical_child_classic_script_network_result(&completion);
-            return None;
-        };
+            .current_child_document_task_owner(completion.handle)?;
         if current_task_owner != completion.owner {
-            self.record_historical_child_classic_script_network_result(&completion);
             return None;
         }
         let current_owner = current_task_owner.document_owner();
@@ -889,15 +933,6 @@ impl PageScriptHost {
             owner_target.owner_request_id(),
         );
         let (_owner_target, source_load) = owner.into_parts();
-        if let Some(network_result) = completion.network_result.as_deref() {
-            self.record_get_subresource_network_result(
-                completion.network_attribution.frame_id.clone(),
-                completion.network_attribution.document_url.clone(),
-                completion.network_attribution.request_url.clone(),
-                SubresourceResourceType::Script,
-                network_result,
-            );
-        }
         let handle = completion.handle;
         let source_result = source_load.into_source_result(completion.result);
         let notification = self
@@ -923,20 +958,90 @@ impl PageScriptHost {
         }
     }
 
+    fn finish_child_classic_script_network_load(
+        &mut self,
+        completion: &ChildClassicScriptLoadCompletion,
+    ) -> bool {
+        let Some(handle) = completion.network_attribution.request_handle else {
+            return true;
+        };
+        let Some(load) = self
+            .pending_child_classic_script_network_loads
+            .remove(&handle)
+        else {
+            // Retirement already emitted the terminal event. A late source
+            // callback must not reannounce the request in another loader.
+            return false;
+        };
+        load.finish();
+        true
+    }
+
+    pub(in crate::native_bridge::context_host) fn retire_child_classic_script_network_loads(
+        &mut self,
+        registry_id: u64,
+    ) -> usize {
+        let handles = self
+            .pending_child_classic_script_network_loads
+            .iter()
+            .filter_map(|(handle, load)| (load.registry_id() == registry_id).then_some(*handle))
+            .collect::<Vec<_>>();
+        for handle in &handles {
+            let load = self
+                .pending_child_classic_script_network_loads
+                .remove(handle)
+                .expect("collected child classic request must remain pending until retirement");
+            load.cancel();
+            load.finish();
+            self.record_subresource_body_finished(crate::types::SubresourceBodyFinished::failed(
+                *handle,
+                moli_fetch::NET_ERR_ABORTED_ERROR_TEXT.to_owned(),
+            ));
+        }
+        handles.len()
+    }
+
+    fn record_child_classic_script_network_result(
+        &mut self,
+        completion: &ChildClassicScriptLoadCompletion,
+    ) {
+        if !self.finish_child_classic_script_network_load(completion) {
+            return;
+        }
+        if let Some(network_result) = completion.network_result.as_deref() {
+            self.record_get_subresource_network_result(
+                completion.network_attribution.frame_id.clone(),
+                completion.network_attribution.document_url.clone(),
+                completion.network_attribution.request_url.clone(),
+                SubresourceResourceType::Script,
+                SubresourceRequestInitiatorType::Script,
+                network_result,
+                match completion.network_attribution.request_handle {
+                    Some(handle) => SubresourceRequestStart::Recorded(handle),
+                    None => SubresourceRequestStart::Unrecorded(None),
+                },
+            );
+        }
+    }
+
     pub(crate) fn record_historical_child_classic_script_network_result(
         &mut self,
         completion: &ChildClassicScriptLoadCompletion,
     ) -> bool {
+        if !self.finish_child_classic_script_network_load(completion) {
+            return false;
+        }
         let Some(network_result) = completion.network_result.as_deref() else {
             return false;
         };
-        self.record_historical_get_subresource_network_result_with_initiator(
+        self.record_historical_get_subresource_network_result_with_handle(
             completion.network_attribution.frame_id.clone(),
             completion.network_attribution.document_url.clone(),
             completion.network_attribution.request_url.clone(),
             SubresourceResourceType::Script,
             crate::types::SubresourceRequestInitiatorType::Script,
             network_result,
+            completion.network_attribution.request_handle,
         );
         true
     }
@@ -2017,7 +2122,7 @@ impl PageScriptHost {
         &mut self,
         failed: FrameDocumentClassicSourceFailureWork,
     ) -> FrameDocumentClassicSourceFailureReportApplication {
-        let (target, _failure, script_element_event) = failed.into_parts();
+        let (target, failure, script_element_event) = failed.into_parts();
         let child_handle = target.child_handle();
         let owner = target.task_owner().document_owner();
         let runner_owner_current = self.frame_parser_classic_scripts.has_runner(owner);
@@ -2056,6 +2161,7 @@ impl PageScriptHost {
                 FrameDocumentClassicSourceFailureReportSkipReason::StaleRealm,
             );
         }
+        self.emit_script_load_failure(failure.script_url().as_str(), failure.error());
         FrameDocumentClassicSourceFailureReportApplication::completed(
             FrameDocumentClassicScriptCompletionAction::new(
                 FrameDocumentClassicScriptCompletionTarget::new(

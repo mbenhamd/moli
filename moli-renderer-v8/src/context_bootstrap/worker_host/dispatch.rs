@@ -18,25 +18,19 @@ pub(crate) fn dispatch_worker_event<'s>(
             dispatch_onmessage(scope, worker, payload);
             true
         }
-        WorkerToParentMessage::Error {
-            message,
-            filename,
-            lineno,
-            colno,
-            event_kind,
-            ..
-        } => {
-            let error = v8::null(scope).into();
+        WorkerToParentMessage::Error(error) => {
+            let omitted_error = v8::null(scope).into();
             dispatch_worker_error_event_with_kind(
                 scope,
                 worker,
-                message,
-                filename,
-                *lineno,
-                *colno,
-                error,
-                *event_kind,
+                &error.message,
+                &error.filename,
+                error.lineno,
+                error.colno,
+                omitted_error,
+                error.event_kind,
             )
+            .unwrap_or(false)
         }
         #[cfg(test)]
         WorkerToParentMessage::PendingSubresourceFetch(_)
@@ -73,8 +67,9 @@ pub(crate) fn dispatch_worker_event<'s>(
         | WorkerToParentMessage::ServiceWorkerSkipWaiting { .. }
         | WorkerToParentMessage::ServiceWorkerClientsClaim { .. }
         | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-        | WorkerToParentMessage::SharedWorkerClosed
-        | WorkerToParentMessage::RuntimeInspectorResponse(_) => false,
+        | WorkerToParentMessage::SharedWorkerClosed => false,
+        #[cfg(feature = "devtools")]
+        WorkerToParentMessage::RuntimeInspectorResponse(_) => false,
     }
 }
 
@@ -167,7 +162,7 @@ pub(crate) fn dispatch_worker_error_event_with_kind<'s>(
     colno: u32,
     error: v8::Local<'s, v8::Value>,
     event_kind: WorkerParentErrorEventKind,
-) -> bool {
+) -> Option<bool> {
     let event = match event_kind {
         // Fetch/parse failures fire a plain Event with the default flags.
         WorkerParentErrorEventKind::Event => construct_original_event(scope, "error"),
@@ -175,16 +170,18 @@ pub(crate) fn dispatch_worker_error_event_with_kind<'s>(
             scope, message, filename, lineno, colno, error,
         )),
     };
-    let Some(event) = event else { return false };
+    let event = event?;
     crate::context_bootstrap::mark_event_trusted(scope, event);
-    crate::context_bootstrap::dispatch_simple_event_target_event_with_checkpoint(
-        scope,
-        worker,
-        "error",
-        event,
-        worker_error_microtask_checkpoint,
+    Some(
+        crate::context_bootstrap::dispatch_simple_event_target_event_with_checkpoint(
+            scope,
+            worker,
+            "error",
+            event,
+            worker_error_microtask_checkpoint,
+        )
+        .uncanceled,
     )
-    .uncanceled
 }
 
 fn worker_error_microtask_checkpoint(scope: &mut v8::PinScope<'_, '_>) {

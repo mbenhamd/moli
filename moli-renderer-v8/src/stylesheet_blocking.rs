@@ -45,9 +45,19 @@ pub(crate) struct RendererStylesheetFetcher {
     interception: Option<crate::network::interception_output::ResourceInterceptionContext>,
     frame_id: Option<String>,
     request_initiator_type: SubresourceRequestInitiatorType,
+    quirks_mode: style::context::QuirksMode,
 }
 
 impl RendererStylesheetFetcher {
+    pub(crate) fn with_quirks_mode(mut self, quirks_mode: style::context::QuirksMode) -> Self {
+        self.quirks_mode = quirks_mode;
+        self
+    }
+
+    pub(crate) fn quirks_mode(&self) -> style::context::QuirksMode {
+        self.quirks_mode
+    }
+
     pub(crate) fn with_request_initiator_type(
         mut self,
         initiator: SubresourceRequestInitiatorType,
@@ -93,6 +103,7 @@ impl RendererStylesheetFetcher {
             interception: None,
             frame_id: None,
             request_initiator_type: SubresourceRequestInitiatorType::Parser,
+            quirks_mode: style::context::QuirksMode::NoQuirks,
         }
     }
 
@@ -111,6 +122,7 @@ impl RendererStylesheetFetcher {
             interception: None,
             frame_id: None,
             request_initiator_type: SubresourceRequestInitiatorType::Parser,
+            quirks_mode: style::context::QuirksMode::NoQuirks,
         }
     }
 
@@ -506,15 +518,7 @@ fn stylesheet_terminal_from_response(
         || response_provenance.is_cors_same_origin(request_origin, &head, web_security_disabled),
         Result::is_ok,
     );
-    let fetch_usability = if !(200..=299).contains(&response.status) {
-        Err(format!(
-            "failed to fetch stylesheet `{request_url}`: HTTP status {}",
-            response.status
-        ))
-    } else {
-        cors_usability.unwrap_or(Ok(()))
-    };
-    if let Err(reason) = fetch_usability {
+    if let Some(Err(reason)) = cors_usability {
         return StylesheetFetchTerminal::unusable_response(response, origin_clean, reason);
     }
     if !response_matches_subresource_integrity_metadata(
@@ -530,6 +534,13 @@ fn stylesheet_terminal_from_response(
             ),
         );
     }
+    if !(200..=299).contains(&response.status) {
+        let reason = format!(
+            "failed to fetch stylesheet `{request_url}`: HTTP status {}",
+            response.status
+        );
+        return StylesheetFetchTerminal::unusable_response(response, origin_clean, reason);
+    }
     let allow_non_css_mime = options.quirks_mode_mime_compatibility()
         && stylesheet_response_url_chain_is_same_origin(request_origin, request_url, &head);
     let usability = validate_stylesheet_response_ref(request_url, &response, allow_non_css_mime);
@@ -538,6 +549,21 @@ fn stylesheet_terminal_from_response(
         Ok(()) => StylesheetFetchTerminal::ready(response, origin_clean),
         Err(reason) => StylesheetFetchTerminal::unusable_response(response, origin_clean, reason),
     }
+}
+
+pub(crate) fn stylesheet_preload_fetch_is_successful(
+    terminal: &StylesheetFetchTerminal,
+    options: &StylesheetFetchOptions,
+) -> bool {
+    let moli_stylesheet_blocking::StylesheetPhysicalOutcome::Response(response) =
+        terminal.physical()
+    else {
+        return false;
+    };
+    !terminal.failed_integrity()
+        && (options.request_mode_and_credentials().0 != moli_fetch::RequestMode::Cors
+            || terminal.origin_clean() != Some(false))
+        && !should_response_be_blocked_due_to_nosniff(&response.headers, FetchDestination::Style)
 }
 
 pub(crate) fn validate_stylesheet_response(

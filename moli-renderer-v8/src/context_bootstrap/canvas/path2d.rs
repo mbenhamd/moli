@@ -1,32 +1,61 @@
-//! `Path2D` (HTML "Path2D objects"): a reusable path in its own user space.
-//!
-//! The `CanvasPath` members are the 2D context's own callbacks, which accept
-//! a `Path2D` receiver and record into its native path state. A `Path2D`
-//! never has a transform, so its geometry stays in the user space it was
-//! built in until a context draws it under that context's current transform.
-
+use super::context2d::{
+    canvas_path_arc_callback, canvas_path_arc_to_callback, canvas_path_bezier_curve_to_callback,
+    canvas_path_close_path_callback, canvas_path_ellipse_callback, canvas_path_line_to_callback,
+    canvas_path_move_to_callback, canvas_path_quadratic_curve_to_callback,
+    canvas_path_rect_callback,
+};
 use super::path::Canvas2dPathState;
 use super::state::canvas_path_state;
-use crate::util::throw_type_error;
-use crate::web_api_interfaces;
+use crate::{util::throw_type_error, web_api_interfaces, webidl};
+use moli_webapi::canvas_context_values::transform::transform_init_coefficients;
+use moli_webapi::geometry::DomMatrix2DInit;
+use moli_webapi_declare::WebApiFunctionTemplate;
 
-/// The path state of a `Path2D` argument, or `None` for any other value.
-pub(super) fn path2d_argument<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    value: v8::Local<'s, v8::Value>,
-) -> Option<Canvas2dPathState> {
-    let object = v8::Local::<v8::Object>::try_from(value).ok()?;
-    if !web_api_interfaces::Path2D::is_instance(scope, object) {
-        return None;
-    }
-    Some(canvas_path_state(scope, object).borrow().clone())
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::Path2D, enumerable)]
+struct Path2dMethods {
+    #[webapi(method = "addPath", length = 1, callback = add_path_callback)]
+    add_path: (),
+    #[webapi(method = "closePath", length = 0, callback = canvas_path_close_path_callback)]
+    close_path: (),
+    #[webapi(method = "moveTo", length = 2, callback = canvas_path_move_to_callback)]
+    move_to: (),
+    #[webapi(method = "lineTo", length = 2, callback = canvas_path_line_to_callback)]
+    line_to: (),
+    #[webapi(method = "quadraticCurveTo", length = 4, callback = canvas_path_quadratic_curve_to_callback)]
+    quadratic_curve_to: (),
+    #[webapi(method = "bezierCurveTo", length = 6, callback = canvas_path_bezier_curve_to_callback)]
+    bezier_curve_to: (),
+    #[webapi(method = "arcTo", length = 5, callback = canvas_path_arc_to_callback)]
+    arc_to: (),
+    #[webapi(method = "rect", length = 4, callback = canvas_path_rect_callback)]
+    rect: (),
+    #[webapi(method = "arc", length = 5, callback = canvas_path_arc_callback)]
+    arc: (),
+    #[webapi(method = "ellipse", length = 7, callback = canvas_path_ellipse_callback)]
+    ellipse: (),
 }
 
-/// `new Path2D()`, `new Path2D(path)` and `new Path2D(svgPathData)`.
-pub(crate) fn path2d_constructor_callback<'s>(
+pub(super) fn install_path_2d_template_bindings<'s>(
+    scope: &mut v8::PinScope<'s, '_, ()>,
+    template: v8::Local<'s, v8::FunctionTemplate>,
+) {
+    let prototype = template.prototype_template(scope);
+    Path2dMethods::initialize_prototype_template(scope, prototype);
+}
+
+pub(super) fn path_2d_object<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let object = v8::Local::<v8::Object>::try_from(value).ok()?;
+    web_api_interfaces::Path2D::is_instance(scope, object).then_some(object)
+}
+
+pub(crate) fn path_2d_constructor_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
+    _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
     if !args.is_construct_call() {
         throw_type_error(
@@ -35,45 +64,55 @@ pub(crate) fn path2d_constructor_callback<'s>(
         );
         return;
     }
-    let source = args.get(0);
-    let initial = if source.is_undefined() {
-        Canvas2dPathState::default()
-    } else if let Some(path) = path2d_argument(scope, source) {
-        path
+    let input = args.get(0);
+    if input.is_undefined() {
+        return;
+    }
+    let path = if let Some(source) = path_2d_object(scope, input) {
+        canvas_path_state(scope, source).borrow().clone()
     } else {
-        let Some(data) = source.to_string(scope) else {
-            return;
-        };
-        Canvas2dPathState::from_svg_path_data(&data.to_rust_string_lossy(scope))
+        match webidl::convert::<webidl::DomString>(
+            scope,
+            input,
+            webidl::Context::argument("Path2D", 1),
+        ) {
+            Ok(data) => Canvas2dPathState::from_svg(&data.0),
+            Err(error) => {
+                webidl::throw_error(scope, &error);
+                return;
+            }
+        }
     };
-    *canvas_path_state(scope, args.this()).borrow_mut() = initial;
-    rv.set(args.this().into());
+    *canvas_path_state(scope, args.this()).borrow_mut() = path;
 }
 
-/// `Path2D.addPath(path, transform)`.
-pub(crate) fn path2d_add_path_callback<'s>(
+#[derive(webidl::WebIdlArgs)]
+#[webidl(prefix = "Path2D.addPath")]
+struct AddPathArgs<'s> {
+    #[webidl(required, interface = web_api_interfaces::Path2D)]
+    path: v8::Local<'s, v8::Object>,
+    #[webidl(dictionary, default = DomMatrix2DInit::default())]
+    transform: DomMatrix2DInit,
+}
+
+fn add_path_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
+    _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    const PREFIX: &str = "Path2D.addPath";
-    let Some(path) = path2d_argument(scope, args.get(0)) else {
-        throw_type_error(
-            scope,
-            "Failed to execute 'addPath' on 'Path2D': parameter 1 is not of type 'Path2D'.",
-        );
+    let Some(parsed) = webidl::parse_args::<AddPathArgs>(scope, &args) else {
         return;
     };
-    let Some([a, b, c, d, e, f]) =
-        super::transform::matrix_2d_init_argument(scope, args.get(1), PREFIX, 2)
-    else {
+    let source = canvas_path_state(scope, parsed.path);
+    if source.borrow().is_empty() {
         return;
-    };
-    // A non-finite matrix adds nothing (HTML: "If any of a..f are infinite or NaN, return").
-    if [a, b, c, d, e, f].into_iter().all(f64::is_finite) {
-        canvas_path_state(scope, args.this())
-            .borrow_mut()
-            .add_path(&path, kurbo::Affine::new([a, b, c, d, e, f]));
     }
-    rv.set_undefined();
+    let Some(transform) = transform_init_coefficients(scope, &parsed.transform) else {
+        return;
+    };
+    // Copy before borrowing the destination, since addPath can append itself.
+    let source = source.borrow().clone();
+    canvas_path_state(scope, args.this())
+        .borrow_mut()
+        .add_path(&source, transform);
 }

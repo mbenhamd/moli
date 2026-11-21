@@ -50,42 +50,6 @@ fn attach_session_events_then_result_step(
     TargetCommandTaskStep::Complete(plan)
 }
 
-#[derive(Default)]
-struct TargetCommandOutput {
-    plan: CommandOutputPlan,
-    side_effects: events::TargetProtocolSideEffects,
-}
-
-impl TargetCommandOutput {
-    fn background_events_mut(&mut self) -> &mut Vec<BackgroundProtocolEvent> {
-        self.side_effects.background_events_mut()
-    }
-
-    fn target_events_mut(&mut self) -> &mut events::TargetProtocolSideEffects {
-        &mut self.side_effects
-    }
-
-    fn push_success(&mut self) {
-        self.flush_side_effects();
-        self.plan.push_success();
-    }
-
-    fn push_error(&mut self, code: i32, message: impl std::fmt::Display) {
-        self.flush_side_effects();
-        self.plan
-            .push_error_without_session(code, format!("{message:#}"));
-    }
-
-    fn into_plan(mut self) -> CommandOutputPlan {
-        self.flush_side_effects();
-        self.plan
-    }
-
-    fn flush_side_effects(&mut self) {
-        self.plan.extend(self.side_effects.drain_into_plan());
-    }
-}
-
 pub(super) fn start_attach_to_target_command(
     conn: &mut CdpConnection,
     cmd: &Cmd<'_>,
@@ -153,6 +117,12 @@ fn do_attach(
         ));
     }
     conn.ensure_default_target_live(target_id);
+    if conn.page_target_is_closing(target_id) {
+        return target_command_error_without_session(
+            -32000,
+            super::session_disposal::SessionDisposalError::Closing,
+        );
+    }
     let attach_from_browser_session = conn.is_browser_session_id(cmd.session_id);
     if conn
         .primary_page_target_id_for_tab_target_id(target_id)
@@ -259,20 +229,6 @@ fn do_attach(
         false,
     )
     .with_flattened_protocol(flattened_protocol);
-    let owner = crate::conn::CommandOwnerScope::for_route(prepared_session.route().clone());
-
-    let initial_document = match conn.start_initial_document_page_ensure_for_owner(&owner) {
-        Ok(pending) => pending.map(Box::new),
-        Err(message) => {
-            if let Some(restore_browser_context_id) = restore_browser_context_id.as_ref() {
-                restore_previously_active_browser_context(
-                    conn,
-                    restore_browser_context_id.as_deref(),
-                );
-            }
-            return target_command_error_without_session(-32000, message);
-        }
-    };
     let bc = conn.browser_context.as_ref().unwrap();
     let target_info = bc
         .devtools_target_info(target_id)
@@ -280,15 +236,9 @@ fn do_attach(
     if let Some(restore_browser_context_id) = restore_browser_context_id.as_ref() {
         restore_previously_active_browser_context(conn, restore_browser_context_id.as_deref());
     }
-    TargetCommandTaskStep::Pending(PendingTargetCommandDispatch {
-        command_id: cmd.id,
-        session_id: cmd.session_id.map(str::to_owned),
-        kind: Box::new(PendingTargetCommandKind::AttachToTarget {
-            prepared_session,
-            target_info,
-            initial_document,
-        }),
-    })
+    TargetCommandTaskStep::Complete(
+        commit_target_attachment(conn, prepared_session, target_info).unwrap_or_else(|error| error),
+    )
 }
 
 fn do_attach_tab_target(
@@ -367,9 +317,6 @@ pub(crate) fn commit_target_attachment(
             -32000,
             SessionDisposalError::UnknownTarget,
         ));
-    }
-    if let Some(error) = super::transient_no_page_devtools_target_info_error(conn, &target_info) {
-        return Err(CommandOutputPlan::error_without_session(-32000, error));
     }
     let session_id = prepared.session_id().to_owned();
     let events = conn.commit_prepared_attach_event_plan(PreparedTargetAttach::new(
@@ -471,9 +418,7 @@ struct DetachParams {
 }
 
 mod detachment;
-pub(super) use detachment::TargetDetachment;
-pub(crate) use detachment::TargetDetachmentOutput;
-pub(crate) use detachment::{TargetDetachmentFailureCleanup, TargetDetachmentRecovery};
+pub(crate) use detachment::TargetDetachment;
 
 pub(super) fn start_detach_from_target_command(
     conn: &mut CdpConnection,
@@ -491,14 +436,7 @@ pub(super) fn start_detach_from_target_command(
     let prepared = TargetDetachment::prepare(conn, cmd.session_id, params);
     restore_previously_active_browser_context(conn, previous_context.as_deref());
     match prepared {
-        Ok(detachment) => TargetCommandTaskStep::Pending(PendingTargetCommandDispatch {
-            command_id: cmd.id,
-            session_id: cmd.session_id.map(str::to_owned),
-            kind: Box::new(PendingTargetCommandKind::DetachFromTarget {
-                detachment,
-                access: conn.protocol_state_access(),
-            }),
-        }),
+        Ok(detachment) => TargetCommandTaskStep::Complete(detachment.commit_in_browser(conn)),
         Err(error) => super::target_command_error(-31998, format!("{error:#}")),
     }
 }

@@ -190,7 +190,7 @@ impl ScriptVm {
     }
 
     pub(super) fn runtime_script_work_has_immediately_runnable_work(&mut self) -> bool {
-        self.document_runtime.accept_ready_runtime_script_events();
+        self.accept_ready_runtime_script_events();
         self.document_runtime
             .runtime_script_work_mut()
             .has_immediately_runnable_work()
@@ -1279,6 +1279,7 @@ impl ScriptVm {
                         &task.message,
                         task.filename.as_deref(),
                         task.error_constructor,
+                        None,
                     );
                     activity = crate::script_vm::ScriptTerminalBodyActivity::EventDispatchAttempted;
                 }
@@ -1459,6 +1460,7 @@ impl ScriptVm {
                     message,
                     module_failure_policy,
                     error_constructor,
+                    None,
                 );
                 self.enqueue_immediate_runtime_script_work_if_needed();
                 return activity;
@@ -2092,7 +2094,7 @@ impl ScriptVm {
     }
 
     fn runtime_script_work_has_pre_domcontentloaded_dynamic_candidate(&mut self) -> bool {
-        self.document_runtime.accept_ready_runtime_script_events();
+        self.accept_ready_runtime_script_events();
         self.document_runtime
             .runtime_script_work_mut()
             .dynamic_scripts
@@ -2104,7 +2106,7 @@ impl ScriptVm {
     fn runtime_script_work_has_immediately_runnable_dynamic_work_before_domcontentloaded(
         &mut self,
     ) -> bool {
-        self.document_runtime.accept_ready_runtime_script_events();
+        self.accept_ready_runtime_script_events();
         self.document_runtime
             .runtime_script_work_mut()
             .dynamic_scripts
@@ -2238,7 +2240,7 @@ impl ScriptVm {
     }
 
     pub(super) fn runtime_script_work_should_signal_immediate_progress(&mut self) -> bool {
-        self.document_runtime.accept_ready_runtime_script_events();
+        self.accept_ready_runtime_script_events();
         if self.document_runtime.runtime_script_work_mut().is_idle() {
             return false;
         }
@@ -2472,6 +2474,7 @@ impl ScriptVm {
             crate::document_runtime::ConnectedStyleImportRoot,
             Vec<crate::live_stylesheet::LiveStylesheetImportResponse>,
         )> = Vec::new();
+        let mut parsed_responses = Vec::new();
         let mut host = self._context_host.borrow_mut();
         for network_result in results {
             let crate::document_runtime::ConnectedLoadNetworkResult {
@@ -2481,6 +2484,7 @@ impl ScriptVm {
                 blocking_operation: _,
                 source_operation: _,
                 import_roots,
+                parsed_stylesheet,
                 document_url,
                 request_url,
                 source_owners,
@@ -2489,6 +2493,7 @@ impl ScriptVm {
                 origin_clean,
                 result,
             } = network_result;
+            parsed_responses.extend(parsed_stylesheet.iter().cloned());
             let is_import_graph_result = !import_roots.is_empty();
             let import_roots = import_roots
                 .into_iter()
@@ -2538,6 +2543,7 @@ impl ScriptVm {
                         request_url: request_url.clone(),
                         response_url: stylesheet_base_url.clone(),
                         css_text: stylesheet_text.clone(),
+                        parsed_stylesheet: parsed_stylesheet.clone(),
                         successful: validated_response.is_some(),
                         origin_clean,
                     };
@@ -2564,6 +2570,7 @@ impl ScriptVm {
                             stylesheet_base_url.clone(),
                             request_url.clone(),
                             origin_clean,
+                            parsed_stylesheet.as_ref(),
                         ) else {
                             continue;
                         };
@@ -2615,6 +2622,11 @@ impl ScriptVm {
         }
         for (root, responses) in import_graph_results {
             let _ = host.install_and_refresh_live_stylesheet_import_graph(root, &responses);
+        }
+        // Roots filtered by revision or generation still leave a completed
+        // network record. Only this installation batch needs its native parse.
+        for parsed in parsed_responses {
+            parsed.discard();
         }
         for blocking_import_graph in blocking_import_graphs {
             let (source, roots, graph) = blocking_import_graph.into_parts();
@@ -2788,14 +2800,14 @@ impl ScriptVm {
         }
         self._context_host
             .borrow_mut()
-            .record_get_subresource_network_result_with_handle(
+            .record_get_subresource_network_result(
                 None,
                 document_url,
                 request_url,
                 SubresourceResourceType::Script,
                 request_initiator_type,
                 result,
-                request_handle,
+                crate::types::SubresourceRequestStart::Unrecorded(request_handle),
             );
         self.record_resource_performance_entries(vec![performance_entry]);
     }

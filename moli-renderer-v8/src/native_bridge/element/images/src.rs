@@ -305,9 +305,14 @@ fn image_selected_source_candidate(
     if let Some(source) = image_selected_picture_source(runtime, handle) {
         return Some(source);
     }
+    let src = element
+        .attribute("src")
+        .map(str::trim)
+        .filter(|src| image_source_is_fetchable(src));
     if let Some(srcset) = element.attribute("srcset")
         && let Some(candidate) = selected_srcset_candidate(
             srcset,
+            src,
             element.attribute("sizes"),
             image_auto_source_size(runtime, handle),
             image_allows_auto_sizes(runtime, handle),
@@ -316,14 +321,10 @@ fn image_selected_source_candidate(
     {
         return Some(candidate);
     }
-    element
-        .attribute("src")
-        .map(str::trim)
-        .filter(|src| image_source_is_fetchable(src))
-        .map(|src| SelectedImageSource {
-            url: src.to_owned(),
-            density: 1.0,
-        })
+    src.map(|src| SelectedImageSource {
+        url: src.to_owned(),
+        density: 1.0,
+    })
 }
 
 fn image_selected_picture_source(
@@ -359,6 +360,7 @@ fn image_selected_picture_source(
         if let Some(srcset) = source.attribute("srcset")
             && let Some(candidate) = selected_srcset_candidate(
                 srcset,
+                None,
                 source
                     .attribute("sizes")
                     .or_else(|| image_element.attribute("sizes")),
@@ -548,10 +550,11 @@ pub(crate) fn mark_image_load_dispatched(runtime: &mut PageScriptHost, handle: D
     }
 }
 
-pub(crate) fn record_image_resource_performance_entry_for_handle(
+fn record_local_image_resource_performance_entry(
     scope: &mut v8::PinScope<'_, '_>,
     runtime: &PageScriptHost,
     handle: DomHandle,
+    initiator_type: &'static str,
 ) {
     let url = image_selected_source_url(runtime, handle);
     if url.is_empty() {
@@ -560,7 +563,9 @@ pub(crate) fn record_image_resource_performance_entry_for_handle(
     crate::context_bootstrap::record_resource_performance_entry(
         scope,
         crate::context_bootstrap::ResourcePerformanceEntry::without_network_result(
-            url, "img", None,
+            url,
+            initiator_type,
+            None,
         ),
     );
 }
@@ -617,7 +622,12 @@ fn dispatch_queued_image_load_event(
         && pending.terminal_source()
             == Some(crate::native_bridge::PendingImageLoadTerminalSource::Local)
     {
-        record_image_resource_performance_entry_for_handle(scope, runtime, handle);
+        record_local_image_resource_performance_entry(
+            scope,
+            runtime,
+            handle,
+            pending.resource_timing_initiator_type(),
+        );
     }
     let _ = runtime.process_pending_image_decode_requests(scope);
     let already_dispatched = runtime
@@ -694,6 +704,7 @@ struct SrcsetCandidate {
 
 fn selected_srcset_candidate(
     srcset: &str,
+    default_src: Option<&str>,
     sizes: Option<&str>,
     auto_source_size: Option<f64>,
     allows_auto_sizes: bool,
@@ -701,12 +712,26 @@ fn selected_srcset_candidate(
 ) -> Option<SelectedImageSource> {
     let mut candidates = parse_srcset_candidates(srcset);
     candidates.retain(|candidate| image_source_is_fetchable(&candidate.url));
-    if candidates.is_empty() {
-        return None;
+    let has_width = candidates
+        .iter()
+        .any(|candidate| candidate.descriptor.width.is_some());
+    if let Some(src) = default_src
+        && !has_width
+        && !candidates
+            .iter()
+            .any(|candidate| candidate.descriptor.density.unwrap_or(1.0) == 1.0)
+    {
+        candidates.push(SrcsetCandidate {
+            url: src.to_owned(),
+            descriptor: SrcsetDescriptor::default(),
+        });
     }
 
-    let source_size =
-        source_size_for_sizes_attribute(sizes, auto_source_size, allows_auto_sizes, viewport);
+    let source_size = if has_width {
+        source_size_for_sizes_attribute(sizes, auto_source_size, allows_auto_sizes, viewport)
+    } else {
+        0.0
+    };
     for candidate in &mut candidates {
         if candidate.descriptor.density.is_some() {
             continue;
@@ -1078,7 +1103,7 @@ mod tests {
     };
 
     fn select(srcset: &str, sizes: Option<&str>) -> Option<String> {
-        selected_srcset_candidate(srcset, sizes, None, false, TEST_VIEWPORT)
+        selected_srcset_candidate(srcset, None, sizes, None, false, TEST_VIEWPORT)
             .map(|candidate| candidate.url)
     }
 
@@ -1153,10 +1178,39 @@ mod tests {
     }
 
     #[test]
+    fn src_fills_a_missing_one_x_candidate_in_density_source_sets() {
+        let high_dpr = ImageSelectionViewport {
+            device_pixel_ratio: 2.0,
+            ..TEST_VIEWPORT
+        };
+        for (srcset, viewport, url, density) in [
+            ("large.png 99x", TEST_VIEWPORT, "default.png", 1.0),
+            ("large.png 2x", high_dpr, "large.png", 2.0),
+            ("normal.png 1x", TEST_VIEWPORT, "normal.png", 1.0),
+            ("normal.png", TEST_VIEWPORT, "normal.png", 1.0),
+            ("small.png 500w", TEST_VIEWPORT, "small.png", 0.5),
+            ("broken.png 0w", TEST_VIEWPORT, "default.png", 1.0),
+        ] {
+            let candidate = selected_srcset_candidate(
+                srcset,
+                Some("default.png"),
+                Some("1000px"),
+                None,
+                false,
+                viewport,
+            )
+            .expect("a selected image source");
+            assert_eq!(candidate.url, url, "{srcset}");
+            assert_eq!(candidate.density, density, "{srcset}");
+        }
+    }
+
+    #[test]
     fn srcset_sizes_auto_uses_only_leading_auto_component() {
         assert_eq!(
             selected_srcset_candidate(
                 "small.png 50w, large.png 51w",
+                None,
                 Some("auto, 100vw"),
                 Some(10.0),
                 true,
@@ -1169,6 +1223,7 @@ mod tests {
         assert_eq!(
             selected_srcset_candidate(
                 "small.png 50w, large.png 51w",
+                None,
                 Some("(max-width: 0px) 10px, auto"),
                 Some(10.0),
                 true,
@@ -1186,9 +1241,15 @@ mod tests {
             device_pixel_ratio: 2.0,
             ..TEST_VIEWPORT
         };
-        let selected =
-            selected_srcset_candidate("normal.png 1x, retina.png 2x", None, None, false, high_dpr)
-                .expect("a responsive image candidate");
+        let selected = selected_srcset_candidate(
+            "normal.png 1x, retina.png 2x",
+            None,
+            None,
+            None,
+            false,
+            high_dpr,
+        )
+        .expect("a responsive image candidate");
 
         assert_eq!(selected.url, "retina.png");
         assert_eq!(selected.density, 2.0);
@@ -1196,9 +1257,15 @@ mod tests {
 
     #[test]
     fn srcset_zero_source_size_produces_infinite_density() {
-        let selected =
-            selected_srcset_candidate("image.png 256w", Some("0px"), None, false, TEST_VIEWPORT)
-                .expect("a responsive image candidate");
+        let selected = selected_srcset_candidate(
+            "image.png 256w",
+            None,
+            Some("0px"),
+            None,
+            false,
+            TEST_VIEWPORT,
+        )
+        .expect("a responsive image candidate");
 
         assert_eq!(selected.url, "image.png");
         assert!(selected.density.is_infinite());

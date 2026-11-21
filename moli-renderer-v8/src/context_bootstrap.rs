@@ -142,9 +142,11 @@ mod performance_observer_runtime;
 mod performance_runtime;
 mod range;
 mod range_algorithms;
+#[cfg(feature = "devtools")]
+pub(crate) use range_algorithms::selection_text_element_is_hidden;
+#[cfg(feature = "devtools")]
 pub(crate) use range_algorithms::{
     NativeSelectionDragSnapshot, document_selection_drag_snapshot_at_point,
-    selection_text_element_is_hidden,
 };
 mod range_live;
 mod range_surface;
@@ -172,9 +174,7 @@ pub use moli_storage_service::DEFAULT_ORIGIN_STORAGE_QUOTA_BYTES;
 
 #[cfg(test)]
 pub(crate) use self::css_runtime::css_lazy_state_diagnostics;
-pub(crate) use self::css_runtime::{
-    css_supports_condition_text, install_css_runtime_state_for_document,
-};
+pub(crate) use self::css_runtime::install_css_runtime_state_for_document;
 #[cfg(any(feature = "devtools", test))]
 pub(crate) use self::events::construct_native_touch_event;
 #[cfg(feature = "devtools")]
@@ -287,6 +287,8 @@ use self::assets::{
 pub(crate) use self::broadcast_channel::{
     dispatch_authorized_page_broadcast_channel_event, dispatch_broadcast_channel_events_for_channel,
 };
+#[cfg(test)]
+pub(crate) use self::canvas::try_append_canvas_path_rect_for_test;
 pub(crate) use self::canvas::{
     CanvasContextKind, attach_canvas_like_context_object, build_canvas_rendering_context_2d_object,
     build_offscreen_canvas_object, build_webgl_context_object, build_webgl2_context_object,
@@ -345,35 +347,31 @@ pub(crate) use self::events::{
     set_event_internal_flag, set_event_private_value, set_event_trusted,
     submit_event_submitter_value,
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "devtools"))]
 pub(crate) use self::file_api::drag_data_read_count_for_test;
 pub(crate) use self::file_api::{
     DataTransferStringCallbackTask, DataTransferStringCallbackTaskEffect,
     DirectoryReaderCallbackAdmission, DirectoryReaderCallbackTask,
     DirectoryReaderCallbackTaskEffect, FileEntryFileCallbackTask, FileEntryFileCallbackTaskEffect,
 };
+
+#[cfg(any(test, feature = "devtools"))]
+pub(crate) use self::file_api::readonly_data_transfer_for_input;
 #[cfg(feature = "devtools")]
 pub(crate) use self::file_api::{
-    DragDataStoreMode, create_drag_data_transfer_view, create_native_drag_data_store,
-    native_set_drag_drop_effect, populate_native_drag_data_store, protect_native_drag_source_view,
-    read_string_drag_data,
+    DragDataStoreMode, NativeDragDataStore, create_drag_data_transfer_view,
+    create_external_drag_data_store, create_native_drag_data_store, finish_drag_data_transfer_view,
+    native_data_transfer_drop_effect, native_data_transfer_effect_allowed,
+    native_data_transfer_file_count, native_data_transfer_files, native_data_transfer_get_data,
+    native_data_transfer_has_type, native_set_drag_drop_effect, populate_native_drag_data_store,
+    protect_native_drag_source_view, read_string_drag_data, replace_drag_data_store_contents,
+    update_drag_data_store_operations_mask,
 };
 pub(crate) use self::file_api::{
     FileReaderReadMode, FileReadingTask, build_file_list_object, build_file_object,
     build_file_object_unpublished, file_clone_metadata, file_list_files_from_object,
     finish_file_reader_read, flush_one_pending_file_reading_task, is_file_list_object,
     queue_file_reading_task, selected_file_from_object, set_file_relative_path,
-};
-pub(crate) use self::file_api::{
-    NativeDragDataStore, finish_drag_data_transfer_view, native_data_transfer_drop_effect,
-    native_data_transfer_effect_allowed, native_data_transfer_file_count,
-    native_data_transfer_files, native_data_transfer_get_data, native_data_transfer_has_type,
-    readonly_data_transfer_for_input,
-};
-#[cfg(feature = "devtools")]
-pub(crate) use self::file_api::{
-    create_external_drag_data_store, replace_drag_data_store_contents,
-    update_drag_data_store_operations_mask,
 };
 pub(crate) use self::form_data_runtime::form_data_request_body;
 pub(crate) use self::geometry_clone::{
@@ -575,7 +573,8 @@ pub(crate) use self::webassembly_runtime::{
 };
 pub(crate) use self::websocket::{WebSocketDispatchResult, dispatch_websocket_event};
 pub(crate) use self::window_events::{
-    clear_simple_window_event_handler_values, dispatch_window_error_event_with_details,
+    clear_simple_window_event_handler_values, dispatch_window_callback_exception,
+    dispatch_window_error_event, dispatch_window_error_event_with_details,
     dispatch_window_promise_rejection_event, dispatch_window_report_error_message,
     event_handler_property_is_exposed, install_simple_window_event_handlers,
     is_window_event_handler_property, set_window_body_onerror_handler_compiled,
@@ -591,7 +590,8 @@ use self::window_runtime::global_caches_getter_callback;
 pub(crate) use self::window_template::install_window_own_template_bindings;
 pub(crate) use self::worker_host::{
     dispatch_worker_error_event_with_kind, dispatch_worker_event,
-    flush_pending_worker_messages_for_listener, worker_has_message_delivery_listener,
+    flush_pending_worker_messages_for_listener, terminate_worker_handle,
+    worker_has_message_delivery_listener,
 };
 pub(crate) use self::worker_location_runtime::install_worker_location_runtime_state;
 pub(super) use super::{

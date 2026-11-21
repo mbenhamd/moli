@@ -21,10 +21,10 @@ use crate::{protocol_types::OptionalResourceFetchMask, types::SubresourceResourc
 use super::{
     backend::{
         BrowserResourceRuntime, BrowserResourceRuntimeDiagnostics, BrowserResourceRuntimeOwner,
-        BrowserResourceRuntimeOwnerRoot, RawSubresourceCacheKey, ScriptTextCacheLookup,
-        SharedMemoryResourceCacheDiagnostics, raw_subresource_memory_cache_expiry,
-        raw_subresource_memory_cache_key, script_text_cache_key,
-        script_text_request_is_memory_cacheable,
+        BrowserResourceRuntimeOwnerRoot, RawSubresourceCacheKey, ScriptTextCacheKey,
+        ScriptTextCacheLookup, SharedMemoryResourceCacheDiagnostics, SharedScriptTextLoad,
+        raw_subresource_memory_cache_expiry, raw_subresource_memory_cache_key,
+        script_text_cache_key, script_text_request_is_memory_cacheable,
     },
     loads,
     policy::PageNetworkPolicy,
@@ -356,31 +356,11 @@ impl ResourceRequestClient {
             return result;
         }
 
-        let page_cache_partition_id = self.page_network_policy.memory_cache_partition_id();
-        if let Some(url) = timing_url.as_deref() {
-            tracing::info!(
-                target: "moli_cdp_nav_timing",
-                url,
-                cacheable = true,
-                page_cache_partition_id,
-                credentials_mode = request.credentials_mode.as_ref(),
-                cookie_context = ?request.cookie_context,
-                stage = "script_text_cache_lookup",
-            );
-        }
-        let key = script_text_cache_key(&request).for_page_cache_partition(page_cache_partition_id);
-        let lookup = {
-            let mut cache = self.resource_runtime.memory_cache().lock();
-            if request.effective_cache_mode().allows_memory_cache_lookup() {
-                cache.lookup_script_text(key.clone())
-            } else {
-                cache.replace_script_text(key.clone())
-            }
-        };
+        let (key, lookup) = self.lookup_cached_script_text(&request, "script_text_cache_lookup");
 
-        let load = match lookup {
-            ScriptTextCacheLookup::Owner(load) => load,
-            ScriptTextCacheLookup::PendingWaiter(load) => {
+        let subscription = match lookup {
+            ScriptTextCacheLookup::Owner(subscription) => subscription,
+            ScriptTextCacheLookup::PendingWaiter(subscription) => {
                 let started = timing_enabled.then(Instant::now);
                 if let Some(url) = timing_url.as_deref() {
                     tracing::info!(
@@ -391,7 +371,7 @@ impl ResourceRequestClient {
                         stage = "script_text_cache_wait_start",
                     );
                 }
-                let result = load.wait().await.map_err(anyhow::Error::msg);
+                let result = subscription.wait().await.map_err(anyhow::Error::msg);
                 if let (Some(started), Some(url)) = (started, timing_url.as_deref()) {
                     let status = result.as_ref().ok().map(|response| response.status);
                     tracing::info!(
@@ -455,27 +435,29 @@ impl ResourceRequestClient {
                 stage = "script_text_request_done",
             );
         }
-        self.resource_runtime
-            .memory_cache()
-            .lock()
-            .complete_script_text(&key, &load, &cache_request, &result);
-        load.finish(result.clone());
+        self.complete_cached_script_text_load(
+            &key,
+            subscription.load(),
+            &cache_request,
+            result.clone(),
+        );
         result.map_err(anyhow::Error::msg)
     }
 
-    pub(crate) fn fetch_cacheable_script_text_callback_with_load<F>(
+    pub(crate) async fn fetch_cacheable_script_text_stream_with_load(
         &self,
         request: Request,
         resource_load: loads::ResourceLoadLease,
-        callback: F,
-    ) -> Result<()>
-    where
-        F: FnOnce(Result<Response>) + Send + 'static,
-    {
-        self.fetch_cacheable_script_text_callback_inner(request, resource_load, callback)
+    ) -> Result<Response> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.fetch_cacheable_script_text_callback_with_load(request, resource_load, |result| {
+            let _ = tx.send(result);
+        })?;
+        rx.await
+            .map_err(|_| anyhow!("script load completion channel closed"))?
     }
 
-    fn fetch_cacheable_script_text_callback_inner<F>(
+    pub(crate) fn fetch_cacheable_script_text_callback_with_load<F>(
         &self,
         mut request: Request,
         resource_load: loads::ResourceLoadLease,
@@ -539,31 +521,12 @@ impl ResourceRequestClient {
             return started_fetch;
         }
 
-        let page_cache_partition_id = self.page_network_policy.memory_cache_partition_id();
-        if let Some(url) = timing_url.as_deref() {
-            tracing::info!(
-                target: "moli_cdp_nav_timing",
-                url,
-                cacheable = true,
-                page_cache_partition_id,
-                credentials_mode = request.credentials_mode.as_ref(),
-                cookie_context = ?request.cookie_context,
-                stage = "script_text_cache_lookup_callback",
-            );
-        }
-        let key = script_text_cache_key(&request).for_page_cache_partition(page_cache_partition_id);
-        let lookup = {
-            let mut cache = self.resource_runtime.memory_cache().lock();
-            if request.effective_cache_mode().allows_memory_cache_lookup() {
-                cache.lookup_script_text(key.clone())
-            } else {
-                cache.replace_script_text(key.clone())
-            }
-        };
+        let (key, lookup) =
+            self.lookup_cached_script_text(&request, "script_text_cache_lookup_callback");
 
-        let (load, owns_transport) = match lookup {
-            ScriptTextCacheLookup::Owner(load) => (load, true),
-            ScriptTextCacheLookup::PendingWaiter(load) => (load, false),
+        let (subscription, owns_transport) = match lookup {
+            ScriptTextCacheLookup::Owner(subscription) => (subscription, true),
+            ScriptTextCacheLookup::PendingWaiter(subscription) => (subscription, false),
             ScriptTextCacheLookup::CompletedHit(result) => {
                 let result = result
                     .map(response_with_memory_cache_hit)
@@ -603,7 +566,8 @@ impl ResourceRequestClient {
         }
         let callback_resource_load = resource_load.clone();
         let callback_timing_url = timing_url.clone();
-        let consumer = load.wait_callback(Box::new(move |result| {
+        let load = Arc::clone(subscription.load());
+        let consumer = subscription.wait_callback(Box::new(move |result| {
             callback_resource_load.finish();
             if let (Some(started), Some(url)) = (started, callback_timing_url.as_deref()) {
                 let status = result.as_ref().ok().map(|response| response.status);
@@ -648,27 +612,60 @@ impl ResourceRequestClient {
             cancel_handle,
             move |result| {
                 let result = result.map_err(|error| format!("{error:#}"));
-                request_client
-                    .resource_runtime
-                    .memory_cache()
-                    .lock()
-                    .complete_script_text(
-                        &callback_key,
-                        &owner_load,
-                        &callback_cache_request,
-                        &result,
-                    );
-                owner_load.finish(result.clone());
+                request_client.complete_cached_script_text_load(
+                    &callback_key,
+                    &owner_load,
+                    &callback_cache_request,
+                    result,
+                );
             },
         ) {
             let result = Err(format!("{error:#}"));
-            self.resource_runtime
-                .memory_cache()
-                .lock()
-                .complete_script_text(&key, &load, &cache_request, &result);
-            load.finish(result);
+            self.complete_cached_script_text_load(&key, &load, &cache_request, result);
         }
         Ok(())
+    }
+
+    fn lookup_cached_script_text(
+        &self,
+        request: &Request,
+        stage: &'static str,
+    ) -> (ScriptTextCacheKey, ScriptTextCacheLookup) {
+        let page_cache_partition_id = self.page_network_policy.memory_cache_partition_id();
+        if moli_trace::cdp_nav_timing_enabled() {
+            tracing::info!(
+                target: "moli_cdp_nav_timing",
+                url = %request.url,
+                cacheable = true,
+                page_cache_partition_id,
+                credentials_mode = request.credentials_mode.as_ref(),
+                cookie_context = ?request.cookie_context,
+                stage,
+            );
+        }
+        let key = script_text_cache_key(request).for_page_cache_partition(page_cache_partition_id);
+        let mut cache = self.resource_runtime.memory_cache().lock();
+        let lookup = if request.effective_cache_mode().allows_memory_cache_lookup() {
+            cache.lookup_script_text(key.clone())
+        } else {
+            cache.replace_script_text(key.clone())
+        };
+        (key, lookup)
+    }
+
+    fn complete_cached_script_text_load(
+        &self,
+        key: &ScriptTextCacheKey,
+        load: &SharedScriptTextLoad,
+        request: &Request,
+        result: std::result::Result<Response, String>,
+    ) {
+        self.resource_runtime
+            .memory_cache()
+            .lock()
+            .complete_script_text(key, load, request, &result);
+        // Callbacks may reenter this cache. Its mutex must be released first.
+        load.finish(result);
     }
 
     async fn fetch_text_stream_with_cancel_after_policy(
@@ -1100,6 +1097,33 @@ impl ResourceRequestClient {
         self.resource_runtime.client().prepare_request(request);
     }
 
+    /// Snapshot browser request metadata at admission, using the same header,
+    /// credential and site-context policies as transport dispatch. Protocols
+    /// that expose a request before its response must not start with empty
+    /// headers and cookies and rely on a later CDP-only ExtraInfo update.
+    pub(crate) fn prepare_subresource_request_observation(
+        &self,
+        request: Request,
+    ) -> (
+        moli_fetch::RequestHeaders,
+        Option<moli_cookie_jar::StoredCookieQueryReport>,
+    ) {
+        let mut request = self.bind_browser_site_context(request);
+        self.prepare_service_worker_request(&mut request);
+        let cookie_report = if request.allows_credentials_for_url(&request.url) {
+            moli_fetch::observe_cookie_access_report_for_request(
+                &self.cookie_store(),
+                &request.url,
+                request.network_cookie_context(),
+            )
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
+        (request.interception_request_headers(), cookie_report)
+    }
+
     /// Bind the owner's cookie scope before a caller retains redirect state,
     /// using the same partition handling as transport dispatch.
     pub(crate) fn bind_browser_site_context(&self, mut request: Request) -> Request {
@@ -1171,10 +1195,8 @@ fn streaming_raw_response_from_cached_subresource(
     let mut head = response.head();
     head.from_cache = true;
     head.cache_state = moli_fetch::ResponseCacheState::Local;
-    for redirect in &mut head.redirect_chain {
-        redirect.from_cache = true;
-        redirect.network_extra_info_available = false;
-    }
+    head.cookie_set_reports.clear();
+    mark_redirects_as_cached(&mut head.redirect_chain);
     streaming_raw_response_from_head_and_body(head, response.clone_body_bytes())
 }
 
@@ -1191,11 +1213,20 @@ fn streaming_raw_response_from_local_response(response: Response) -> Result<Stre
 fn response_with_memory_cache_hit(mut response: Response) -> Response {
     response.from_cache = true;
     response.cache_state = moli_fetch::ResponseCacheState::Local;
-    for redirect in &mut response.redirect_chain {
+    response.cookie_set_reports.clear();
+    mark_redirects_as_cached(&mut response.redirect_chain);
+    response.with_network_request_extra_info(None)
+}
+
+fn mark_redirects_as_cached(redirects: &mut [moli_fetch::RedirectInfo]) {
+    for redirect in redirects {
         redirect.from_cache = true;
         redirect.network_extra_info_available = false;
+        redirect.request_extra_info = None;
+        redirect.response_extra_info = None;
+        redirect.redirect_has_extra_info = false;
+        redirect.cookie_set_reports.clear();
     }
-    response
 }
 
 fn streaming_raw_response_from_head_and_body(

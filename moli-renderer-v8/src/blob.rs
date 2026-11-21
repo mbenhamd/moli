@@ -5,8 +5,7 @@ use moli_webapi::blob::{BlobReadMode, BlobRuntime, blob_id_from_object};
 pub(super) use moli_webapi::blob::{
     blob_constructor_callback, blob_data_from_object, blob_mime_type_from_object,
     blob_size_from_object, build_blob_object, build_blob_object_from_data,
-    build_blob_object_unpublished, init_blob_object, install_blob_template_bindings,
-    is_blob_object,
+    build_blob_object_unpublished, install_blob_template_bindings, is_blob_object,
 };
 use std::sync::{Arc, OnceLock};
 
@@ -170,22 +169,9 @@ pub(super) fn release_blob_wrapper_ref(blob_id: BlobId) {
     blob_store().release_blob_wrapper_ref(blob_id);
 }
 
-pub(super) fn buffer_source_has_shared_or_resizable_backing_store(
-    value: v8::Local<'_, v8::Value>,
-) -> bool {
-    if let Ok(buffer) = v8::Local::<v8::ArrayBuffer>::try_from(value) {
-        let backing_store = buffer.get_backing_store();
-        return backing_store.is_shared() || backing_store.is_resizable_by_user_javascript();
-    }
-    if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value)
-        && let Some(backing_store) = view.get_backing_store()
-    {
-        return backing_store.is_shared() || backing_store.is_resizable_by_user_javascript();
-    }
-    false
-}
-
-pub(super) use moli_v8_util::array_buffer_from_bytes;
+pub(super) use moli_v8_util::{
+    array_buffer_from_bytes, buffer_source_has_shared_or_resizable_backing_store,
+};
 
 fn new_uint8_array_from_bytes<'s>(
     scope: &mut v8::PinScope<'s, '_>,

@@ -224,6 +224,8 @@ async fn worker_global_unhandledrejection_event_dispatches_after_microtask_check
     ensure_v8();
     let mut handle = spawn_worker(
         r#"
+        const NativePromiseRejectionEvent = PromiseRejectionEvent;
+        self.PromiseRejectionEvent = function() { throw new Error("public event constructor"); };
         onunhandledrejection = event => {
             const defaultPreventedBefore = event.defaultPrevented;
             event.preventDefault();
@@ -231,6 +233,7 @@ async fn worker_global_unhandledrejection_event_dispatches_after_microtask_check
                 type: event.type,
                 reason: event.reason,
                 promise: event.promise instanceof Promise,
+                native: event instanceof NativePromiseRejectionEvent,
                 cancelable: event.cancelable,
                 defaultPreventedBefore,
                 defaultPreventedAfter: event.defaultPrevented
@@ -245,7 +248,7 @@ async fn worker_global_unhandledrejection_event_dispatches_after_microtask_check
 
     assert_eq!(
         recv_post_json(&mut handle).await,
-        r#"{"type":"unhandledrejection","reason":"worker-boom","promise":true,"cancelable":true,"defaultPreventedBefore":false,"defaultPreventedAfter":true}"#
+        r#"{"type":"unhandledrejection","reason":"worker-boom","promise":true,"native":true,"cancelable":true,"defaultPreventedBefore":false,"defaultPreventedAfter":true}"#
     );
 }
 
@@ -1158,9 +1161,11 @@ async fn worker_error_report_ignores_throwing_accessors() {
         .expect("timed out")
         .expect("channel closed");
     match msg {
-        WorkerToParentMessage::Error {
-            message, filename, ..
-        } => {
+        WorkerToParentMessage::Error(WorkerErrorReport {
+            ref message,
+            ref filename,
+            ..
+        }) => {
             assert!(
                 message.contains("Uncaught"),
                 "message should come from the original report: {message}"
@@ -1202,8 +1207,9 @@ async fn worker_error_report_ignores_throwing_accessors() {
         | WorkerToParentMessage::ServiceWorkerSkipWaiting { .. }
         | WorkerToParentMessage::ServiceWorkerClientsClaim { .. }
         | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-        | WorkerToParentMessage::RuntimeInspectorResponse(_)
         | WorkerToParentMessage::SharedWorkerClosed => panic!("expected worker error"),
+        #[cfg(feature = "devtools")]
+        WorkerToParentMessage::RuntimeInspectorResponse(_) => panic!("expected worker error"),
     }
 }
 
@@ -1424,7 +1430,9 @@ async fn unhandled_classic_worker_top_level_exception_is_runtime_phase() {
         .expect("timed out")
         .expect("channel closed");
     match msg {
-        WorkerToParentMessage::Error { message, phase, .. } => {
+        WorkerToParentMessage::Error(WorkerErrorReport {
+            ref message, phase, ..
+        }) => {
             assert!(
                 message.contains("top-level-runtime"),
                 "expected top-level-runtime, got {message:?}"
@@ -1597,7 +1605,7 @@ async fn worker_syntax_error() {
         .await
         .expect("timed out")
         .expect("channel closed");
-    assert!(matches!(msg, WorkerToParentMessage::Error { .. }));
+    assert!(matches!(msg, WorkerToParentMessage::Error(_)));
 }
 
 #[tokio::test]

@@ -282,18 +282,17 @@ pub(super) enum PageVmRuntimeCommandLifecycleAdvance {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PageVmRuntimeCommandOutputScopeId(pub(super) u64);
 
-pub(super) enum PageVmRuntimeCommandLifecycleTarget {
-    AwaitingExplicitDocumentReplacement,
-    Exact(RendererDocumentLifecycleIdentity),
-}
-
 pub(super) struct PageVmRuntimeCommandOutputScope {
     pub(super) id: PageVmRuntimeCommandOutputScopeId,
+    #[cfg(feature = "devtools")]
     pub(super) inspector_session_id: Option<String>,
+    #[cfg(feature = "devtools")]
     pub(super) protocol_configuration_command:
         Option<RendererInspectorProtocolConfigurationCommand>,
+    #[cfg(feature = "devtools")]
     pub(super) recorder: RendererRuntimeCommandOutputRecorder,
-    pub(super) lifecycle_target: PageVmRuntimeCommandLifecycleTarget,
+    // The command can be admitted before an explicit Document replacement.
+    pub(super) lifecycle_document: Option<RendererDocumentLifecycleIdentity>,
 }
 
 struct PageOwnedScriptExecutionOutcome {
@@ -498,6 +497,7 @@ enum PageOwnedScriptFailureClassification {
         dynamic_kind: crate::dynamic_script_owner::DynamicScriptFailureKind,
         module_failure_policy: Option<crate::host::ModuleFailurePolicy>,
         error_constructor: Option<ScriptErrorConstructorKind>,
+        failed_module: Option<crate::module_runtime::ModuleEntryId>,
     },
 }
 
@@ -515,6 +515,7 @@ impl PageOwnedScriptFailureClassification {
                     ),
                 module_failure_policy: error.module_failure_policy(),
                 error_constructor: error.error_constructor(),
+                failed_module: None,
             },
         )
     }
@@ -523,7 +524,17 @@ impl PageOwnedScriptFailureClassification {
         script: &PreparedScript,
         error: &crate::module_runtime::ModuleLoadError,
     ) -> Self {
+        Self::from_module_error_with_entry(script, error, None)
+    }
+
+    fn from_module_error_with_entry(
+        script: &PreparedScript,
+        error: &crate::module_runtime::ModuleLoadError,
+        root_entry: Option<crate::module_runtime::ModuleEntryId>,
+    ) -> Self {
         let module_failure_policy = crate::host::ModuleFailurePolicy::for_module_load_error(error);
+        let failed_module = root_entry
+            .filter(|_| error.stage() == crate::module_runtime::ModuleLoadStage::Evaluate);
         PageOwnedScriptFailureClassification::Typed {
             dynamic_kind: crate::dynamic_script_owner::DynamicScriptOwner::module_load_failure_kind(
                 script,
@@ -531,6 +542,7 @@ impl PageOwnedScriptFailureClassification {
             ),
             module_failure_policy: Some(module_failure_policy),
             error_constructor: error.error_constructor(),
+            failed_module,
         }
     }
 }
@@ -609,6 +621,7 @@ fn complete_prepared_script_execution_failure(
                 dynamic_kind,
                 module_failure_policy,
                 error_constructor,
+                ..
             } => vm.finish_runtime_owned_script_failure_with_kind(
                 dynamic_script_owner_id,
                 &script,
@@ -627,19 +640,22 @@ fn complete_prepared_script_execution_failure(
             Some(script.url.as_str()),
         );
     } else if vm.parser_owned_module_reports_failure_immediately(&script) {
-        let (module_failure_policy, error_constructor) = match failure_classification {
+        let (module_failure_policy, error_constructor, failed_module) = match failure_classification
+        {
             PageOwnedScriptFailureClassification::Typed {
                 module_failure_policy,
                 error_constructor,
+                failed_module,
                 ..
-            } => (module_failure_policy, error_constructor),
-            PageOwnedScriptFailureClassification::LegacyMessageText => (None, None),
+            } => (module_failure_policy, error_constructor, failed_module),
+            PageOwnedScriptFailureClassification::LegacyMessageText => (None, None, None),
         };
         vm.dispatch_parser_owned_module_failure_and_finish_settlement_best_effort(
             &script,
             &error,
             module_failure_policy,
             error_constructor,
+            failed_module,
         );
     } else {
         let (module_failure_policy, error_constructor) = match failure_classification {
@@ -676,6 +692,7 @@ fn complete_page_owned_prepared_script_execution_failure_body(
                 dynamic_kind,
                 module_failure_policy,
                 error_constructor,
+                ..
             } => (dynamic_kind, module_failure_policy, error_constructor),
             PageOwnedScriptFailureClassification::LegacyMessageText => (
                 crate::dynamic_script_owner::DynamicScriptOwner::legacy_message_failure_kind(
@@ -694,22 +711,25 @@ fn complete_page_owned_prepared_script_execution_failure_body(
             error_constructor,
         )
     } else if vm.parser_owned_inline_importmap_reports_window_error_immediately(&script) {
-        vm.report_window_error_body_best_effort(&error, Some(script.url.as_str()), None);
+        vm.report_window_error_body_best_effort(&error, Some(script.url.as_str()), None, None);
         crate::script_vm::ScriptTerminalBodyActivity::EventDispatchAttempted
     } else if vm.parser_owned_module_reports_failure_immediately(&script) {
-        let (module_failure_policy, error_constructor) = match failure_classification {
+        let (module_failure_policy, error_constructor, failed_module) = match failure_classification
+        {
             PageOwnedScriptFailureClassification::Typed {
                 module_failure_policy,
                 error_constructor,
+                failed_module,
                 ..
-            } => (module_failure_policy, error_constructor),
-            PageOwnedScriptFailureClassification::LegacyMessageText => (None, None),
+            } => (module_failure_policy, error_constructor, failed_module),
+            PageOwnedScriptFailureClassification::LegacyMessageText => (None, None, None),
         };
         vm.dispatch_current_prepared_script_error_body_best_effort(
             &script,
             &error,
             module_failure_policy,
             error_constructor,
+            failed_module,
         )
     } else {
         let (module_failure_policy, error_constructor) = match failure_classification {
@@ -1645,6 +1665,7 @@ pub(crate) struct PageVm {
     pub(super) document_lifecycle: RendererDocumentLifecycleJournalHandle,
     pub(super) runtime_command_settlement: super::RendererRuntimeCommandOutputSettlement,
     pub(super) pending_runtime_command_output: Option<PageVmRuntimeCommandOutputScope>,
+    #[cfg(feature = "devtools")]
     pub(super) next_runtime_command_output_scope_id: u64,
     pub(super) vm: Option<ScriptVm>,
     pub(super) report: ScriptExecutionReport,
@@ -1661,6 +1682,7 @@ pub(crate) struct PageVm {
     // it is now a page resource rather than two unrelated local queues created in different
     // phases.
     pub(super) page_task_queue: PageTaskQueue,
+    #[cfg(feature = "devtools")]
     page_action_window: page_action_window::RendererPageActionWindow,
     next_module_script_evaluation_reaction_id: u64,
     target_stage: PageVmInitStage,
@@ -2003,9 +2025,9 @@ impl PageVm {
                     "renderer runtime command lifecycle continuation has no active output scope"
                 )
             })?;
-        let document = match scope.lifecycle_target {
-            PageVmRuntimeCommandLifecycleTarget::Exact(document) => document,
-            PageVmRuntimeCommandLifecycleTarget::AwaitingExplicitDocumentReplacement => {
+        let document = match scope.lifecycle_document {
+            Some(document) => document,
+            None => {
                 anyhow::bail!(
                     "runtime command lifecycle observer was not bound at the explicit Document replacement boundary"
                 )
@@ -2029,13 +2051,13 @@ impl PageVm {
                     "renderer runtime command lifecycle continuation has no active output scope"
                 )
             })
-            .and_then(|scope| match scope.lifecycle_target {
+            .and_then(|scope| match scope.lifecycle_document {
                 // No explicit `document.open()` replacement was installed.
                 // A location navigation requested by the command remains a
                 // separate Page-owner action and must not turn the command's
                 // already-produced inspector response into an error.
-                PageVmRuntimeCommandLifecycleTarget::AwaitingExplicitDocumentReplacement => Ok(()),
-                PageVmRuntimeCommandLifecycleTarget::Exact(document) => {
+                None => Ok(()),
+                Some(document) => {
                     ensure!(
                         document == current_document,
                         "runtime command lifecycle observer was replaced before command completion"
@@ -2632,6 +2654,7 @@ impl PageVm {
                     dynamic_kind,
                     module_failure_policy,
                     error_constructor,
+                    ..
                 },
             ) if dynamic_kind.is_deferrable_module() => {
                 self.vm_mut()
@@ -3989,7 +4012,8 @@ impl PageVm {
                     self.report_snapshot_cache = None;
                 }
             }
-            super::RendererPageStateCapturePolicy::ProtocolTurn => {
+            super::RendererPageStateCapturePolicy::ProtocolTurn
+            | super::RendererPageStateCapturePolicy::BackgroundInitialization => {
                 if self.report.mark_globals_snapshot_dirty() {
                     self.report_snapshot_cache = None;
                 }
@@ -4438,6 +4462,7 @@ impl PageVm {
             document_lifecycle,
             runtime_command_settlement: super::RendererRuntimeCommandOutputSettlement::default(),
             pending_runtime_command_output: None,
+            #[cfg(feature = "devtools")]
             next_runtime_command_output_scope_id: 1,
             vm: Some(vm),
             report,
@@ -4447,6 +4472,7 @@ impl PageVm {
             devtools: devtools::PageDevToolsState::new(env),
             last_published_document_title: String::new(),
             page_task_queue,
+            #[cfg(feature = "devtools")]
             page_action_window: page_action_window::RendererPageActionWindow::default(),
             next_module_script_evaluation_reaction_id: 0,
             target_stage: PageVmInitStage::Load,
@@ -4780,19 +4806,6 @@ impl PageVm {
         Some(self.renderer_backend_node_id_for_node_key(document_id, handle))
     }
 
-    pub(super) fn renderer_backend_node_id_for_inspector_node(
-        &mut self,
-        host: DomHandle,
-        inspector_identity: moli_page_types::DocumentNodeInspectorIdentity,
-    ) -> Option<u32> {
-        let document_id = self.vm().document_id_for_live_node_handle(host)?;
-        Some(self.dom_agent_state.backend_node_id_for_inspector_node(
-            document_id,
-            host,
-            inspector_identity,
-        ))
-    }
-
     fn renderer_backend_node_id_for_node_key(
         &self,
         document_id: DocumentId,
@@ -4832,21 +4845,6 @@ impl PageVm {
         self.dom_agent_state
             .remove_stale_backend_node_id(backend_node_id, key);
         None
-    }
-
-    fn current_dom_agent_document_id(&self) -> Option<DocumentId> {
-        self.vm()
-            .current_main_document_task_owner()
-            .map(|owner| owner.document_id)
-            .or_else(|| {
-                let document_handle = self
-                    .vm()
-                    .document_runtime
-                    .dom_host()
-                    .dom()
-                    .document_node_id();
-                self.vm().document_id_for_live_node_handle(document_handle)
-            })
     }
 
     /// Returns the exact authority for the currently committed main Document.
@@ -5008,19 +5006,11 @@ mod tests;
 impl PageVm {
     pub(super) fn absorb_pending_dom_mutations_into_output_journal(&mut self) {}
     pub(crate) fn flush_pending_dom_mutation_event_batches(&mut self) {}
-    pub(super) fn sync_devtools_dom_mutation_recording_interest(&self) {}
     pub(super) fn prepare_dom_agent_for_main_document_dom_content_loaded(
         &mut self,
         document: RendererDocumentLifecycleIdentity,
     ) -> bool {
         self.document_lifecycle.identity() == document
-    }
-}
-
-#[cfg(not(feature = "devtools"))]
-impl PageVm {
-    pub(super) fn document_dom_agent_includes_whitespace(&self, _session: Option<&str>) -> bool {
-        false
     }
 }
 

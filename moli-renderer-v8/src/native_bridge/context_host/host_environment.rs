@@ -1,5 +1,6 @@
 use crate::content_security_policy::ContentSecurityPolicy;
 
+#[cfg(feature = "devtools")]
 use std::collections::HashSet;
 
 use super::{
@@ -12,7 +13,6 @@ use crate::{
     dom::native::{
         DocumentReadyState, DomStylesheetOwnerChange, DomStylesheetOwnerChangeKind, Node,
     },
-    native_bridge::element::label_control_handle,
     network::context::DocumentResourceLoader,
     style_engine::{
         AdoptedStyleSheetInstallation, CssCustomPropertyRegistration,
@@ -26,10 +26,13 @@ use crate::{
         context_bootstrap::{
             SharedStorageBucketStore, SharedWebStorageStore, WeakIndexedDbManager,
         },
-        types::{SubresourceInterceptionClasses, SubresourceResourceType},
+        types::SubresourceResourceType,
     },
 };
 use dom::ElementState as StyloElementState;
+
+#[cfg(feature = "devtools")]
+use crate::native_bridge::element::label_control_handle;
 
 fn push_unique_handle(handles: &mut Vec<DomHandle>, handle: DomHandle) {
     if !handles.contains(&handle) {
@@ -37,6 +40,7 @@ fn push_unique_handle(handles: &mut Vec<DomHandle>, handle: DomHandle) {
     }
 }
 
+#[cfg(feature = "devtools")]
 fn hover_chain_for_input_hit(runtime: &PageScriptHost, hit: Option<DomHandle>) -> Vec<DomHandle> {
     let mut hovered = Vec::new();
     let mut visited = HashSet::new();
@@ -143,6 +147,7 @@ impl PageScriptHost {
         document: DomHandle,
         css_text: &str,
         base_url: url::Url,
+        parsed_stylesheet: Option<&moli_stylesheet_blocking::StylesheetImportParsedResponse>,
     ) -> crate::live_stylesheet::LiveStylesheetRef {
         let quirks_mode = self
             .dom_host()
@@ -156,6 +161,7 @@ impl PageScriptHost {
                 base_url,
                 quirks_mode,
                 self.style_engine.author_shared_lock(),
+                parsed_stylesheet,
             )
     }
 
@@ -196,10 +202,15 @@ impl PageScriptHost {
         base_url: url::Url,
         sheet_url: url::Url,
         origin_clean: bool,
+        parsed_stylesheet: Option<&moli_stylesheet_blocking::StylesheetImportParsedResponse>,
     ) -> Option<crate::document_runtime::PreparedLinkedStylesheetResource> {
         let document = self.dom_host().owner_document_handle(owner)?;
-        let template =
-            self.create_linked_live_stylesheet_template(document, css_text, base_url.clone());
+        let template = self.create_linked_live_stylesheet_template(
+            document,
+            css_text,
+            base_url,
+            parsed_stylesheet,
+        );
         let (has_import_rules, import_urls) = template.top_level_import_state();
         if !has_import_rules {
             template.share_initial_contents();
@@ -687,6 +698,10 @@ impl PageScriptHost {
             .document_resource_loaders
             .get(retired_owner)
             .expect("document.open() requires its exact source resource authority");
+        // Parser source loads belong to the discarded parser, unlike Window
+        // Fetch/XHR consumers that survive document.open(). Cancel them before
+        // transferring the surviving loads to the replacement registry.
+        self.retire_child_classic_script_network_loads(retired.load_diagnostics().registry_id);
         let replacement = DocumentResourceLoader::for_committed_document(context, source);
         let transferred_loads = retired.transfer_existing_loads_to(&replacement);
         self.retire_document_resource_loader(retired_owner)
@@ -816,6 +831,7 @@ impl PageScriptHost {
         self.protocol_user_gesture_activation_depth > 0
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn replace_current_input_event(
         &mut self,
         event: Option<crate::native_bridge::CurrentInputEvent>,
@@ -1806,17 +1822,37 @@ impl PageScriptHost {
             )
     }
 
-    pub(crate) fn prepare_style_observation_targets(
+    pub(crate) fn style_world_update_plan_for_observation(
         &self,
         document: DomHandle,
-        handles: &[DomHandle],
-    ) {
-        self.style_engine.prepare_style_observation_targets(
+        viewport: StyleViewport,
+        environment: StyloStyleEnvironment,
+        tree_scope_versions: crate::style_engine::StyleTreeScopeVersions,
+    ) -> Option<crate::style_engine::StyleWorldUpdatePlan> {
+        self.style_engine.style_world_update_plan_for_observation(
+            self.dom_host(),
+            document,
+            viewport,
+            environment,
+            tree_scope_versions,
+        )
+    }
+
+    pub(crate) fn with_style_resolution_pass<R>(
+        &self,
+        document: DomHandle,
+        update: Option<&PreparedStyleWorldUpdate>,
+        resolve: impl FnOnce(&mut crate::style_engine::StyleResolutionPass<'_, '_>) -> R,
+    ) -> R {
+        let source_context =
+            update.map(|_| self.style_source_document_context_for_read_document(document));
+        self.style_engine.with_style_resolution_pass(
             self.dom_host(),
             self.document_url(),
             document,
-            handles,
-        );
+            update.zip(source_context.as_ref().map(|context| context.as_ref())),
+            resolve,
+        )
     }
 
     pub(crate) fn computed_style_snapshot_from_current_observation(
@@ -1877,27 +1913,7 @@ impl PageScriptHost {
             )
     }
 
-    pub(crate) fn computed_anonymous_style_snapshot_from_current_observation(
-        &self,
-        owner: DomHandle,
-        parent_style: &style::properties::ComputedValues,
-        anonymous_kind: crate::style_engine::StyloAnonymousBoxKind,
-        document_context: &OwnedStyleSourceDocumentContext,
-        read_document: DomHandle,
-    ) -> Option<crate::style_engine::StyloComputedStyleSnapshot> {
-        self.style_engine
-            .computed_anonymous_style_snapshot_from_current_observation(
-                self.dom_host(),
-                self.document_url(),
-                owner,
-                parent_style,
-                anonymous_kind,
-                document_context.as_ref(),
-                read_document,
-            )
-    }
-
-    #[cfg(test)]
+    #[cfg(all(test, feature = "devtools"))]
     pub(crate) fn stylo_computed_style_property_reads_for_test(&self) -> u64 {
         self.stylo_computed_style_property_reads.get()
     }
@@ -2047,6 +2063,7 @@ impl PageScriptHost {
             );
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn set_hovered_element_for_input(&mut self, hit: Option<DomHandle>) -> bool {
         let next = hover_chain_for_input_hit(self, hit);
         let previous = self.dom_host().hovered_element_handles();
@@ -2771,7 +2788,7 @@ impl PageScriptHost {
     #[cfg(any(test, feature = "devtools"))]
     pub(crate) fn set_fetch_subresource_interception(
         &mut self,
-        classes: SubresourceInterceptionClasses,
+        classes: crate::types::SubresourceInterceptionClasses,
     ) {
         self.page_network_policy
             .set_subresource_interception(classes);

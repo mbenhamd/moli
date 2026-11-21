@@ -109,6 +109,146 @@ fn create_image_bitmap_matches_chromium_offscreen_canvas_and_close_contract() {
 }
 
 #[test]
+fn canvas_html_and_offscreen_draw_with_modern_fill_and_stroke_colors() {
+    let mut vm = new_storage_test_vm("https://canvas-css-colors.test/");
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  for (const canvas of [document.createElement('canvas'), new OffscreenCanvas(8, 8)]) {
+    canvas.width = canvas.height = 8;
+    const ctx = canvas.getContext('2d');
+    ctx.lineWidth = 2;
+    const pixel = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data);
+    for (const [color, expected] of [
+      ['oklch(0.5 0 0)', [99, 99, 99, 255]],
+      ['hsl(120 100% 50%)', [0, 255, 0, 255]],
+      ['color(srgb 1 0 0 / 0.5)', [255, 0, 0, 128]],
+      ['color-mix(in srgb, red 50%, blue 50%)', [128, 0, 128, 255]],
+    ]) {
+      ctx.fillStyle = 'black';
+      ctx.strokeStyle = 'black';
+      ctx.fillStyle = color;
+      ctx.strokeStyle = color;
+      const style = ctx.fillStyle;
+      if (ctx.strokeStyle !== style) throw new Error('stroke color differs');
+      for (const invalid of ['oklch(invalid)', 'CanvasText', 'light-dark(red, blue)',
+                             'currentcolor', 'rgb(1, 2, 3, 1, 0)', 'rgb(50%, 0, 0)']) {
+        ctx.fillStyle = invalid;
+        ctx.strokeStyle = invalid;
+        if (ctx.fillStyle !== style || ctx.strokeStyle !== style) {
+          throw new Error("invalid assignment changed the style: " + invalid);
+        }
+      }
+      ctx.clearRect(0, 0, 8, 8);
+      ctx.fillRect(0, 0, 1, 1);
+      ctx.strokeRect(2, 2, 4, 4);
+      for (const rgba of [pixel(0, 0), pixel(4, 2)]) {
+        if (rgba.some((value, index) => Math.abs(value - expected[index]) > 1)) {
+          throw new Error(color + ': ' + rgba + ' != ' + expected);
+        }
+      }
+    }
+
+    ctx.clearRect(0, 0, 8, 8);
+    ctx.fillStyle = 'color(srgb 1 0 0 / 0.1)';
+    ctx.globalAlpha = 0.6;
+    ctx.fillRect(0, 0, 1, 1);
+    if (pixel(0, 0)[3] !== 15) throw new Error('alpha was quantized before drawing');
+  }
+  return 'ok';
+})()
+"#,
+        )
+        .expect("HTML and OffscreenCanvas should draw with modern CSS colors");
+    assert_eq!(result, "ok");
+}
+
+#[test]
+fn canvas_style_getters_keep_modern_color_spaces_and_precision() {
+    let mut vm = new_storage_test_vm("https://canvas-color-serialization.test/");
+    let result = vm
+        .eval(
+            r##"
+(() => {
+  for (const canvas of [document.createElement('canvas'), new OffscreenCanvas(2, 2)]) {
+    const ctx = canvas.getContext('2d');
+    for (const [input, expected] of [
+      ['rgb(1, 2, 3)', '#010203'],
+      ['rgb(1 2 3)', '#010203'],
+      ['#ff000080', 'rgba(255, 0, 0, 0.5)'],
+      ['rgba(255, 0, 0, 0.9999)', 'rgba(255, 0, 0, 0.9999)'],
+      ['lab(29% 39 20)', 'lab(29 39 20)'],
+      ['oklch(0.543218 0.12 33.25)', 'oklch(0.543218 0.12 33.25)'],
+      ['color(srgb 1 0 0 / 0.5)', 'color(srgb 1 0 0 / 0.5)'],
+      ['color-mix(in srgb, red 50%, blue 50%)', 'color(srgb 0.5 0 0.5)'],
+      ['color(display-p3 1 0.25 0 / 0.1234567)', 'color(display-p3 1 0.25 0 / 0.123457)'],
+      ['rgb(none 0 0)', 'color(srgb none 0 0)'],
+      ['hsl(none 20% 30% / none)', 'hsl(none 20% 30% / none)'],
+    ]) {
+      ctx.fillStyle = input;
+      ctx.strokeStyle = input;
+      if (ctx.fillStyle !== expected || ctx.strokeStyle !== expected) {
+        throw new Error(input + ': ' + [ctx.fillStyle, ctx.strokeStyle] + ' != ' + expected);
+      }
+    }
+    canvas.width = canvas.width;
+    if (ctx.fillStyle !== '#000000' || ctx.strokeStyle !== '#000000') {
+      throw new Error('resizing did not reset both colors');
+    }
+  }
+  return 'ok';
+})()
+"##,
+        )
+        .expect("Canvas getters should serialize typed colors");
+    assert_eq!(result, "ok");
+}
+
+#[test]
+fn canvas_styles_round_trip_hsl_and_hwb_with_non_finite_components() {
+    let mut vm = new_storage_test_vm("https://canvas-color-round-trip.test/");
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  for (const canvas of [document.createElement('canvas'), new OffscreenCanvas(2, 2)]) {
+    const ctx = canvas.getContext('2d');
+    for (const [input, expected] of [
+      ['hsl(from red none calc(infinity * 1%) 50%)',
+       'hsl(from black none calc(infinity * 1%) 50%)'],
+      ['hwb(from red none calc(infinity * 1%) 20%)',
+       'hwb(from black none calc(infinity * 1%) 20%)'],
+      ['hwb(from red 120 none calc(-infinity * 1%) / 0.5)',
+       'hwb(from black 120 none calc(-infinity * 1%) / 0.5)'],
+      ['hsl(120 none calc(NaN * 1%))', 'hsl(120 none calc(NaN * 1%))'],
+      ['hwb(calc(infinity) 10% none)', 'hwb(calc(NaN) 10% none)'],
+      ['hsl(from red none 125% 30% / none)', 'hsl(from black none 125% 30% / none)'],
+    ]) {
+      for (const property of ['fillStyle', 'strokeStyle']) {
+        ctx[property] = 'white';
+        ctx[property] = input;
+        const serialized = ctx[property];
+        if (serialized !== expected) {
+          throw new Error(property + ' serialized ' + input + ' as ' + serialized);
+        }
+        ctx[property] = 'white';
+        ctx[property] = serialized;
+        if (ctx[property] !== serialized) {
+          throw new Error(property + ' reparsed ' + serialized + ' as ' + ctx[property]);
+        }
+      }
+    }
+  }
+  return 'ok';
+})()
+"#,
+        )
+        .expect("Canvas HSL and HWB styles should round-trip through CSS strings");
+    assert_eq!(result, "ok");
+}
+
+#[test]
 fn webgl_viewport_state_matches_chromium_on_html_and_offscreen_contexts() {
     let mut vm = new_storage_test_vm("https://webgl-viewport.test/");
     let result = vm
@@ -508,6 +648,50 @@ fn webgl_shader_pipeline_cleanup_and_uniform_methods_are_available() {
         result,
         r#"{"methods":[["deleteShader","function",1,true],["deleteProgram","function",1,true],["uniform2fv","function",2,true],["uniform1f","function",2,true]],"constants":[35713,35714],"status":[true,true],"returns":[true,true,true,true,true]}"#
     );
+}
+
+#[test]
+fn webgl_vector_uniforms_and_buffer_cleanup_share_webidl_bindings() {
+    let mut vm = new_storage_test_vm("https://webgl-vector-uniforms.test/");
+    let result = vm
+        .eval(
+            r#"(() => {
+                const throwsTypeError = action => {
+                    try { action(); } catch (error) { return error.name === 'TypeError'; }
+                    return false;
+                };
+                const checks = [];
+                for (const makeCanvas of [() => document.createElement('canvas'), () => new OffscreenCanvas(1, 1)]) {
+                    for (const kind of ['webgl', 'webgl2']) {
+                        const gl = makeCanvas().getContext(kind);
+                        const location = gl.getUniformLocation(gl.createProgram(), 'color');
+                        const prototype = Object.getPrototypeOf(gl);
+                        let conversions = 0;
+                        const component = { valueOf() { conversions++; return 0.5; } };
+                        checks.push(
+                            Object.hasOwn(prototype, 'uniform3f') && gl.uniform3f.length === 4,
+                            Object.hasOwn(prototype, 'uniform4f') && gl.uniform4f.length === 5,
+                            Object.hasOwn(prototype, 'deleteBuffer') && gl.deleteBuffer.length === 1,
+                            gl.uniform3f(location, NaN, Infinity, 1) === undefined,
+                            gl.uniform4f(location, component, 0, 0, 1) === undefined,
+                            gl.uniform4f(null, component, 0, 0, 1) === undefined,
+                            conversions === 2,
+                            gl.deleteBuffer(gl.createBuffer()) === undefined,
+                            gl.deleteBuffer(null) === undefined,
+                            throwsTypeError(() => gl.uniform4f(location, 0, 0, 1)),
+                            throwsTypeError(() => gl.uniform3f({}, 0, 0, 0)),
+                            throwsTypeError(() => gl.uniform4f(location, Symbol(), 0, 0, 1)),
+                            throwsTypeError(() => prototype.uniform4f.call({}, location, 0, 0, 0, 1)),
+                            throwsTypeError(() => gl.deleteBuffer(location)),
+                            gl.getError() === gl.NO_ERROR
+                        );
+                    }
+                }
+                return JSON.stringify(checks.flatMap((passed, index) => passed ? [] : [index]));
+            })()"#,
+        )
+        .expect("WebGL uniform and cleanup methods should be callable on both context types");
+    assert_eq!(result, "[]");
 }
 
 #[test]
@@ -1205,7 +1389,7 @@ fn html_canvas_fill_style_getter_canonicalizes_supported_values() {
         )
         .expect("canvas fillStyle canonicalization should evaluate");
 
-    assert_eq!(result, r##"["#663399","#aabbcc","rgba(255, 0, 0, 0.50)"]"##);
+    assert_eq!(result, r##"["#663399","#aabbcc","rgba(255, 0, 0, 0.5)"]"##);
 }
 
 #[test]

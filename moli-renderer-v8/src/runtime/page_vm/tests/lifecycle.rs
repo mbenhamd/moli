@@ -10,7 +10,7 @@ use crate::{
     RendererDocumentLifecycleEventKind, RendererDocumentLifecycleIdentity,
     RendererDocumentLifecycleMilestone, RendererDocumentLifecycleWaitOutcome,
     RendererDocumentTerminationReason, RendererLifecycleStartReason, RendererPageReply,
-    RendererPageState, RendererRuntimeInspectorMessage,
+    RendererPageState,
     page_task_queue::PostParseLifecycleWork,
     runtime::document_lifecycle_turn::DocumentLifecycleNavigationTiming,
     script_vm::{
@@ -20,8 +20,9 @@ use crate::{
         MainDocumentLifecycleTargetRejection,
     },
 };
-use serde_json::Value;
 use std::sync::Arc;
+#[cfg(feature = "devtools")]
+use {crate::RendererRuntimeInspectorMessage, serde_json::Value};
 
 #[cfg(feature = "devtools")]
 #[test]
@@ -3184,6 +3185,7 @@ document.body.appendChild(replacementFrame);
                                     "retired child classic failed".to_owned(),
                                 ))),
                                 network_attribution: ChildClassicScriptNetworkAttribution {
+                                    request_handle: None,
                                     frame_id: Some("retired-child-classic-frame".to_owned()),
                                     document_url: Url::parse(
                                         "https://old-document.test/classic-child",

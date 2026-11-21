@@ -5,7 +5,7 @@ use super::super::{
     broadcast_channel::broadcast_channel_constructor_callback,
     canvas::{
         canvas_rendering_context_2d_constructor_callback, offscreen_canvas_constructor_callback,
-        offscreen_canvas_rendering_context_2d_constructor_callback, path2d_constructor_callback,
+        offscreen_canvas_rendering_context_2d_constructor_callback, path_2d_constructor_callback,
         webgl_debug_renderer_info_constructor_callback, webgl_lose_context_constructor_callback,
         webgl_rendering_context_constructor_callback,
     },
@@ -271,6 +271,9 @@ pub(in crate::context_bootstrap) fn build_constructor_template_for_profile<'s>(
         ConstructorKind::PageRevealEvent => {
             build_event_subclass_template(scope, EventSubclassKind::PageRevealEvent)
         }
+        ConstructorKind::PageSwapEvent => {
+            build_event_subclass_template(scope, EventSubclassKind::PageSwapEvent)
+        }
         ConstructorKind::PageTransitionEvent => {
             build_event_subclass_template(scope, EventSubclassKind::PageTransitionEvent)
         }
@@ -445,20 +448,20 @@ pub(in crate::context_bootstrap) fn build_constructor_template_for_profile<'s>(
             let _ = instance.set_internal_field_count(1);
             template
         }
+        ConstructorKind::Path2D => {
+            v8::FunctionTemplate::builder(moli_webapi_declare::web_api_constructor!(
+                web_api_interfaces::Path2D,
+                path_2d_constructor_callback
+            ))
+            .length(0)
+            .build(scope)
+        }
         ConstructorKind::OffscreenCanvas => {
             v8::FunctionTemplate::builder(moli_webapi_declare::web_api_constructor!(
                 web_api_interfaces::OffscreenCanvas,
                 offscreen_canvas_constructor_callback
             ))
             .length(2)
-            .build(scope)
-        }
-        ConstructorKind::Path2D => {
-            v8::FunctionTemplate::builder(moli_webapi_declare::web_api_constructor!(
-                web_api_interfaces::Path2D,
-                path2d_constructor_callback
-            ))
-            .length(0)
             .build(scope)
         }
         ConstructorKind::CanvasRenderingContext2D => {

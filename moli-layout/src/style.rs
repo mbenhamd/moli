@@ -1353,18 +1353,26 @@ impl ResolvedLayoutStyle {
         }
     }
 
+    pub(crate) fn has_explicit_generated_content(&self) -> bool {
+        matches!(self.generated_content, GeneratedContent::Items { .. })
+    }
+
     /// Like Chromium, `::marker { content: '' }` generates no marker box, so
     /// the list item's text starts where it would with `content: none`. An
     /// empty `::before`/`::after` string still generates its (empty) box.
-    pub(crate) fn generates_pseudo_box(&self, marker: bool) -> bool {
+    pub(crate) fn generates_marker_box(&self) -> bool {
         match &self.generated_content {
-            GeneratedContent::Normal => marker,
+            GeneratedContent::Normal => true,
             GeneratedContent::None => false,
             GeneratedContent::Items {
                 text,
                 has_unsupported_items,
-            } => !marker || *has_unsupported_items || !text.is_empty(),
+            } => *has_unsupported_items || !text.is_empty(),
         }
+    }
+
+    pub(crate) fn has_normal_generated_content(&self) -> bool {
+        matches!(self.generated_content, GeneratedContent::Normal)
     }
 
     pub(crate) fn has_unsupported_generated_content(&self) -> bool {

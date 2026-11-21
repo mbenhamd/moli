@@ -131,6 +131,24 @@ impl PageScriptHost {
         self.page_script_environment.as_ref()?.upgrade()
     }
 
+    pub(crate) fn emit_diagnostic(
+        &self,
+        build: impl FnOnce(crate::DiagnosticSource) -> Option<crate::DiagnosticEvent>,
+    ) {
+        self.browser_context_runtime.diagnostics().emit(|| {
+            let page_id = self.page_script_environment()?.page_id();
+            build(crate::DiagnosticSource::Page { page_id })
+        });
+    }
+
+    pub(crate) fn emit_script_load_failure(&self, url: &str, message: &str) {
+        self.emit_diagnostic(|source| {
+            Some(crate::DiagnosticEvent::script_load_failure(
+                source, url, url, message,
+            ))
+        });
+    }
+
     #[cfg(test)]
     pub(crate) fn bind_auxiliary_window_for_test(
         &mut self,
@@ -483,6 +501,7 @@ impl PageScriptHost {
             active_pointer_capture_ids: HashSet::new(),
             pending_pointer_capture_targets: HashMap::new(),
             pointer_capture_targets: HashMap::new(),
+            #[cfg(feature = "devtools")]
             mouse_input: mouse_click::MouseInputState::default(),
             lazy_media_load_candidates: HashSet::new(),
             canvas_resources: super::canvas_resources::CanvasResourceStore::new(
@@ -511,6 +530,7 @@ impl PageScriptHost {
             child_document_script_ready_tasks:
                 super::document_script_ready_inputs::ChildDocumentScriptReadyTaskLedger::default(),
             pending_child_external_classic_document_scripts: HashMap::new(),
+            pending_child_classic_script_network_loads: HashMap::new(),
             pending_child_modulepreload_work_awaiting_realm: VecDeque::new(),
             character_data_utf16_overrides: HashMap::new(),
             child_meta_refresh_navigations: HashMap::new(),

@@ -9,10 +9,9 @@ use moli_selector::StyloSourceDependencySummary;
 use style::{
     context::QuirksMode,
     device::{Device, servo::FontMetricsProvider},
-    font_face::{
-        FontFaceRule, FontFaceSourceFormat, FontFaceSourceFormatKeyword, Source, SourceList,
-    },
+    font_face::{FontFaceRule, Source, SourceList},
     font_metrics::FontMetrics,
+    moli_font_face::supports_font_source,
     properties::{ComputedValues, style_structs::Font},
     servo::media_features::PointerCapabilities,
     servo_arc::Arc as ServoArc,
@@ -137,8 +136,17 @@ pub(super) fn install_active_stylesheet(
 pub(super) fn style_source_metadata_for_css_text(
     css_text: &str,
     base_url: &url::Url,
-) -> StyleSourceMetadata {
-    style_source_metadata_for_css_text_with_origin(css_text, base_url, Origin::Author)
+) -> (StyleSourceMetadata, Vec<url::Url>) {
+    let stylesheet = moli_css_parse::parse_detached_author_stylesheet_with_stylo(
+        css_text,
+        base_url,
+        QuirksMode::NoQuirks,
+    );
+    let imports = moli_css_parse::stylesheet_imports_from_native_with_stylo(&stylesheet);
+    (
+        style_source_metadata_for_stylesheet(&stylesheet),
+        imports.urls,
+    )
 }
 
 pub(in crate::style_engine) fn style_source_metadata_for_stylesheet(
@@ -309,7 +317,7 @@ fn native_font_sources(source_list: &SourceList) -> Vec<moli_css_parse::CssFontS
             let Source::Url(source) = source else {
                 return None;
             };
-            if !native_font_source_format_is_supported(source.format_hint.as_ref()) {
+            if !supports_font_source(source) {
                 return None;
             }
             let url = source.url.url()?;
@@ -317,29 +325,6 @@ fn native_font_sources(source_list: &SourceList) -> Vec<moli_css_parse::CssFontS
                 .then(|| moli_css_parse::CssFontSource::Url(url.to_string()))
         })
         .collect()
-}
-
-fn native_font_source_format_is_supported(format: Option<&FontFaceSourceFormat>) -> bool {
-    match format {
-        None => true,
-        Some(FontFaceSourceFormat::Keyword(format)) => matches!(
-            format,
-            FontFaceSourceFormatKeyword::Collection
-                | FontFaceSourceFormatKeyword::Opentype
-                | FontFaceSourceFormatKeyword::Truetype
-                | FontFaceSourceFormatKeyword::Woff
-                | FontFaceSourceFormatKeyword::Woff2
-        ),
-        Some(FontFaceSourceFormat::String(format)) => {
-            let format = format.to_ascii_lowercase();
-            let format =
-                crate::css_resource_urls::legacy_variations_font_format(&format).unwrap_or(&format);
-            matches!(
-                format,
-                "collection" | "opentype" | "otf" | "truetype" | "ttf" | "woff" | "woff2"
-            )
-        }
-    }
 }
 
 pub(super) fn moli_user_agent_source_dependency_summary() -> StdArc<StyloSourceDependencySummary> {
@@ -352,34 +337,15 @@ fn style_source_metadata_for_css_text_with_origin(
     origin: Origin,
 ) -> StyleSourceMetadata {
     let shared_lock = SharedRwLock::new();
-    let stylesheet = DocumentStyleSheet::new(ServoArc::new(parse_stylesheet(
+    let stylesheet = ServoArc::new(parse_stylesheet(
         &shared_lock,
         base_url,
         css_text,
         origin,
         QuirksMode::NoQuirks,
         "",
-    )));
-    let guard = shared_lock.read();
-    let stylist = new_stylist_with_viewport(
-        StyleViewport::default(),
-        StyloStyleEnvironment::default(),
-        QuirksMode::NoQuirks,
-    );
-    let mut cascade_data = CascadeData::new();
-    if cascade_data
-        .add_stylesheet_for_moli_source_metadata(
-            stylist.device(),
-            QuirksMode::NoQuirks,
-            &stylesheet,
-            0,
-            &guard,
-        )
-        .is_err()
-    {
-        return StyleSourceMetadata::default();
-    }
-    style_source_metadata_from_cascade_data(&cascade_data)
+    ));
+    style_source_metadata_for_stylesheet(&stylesheet)
 }
 
 fn style_source_metadata_from_cascade_data(cascade_data: &CascadeData) -> StyleSourceMetadata {

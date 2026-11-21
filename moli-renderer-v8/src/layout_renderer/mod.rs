@@ -7,8 +7,9 @@ mod style_resolver;
 use std::collections::HashMap;
 
 use moli_layout::{
-    DocumentLayoutServices, EmbeddedFrameRenderer, LayoutPassRequest, LayoutPassResult,
-    LayoutViewport, build_layout_pass_with_embedded_frames,
+    DocumentLayoutServices, EmbeddedFrameRenderer, LayoutPassPreparation, LayoutPassRequest,
+    LayoutPassResult, LayoutPassStep, LayoutViewport, PreparedLayoutPass,
+    finish_prepared_layout_pass, verify_incremental_layout_pass,
 };
 
 use crate::{document_runtime::DomHandle, native_bridge::PageScriptHost};
@@ -102,6 +103,7 @@ fn build_native_layout_pass_recursive(
     let mut request = request.with_environment(moli_layout::LayoutEnvironment {
         scrollbars_hidden: runtime.scrollbars_hidden(),
     });
+    let one_shot_request = request;
     // Only live relayout retains a world; print and media overrides resolve a
     // different style world, and the frozen policies stay one-shot.
     if runtime.layout_policy().relayouts_stale_reads()
@@ -124,24 +126,25 @@ fn build_native_layout_pass_recursive(
         request.requests_paint(),
     );
     let source_ready = profile_started.map(|_| std::time::Instant::now());
-    let mut styles = if foreign_object_root {
-        style_resolver::NativeLayoutStyleResolver::for_foreign_object_content(
+    let mut styles_ready = None;
+    let container_query_store = style_resolver::ContainerQueryStoreScope::begin(
+        runtime,
+        document,
+        environment_override.is_some(),
+        foreign_object_root,
+    );
+    let mut resources = None;
+    let result = (|| {
+        let styles = NativeLayoutStyleScope {
             runtime,
             root,
             document,
-            request.viewport,
-        )
-    } else {
-        style_resolver::NativeLayoutStyleResolver::new(
-            runtime,
-            root,
-            document,
-            request.viewport,
             environment_override,
-        )
-    };
-    let styles_ready = profile_started.map(|_| std::time::Instant::now());
-    let result = {
+            foreign_object_root,
+        };
+        let prepared = styles.prepare(&source, services, request, &mut resources, &mut styles_ready)?;
+        let used_retained_world = prepared.used_retained_world();
+        let applied_sizes = prepared.applied_query_container_sizes().map(<[_]>::to_vec);
         let mut frames = NativeEmbeddedFrameRenderer {
             runtime,
             reason: request.reason,
@@ -151,43 +154,44 @@ fn build_native_layout_pass_recursive(
             document_stack,
             embedded_document_services,
         };
-        if services.has_stylesheet_web_fonts() {
-            if let Some(resources) = styles.stylesheet_resources(root) {
-                services.with_stylesheet_font_declarations(
-                    resources.web_fonts().iter().filter_map(|resource| {
-                        let font = resource.web_font()?;
-                        Some(moli_layout::WebFontDeclaration {
-                            slot: font.registration_slot(),
-                            source_key: font.resource_key(),
-                            face: font.face(),
+        with_layout_fonts(services, resources.as_ref(), |services| {
+            let result = finish_prepared_layout_pass(prepared, &source, services, &mut frames)?;
+            verify_incremental_layout_pass(&result, services, used_retained_world, |services| {
+                // Embedded frames verify in their own recursive passes, so the
+                // check renders no frames and compares this document's geometry.
+                let mut full_resources = None;
+                let full = styles
+                    .prepare(
+                        &source,
+                        services,
+                        one_shot_request,
+                        &mut full_resources,
+                        &mut None,
+                    )
+                    .and_then(|prepared| {
+                        with_layout_fonts(services, full_resources.as_ref(), |services| {
+                            finish_prepared_layout_pass(
+                                prepared,
+                                &source,
+                                services,
+                                &mut NoEmbeddedFrames,
+                            )
                         })
-                    }),
-                    |services| {
-                        build_layout_pass_with_embedded_frames(
-                            &source,
-                            &mut styles,
-                            services,
-                            request,
-                            &mut frames,
-                        )
-                    },
-                )
-            } else {
-                Err(moli_layout::LayoutError::source_contract(
-                    "layout fonts",
-                    "missing current stylesheet resource manifest",
-                ))
-            }
-        } else {
-            build_layout_pass_with_embedded_frames(
-                &source,
-                &mut styles,
-                services,
-                request,
-                &mut frames,
-            )
-        }
-    };
+                    });
+                // The full pass ran its own container-query loop. Put back the
+                // sizes the incremental pass ended with so later passes start
+                // from the same state as without the check.
+                if let Some(sizes) = &applied_sizes
+                    && !foreign_object_root
+                {
+                    style_resolver::store_query_container_sizes(runtime, document, sizes);
+                }
+                full
+            });
+            Ok(result)
+        })
+    })();
+    drop(container_query_store);
     if let (Some(started), Some(source_ready), Some(styles_ready)) =
         (profile_started, source_ready, styles_ready)
     {
@@ -206,9 +210,109 @@ fn build_native_layout_pass_recursive(
             success = result.is_ok(),
         );
     }
-    styles.trace_profile(document);
     document_stack.pop();
     result
+}
+
+/// The style inputs of one native layout demand. Each container-query
+/// iteration resolves its styles in a fresh style resolution pass.
+#[derive(Clone, Copy)]
+struct NativeLayoutStyleScope<'a> {
+    runtime: &'a PageScriptHost,
+    root: DomHandle,
+    document: DomHandle,
+    environment_override: Option<crate::style_engine::StyloStyleEnvironment>,
+    foreign_object_root: bool,
+}
+
+impl NativeLayoutStyleScope<'_> {
+    /// Builds and lays out worlds until container-query sizes converge. The
+    /// stylesheet font manifest is read once, in the first resolution pass,
+    /// and every iteration shapes text under its declarations.
+    fn prepare(
+        &self,
+        source: &source_view::NativeLayoutSourceView<'_>,
+        services: &mut DocumentLayoutServices,
+        request: LayoutPassRequest,
+        resources: &mut Option<crate::style_engine::StylesheetResourceSnapshot>,
+        styles_ready: &mut Option<std::time::Instant>,
+    ) -> Result<PreparedLayoutPass<DomHandle>, moli_layout::LayoutError> {
+        let mut preparation: Option<LayoutPassPreparation<DomHandle>> = None;
+        loop {
+            let step = style_resolver::with_layout_root_styles(
+                self.runtime,
+                self.root,
+                self.document,
+                request.viewport,
+                self.environment_override,
+                self.foreign_object_root,
+                |styles| -> Result<_, moli_layout::LayoutError> {
+                    if styles_ready.is_none() && moli_trace::cpu_profile_enabled() {
+                        *styles_ready = Some(std::time::Instant::now());
+                    }
+                    if resources.is_none() && services.has_stylesheet_web_fonts() {
+                        *resources = Some(
+                            self.runtime
+                                .stylesheet_resource_snapshot_for_document(self.document)
+                                .ok_or_else(|| {
+                                    moli_layout::LayoutError::source_contract(
+                                        "layout fonts",
+                                        "missing current stylesheet resource manifest",
+                                    )
+                                })?,
+                        );
+                    }
+                    with_layout_fonts(services, resources.as_ref(), |services| {
+                        preparation
+                            .take()
+                            .unwrap_or_else(|| LayoutPassPreparation::new(services, request))
+                            .prepare(source, styles, services)
+                    })
+                },
+            )?;
+            match step {
+                LayoutPassStep::Ready(prepared) => return Ok(prepared),
+                LayoutPassStep::Restyle(next) => preparation = Some(next),
+            }
+        }
+    }
+}
+
+/// Runs `consume` with this pass's stylesheet `@font-face` declarations
+/// selected, when the Document has stylesheet web fonts.
+fn with_layout_fonts<R>(
+    services: &mut DocumentLayoutServices,
+    resources: Option<&crate::style_engine::StylesheetResourceSnapshot>,
+    consume: impl FnOnce(&mut DocumentLayoutServices) -> R,
+) -> R {
+    let Some(resources) = resources else {
+        return consume(services);
+    };
+    services.with_stylesheet_font_declarations(
+        resources.web_fonts().iter().filter_map(|resource| {
+            let font = resource.web_font()?;
+            Some(moli_layout::WebFontDeclaration {
+                slot: font.registration_slot(),
+                source_key: font.resource_key(),
+                face: font.face(),
+            })
+        }),
+        consume,
+    )
+}
+
+/// The incremental-layout check renders no embedded frames.
+struct NoEmbeddedFrames;
+
+impl EmbeddedFrameRenderer<DomHandle> for NoEmbeddedFrames {
+    fn render_embedded_frame(
+        &mut self,
+        _frame: DomHandle,
+        _viewport: LayoutViewport,
+    ) -> Result<Option<moli_layout::EmbeddedFrameSnapshot<DomHandle>>, moli_layout::LayoutError>
+    {
+        Ok(None)
+    }
 }
 
 struct NativeEmbeddedFrameRenderer<'a> {
@@ -290,7 +394,7 @@ pub(crate) fn build_normalized_native_box_tree_for_test(
         .unwrap_or_else(|| runtime.document_handle());
     let viewport = runtime.layout_viewport_for_document(document);
     let source = source_view::NativeLayoutSourceView::new(runtime, root);
-    let mut styles =
-        style_resolver::NativeLayoutStyleResolver::new(runtime, root, document, viewport, None);
-    moli_layout::build_layout_world(&source, &mut styles).map(|world| world.normalized_tree())
+    style_resolver::with_layout_styles(runtime, document, viewport, None, |styles| {
+        moli_layout::build_layout_world(&source, styles).map(|world| world.normalized_tree())
+    })
 }

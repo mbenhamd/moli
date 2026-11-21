@@ -10,6 +10,13 @@ pub(crate) type NetworkBodySourceId = u64;
 pub(crate) type SharedNavigationResponseResult =
     std::sync::Arc<std::result::Result<NavigationResponse, String>>;
 
+/// Whether the renderer has recorded this request's start. Fetch interception
+/// can assign a handle before that start enters the renderer's network output.
+pub(crate) enum SubresourceRequestStart {
+    Unrecorded(Option<SubresourceNetworkRequestHandle>),
+    Recorded(SubresourceNetworkRequestHandle),
+}
+
 #[derive(Clone)]
 pub(crate) enum SubresourceFetchRegistration {
     Intercepted,
@@ -75,7 +82,7 @@ pub use crate::protocol_types::{
     SubresourceEventSourceMessageReceived, SubresourceInterceptionClasses,
     SubresourceJsonPathEquals, SubresourceJsonPathRegex, SubresourceNetworkOutcome,
     SubresourceNetworkRecord, SubresourceNetworkRequestHandle, SubresourceRequestInitiatorType,
-    SubresourceRequestStarted, SubresourceResourceType, SubresourceResponseBody,
+    SubresourceRequestSnapshot, SubresourceResourceType, SubresourceResponseBody,
     SubresourceResponseBodyWriter, SubresourceResponseStarted, SubresourceResponseWaitCriteria,
     WebSocketFrameDirection, WebSocketFrameOpcode, WebSocketLifecycleEvent, WebSocketLifecycleKind,
     WebSocketNetworkEvent,
@@ -84,6 +91,7 @@ pub use crate::protocol_types::{
 pub(super) enum PendingSubresourceContinuation {
     Beacon,
     CspReport {
+        #[cfg(any(test, feature = "devtools"))]
         client_id: crate::service_worker_runtime::ServiceWorkerClientId,
     },
     EventSource(v8::Global<v8::Object>),
@@ -111,7 +119,7 @@ pub(super) enum PendingSubresourceContinuation {
         use_cors_preflight: bool,
         initiator_url: String,
     },
-    WebSocket(PendingWebSocketConnection),
+    WebSocket(#[cfg(any(test, feature = "devtools"))] PendingWebSocketConnection),
     /// A child frame navigation held before its request leaves the renderer.
     ChildDocument(Box<crate::native_bridge::ChildDocumentFetch>),
 }
@@ -342,9 +350,13 @@ impl ImageRequestKey {
     }
 }
 pub(super) struct PendingWebSocketConnection {
+    #[cfg(any(test, feature = "devtools"))]
     pub(super) connector: Option<moli_fetch::CurlWebSocketConnector>,
+    #[cfg(any(test, feature = "devtools"))]
     pub(super) socket_id: u64,
+    #[cfg(any(test, feature = "devtools"))]
     pub(super) protocols: Vec<String>,
+    #[cfg(any(test, feature = "devtools"))]
     pub(super) connect_options: moli_websocket::ConnectOptions,
 }
 
@@ -590,14 +602,18 @@ pub(super) struct PendingSubresourceResponseState {
     pub(super) request_headers: moli_fetch::RequestHeaders,
     pub(super) request_body: Option<String>,
     pub(super) response: NavigationResponse,
-    pub(super) encoded: Option<moli_parkable_image::ParkableImage>,
-    pub(super) response_status_text: Option<String>,
-    pub(super) skip_fetch_security_validation: bool,
-    pub(super) response_filter: Option<AsyncSubresourceFetchResponseFilter>,
+    #[cfg(any(test, feature = "devtools"))]
+    pub(super) details: PendingSubresourceResponseDetails,
 }
 
 pub(super) struct PendingSubresourceAuthState {
     pub(super) pending: PendingSubresourceFetchState,
+    #[cfg(any(test, feature = "devtools"))]
+    pub(super) response: PendingSubresourceAuthResponse,
+}
+
+#[cfg(any(test, feature = "devtools"))]
+pub(super) struct PendingSubresourceAuthResponse {
     pub(super) request_url: Url,
     pub(super) request_method: String,
     pub(super) request_headers: moli_fetch::RequestHeaders,
@@ -605,6 +621,14 @@ pub(super) struct PendingSubresourceAuthState {
     pub(super) intercept_response: bool,
     pub(super) initial_network_request_headers: Option<Vec<(String, String)>>,
     pub(super) response: NavigationResponse,
+    pub(super) encoded: Option<moli_parkable_image::ParkableImage>,
+    pub(super) response_status_text: Option<String>,
+    pub(super) skip_fetch_security_validation: bool,
+    pub(super) response_filter: Option<AsyncSubresourceFetchResponseFilter>,
+}
+
+#[cfg(any(test, feature = "devtools"))]
+pub(super) struct PendingSubresourceResponseDetails {
     pub(super) encoded: Option<moli_parkable_image::ParkableImage>,
     pub(super) response_status_text: Option<String>,
     pub(super) skip_fetch_security_validation: bool,
@@ -1330,6 +1354,7 @@ impl DocumentWriteExternalScriptLoadCompletion {
 
 #[derive(Clone, Debug)]
 pub(super) struct ChildClassicScriptNetworkAttribution {
+    pub(super) request_handle: Option<SubresourceNetworkRequestHandle>,
     pub(super) frame_id: Option<String>,
     pub(super) document_url: Url,
     pub(super) request_url: Url,

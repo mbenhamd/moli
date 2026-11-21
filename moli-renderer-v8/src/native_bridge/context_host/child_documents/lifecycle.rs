@@ -843,7 +843,8 @@ impl PageScriptHost {
         else {
             return false;
         };
-        let Some(_document) = self.child_browsing_context_document_wrapper(scope, handle) else {
+        let Some(_document) = self.existing_child_browsing_context_document_wrapper(scope, handle)
+        else {
             return false;
         };
         let Some(action) = self

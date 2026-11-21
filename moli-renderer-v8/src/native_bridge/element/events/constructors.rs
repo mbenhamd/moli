@@ -1,14 +1,40 @@
-use crate::runtime::RendererPointerEventProperties;
-use crate::util::{v8_string, v8str};
-use crate::{document_runtime::DomHandle, native_bridge::PageScriptHost};
+#[cfg(any(test, feature = "devtools"))]
+use moli_webapi::events::subclasses::construct_native_keyboard_event;
+pub(crate) use moli_webapi::events::subclasses::{
+    construct_native_command_event as construct_command_event,
+    construct_native_form_data_event as construct_form_data_event,
+    construct_native_interest_event as construct_interest_event,
+    construct_native_toggle_event as construct_toggle_event,
+};
+use moli_webapi::events::subclasses::{
+    construct_native_focus_event, construct_native_input_event, construct_native_submit_event,
+};
+#[cfg(feature = "devtools")]
+mod devtools;
+#[cfg(feature = "devtools")]
+pub(crate) use devtools::{
+    construct_drag_event_with_related_target, construct_drop_input_event,
+    construct_mouse_event_for_target, construct_mouse_event_with_detail_for_target,
+    construct_mouse_event_with_related_target_for_target, construct_pointer_event,
+    construct_pointer_event_with_modifiers, construct_pointer_event_with_related_target,
+    construct_pointer_event_with_related_target_and_modifiers, construct_wheel_event_for_target,
+};
 
-use super::construct_event;
-use moli_webapi_declare::WebApiObject;
+use crate::{document_runtime::DomHandle, native_bridge::PageScriptHost};
+pub(crate) use moli_webapi::events::subclasses::InputEventCoordinates;
+#[cfg(any(test, feature = "devtools"))]
+use moli_webapi::events::subclasses::construct_native_mouse_event;
+use moli_webapi::events::subclasses::{MouseEventInit, construct_native_pointer_click};
+use moli_webapi::events::{construct_native_event, init::EventInit, state::mark_event_trusted};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::native_bridge::element) enum ClickEventSource {
+    #[cfg(any(test, feature = "devtools"))]
     Pointer,
-    Touch { pointer_id: i32 },
+    #[cfg(feature = "devtools")]
+    Touch {
+        pointer_id: i32,
+    },
     UserAgent,
     Script,
 }
@@ -19,134 +45,19 @@ impl ClickEventSource {
     }
 }
 
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct MouseEventInitDeclaration<'scope> {
-    bubbles: bool,
-    cancelable: bool,
-    composed: bool,
-    screen_x: f64,
-    screen_y: f64,
-    client_x: f64,
-    client_y: f64,
-    detail: i32,
-    button: i32,
-    buttons: i32,
-    alt_key: bool,
-    ctrl_key: bool,
-    meta_key: bool,
-    shift_key: bool,
-    related_target: Option<v8::Local<'scope, v8::Value>>,
-    view: Option<v8::Local<'scope, v8::Object>>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct PointerEventInitDeclaration<'scope> {
-    bubbles: bool,
-    cancelable: bool,
-    composed: bool,
-    screen_x: f64,
-    screen_y: f64,
-    client_x: f64,
-    client_y: f64,
-    button: i32,
-    buttons: i32,
-    alt_key: bool,
-    ctrl_key: bool,
-    meta_key: bool,
-    shift_key: bool,
-    pointer_type: v8::Local<'scope, v8::String>,
-    pressure: f64,
-    tangential_pressure: f64,
-    tilt_x: f64,
-    tilt_y: f64,
-    twist: f64,
-    pointer_id: f64,
-    width: f64,
-    height: f64,
-    is_primary: bool,
-    related_target: Option<v8::Local<'scope, v8::Value>>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct DragEventInitDeclaration<'scope> {
-    bubbles: bool,
-    cancelable: bool,
-    composed: bool,
-    screen_x: f64,
-    screen_y: f64,
-    client_x: f64,
-    client_y: f64,
-    alt_key: bool,
-    ctrl_key: bool,
-    meta_key: bool,
-    shift_key: bool,
-    view: v8::Local<'scope, v8::Object>,
-    data_transfer: v8::Local<'scope, v8::Value>,
-    related_target: Option<v8::Local<'scope, v8::Value>>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct WheelEventInitDeclaration<'scope> {
-    bubbles: bool,
-    cancelable: bool,
-    composed: bool,
-    screen_x: f64,
-    screen_y: f64,
-    client_x: f64,
-    client_y: f64,
-    delta_x: f64,
-    delta_y: f64,
-    button: i32,
-    buttons: i32,
-    alt_key: bool,
-    ctrl_key: bool,
-    meta_key: bool,
-    shift_key: bool,
-    view: v8::Local<'scope, v8::Object>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct KeyboardEventInitDeclaration<'scope> {
-    bubbles: bool,
-    cancelable: bool,
-    composed: bool,
-    key: v8::Local<'scope, v8::Value>,
-    code: v8::Local<'scope, v8::Value>,
-    location: u32,
-    char_code: f64,
-    key_code: f64,
-    which: f64,
-    alt_key: bool,
-    ctrl_key: bool,
-    meta_key: bool,
-    shift_key: bool,
-    repeat: bool,
-}
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct InputEventInitDeclaration<'scope> {
-    bubbles: bool,
-    cancelable: bool,
-    composed: bool,
-    input_type: v8::Local<'scope, v8::String>,
-    data: v8::Local<'scope, v8::Value>,
-    data_transfer: v8::Local<'scope, v8::Value>,
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum TextEditInputType {
     None,
     InsertText,
+    #[cfg(feature = "devtools")]
     InsertLineBreak,
+    #[cfg(feature = "devtools")]
     InsertParagraph,
+    #[cfg(feature = "devtools")]
     InsertFromDrop,
+    #[cfg(feature = "devtools")]
     DeleteContentBackward,
+    #[cfg(feature = "devtools")]
     DeleteContentForward,
 }
 
@@ -155,19 +66,27 @@ impl TextEditInputType {
         match self {
             Self::None => "",
             Self::InsertText => "insertText",
+            #[cfg(feature = "devtools")]
             Self::InsertLineBreak => "insertLineBreak",
+            #[cfg(feature = "devtools")]
             Self::InsertParagraph => "insertParagraph",
+            #[cfg(feature = "devtools")]
             Self::InsertFromDrop => "insertFromDrop",
+            #[cfg(feature = "devtools")]
             Self::DeleteContentBackward => "deleteContentBackward",
+            #[cfg(feature = "devtools")]
             Self::DeleteContentForward => "deleteContentForward",
         }
     }
 
     pub(crate) fn data(self, text: &str) -> Option<&str> {
         match self {
-            Self::InsertText | Self::InsertFromDrop => Some(text),
-            Self::None
-            | Self::InsertLineBreak
+            Self::InsertText => Some(text),
+            #[cfg(feature = "devtools")]
+            Self::InsertFromDrop => Some(text),
+            Self::None => None,
+            #[cfg(feature = "devtools")]
+            Self::InsertLineBreak
             | Self::InsertParagraph
             | Self::DeleteContentBackward
             | Self::DeleteContentForward => None,
@@ -351,202 +270,6 @@ fn keyboard_event_key_code_for_printable_key(key: &str) -> Option<u32> {
     })
 }
 
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct FocusEventInitDeclaration<'scope> {
-    bubbles: bool,
-    cancelable: bool,
-    composed: bool,
-    related_target: v8::Local<'scope, v8::Value>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct SimpleEventInitDeclaration {
-    #[webapi(prototype, value = v8::null(scope))]
-    prototype: (),
-    bubbles: bool,
-    cancelable: bool,
-    composed: bool,
-}
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct SubmitEventInitDeclaration<'scope> {
-    #[webapi(prototype, value = v8::null(scope))]
-    prototype: (),
-    bubbles: bool,
-    cancelable: bool,
-    submitter: v8::Local<'scope, v8::Value>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct CommandEventInitDeclaration<'scope> {
-    bubbles: bool,
-    cancelable: bool,
-    composed: bool,
-    source: v8::Local<'scope, v8::Value>,
-    command: v8::Local<'scope, v8::String>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct ToggleEventInitDeclaration<'scope> {
-    bubbles: bool,
-    cancelable: bool,
-    composed: bool,
-    source: v8::Local<'scope, v8::Value>,
-    old_state: v8::Local<'scope, v8::String>,
-    new_state: v8::Local<'scope, v8::String>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct InterestEventInitDeclaration<'scope> {
-    bubbles: bool,
-    cancelable: bool,
-    composed: bool,
-    source: v8::Local<'scope, v8::Value>,
-}
-
-#[derive(Clone, Copy)]
-struct ModifierKeyState {
-    alt: bool,
-    ctrl: bool,
-    meta: bool,
-    shift: bool,
-}
-
-fn modifier_key_state(modifiers: u8) -> ModifierKeyState {
-    ModifierKeyState {
-        alt: modifiers & 1 == 1,
-        ctrl: modifiers & 2 == 2,
-        meta: modifiers & 4 == 4,
-        shift: modifiers & 8 == 8,
-    }
-}
-
-/// Root/screen and target-frame client coordinates for a dispatched input event.
-#[derive(Clone, Copy, Default)]
-pub(crate) struct InputEventCoordinates {
-    pub screen_x: f64,
-    pub screen_y: f64,
-    pub client_x: f64,
-    pub client_y: f64,
-}
-
-impl InputEventCoordinates {
-    pub(crate) fn from_root(x: f64, y: f64) -> Self {
-        // Moli's top-level window is at the screen origin. Frame transforms
-        // change client coordinates without changing this screen position.
-        Self {
-            screen_x: x,
-            screen_y: y,
-            client_x: x,
-            client_y: y,
-        }
-    }
-
-    pub(crate) fn with_client(self, x: f64, y: f64) -> Self {
-        Self {
-            client_x: x,
-            client_y: y,
-            ..self
-        }
-    }
-}
-
-pub(crate) fn construct_mouse_event_with_modifiers<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    coordinates: InputEventCoordinates,
-    button: i32,
-    buttons: i32,
-    modifiers: u8,
-) -> Option<v8::Local<'s, v8::Object>> {
-    construct_mouse_event_with_detail_and_related_target(
-        scope,
-        event_type,
-        coordinates,
-        0,
-        button,
-        buttons,
-        modifiers,
-        None,
-        Some(scope.get_current_context().global(scope)),
-    )
-}
-
-pub(crate) fn construct_mouse_event_with_detail_and_modifiers<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    coordinates: InputEventCoordinates,
-    detail: i32,
-    button: i32,
-    buttons: i32,
-    modifiers: u8,
-) -> Option<v8::Local<'s, v8::Object>> {
-    construct_mouse_event_with_detail_and_related_target(
-        scope,
-        event_type,
-        coordinates,
-        detail,
-        button,
-        buttons,
-        modifiers,
-        None,
-        Some(scope.get_current_context().global(scope)),
-    )
-}
-
-pub(crate) fn construct_mouse_event_with_related_target_and_modifiers<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    coordinates: InputEventCoordinates,
-    button: i32,
-    buttons: i32,
-    related_target: Option<v8::Local<'s, v8::Value>>,
-    modifiers: u8,
-) -> Option<v8::Local<'s, v8::Object>> {
-    construct_mouse_event_with_detail_and_related_target(
-        scope,
-        event_type,
-        coordinates,
-        0,
-        button,
-        buttons,
-        modifiers,
-        related_target,
-        Some(scope.get_current_context().global(scope)),
-    )
-}
-
-fn construct_mouse_event_with_detail_and_related_target<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    coordinates: InputEventCoordinates,
-    detail: i32,
-    button: i32,
-    buttons: i32,
-    modifiers: u8,
-    related_target: Option<v8::Local<'s, v8::Value>>,
-    view: Option<v8::Local<'s, v8::Object>>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let init = mouse_event_init(
-        scope,
-        event_type,
-        coordinates,
-        detail,
-        button,
-        buttons,
-        modifiers,
-        related_target,
-        view,
-    )?;
-    construct_event(scope, "MouseEvent", event_type, init)
-}
-
 fn mouse_event_init<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     event_type: &str,
@@ -557,8 +280,7 @@ fn mouse_event_init<'s>(
     modifiers: u8,
     related_target: Option<v8::Local<'s, v8::Value>>,
     view: Option<v8::Local<'s, v8::Object>>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let modifier_keys = modifier_key_state(modifiers);
+) -> Option<MouseEventInit<'s>> {
     let is_boundary = matches!(event_type, "mouseenter" | "mouseleave");
     let button = if matches!(
         event_type,
@@ -568,207 +290,21 @@ fn mouse_event_init<'s>(
     } else {
         button
     };
-    let init = MouseEventInitDeclaration::new(
-        !is_boundary,
-        !is_boundary,
-        !is_boundary,
-        coordinates.screen_x,
-        coordinates.screen_y,
-        coordinates.client_x,
-        coordinates.client_y,
+    MouseEventInit::from_native(
+        scope,
+        EventInit {
+            bubbles: !is_boundary,
+            cancelable: !is_boundary,
+            composed: !is_boundary,
+        },
+        coordinates,
         detail,
         button,
         buttons,
-        modifier_keys.alt,
-        modifier_keys.ctrl,
-        modifier_keys.meta,
-        modifier_keys.shift,
-        related_target,
-        view,
-    )
-    .bind(scope)
-    .ok()?;
-    init.set_prototype(scope, v8::null(scope).into())?
-        .then_some(())?;
-    Some(init)
-}
-
-#[cfg(feature = "devtools")]
-pub(crate) fn construct_pointer_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    coordinates: InputEventCoordinates,
-    button: i32,
-    buttons: i32,
-    pointer: &RendererPointerEventProperties,
-) -> Option<v8::Local<'s, v8::Object>> {
-    construct_pointer_event_with_modifiers(
-        scope,
-        event_type,
-        coordinates,
-        button,
-        buttons,
-        pointer,
-        0,
-    )
-}
-
-pub(crate) fn construct_pointer_event_with_modifiers<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    coordinates: InputEventCoordinates,
-    button: i32,
-    buttons: i32,
-    pointer: &RendererPointerEventProperties,
-    modifiers: u8,
-) -> Option<v8::Local<'s, v8::Object>> {
-    construct_pointer_event_with_related_target_and_modifiers(
-        scope,
-        event_type,
-        coordinates,
-        button,
-        buttons,
-        pointer,
-        None,
         modifiers,
-    )
-}
-
-#[cfg(feature = "devtools")]
-pub(crate) fn construct_pointer_event_with_related_target<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    coordinates: InputEventCoordinates,
-    button: i32,
-    buttons: i32,
-    pointer: &RendererPointerEventProperties,
-    related_target: Option<v8::Local<'s, v8::Value>>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    construct_pointer_event_with_related_target_and_modifiers(
-        scope,
-        event_type,
-        coordinates,
-        button,
-        buttons,
-        pointer,
         related_target,
-        0,
-    )
-}
-
-pub(crate) fn construct_pointer_event_with_related_target_and_modifiers<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    coordinates: InputEventCoordinates,
-    button: i32,
-    buttons: i32,
-    pointer: &RendererPointerEventProperties,
-    related_target: Option<v8::Local<'s, v8::Value>>,
-    modifiers: u8,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let is_enter_or_leave = matches!(event_type, "pointerenter" | "pointerleave");
-    let pointer_type = v8_string(scope, &pointer.pointer_type)?;
-    let modifier_keys = modifier_key_state(modifiers);
-    let init = PointerEventInitDeclaration::new(
-        !is_enter_or_leave,
-        !is_enter_or_leave
-            && !matches!(
-                event_type,
-                "pointercancel" | "gotpointercapture" | "lostpointercapture"
-            ),
-        true,
-        coordinates.screen_x,
-        coordinates.screen_y,
-        coordinates.client_x,
-        coordinates.client_y,
-        button,
-        buttons,
-        modifier_keys.alt,
-        modifier_keys.ctrl,
-        modifier_keys.meta,
-        modifier_keys.shift,
-        pointer_type,
-        pointer.pressure,
-        pointer.tangential_pressure,
-        pointer.tilt_x,
-        pointer.tilt_y,
-        pointer.twist,
-        f64::from(pointer.pointer_id),
-        1.0,
-        1.0,
-        pointer.is_primary,
-        related_target,
-    )
-    .bind(scope)
-    .ok()?;
-    construct_event(scope, "PointerEvent", event_type, init)
-}
-
-pub(crate) fn construct_drag_event_with_related_target<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    coordinates: InputEventCoordinates,
-    data_transfer: v8::Local<'s, v8::Value>,
-    related_target: Option<v8::Local<'s, v8::Value>>,
-    modifiers: u8,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let modifier_keys = modifier_key_state(modifiers);
-    let view = scope.get_current_context().global(scope);
-    let init = DragEventInitDeclaration::new(
-        true,
-        !matches!(event_type, "dragleave" | "dragend"),
-        true,
-        coordinates.screen_x,
-        coordinates.screen_y,
-        coordinates.client_x,
-        coordinates.client_y,
-        modifier_keys.alt,
-        modifier_keys.ctrl,
-        modifier_keys.meta,
-        modifier_keys.shift,
         view,
-        data_transfer,
-        related_target,
     )
-    .bind(scope)
-    .ok()?;
-    construct_event(scope, "DragEvent", event_type, init)
-}
-
-pub(crate) fn construct_wheel_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    coordinates: InputEventCoordinates,
-    delta_x: f64,
-    delta_y: f64,
-    button: i32,
-    buttons: i32,
-    modifiers: u8,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let modifier_keys = modifier_key_state(modifiers);
-    let init = WheelEventInitDeclaration::new(
-        true,
-        true,
-        true,
-        coordinates.screen_x,
-        coordinates.screen_y,
-        coordinates.client_x,
-        coordinates.client_y,
-        delta_x,
-        delta_y,
-        button,
-        buttons,
-        modifier_keys.alt,
-        modifier_keys.ctrl,
-        modifier_keys.meta,
-        modifier_keys.shift,
-        scope.get_current_context().global(scope),
-    )
-    .bind(scope)
-    .ok()?;
-    init.set_prototype(scope, v8::null(scope).into())?
-        .then_some(())?;
-    construct_event(scope, "WheelEvent", event_type, init)
 }
 
 #[cfg(any(feature = "devtools", test))]
@@ -838,31 +374,10 @@ pub(crate) fn construct_keyboard_event<'s>(
     location: u32,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let (char_code, key_code, which) = keyboard_event_legacy_codes(event_type, key, code);
-    let key = v8_string(scope, key)
-        .map(Into::into)
-        .unwrap_or_else(|| v8::undefined(scope).into());
-    let code = v8_string(scope, code)
-        .map(Into::into)
-        .unwrap_or_else(|| v8::undefined(scope).into());
-    let init = KeyboardEventInitDeclaration::new(
-        true,
-        true,
-        true,
-        key,
-        code,
-        location,
-        char_code as f64,
-        key_code as f64,
-        which as f64,
-        alt,
-        ctrl,
-        meta,
-        shift,
-        repeat,
+    construct_native_keyboard_event(
+        scope, event_type, key, code, alt, ctrl, meta, shift, repeat, location, char_code,
+        key_code, which,
     )
-    .bind(scope)
-    .ok()?;
-    construct_event(scope, "KeyboardEvent", event_type, init)
 }
 
 pub(crate) fn construct_focus_event<'s>(
@@ -871,15 +386,9 @@ pub(crate) fn construct_focus_event<'s>(
     related_target: Option<v8::Local<'s, v8::Value>>,
     bubbles: bool,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let init = FocusEventInitDeclaration::new(
-        bubbles,
-        false,
-        true,
-        related_target.unwrap_or_else(|| v8::null(scope).into()),
-    )
-    .bind(scope)
-    .ok()?;
-    construct_event(scope, "FocusEvent", event_type, init)
+    let event = construct_native_focus_event(scope, event_type, related_target, bubbles)?;
+    mark_event_trusted(scope, event);
+    Some(event)
 }
 
 pub(crate) fn construct_input_event<'s>(
@@ -906,20 +415,6 @@ pub(crate) fn construct_text_input_event_for_target<'s>(
     crate::context_bootstrap::construct_original_text_input_event(scope, text)
 }
 
-pub(crate) fn construct_drop_input_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    data_transfer: v8::Local<'s, v8::Object>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    construct_input_event_with_transfer(
-        scope,
-        event_type,
-        TextEditInputType::InsertFromDrop,
-        None,
-        Some(data_transfer),
-    )
-}
-
 fn construct_input_event_with_transfer<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     event_type: &str,
@@ -927,25 +422,7 @@ fn construct_input_event_with_transfer<'s>(
     data: Option<&str>,
     data_transfer: Option<v8::Local<'s, v8::Object>>,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let input_type = v8_string(scope, input_type.as_str())?;
-    let data = match data {
-        Some(text) => v8_string(scope, text)?.into(),
-        None => v8::null(scope).into(),
-    };
-    let data_transfer = data_transfer
-        .map(|value| value.into())
-        .unwrap_or_else(|| v8::null(scope).into());
-    let init = InputEventInitDeclaration::new(
-        true,
-        event_type == "beforeinput",
-        true,
-        input_type,
-        data,
-        data_transfer,
-    )
-    .bind(scope)
-    .ok()?;
-    construct_event(scope, "InputEvent", event_type, init)
+    construct_native_input_event(scope, event_type, input_type.as_str(), data, data_transfer)
 }
 
 pub(crate) fn construct_simple_event<'s>(
@@ -955,10 +432,17 @@ pub(crate) fn construct_simple_event<'s>(
     cancelable: bool,
     composed: bool,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let init = SimpleEventInitDeclaration::new(bubbles, cancelable, composed)
-        .bind(scope)
-        .ok()?;
-    construct_event(scope, "Event", event_type, init)
+    let event = construct_native_event(
+        scope,
+        event_type,
+        EventInit {
+            bubbles,
+            cancelable,
+            composed,
+        },
+    )?;
+    mark_event_trusted(scope, event);
+    Some(event)
 }
 
 pub(crate) fn construct_submit_event<'s>(
@@ -974,14 +458,7 @@ pub(crate) fn construct_submit_event<'s>(
         .wrap_handle(scope, runtime_ptr, target)?;
     let context = crate::native_bridge::node_relevant_context(scope, target)?;
     let scope = &mut v8::ContextScope::new(scope, context);
-    let init = SubmitEventInitDeclaration::new(
-        bubbles,
-        cancelable,
-        submitter.unwrap_or_else(|| v8::null(scope).into()),
-    )
-    .bind(scope)
-    .ok()?;
-    construct_event(scope, "SubmitEvent", "submit", init)
+    construct_native_submit_event(scope, submitter, bubbles, cancelable)
 }
 
 pub(crate) fn construct_simple_event_for_target<'s>(
@@ -999,65 +476,6 @@ pub(crate) fn construct_simple_event_for_target<'s>(
     let context = crate::native_bridge::node_relevant_context(scope, target)?;
     let scope = &mut v8::ContextScope::new(scope, context);
     construct_simple_event(scope, event_type, bubbles, cancelable, composed)
-}
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct FormDataEventInitDeclaration<'s> {
-    #[webapi(prototype, value = v8::null(scope))]
-    prototype: (),
-    form_data: v8::Local<'s, v8::Object>,
-    bubbles: bool,
-}
-
-pub(crate) fn construct_form_data_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    form_data: v8::Local<'s, v8::Object>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let init = FormDataEventInitDeclaration::new(form_data, true)
-        .bind(scope)
-        .ok()?;
-    construct_event(scope, "FormDataEvent", "formdata", init)
-}
-
-pub(crate) fn construct_command_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    command: &str,
-    source: v8::Local<'s, v8::Value>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let command = v8_string(scope, command)?;
-    let init = CommandEventInitDeclaration::new(false, true, false, source, command)
-        .bind(scope)
-        .ok()?;
-    construct_event(scope, "CommandEvent", "command", init)
-}
-
-pub(crate) fn construct_toggle_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    old_state: &str,
-    new_state: &str,
-    cancelable: bool,
-    source: v8::Local<'s, v8::Value>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let old_state = v8_string(scope, old_state)?;
-    let new_state = v8_string(scope, new_state)?;
-    let init =
-        ToggleEventInitDeclaration::new(false, cancelable, false, source, old_state, new_state)
-            .bind(scope)
-            .ok()?;
-    construct_event(scope, "ToggleEvent", event_type, init)
-}
-
-pub(crate) fn construct_interest_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    event_type: &str,
-    source: v8::Local<'s, v8::Value>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let init = InterestEventInitDeclaration::new(false, false, false, source)
-        .bind(scope)
-        .ok()?;
-    construct_event(scope, "InterestEvent", event_type, init)
 }
 
 pub(in crate::native_bridge::element) fn construct_click_event<'s>(
@@ -1081,127 +499,16 @@ pub(in crate::native_bridge::element) fn construct_click_event<'s>(
         None,
         view,
     )?;
-    let interface = if source == ClickEventSource::Pointer {
-        "MouseEvent"
-    } else if let ClickEventSource::Touch { pointer_id } = source {
-        let key = v8str(scope, "pointerId");
-        let id = v8::Integer::new(scope, pointer_id);
-        init.create_data_property(scope, key.into(), id.into())?
-            .then_some(())?;
-        let key = v8str(scope, "pointerType");
-        let kind = v8str(scope, "touch");
-        init.create_data_property(scope, key.into(), kind.into())?
-            .then_some(())?;
-        "PointerEvent"
-    } else {
-        // Blink reserves -1 for clicks with no pointing device. PointerEvent's
-        // other defaults describe a synthetic click, unlike physical input.
-        let key = v8str(scope, "pointerId");
-        let pointer_id = v8::Integer::new(scope, -1);
-        init.create_data_property(scope, key.into(), pointer_id.into())?
-            .then_some(())?;
-        "PointerEvent"
-    };
-    construct_event(scope, interface, "click", init)
-}
-
-pub(crate) fn construct_mouse_event_for_target<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut PageScriptHost,
-    target: DomHandle,
-    event_type: &str,
-    coordinates: InputEventCoordinates,
-    button: i32,
-    buttons: i32,
-    modifiers: u8,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let target = unsafe { &mut *runtime_ptr }
-        .native_bridge_mut()
-        .wrap_handle(scope, runtime_ptr, target)?;
-    let context = crate::native_bridge::node_relevant_context(scope, target)?;
-    let scope = &mut v8::ContextScope::new(scope, context);
-    construct_mouse_event_with_modifiers(scope, event_type, coordinates, button, buttons, modifiers)
-}
-
-pub(crate) fn construct_mouse_event_with_related_target_for_target<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut PageScriptHost,
-    target: DomHandle,
-    event_type: &str,
-    coordinates: InputEventCoordinates,
-    button: i32,
-    buttons: i32,
-    related_target: Option<v8::Local<'s, v8::Value>>,
-    modifiers: u8,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let target = unsafe { &mut *runtime_ptr }
-        .native_bridge_mut()
-        .wrap_handle(scope, runtime_ptr, target)?;
-    let context = crate::native_bridge::node_relevant_context(scope, target)?;
-    let scope = &mut v8::ContextScope::new(scope, context);
-    construct_mouse_event_with_related_target_and_modifiers(
-        scope,
-        event_type,
-        coordinates,
-        button,
-        buttons,
-        related_target,
-        modifiers,
-    )
-}
-
-pub(crate) fn construct_mouse_event_with_detail_for_target<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut PageScriptHost,
-    target: DomHandle,
-    event_type: &str,
-    coordinates: InputEventCoordinates,
-    detail: i32,
-    button: i32,
-    buttons: i32,
-    modifiers: u8,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let target = unsafe { &mut *runtime_ptr }
-        .native_bridge_mut()
-        .wrap_handle(scope, runtime_ptr, target)?;
-    let context = crate::native_bridge::node_relevant_context(scope, target)?;
-    let scope = &mut v8::ContextScope::new(scope, context);
-    construct_mouse_event_with_detail_and_modifiers(
-        scope,
-        event_type,
-        coordinates,
-        detail,
-        button,
-        buttons,
-        modifiers,
-    )
-}
-
-pub(crate) fn construct_wheel_event_for_target<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    runtime_ptr: *mut PageScriptHost,
-    target: DomHandle,
-    event_type: &str,
-    coordinates: InputEventCoordinates,
-    delta_x: f64,
-    delta_y: f64,
-    buttons: i32,
-    modifiers: u8,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let target = unsafe { &mut *runtime_ptr }
-        .native_bridge_mut()
-        .wrap_handle(scope, runtime_ptr, target)?;
-    let context = crate::native_bridge::node_relevant_context(scope, target)?;
-    let scope = &mut v8::ContextScope::new(scope, context);
-    // Wheel input does not change a mouse button.
-    construct_wheel_event(
-        scope,
-        event_type,
-        coordinates,
-        delta_x,
-        delta_y,
-        0,
-        buttons,
-        modifiers,
-    )
+    match source {
+        #[cfg(any(test, feature = "devtools"))]
+        ClickEventSource::Pointer => construct_native_mouse_event(scope, "click", init),
+        #[cfg(feature = "devtools")]
+        ClickEventSource::Touch { pointer_id } => {
+            construct_native_pointer_click(scope, init, pointer_id, "touch")
+        }
+        ClickEventSource::UserAgent | ClickEventSource::Script => {
+            // Blink reserves -1 for clicks with no pointing device.
+            construct_native_pointer_click(scope, init, -1, "")
+        }
+    }
 }

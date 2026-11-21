@@ -2494,6 +2494,56 @@ async fn indexed_db_child_reply_does_not_leak_child_scope_to_top_continuation() 
 }
 
 #[test]
+fn global_cache_storage_rejects_uncacheable_responses_before_consuming_body() {
+    let mut vm = new_storage_page_task_executor_test_vm("https://cache-admission.test/");
+    vm.eval(
+        r#"
+globalThis.cacheAdmissionResult = 'pending';
+(async () => {
+  const check = (value, label) => { if (!value) throw new Error(label); };
+  const name = 'response-admission';
+  await caches.delete(name);
+  const cache = await caches.open(name);
+  await cache.put('/key', new Response('original'));
+  for (const streaming of [false, true]) {
+    for (const init of [
+      {status: 206},
+      {headers: {VARY: '*'}},
+      {headers: [['vary', 'Accept-Language'], ['Vary', ' \t* ']]}
+    ]) {
+      const body = streaming ? new ReadableStream({start(controller) {
+        controller.enqueue(new TextEncoder().encode('replacement'));
+        controller.close();
+      }}) : 'replacement';
+      const response = new Response(body, init);
+      // Admission reads the associated response, even if author properties mask it.
+      Object.defineProperty(response, 'status', {get() { throw new Error('status getter'); }});
+      Object.defineProperty(response, 'headers', {get() { throw new Error('headers getter'); }});
+      let error;
+      try { await cache.put('/key', response); } catch (value) { error = value; }
+      check(error instanceof TypeError, 'uncacheable response must reject');
+      check(!response.bodyUsed && !response.body.locked, 'rejection consumed or locked body');
+      check(await response.text() === 'replacement', 'rejected body is readable');
+      check(await (await cache.match('/key')).text() === 'original', 'rejection replaced entry');
+    }
+  }
+  const accepted = new Response('allowed', {headers: {Vary: 'Accept-Language, star*'}});
+  await cache.put('/key', accepted);
+  check(accepted.bodyUsed && await (await cache.match('/key')).text() === 'allowed', 'valid Vary');
+  await caches.delete(name);
+  cacheAdmissionResult = 'ok';
+})().catch(error => cacheAdmissionResult = String(error.stack || error));
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        vm.eval_after_selected_page_tasks("cacheAdmissionResult")
+            .unwrap(),
+        "ok"
+    );
+}
+
+#[test]
 fn global_cache_storage_normalizes_request_info_urls() {
     let mut vm =
         new_storage_page_task_executor_test_vm("https://cache-request-info.test/app/index.html");
@@ -7059,6 +7109,46 @@ globalThis.transportProfileResult = 'pending';
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn indexed_db_versionchange_coordinates_window_worker_and_two_worker_connections() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    for (holder, requester) in [
+        ("worker", "window"),
+        ("window", "worker"),
+        ("worker", "worker"),
+    ] {
+        for operation in ["upgrade", "delete"] {
+            for close_mode in ["microtask", "timer", "blocked"] {
+                let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+                    "https://indexeddb-cross-agent-connections.test/",
+                    &loader,
+                );
+                let config = serde_json::json!({"holder":holder,"requester":requester,"operation":operation,"closeMode":close_mode});
+                vm.eval(&format!("globalThis.connectionConfig = {config};"))
+                    .unwrap();
+                vm.eval(include_str!(
+                    "../../../tests/fixtures/indexeddb-cross-agent-connections.js"
+                ))
+                .unwrap();
+                advance_page_task_executor_until_eval_equals(
+                    &mut vm,
+                    &loader,
+                    "String(connectionProbe.state !== 'pending')",
+                    "true",
+                    "cross-agent connection notification should finish",
+                )
+                .await;
+                assert_eq!(
+                    vm.eval("connectionProbe.state").unwrap(),
+                    "pass",
+                    "{config}: {}",
+                    vm.eval("JSON.stringify(connectionProbe)").unwrap()
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn indexed_db_connection_queue_waits_for_upgrade_requests_and_resolves_versions_at_head() {
     let mut vm = new_storage_page_task_executor_test_vm("https://indexeddb-connection-fifo.test/");
@@ -7326,6 +7416,69 @@ worker.onmessage = event => {
         vm.eval("connectionResult").unwrap(),
         "window:3:from-worker|worker:5:from-window"
     );
+}
+
+#[tokio::test]
+async fn indexed_db_retiring_a_blocked_worker_request_releases_the_next_request() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    for shutdown in ["close", "terminate"] {
+        let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+            &format!("https://indexeddb-retired-requester-{shutdown}.test/"),
+            &loader,
+        );
+        vm.eval(&format!("globalThis.requesterShutdown = {shutdown:?};"))
+            .unwrap();
+        vm.eval(r#"
+globalThis.requesterResult = 'pending';
+globalThis.requesterEvents = [];
+const initial = indexedDB.open('retiring-requester', 1);
+initial.onerror = () => { requesterResult = initial.error.name; };
+initial.onsuccess = () => {
+  const database = initial.result;
+  database.onversionchange = event => {
+    requesterEvents.push(event.newVersion);
+  };
+  const source = [
+    'const shutdown = ' + JSON.stringify(requesterShutdown) + ';',
+    "const request = indexedDB.open('retiring-requester', 2);",
+    "request.onblocked = () => { postMessage('blocked'); if (shutdown === 'close') self.close(); };",
+    "request.onsuccess = () => postMessage('unexpected-success');",
+    "request.onerror = () => postMessage('error:' + request.error.name);"
+  ].join('\n');
+  const url = URL.createObjectURL(new Blob([source]));
+  const worker = new Worker(url);
+  worker.onmessage = event => {
+    if (event.data !== 'blocked') { requesterResult = event.data; worker.terminate(); return; }
+    requesterEvents.push('blocked');
+    if (requesterShutdown === 'terminate') worker.terminate();
+    database.close();
+    const next = indexedDB.open('retiring-requester', 3);
+    next.onupgradeneeded = event => requesterEvents.push('upgrade:' + event.oldVersion);
+    next.onerror = () => { requesterResult = next.error.name; };
+    next.onsuccess = () => {
+      requesterEvents.push('success');
+      requesterResult = next.result.version === 3 ? 'pass' : 'wrong-version';
+      next.result.close();
+      worker.terminate();
+      URL.revokeObjectURL(url);
+    };
+  };
+};
+"#).unwrap();
+        advance_page_task_executor_until_eval_equals(
+            &mut vm,
+            &loader,
+            "String(requesterResult !== 'pending')",
+            "true",
+            "retiring a blocked requester must release its queue position",
+        )
+        .await;
+        assert_eq!(vm.eval("requesterResult").unwrap(), "pass", "{shutdown}");
+        assert_eq!(
+            vm.eval("JSON.stringify(requesterEvents)").unwrap(),
+            r#"[2,"blocked","upgrade:1","success"]"#
+        );
+    }
 }
 
 #[test]

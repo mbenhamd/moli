@@ -124,7 +124,7 @@ impl super::PageScriptHost {
         self.image_resources.visual_generation()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "devtools"))]
     pub(crate) fn visual_resource_generation_handle_for_test(
         &self,
     ) -> super::visual_resource_generation::VisualResourceGeneration {
@@ -385,11 +385,7 @@ impl super::PageScriptHost {
         &self,
         element: DomHandle,
     ) -> Option<(u32, u32)> {
-        let (width, height) = self.image_resource_intrinsic_size(element)?;
-        Some((
-            width.max(0.0).round() as u32,
-            height.max(0.0).round() as u32,
-        ))
+        self.image_resources.natural_dimensions(element)
     }
 
     pub(crate) fn image_resource_intrinsic_size(&self, element: DomHandle) -> Option<(f32, f32)> {

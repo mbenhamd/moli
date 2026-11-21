@@ -7,26 +7,20 @@ use std::time::Instant;
 
 use crate::{
     document_runtime::DomHandle,
-    native_bridge::{
-        PageScriptHost,
-        element::{PreparedAnonymousStyleContext, StyleObservation},
+    dom_presentation::suppresses_noscript_box,
+    native_bridge::{PageScriptHost, element::StyleObservation},
+    style_engine::{
+        StyleResolutionPass, StyleViewport, StyloAnonymousBoxKind, StyloStyleEnvironment,
     },
-    style_engine::{StyleViewport, StyloAnonymousBoxKind, StyloStyleEnvironment},
 };
 
-pub(super) struct NativeLayoutStyleResolver<'a> {
+pub(super) struct NativeLayoutStyleResolver<'a, 'world, 'dom> {
     runtime: &'a PageScriptHost,
-    reads: StyleObservation<'a>,
-    anonymous_context: Option<PreparedAnonymousStyleContext<'a>>,
+    pass: &'a mut StyleResolutionPass<'world, 'dom>,
     scripting_enabled: bool,
     profile: Option<NativeLayoutStyleResolverProfile>,
     root: DomHandle,
     document: DomHandle,
-    viewport: LayoutViewport,
-    environment_override: Option<StyloStyleEnvironment>,
-    /// The screen store to restore after an environment-override pass, whose
-    /// print-sized containers must not answer later screen styles.
-    screen_container_sizes: Option<Option<moli_selector::ContainerQuerySizes>>,
     /// `root` is a `<foreignObject>` laid out as its own block root (see
     /// `build_foreign_object_layout_pass`). Such a pass reads the Document's
     /// container-query sizes but never replaces them.
@@ -49,89 +43,128 @@ struct NativeLayoutStyleResolverProfile {
     anonymous_projection_ns: u128,
 }
 
-impl<'a> NativeLayoutStyleResolver<'a> {
-    pub(super) fn new(
-        runtime: &'a PageScriptHost,
-        root: DomHandle,
-        document: DomHandle,
-        viewport: LayoutViewport,
-        environment_override: Option<StyloStyleEnvironment>,
-    ) -> Self {
-        let screen_container_sizes = environment_override
-            .is_some()
-            .then(|| runtime.container_query_sizes_snapshot(document));
-        runtime.begin_container_query_store(document);
-        Self::with_prepared_store(
-            runtime,
-            root,
-            document,
-            viewport,
-            environment_override,
-            screen_container_sizes,
-            false,
-        )
-    }
+pub(super) fn with_layout_styles<R>(
+    runtime: &PageScriptHost,
+    document: DomHandle,
+    viewport: LayoutViewport,
+    environment_override: Option<StyloStyleEnvironment>,
+    prepare: impl FnOnce(&mut NativeLayoutStyleResolver<'_, '_, '_>) -> R,
+) -> R {
+    with_layout_root_styles(
+        runtime,
+        document,
+        document,
+        viewport,
+        environment_override,
+        false,
+        prepare,
+    )
+}
 
-    /// Resolves the styles of one `<foreignObject>`'s content in the
-    /// Document's current screen style world, with the element itself as a
-    /// block root.
-    pub(super) fn for_foreign_object_content(
-        runtime: &'a PageScriptHost,
-        foreign_object: DomHandle,
-        document: DomHandle,
-        viewport: LayoutViewport,
-    ) -> Self {
-        Self::with_prepared_store(
+/// Resolves one layout iteration's styles in one style resolution pass.
+///
+/// A changed container-query size needs a fresh pass: the caller re-enters
+/// here after `update_query_container_sizes` reports a change. When
+/// `foreign_object_root` is set, `root` is a `<foreignObject>` laid out as its
+/// own block root (see `build_foreign_object_layout_pass`), in the Document's
+/// current screen style world.
+pub(super) fn with_layout_root_styles<R>(
+    runtime: &PageScriptHost,
+    root: DomHandle,
+    document: DomHandle,
+    viewport: LayoutViewport,
+    environment_override: Option<StyloStyleEnvironment>,
+    foreign_object_root: bool,
+    prepare: impl FnOnce(&mut NativeLayoutStyleResolver<'_, '_, '_>) -> R,
+) -> R {
+    let mut observation =
+        layout_style_read_scope(runtime, document, viewport, environment_override);
+    observation.with_resolution_pass(document, |pass| {
+        let mut resolver = NativeLayoutStyleResolver {
             runtime,
-            foreign_object,
-            document,
-            viewport,
-            None,
-            None,
-            true,
-        )
-    }
-
-    fn with_prepared_store(
-        runtime: &'a PageScriptHost,
-        root: DomHandle,
-        document: DomHandle,
-        viewport: LayoutViewport,
-        environment_override: Option<StyloStyleEnvironment>,
-        screen_container_sizes: Option<Option<moli_selector::ContainerQuerySizes>>,
-        foreign_object_root: bool,
-    ) -> Self {
-        let mut reads = layout_style_read_scope(runtime, document, viewport, environment_override);
-        // Drain pending invalidations and update the retained world before
-        // freezing the anonymous-style context for this synchronous pass.
-        let anonymous_context = reads.read(root).prepare_anonymous_style_context();
-        Self {
-            runtime,
-            reads,
-            anonymous_context,
+            pass,
             scripting_enabled: runtime.document_scripting_enabled(document),
             profile: moli_trace::cpu_profile_enabled()
                 .then(NativeLayoutStyleResolverProfile::default),
             root,
             document,
-            viewport,
-            environment_override,
-            screen_container_sizes,
             foreign_object_root,
+        };
+        let result = prepare(&mut resolver);
+        resolver.trace_profile(document);
+        result
+    })
+}
+
+/// The container-query store of one layout demand, across all of its style
+/// resolution passes.
+///
+/// An environment-override pass (print, media emulation) restores the screen
+/// store when it ends, so its print-sized containers never answer later screen
+/// styles. A `<foreignObject>` content pass reads the Document's container
+/// sizes but never replaces them.
+pub(super) struct ContainerQueryStoreScope<'a> {
+    runtime: &'a PageScriptHost,
+    document: DomHandle,
+    screen_container_sizes: Option<Option<moli_selector::ContainerQuerySizes>>,
+}
+
+impl<'a> ContainerQueryStoreScope<'a> {
+    pub(super) fn begin(
+        runtime: &'a PageScriptHost,
+        document: DomHandle,
+        environment_override: bool,
+        foreign_object_root: bool,
+    ) -> Self {
+        let screen_container_sizes = (environment_override && !foreign_object_root)
+            .then(|| runtime.container_query_sizes_snapshot(document));
+        if !foreign_object_root {
+            runtime.begin_container_query_store(document);
+        }
+        Self {
+            runtime,
+            document,
+            screen_container_sizes,
         }
     }
+}
 
-    pub(super) fn stylesheet_resources(
-        &mut self,
-        root: DomHandle,
-    ) -> Option<crate::style_engine::StylesheetResourceSnapshot> {
-        self.reads.read(root).stylesheet_resource_snapshot()
+impl Drop for ContainerQueryStoreScope<'_> {
+    fn drop(&mut self) {
+        if let Some(snapshot) = self.screen_container_sizes.take() {
+            self.runtime
+                .restore_container_query_sizes(self.document, snapshot);
+        }
     }
+}
 
-    pub(super) fn trace_profile(&self, document: crate::document_runtime::DomHandle) {
+/// Stores used container sizes for `document`; `true` when any changed.
+pub(super) fn store_query_container_sizes(
+    runtime: &PageScriptHost,
+    document: DomHandle,
+    sizes: &[(DomHandle, LayoutQueryContainerSize)],
+) -> bool {
+    let store = sizes
+        .iter()
+        .map(|(node, size)| {
+            (
+                *node,
+                euclid::default::Size2D::new(
+                    size.width.map(app_units::Au::from_f32_px),
+                    size.height.map(app_units::Au::from_f32_px),
+                ),
+            )
+        })
+        .collect();
+    runtime.update_container_query_sizes(document, store)
+}
+
+impl NativeLayoutStyleResolver<'_, '_, '_> {
+    fn trace_profile(&self, document: DomHandle) {
         let Some(profile) = self.profile.as_ref() else {
             return;
         };
+        self.pass.trace_profile();
         tracing::info!(
             target: "moli_cpu_profile",
             stage = "layout_style_resolver",
@@ -187,16 +220,9 @@ fn layout_style_viewport(runtime: &PageScriptHost, viewport: LayoutViewport) -> 
     .with_device_pixel_ratio(screen.device_pixel_ratio)
 }
 
-impl Drop for NativeLayoutStyleResolver<'_> {
-    fn drop(&mut self) {
-        if let Some(snapshot) = self.screen_container_sizes.take() {
-            self.runtime
-                .restore_container_query_sizes(self.document, snapshot);
-        }
-    }
-}
-
-impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
+impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_, '_, '_> {
+    /// Records the sizes; the caller lays out again in a fresh resolution
+    /// pass when they changed.
     fn update_query_container_sizes(
         &mut self,
         sizes: &[(DomHandle, LayoutQueryContainerSize)],
@@ -204,34 +230,11 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
         if self.foreign_object_root {
             return Ok(false);
         }
-        let store = sizes
-            .iter()
-            .map(|(node, size)| {
-                (
-                    *node,
-                    euclid::default::Size2D::new(
-                        size.width.map(app_units::Au::from_f32_px),
-                        size.height.map(app_units::Au::from_f32_px),
-                    ),
-                )
-            })
-            .collect();
-        if !self
-            .runtime
-            .update_container_query_sizes(self.document, store)
-        {
-            return Ok(false);
-        }
-        // Drop the observation that pinned the previous iteration's styles,
-        // then drain the invalidations for the next world.
-        self.reads = layout_style_read_scope(
+        Ok(store_query_container_sizes(
             self.runtime,
             self.document,
-            self.viewport,
-            self.environment_override,
-        );
-        self.anonymous_context = self.reads.read(self.root).prepare_anonymous_style_context();
-        Ok(true)
+            sizes,
+        ))
     }
 
     fn element_styles(
@@ -239,8 +242,7 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
         node: DomHandle,
     ) -> Result<Option<ResolvedLayoutElementStyles>, LayoutError> {
         let phase_started = self.profile.as_ref().map(|_| Instant::now());
-        let read = self.reads.read(node);
-        let Some((computed, before, after)) = read.into_element_computed_values() else {
+        let Some(style) = self.pass.element_styles(node) else {
             if let Some(profile) = self.profile.as_mut() {
                 profile.primary_count = profile.primary_count.saturating_add(1);
                 profile.primary_read_ns = profile.primary_read_ns.saturating_add(
@@ -251,6 +253,7 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
             }
             return Ok(None);
         };
+        let (computed, before, after) = style.into_element_computed_values();
         let eager_pseudo_count = u64::from(before.is_some()) + u64::from(after.is_some());
         if let Some(profile) = self.profile.as_mut() {
             profile.primary_count = profile.primary_count.saturating_add(1);
@@ -283,12 +286,7 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
             );
         }
         let phase_started = self.profile.as_ref().map(|_| Instant::now());
-        if self.scripting_enabled
-            && self
-                .runtime
-                .dom_host()
-                .is_html_element_named(node, "noscript")
-        {
+        if suppresses_noscript_box(self.runtime.dom_host(), node, self.scripting_enabled) {
             // Match Blink's HTMLNoScriptElement::LayoutObjectIsNeeded(): the
             // computed `display` remains observable, including author
             // overrides, but no layout object is generated while this exact
@@ -323,8 +321,7 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
         node: DomHandle,
     ) -> Result<Option<ResolvedLayoutPseudoStyle>, LayoutError> {
         let phase_started = self.profile.as_ref().map(|_| Instant::now());
-        let read = self.reads.read(node);
-        let computed = read.pseudo_computed_values("marker");
+        let computed = self.pass.marker_for_generation(node);
         if let Some(profile) = self.profile.as_mut() {
             profile.marker_count = profile.marker_count.saturating_add(1);
             profile.marker_read_ns = profile.marker_read_ns.saturating_add(
@@ -351,13 +348,9 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
         &mut self,
         node: DomHandle,
     ) -> Result<Option<ResolvedLayoutPseudoStyle>, LayoutError> {
-        Ok(self
-            .reads
-            .read(node)
-            .pseudo_computed_values("placeholder")
-            .map(|computed| {
-                ResolvedLayoutPseudoStyle::new(ResolvedLayoutStyle::from_stylo(computed))
-            }))
+        Ok(self.pass.pseudo_style(node, "placeholder").map(|computed| {
+            ResolvedLayoutPseudoStyle::new(ResolvedLayoutStyle::from_stylo(computed))
+        }))
     }
 
     fn anonymous_style(
@@ -375,24 +368,13 @@ impl LayoutStyleResolver<DomHandle> for NativeLayoutStyleResolver<'_> {
         })?;
         let anonymous_kind = anonymous_box_kind(display);
         let phase_started = self.profile.as_ref().map(|_| Instant::now());
-        let prepared = self.anonymous_context.as_ref().ok_or_else(|| {
-            LayoutError::style_resolution(
-                format!("{owner:?}"),
-                "anonymous style pass has no prepared document world",
-            )
-        })?;
-        if self.runtime.dom_host().owner_document_handle(owner) != Some(prepared.document()) {
-            return Err(LayoutError::style_resolution(
-                format!("{owner:?}"),
-                "anonymous owner document does not match the prepared style context",
-            ));
-        }
-        let computed = prepared
-            .computed_values(owner, parent_computed.as_ref(), anonymous_kind)
+        let computed = self
+            .pass
+            .anonymous_style(owner, parent_computed.as_ref(), anonymous_kind)
             .ok_or_else(|| {
                 LayoutError::style_resolution(
                     format!("{owner:?}"),
-                    format!("Stylo could not resolve {anonymous_kind:?} anonymous style"),
+                    "anonymous owner document does not match the prepared style context",
                 )
             })?;
         if let Some(profile) = self.profile.as_mut() {
@@ -446,7 +428,7 @@ const fn anonymous_box_kind(display: LayoutDisplay) -> StyloAnonymousBoxKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::style_engine::StyloAnonymousBoxKind;
+    use crate::style_engine::take_style_resolution_context_count_for_test;
     use moli_layout::LayoutDisplay;
 
     fn fixture() -> crate::script_vm::StandaloneScriptVmHarness {
@@ -473,7 +455,7 @@ mod tests {
     }
 
     fn layout_world(
-        resolver: &mut NativeLayoutStyleResolver<'_>,
+        resolver: &mut NativeLayoutStyleResolver<'_, '_, '_>,
         root: DomHandle,
     ) -> moli_layout::LayoutWorld<DomHandle> {
         let source = super::super::source_view::NativeLayoutSourceView::new(resolver.runtime, root);
@@ -497,31 +479,37 @@ mod tests {
         let root = host.dom_host().document_element_handle().unwrap();
         let owner = host.dom_host().element_handle_by_id("owner").unwrap();
         let viewport = host.layout_viewport_for_document(document);
-        let mut resolver = NativeLayoutStyleResolver::new(&host, root, document, viewport, None);
-        let world = layout_world(&mut resolver, root);
-        let parent = parent_context(&world, owner);
-        let reads = resolver.reads.read_count_for_test();
-        for _ in 0..3 {
-            resolver.profile = Some(NativeLayoutStyleResolverProfile::default());
-            for _ in 0..10_000 {
-                let style = resolver
-                    .anonymous_style(parent, LayoutDisplay::Block)
-                    .unwrap();
-                assert_eq!(style.display(), LayoutDisplay::Block);
-                std::hint::black_box(style);
+        take_style_resolution_context_count_for_test();
+        with_layout_styles(&host, document, viewport, None, |resolver| {
+            assert_eq!(take_style_resolution_context_count_for_test(), 0);
+            let world = layout_world(resolver, root);
+            let parent = parent_context(&world, owner);
+            assert_eq!(take_style_resolution_context_count_for_test(), 1);
+            let resolutions = resolver.pass.resolutions_for_test();
+            for _ in 0..3 {
+                resolver.profile = Some(NativeLayoutStyleResolverProfile::default());
+                for _ in 0..10_000 {
+                    let style = resolver
+                        .anonymous_style(parent, LayoutDisplay::Block)
+                        .unwrap();
+                    assert_eq!(style.display(), LayoutDisplay::Block);
+                    std::hint::black_box(style);
+                }
+                let profile = resolver.profile.as_ref().unwrap();
+                assert_eq!(profile.anonymous_count, 10_000);
+                assert_eq!(
+                    resolver.pass.resolutions_for_test(),
+                    resolutions,
+                    "anonymous boxes must reuse the parent box style"
+                );
+                eprintln!(
+                    "anonymous_count={} anonymous_read_ns={} anonymous_projection_ns={}",
+                    profile.anonymous_count,
+                    profile.anonymous_read_ns,
+                    profile.anonymous_projection_ns
+                );
             }
-            let profile = resolver.profile.as_ref().unwrap();
-            assert_eq!(profile.anonymous_count, 10_000);
-            assert_eq!(
-                resolver.reads.read_count_for_test(),
-                reads,
-                "anonymous boxes must not observe element styles again"
-            );
-            eprintln!(
-                "anonymous_count={} anonymous_read_ns={} anonymous_projection_ns={}",
-                profile.anonymous_count, profile.anonymous_read_ns, profile.anonymous_projection_ns
-            );
-        }
+        });
     }
 
     #[test]
@@ -532,13 +520,6 @@ mod tests {
         let host = vm.context_host_weak_for_test().upgrade().unwrap();
         let host = host.borrow();
         let document = host.document_handle();
-        let root = host.dom_host().document_element_handle().unwrap();
-        let owner = host.dom_host().element_handle_by_id("owner").unwrap();
-        let viewport = host.layout_viewport_for_document(document);
-        let mut resolver = NativeLayoutStyleResolver::new(&host, root, document, viewport, None);
-        let world = layout_world(&mut resolver, root);
-        let parent = parent_context(&world, owner);
-
         let frame = host.dom_host().element_handle_by_id("frame").unwrap();
         let foreign_document = host.child_browsing_context_document_handle(frame).unwrap();
         let foreign_root = host
@@ -546,30 +527,31 @@ mod tests {
             .dom()
             .document_element_handle_for_document(foreign_document)
             .unwrap();
-        let mut foreign =
-            NativeLayoutStyleResolver::new(&host, foreign_root, foreign_document, viewport, None);
-        let foreign_world = layout_world(&mut foreign, foreign_root);
+        let foreign_viewport = host.layout_viewport_for_document(foreign_document);
+        let foreign_world =
+            with_layout_styles(&host, foreign_document, foreign_viewport, None, |foreign| {
+                let world = layout_world(foreign, foreign_root);
+                let parent = parent_context(&world, foreign_root);
+                assert!(
+                    foreign
+                        .anonymous_style(parent, LayoutDisplay::Block)
+                        .is_ok()
+                );
+                world
+            });
         let foreign_parent = parent_context(&foreign_world, foreign_root);
-        assert!(
-            foreign
-                .anonymous_style(foreign_parent, LayoutDisplay::Block)
-                .is_ok()
-        );
-        let error = resolver
-            .anonymous_style(foreign_parent, LayoutDisplay::Block)
-            .unwrap_err();
-        assert!(error.to_string().contains("owner document"), "{error}");
-        assert!(
-            resolver
-                .anonymous_context
-                .as_ref()
-                .unwrap()
-                .computed_values(
-                    foreign_root,
-                    parent.parent_style().stylo_computed_values().unwrap(),
-                    StyloAnonymousBoxKind::Generic
-                )
-                .is_none()
+        with_layout_styles(
+            &host,
+            document,
+            host.layout_viewport_for_document(document),
+            None,
+            |resolver| {
+                let error = resolver
+                    .anonymous_style(foreign_parent, LayoutDisplay::Block)
+                    .unwrap_err();
+                assert!(error.to_string().contains("owner document"), "{error}");
+                assert!(resolver.pass.element_styles(foreign_root).is_none());
+            },
         );
     }
 
@@ -586,107 +568,134 @@ mod tests {
         let document = host.document_handle();
         let root = host.dom_host().document_element_handle().unwrap();
         let owner = host.dom_host().element_handle_by_id("owner").unwrap();
-        let mut resolver = NativeLayoutStyleResolver::new(
+        with_layout_styles(
             &host,
-            root,
             document,
             host.layout_viewport_for_document(document),
             None,
+            |resolver| {
+                let world = layout_world(resolver, root);
+                let reads = resolver.pass.resolutions_for_test();
+                let mut pending = vec![world.source_box(owner).unwrap()];
+                let mut displays = Vec::new();
+                while let Some(id) = pending.pop() {
+                    let parent = world.box_by_id(id).unwrap();
+                    pending.extend_from_slice(parent.children());
+                    if parent.anonymous_reason().is_none() {
+                        continue;
+                    }
+                    let context = LayoutAnonymousStyleContext::from_parent(parent).unwrap();
+                    assert_eq!(context.owner(), parent.owner().unwrap());
+                    assert_eq!(context.parent_style().font_size(), 23.0);
+                    let anonymous = resolver
+                        .anonymous_style(context, LayoutDisplay::Block)
+                        .unwrap();
+                    assert_eq!(anonymous.font_size(), 23.0);
+                    displays.push(parent.style().display());
+                }
+                for display in [
+                    LayoutDisplay::Table,
+                    LayoutDisplay::TableRowGroup,
+                    LayoutDisplay::TableRow,
+                    LayoutDisplay::TableCell,
+                ] {
+                    assert!(
+                        displays.contains(&display),
+                        "missing {display:?}: {displays:?}"
+                    );
+                }
+                assert_eq!(resolver.pass.resolutions_for_test(), reads);
+            },
         );
-        let world = layout_world(&mut resolver, root);
-        let reads = resolver.reads.read_count_for_test();
-        let mut pending = vec![world.source_box(owner).unwrap()];
-        let mut displays = Vec::new();
-        while let Some(id) = pending.pop() {
-            let parent = world.box_by_id(id).unwrap();
-            pending.extend_from_slice(parent.children());
-            if parent.anonymous_reason().is_none() {
-                continue;
-            }
-            let context = LayoutAnonymousStyleContext::from_parent(parent).unwrap();
-            assert_eq!(context.owner(), parent.owner().unwrap());
-            assert_eq!(context.parent_style().font_size(), 23.0);
-            let anonymous = resolver
-                .anonymous_style(context, LayoutDisplay::Block)
-                .unwrap();
-            assert_eq!(anonymous.font_size(), 23.0);
-            displays.push(parent.style().display());
-        }
-        for display in [
-            LayoutDisplay::Table,
-            LayoutDisplay::TableRowGroup,
-            LayoutDisplay::TableRow,
-            LayoutDisplay::TableCell,
-        ] {
-            assert!(
-                displays.contains(&display),
-                "missing {display:?}: {displays:?}"
-            );
-        }
-        assert_eq!(resolver.reads.read_count_for_test(), reads);
     }
 
     #[test]
     fn anonymous_styles_prepare_pending_invalidations_for_each_pass() {
         let mut vm = fixture();
         vm.sync_live_document_style_sources();
-        {
-            let host = vm.context_host_weak_for_test().upgrade().unwrap();
-            let host = host.borrow();
-            let document = host.document_handle();
-            let root = host.dom_host().document_element_handle().unwrap();
-            let owner = host.dom_host().element_handle_by_id("owner").unwrap();
-            let mut resolver = NativeLayoutStyleResolver::new(
-                &host,
-                root,
-                document,
-                host.layout_viewport_for_document(document),
-                None,
-            );
-            let world = layout_world(&mut resolver, root);
-            let parent = parent_context(&world, owner);
-            assert_eq!(parent.parent_style().font_size(), 23.0);
-            assert_eq!(
-                resolver
-                    .anonymous_style(parent, LayoutDisplay::Block)
-                    .unwrap()
-                    .font_size(),
-                23.0
-            );
-        }
         for (mutation, expected) in [
+            (None, 23.0),
             (
-                "document.getElementById('owner').style.fontSize = '37px'",
+                Some("document.getElementById('owner').style.fontSize = '37px'"),
                 37.0,
             ),
             (
-                "document.querySelector('style').textContent += '#owner {font-size:51px!important}'",
+                Some(
+                    "document.querySelector('style').textContent += '#owner {font-size:51px!important}'",
+                ),
                 51.0,
             ),
         ] {
-            vm.eval(mutation).unwrap();
-            vm.sync_live_document_style_sources();
+            if let Some(mutation) = mutation {
+                vm.eval(mutation).unwrap();
+                vm.sync_live_document_style_sources();
+            }
             let host = vm.context_host_weak_for_test().upgrade().unwrap();
             let host = host.borrow();
             let document = host.document_handle();
             let root = host.dom_host().document_element_handle().unwrap();
             let owner = host.dom_host().element_handle_by_id("owner").unwrap();
-            let mut resolver = NativeLayoutStyleResolver::new(
+            with_layout_styles(
                 &host,
-                root,
                 document,
                 host.layout_viewport_for_document(document),
                 None,
+                |resolver| {
+                    let world = layout_world(resolver, root);
+                    let parent = parent_context(&world, owner);
+                    assert_eq!(parent.parent_style().font_size(), expected);
+                    let resolutions = resolver.pass.resolutions_for_test();
+                    let anonymous = resolver
+                        .anonymous_style(parent, LayoutDisplay::Block)
+                        .unwrap();
+                    assert_eq!(anonymous.font_size(), expected);
+                    assert_eq!(resolver.pass.resolutions_for_test(), resolutions);
+                },
             );
-            let world = layout_world(&mut resolver, root);
-            let parent = parent_context(&world, owner);
-            assert_eq!(parent.parent_style().font_size(), expected);
-            let reads = resolver.reads.read_count_for_test();
-            let anonymous = resolver
-                .anonymous_style(parent, LayoutDisplay::Block)
-                .unwrap();
-            assert_eq!(anonymous.font_size(), expected);
-            assert_eq!(resolver.reads.read_count_for_test(), reads);
+        }
+    }
+
+    #[test]
+    fn layout_style_pass_recovers_ancestor_filters_across_branches_and_results() {
+        let mut vm = fixture();
+        vm.eval(
+            r#"
+            document.querySelector('style').textContent +=
+              '#owner section .target { font-size:31px } #other .target { font-size:47px } input::placeholder { color:green }';
+            document.getElementById('owner').innerHTML =
+              '<section><div style="display:contents"><span id="deep" class="target">A</span></div></section>';
+            document.getElementById('other').innerHTML =
+              '<span id="shallow" class="target">B</span><input id="input" placeholder="hint">';
+            "#,
+        )
+        .unwrap();
+        vm.sync_live_document_style_sources();
+        let host = vm.context_host_weak_for_test().upgrade().unwrap();
+        let host = host.borrow();
+        let document = host.document_handle();
+        let viewport = host.layout_viewport_for_document(document);
+        let owner = host.dom_host().element_handle_by_id("owner").unwrap();
+        let deep = host.dom_host().element_handle_by_id("deep").unwrap();
+        let shallow = host.dom_host().element_handle_by_id("shallow").unwrap();
+        let input = host.dom_host().element_handle_by_id("input").unwrap();
+
+        take_style_resolution_context_count_for_test();
+        let interrupted = with_layout_styles(&host, document, viewport, None, |resolver| {
+            assert!(resolver.pass.element_styles(owner).is_some());
+            Err::<(), _>("stop layout preparation")
+        });
+        assert_eq!(interrupted, Err("stop layout preparation"));
+        assert_eq!(take_style_resolution_context_count_for_test(), 1);
+
+        for contexts in [1, 0] {
+            with_layout_styles(&host, document, viewport, None, |resolver| {
+                for (target, expected) in [(shallow, "47px"), (deep, "31px"), (shallow, "47px")] {
+                    let style = resolver.pass.element_styles(target).unwrap();
+                    assert_eq!(style.property_value("font-size").as_deref(), Some(expected));
+                }
+                assert!(resolver.placeholder_style(input).unwrap().is_some());
+            });
+            assert_eq!(take_style_resolution_context_count_for_test(), contexts);
         }
     }
 

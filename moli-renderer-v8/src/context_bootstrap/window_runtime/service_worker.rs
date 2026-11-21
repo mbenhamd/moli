@@ -8,13 +8,14 @@ use crate::native_bridge::OwnerDispatchScope;
 use crate::service_worker_runtime::{
     ServiceWorkerClientUrlError, ServiceWorkerNavigationPreloadState,
     ServiceWorkerNavigationPreloadStateError, ServiceWorkerRegistrationError,
-    ServiceWorkerUpdateViaCache, resolve_service_worker_script_url, service_worker_scope_url,
+    resolve_service_worker_script_url, service_worker_scope_url,
 };
 use crate::util::{get_private_value, set_private_value};
 use crate::web_api_interfaces;
 use crate::webidl;
-use crate::worker::WorkerScriptKind;
-use moli_webapi_declare::{ObjectLiteralDeclaration, WebApiObject, WebApiObjectDeclaration};
+use moli_webapi::events::fallback::PlainEventDeclaration;
+use moli_webapi::worker_options::service_worker::ServiceWorkerRegistrationOptions;
+use moli_webapi_declare::{WebApiObject, WebApiObjectDeclaration};
 
 const SERVICE_WORKER_REGISTRATION_SCOPE_SLOT: &str = "__moliServiceWorkerRegistrationScope";
 const SERVICE_WORKER_REGISTRATION_WORKER_SLOT: &str = "__moliServiceWorkerRegistrationWorker";
@@ -209,29 +210,6 @@ struct ServiceWorkerNavigationPreloadManagerDeclaration {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::PushSubscription)]
-struct ServiceWorkerPushSubscriptionDeclaration<'scope> {
-    #[webapi(data_property, readonly)]
-    endpoint: String,
-
-    #[webapi(data_property = "expirationTime", readonly)]
-    expiration_time: v8::Local<'scope, v8::Value>,
-
-    #[webapi(data_property, readonly)]
-    options: v8::Local<'scope, v8::Object>,
-
-    #[webapi(method, callback = service_worker_push_subscription_unsubscribe_callback, length = 0)]
-    unsubscribe: (),
-
-    #[webapi(
-        method = "toJSON",
-        callback = service_worker_push_subscription_to_json_callback,
-        length = 0
-    )]
-    to_json: (),
-}
-
-#[derive(WebApiObject)]
 #[webapi(interface = web_api_interfaces::ServiceWorker)]
 struct ServiceWorkerObjectDeclaration {
     #[webapi(
@@ -263,13 +241,6 @@ struct ServiceWorkerObjectDeclaration {
     post_message: (),
 }
 
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::Event, prototype = "Object")]
-struct ServiceWorkerSimpleEventDeclaration<'scope> {
-    #[webapi(data_property = "type", enumerable)]
-    event_type: v8::Local<'scope, v8::String>,
-}
-
 fn bind_declared_service_worker_object<'s, D>(
     scope: &mut v8::PinScope<'s, '_>,
     declaration: &D,
@@ -283,37 +254,6 @@ where
             let object = v8::Object::new(scope);
             let _ = declaration.initialize(scope, object);
             object
-        }
-    }
-}
-
-#[derive(webidl::WebIdlDictionary)]
-#[webidl(prefix = "RegistrationOptions")]
-struct ServiceWorkerRegistrationOptions {
-    #[webidl(name = "scope", converter = "usv_string")]
-    requested_scope: Option<String>,
-
-    #[webidl(
-        name = "type",
-        converter = "enum",
-        default = WorkerScriptKind::Classic
-    )]
-    script_kind: WorkerScriptKind,
-
-    #[webidl(
-        name = "updateViaCache",
-        converter = "enum",
-        default = ServiceWorkerUpdateViaCache::Imports
-    )]
-    update_via_cache: ServiceWorkerUpdateViaCache,
-}
-
-impl Default for ServiceWorkerRegistrationOptions {
-    fn default() -> Self {
-        Self {
-            requested_scope: None,
-            script_kind: WorkerScriptKind::Classic,
-            update_via_cache: ServiceWorkerUpdateViaCache::Imports,
         }
     }
 }
@@ -458,6 +398,29 @@ pub(in crate::context_bootstrap) fn navigator_service_worker_register_callback<'
         rv.set(promise.into());
         return;
     };
+    if !request_context.registration_urls_match_origin(&script_url, &scope_url) {
+        reject_service_worker_promise_with_dom_exception(
+            scope,
+            resolver,
+            "The script and scope must have the document's origin.",
+            "SecurityError",
+        );
+        rv.set(promise.into());
+        return;
+    }
+    if host
+        .check_service_worker_registration_csp_for_owner(scope, owner, &script_url)
+        .blocks_request()
+    {
+        reject_service_worker_promise_with_dom_exception(
+            scope,
+            resolver,
+            "The ServiceWorker script URL violates the document's Content Security Policy.",
+            "SecurityError",
+        );
+        rv.set(promise.into());
+        return;
+    }
     let (request_id, document_owner, completion_tx) =
         host.register_pending_service_worker_register(scope, resolver, request_context.owner());
     host.start_service_worker_runtime(
@@ -1702,7 +1665,7 @@ fn service_worker_periodic_sync_manager_unregister_callback<'s>(
     let _ = resolver.resolve(scope, v8::undefined(scope).into());
 }
 
-use crate::service_worker_api_values::service_worker_periodic_sync_options;
+use moli_webapi::worker_options::service_worker::service_worker_periodic_sync_options;
 
 fn service_worker_background_sync_permission_state(scope: &mut v8::PinScope<'_, '_>) -> String {
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
@@ -1759,7 +1722,7 @@ fn service_worker_navigation_preload_manager_scope_from_this(
     url::Url::parse(&scope_string).ok()
 }
 
-use crate::service_worker_api_values::service_worker_navigation_preload_header_value;
+use moli_webapi::worker_options::service_worker::service_worker_navigation_preload_header_value;
 
 fn service_worker_navigation_preload_valid_header_value(value: &str) -> bool {
     value
@@ -2443,20 +2406,12 @@ fn build_service_worker_push_subscription_object<'s>(
     scope_url: &url::Url,
     snapshot: &crate::service_worker_runtime::ServiceWorkerPushSubscriptionSnapshot,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let options = moli_webapi::push_values::new_subscription_options(
+    let subscription = moli_webapi::push_values::new_subscription(
         scope,
+        &snapshot.endpoint,
         snapshot.user_visible_only,
-        v8::null(scope).into(),
+        service_worker_push_subscription_unsubscribe_callback,
     )?;
-    let subscription = ServiceWorkerPushSubscriptionDeclaration {
-        endpoint: snapshot.endpoint.clone(),
-        expiration_time: v8::null(scope).into(),
-        options,
-        unsubscribe: (),
-        to_json: (),
-    }
-    .bind(scope)
-    .ok()?;
     let scope_value = v8_string(scope, scope_url.as_str())?;
     define_non_enumerable_value_property(
         scope,
@@ -2497,22 +2452,6 @@ fn service_worker_push_subscription_unsubscribe_callback<'s>(
     let host = unsafe { &*host_ptr };
     let unsubscribed = host.unsubscribe_service_worker_push(&scope_url);
     let _ = resolver.resolve(scope, v8::Boolean::new(scope, unsubscribed).into());
-}
-
-fn service_worker_push_subscription_to_json_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'s, v8::Value>,
-) {
-    let object = ObjectLiteralDeclaration::bind(scope);
-    for name in ["endpoint", "expirationTime", "options"] {
-        let value = args
-            .this()
-            .get(scope, v8str(scope, name).into())
-            .unwrap_or_else(|| v8::undefined(scope).into());
-        object.set_string_property(scope, name, value);
-    }
-    rv.set(object.into_value());
 }
 
 fn service_worker_registration_scope_from_this(
@@ -2962,8 +2901,7 @@ fn dispatch_service_worker_simple_event<'s>(
         ServiceWorkerInternalEventCallbackDispatchEffect::CallbackBodyDispatched
     };
     let event = v8::Object::new(scope);
-    let _ =
-        ServiceWorkerSimpleEventDeclaration::new(v8str(scope, event_type)).initialize(scope, event);
+    let _ = PlainEventDeclaration::new(v8str(scope, event_type)).initialize(scope, event);
     dispatch_simple_event_target_event(scope, target, event_type, event);
     callback_effect
 }
