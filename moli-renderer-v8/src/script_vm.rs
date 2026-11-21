@@ -11,12 +11,16 @@ use crate::DocumentStartScript;
 use crate::content_security_policy::ContentSecurityPolicyScriptElementRequest;
 use crate::dom::NodeId;
 use crate::dom::native::{
-    Attribute, DomHost, DomMutationEffects, NativeDom, NativeNodeId, NodeData,
+    Attribute, DomHost, DomMutationEffects, NativeDom, NativeNodeId,
 };
+#[cfg(feature = "devtools")]
+use crate::dom::native::NodeData;
 use crate::frame_owner_model::{
     ChildDocumentModulatorStore, DocumentId, FrameDocumentTaskOwner, FrameOwnerStore, FrameRealmId,
     FrameScriptJob, FrameScriptJobKind,
 };
+#[cfg(feature = "devtools")]
+use crate::runtime::{RendererCountEntry, RendererMoliDomMemoryDiagnostics};
 use crate::inspector_microtasks::with_scoped_inspector_microtasks;
 use crate::inspector_session::dispatch_with_runtime_defaults;
 use crate::network::ResourceRequestClient;
@@ -26,7 +30,7 @@ use crate::page_task_queue::{
     RendererResourceCompletionSender, RuntimePageTaskSender,
 };
 use crate::runtime::{
-    RendererBrowserContextRuntime, RendererCountEntry, RendererMoliDomMemoryDiagnostics,
+    RendererBrowserContextRuntime,
     RendererPerformanceMetricSnapshot, RendererRuntimeInspectorAsyncCompletion,
     RendererRuntimeInspectorMessage, RendererRuntimeInspectorResponseSender,
     RendererRuntimeRealmInfo, RuntimeConsoleMessageSnapshot, SharedRendererBackendNodeRegistry,

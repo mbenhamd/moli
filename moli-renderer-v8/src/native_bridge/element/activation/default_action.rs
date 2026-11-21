@@ -11,11 +11,13 @@ use crate::context_bootstrap::{
     selection_value_for_window,
 };
 use crate::dom::{
-    forms::{
-        ButtonTypeState, InputStepDirection, InputStepOutcome, InputStepState, InputType,
-        RangeKeyboardStep, range_value_after_keyboard_step, step_input_value,
-    },
+    forms::{ButtonTypeState, InputType},
     native::{Element, Node},
+};
+#[cfg(feature = "devtools")]
+use crate::dom::forms::{
+    InputStepDirection, InputStepOutcome, InputStepState, RangeKeyboardStep,
+    range_value_after_keyboard_step, step_input_value,
 };
 use crate::util::{
     call_object_method, node_wrapper_from_handle, object_number_property,

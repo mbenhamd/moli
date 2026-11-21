@@ -232,7 +232,7 @@ where
     let prepared = loop {
         match preparation.prepare(source, styles, services)? {
             LayoutPassStep::Ready(prepared) => break *prepared,
-            LayoutPassStep::Restyle(next) => preparation = next,
+            LayoutPassStep::Restyle(next) => preparation = *next,
         }
     };
     let used_retained_world = prepared.used_retained_world;
@@ -319,7 +319,7 @@ where
     /// Container-query sizes converged; the style resolver can be released.
     Ready(Box<PreparedLayoutPass<N>>),
     /// The resolver accepted changed container sizes; prepare again.
-    Restyle(LayoutPassPreparation<N>),
+    Restyle(Box<LayoutPassPreparation<N>>),
 }
 
 /// A converged, numerically laid-out world for one layout demand.
@@ -481,7 +481,7 @@ where
                 web_fonts: self.web_fonts.clone(),
             });
         }
-        Ok(LayoutPassStep::Restyle(self))
+        Ok(LayoutPassStep::Restyle(Box::new(self)))
     }
 }
 
