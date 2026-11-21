@@ -2767,3 +2767,415 @@ async fn css_transition_does_not_start_from_the_pre_layout_container_estimate() 
         .expect("container style should be readable");
     assert_eq!(observed, "rgb(255, 0, 0)|0");
 }
+
+const TRANSITION_STYLE: &str = r#"<html><head><style>
+.x { position: relative; left: 0; opacity: 0; transition: opacity 3600s steps(1, jump-both); }
+.x.on { opacity: 1; }
+</style></head><body><div id="t" class="x"></div></body></html>"#;
+
+fn css_transition_task_queued(vm: &ScriptVm) -> bool {
+    vm._context_host
+        .borrow()
+        .style_engine_ref()
+        .css_transition_task_due()
+        .get()
+        .is_some()
+}
+
+/// Chromium 156: a class change in a document none of whose styles specifies
+/// a transition starts none, and a rule or `style` attribute added later
+/// starts one. Until then neither the style change nor its layout queues a transition task.
+#[test]
+fn css_transition_frames_wait_for_a_style_that_can_specify_transitions() {
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-unspecifiable.test/",
+        r#"<html><head><style>div { position: absolute; left: 0; } .on { left: 10px; }</style></head>
+<body><div id="t"></div><div id="u"></div></body></html>"#,
+    );
+    vm.eval(
+        "(() => { const t = document.getElementById('t'); getComputedStyle(t).left; \
+         t.className = 'on'; })()",
+    )
+    .expect("class change should evaluate");
+    // The layout that follows queues the transition task when a style change
+    // may start a transition.
+    vm.eval("document.getElementById('t').getBoundingClientRect(); 0")
+        .expect("layout should evaluate");
+    assert!(!css_transition_task_queued(&vm));
+    let observed = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  const u = document.getElementById('u');
+  const before = [getComputedStyle(t).left, t.getAnimations().length];
+  document.styleSheets[0].insertRule('#t { transition: left 3600s steps(1, jump-both); }', 2);
+  getComputedStyle(t).left;
+  t.className = '';
+  const ruled = t.getAnimations().length;
+  getComputedStyle(u).left;
+  u.setAttribute('style', 'transition: left 3600s steps(1, jump-both)');
+  getComputedStyle(u).left;
+  u.className = 'on';
+  return [...before, ruled, u.getAnimations().length].join('|');
+})()
+"#,
+        )
+        .expect("transition styles should evaluate");
+    assert_eq!(observed, "10px|0|1|1");
+    assert!(css_transition_task_queued(&vm));
+}
+
+/// Chromium 156: a style flush that cancels a transition makes its
+/// `CSSTransition` idle, and the rejection of its `finished` promise waits
+/// for the transition task.
+#[tokio::test]
+async fn css_transition_style_cancel_is_idle_at_the_flush_and_rejects_later() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm("https://css-transition-flush-idle.test/", TRANSITION_STYLE);
+    let observed = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  getComputedStyle(t).opacity;
+  t.classList.add('on');
+  const a = t.getAnimations()[0];
+  globalThis.__result = 'pending';
+  a.finished.catch((error) => { globalThis.__result = error.name; });
+  t.style.transitionProperty = 'none';
+  const flushed = [getComputedStyle(t).opacity, a.playState, t.getAnimations().length];
+  Promise.resolve().then(() => Promise.resolve()).then(() => {
+    globalThis.__early = globalThis.__result;
+  });
+  return flushed.join('|');
+})()
+"#,
+        )
+        .expect("style cancel should evaluate");
+    assert_eq!(observed, "1|idle|0");
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("transition task should run");
+    let results = vm
+        .eval("[globalThis.__early, globalThis.__result].join('|')")
+        .expect("results should be readable");
+    assert_eq!(results, "pending|AbortError");
+}
+
+/// Chromium 156: every `finished` reaction of an ended transition runs
+/// before its `transitionend` listeners, a chained one too.
+#[tokio::test]
+async fn css_transition_finished_reaction_chain_runs_before_transitionend() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-finished-chain.test/",
+        r#"<html><head><style>
+#t { width: 10px; height: 10px; opacity: 1; transition: opacity 5ms linear; }
+#t.on { opacity: 0; }
+</style></head><body><div id="t"></div></body></html>"#,
+    );
+    vm.eval(
+        r#"
+(() => {
+  const t = document.getElementById('t');
+  getComputedStyle(t).opacity;
+  t.classList.add('on');
+  let state = 0;
+  t.getAnimations()[0].finished.then(() => { state = 1; }).then(() => { state = 2; });
+  t.addEventListener('transitionend', () => { globalThis.__state = state; });
+})()
+"#,
+    )
+    .expect("transition should start");
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("transition should end");
+    let state = vm
+        .eval("String(globalThis.__state)")
+        .expect("listener observation should be readable");
+    assert_eq!(state, "2");
+}
+
+/// Chromium 156: `finish()` and `cancel()` act on a `CSSTransition` in any
+/// state: canceling a finished one replaces its `finished` promise, and
+/// finishing a canceled one resolves the new promise.
+#[test]
+fn css_transition_finish_and_cancel_act_from_any_state() {
+    let mut vm = new_rendered_test_vm("https://css-transition-any-state.test/", TRANSITION_STYLE);
+    let observed = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  getComputedStyle(t).opacity;
+  t.classList.add('on');
+  const a = t.getAnimations()[0];
+  a.finish();
+  const old = a.finished;
+  a.cancel();
+  const replaced = old !== a.finished;
+  const canceled = a.playState;
+  a.finish();
+  const u = document.body.appendChild(document.createElement('div'));
+  u.className = 'x';
+  getComputedStyle(u).opacity;
+  u.classList.add('on');
+  const b = u.getAnimations()[0];
+  b.cancel();
+  globalThis.__resolved = false;
+  b.finished.then(() => { globalThis.__resolved = true; });
+  b.finish();
+  return [replaced, canceled, a.playState, b.playState].join('|');
+})()
+"#,
+        )
+        .expect("finish and cancel should evaluate");
+    assert_eq!(observed, "true|idle|finished|finished");
+    let resolved = vm
+        .eval("String(globalThis.__resolved)")
+        .expect("promise state should be readable");
+    assert_eq!(resolved, "true");
+}
+
+/// Chromium 156: showing a `display: none` subtree starts no transition from
+/// the styles its elements had while hidden.
+#[test]
+fn css_transition_does_not_start_from_a_hidden_style_on_reveal() {
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-reveal.test/",
+        r#"<html><body><div id="p" style="display: none"><div id="t"></div></div></body></html>"#,
+    );
+    let observed = vm
+        .eval(
+            r#"
+(() => {
+  const p = document.getElementById('p');
+  const t = document.getElementById('t');
+  t.style.opacity = '0';
+  getComputedStyle(t).opacity;
+  p.style.display = 'block';
+  t.style.cssText = 'opacity: 1; transition: opacity 3600s steps(1, jump-both)';
+  return [getComputedStyle(t).opacity, t.getAnimations().length].join('|');
+})()
+"#,
+        )
+        .expect("reveal should evaluate");
+    assert_eq!(observed, "1|0");
+}
+
+/// Chromium 156: an element removed while its transition runs, then
+/// reinserted, starts a new transition to the same end value.
+#[test]
+fn css_transition_starts_again_after_its_element_is_reinserted() {
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-reinsert-again.test/",
+        TRANSITION_STYLE,
+    );
+    let observed = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  getComputedStyle(t).opacity;
+  t.classList.add('on');
+  t.getAnimations();
+  t.remove();
+  t.classList.remove('on');
+  document.body.append(t);
+  const initial = getComputedStyle(t).opacity;
+  t.classList.add('on');
+  return [initial, getComputedStyle(t).opacity, t.getAnimations().length].join('|');
+})()
+"#,
+        )
+        .expect("reinsertion should evaluate");
+    assert_eq!(observed, "0|0.5|1");
+}
+
+/// Chromium 156: `document.open()` cancels the replaced document's
+/// transitions; their `CSSTransition`s become idle.
+#[test]
+fn css_transition_objects_are_idle_after_document_open() {
+    let mut vm = new_rendered_test_vm("https://css-transition-open-idle.test/", TRANSITION_STYLE);
+    let observed = vm
+        .eval(
+            r#"
+(() => {
+  const saved = [];
+  for (let i = 0; i < 3; i++) {
+    const t = document.body.appendChild(document.createElement('div'));
+    t.style.cssText = 'opacity: 0; transition: opacity 3600s steps(1, jump-both)';
+    getComputedStyle(t).opacity;
+    t.style.opacity = '1';
+    saved.push(t.getAnimations()[0]);
+    document.open();
+    document.write('<body></body>');
+    document.close();
+  }
+  return [document.getAnimations().length,
+          saved.filter((a) => a.playState === 'running').length].join('|');
+})()
+"#,
+        )
+        .expect("document.open should evaluate");
+    assert_eq!(observed, "0|0");
+}
+
+/// Chromium 156: moving an element with a running transition into a child
+/// frame's document cancels that transition and starts none there.
+#[test]
+fn css_transition_is_canceled_when_its_element_moves_to_another_document() {
+    let mut vm = new_rendered_test_vm("https://css-transition-adopt.test/", TRANSITION_STYLE);
+    vm.eval("document.body.appendChild(document.createElement('iframe'))")
+        .expect("frame should be inserted");
+    vm.drain_pending_child_frame_work_for_test();
+    let observed = vm
+        .eval(
+            r#"
+(() => {
+  const f = document.querySelector('iframe');
+  const t = document.body.appendChild(document.createElement('div'));
+  t.style.cssText = 'opacity: 0; transition: opacity 3600s steps(1, jump-both)';
+  getComputedStyle(t).opacity;
+  t.style.opacity = '1';
+  const a = t.getAnimations()[0];
+  f.contentDocument.body.appendChild(t);
+  return [f.contentWindow.getComputedStyle(t).opacity, t.getAnimations().length,
+          a.playState].join('|');
+})()
+"#,
+        )
+        .expect("adoption should evaluate");
+    assert_eq!(observed, "1|0|idle");
+}
+
+/// Chromium 156: another realm's `getAnimations()` returns the same
+/// `CSSTransition` as the element's own realm, and it settles.
+#[test]
+fn css_transition_object_is_shared_across_realms() {
+    let mut vm = new_rendered_test_vm("https://css-transition-realms.test/", TRANSITION_STYLE);
+    vm.eval("document.body.appendChild(document.createElement('iframe'))")
+        .expect("frame should be inserted");
+    vm.drain_pending_child_frame_work_for_test();
+    let observed = vm
+        .eval(
+            r#"
+(() => {
+  const d = document.querySelector('iframe').contentDocument;
+  const t = d.body.appendChild(d.createElement('div'));
+  t.style.cssText = 'opacity: 0; transition: opacity 3600s steps(1, jump-both)';
+  d.defaultView.getComputedStyle(t).opacity;
+  t.style.opacity = '1';
+  const a = t.getAnimations()[0];
+  const b = Element.prototype.getAnimations.call(t)[0];
+  a.finish();
+  return [a === b, b.playState].join('|');
+})()
+"#,
+        )
+        .expect("cross-realm transition should evaluate");
+    assert_eq!(observed, "true|finished");
+}
+
+/// Chromium 156: assigning a `CSSTransition`'s effect to itself and then
+/// canceling it leaves no animation behind.
+#[test]
+fn css_transition_effect_assignment_keeps_it_out_of_script_animations() {
+    let mut vm = new_rendered_test_vm("https://css-transition-effect-self.test/", TRANSITION_STYLE);
+    let observed = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  for (let i = 0; i < 3; i++) {
+    getComputedStyle(t).opacity;
+    t.classList.toggle('on');
+    const a = t.getAnimations()[0];
+    a.effect = a.effect;
+    a.cancel();
+    getComputedStyle(t).opacity;
+  }
+  return [t.getAnimations().length, document.getAnimations().length].join('|');
+})()
+"#,
+        )
+        .expect("effect assignment should evaluate");
+    assert_eq!(observed, "0|0");
+}
+
+/// Chromium 156: transitions that end in the same frame send `transitionend`
+/// in their elements' tree order.
+#[tokio::test]
+async fn css_transition_end_events_follow_tree_order() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-end-order.test/",
+        r#"<html><head><style>
+.b { position: relative; left: 0; height: 2px; transition: left 1ms linear; }
+</style></head><body><div id="root"></div></body></html>"#,
+    );
+    vm.eval(
+        r#"
+(() => {
+  const root = document.getElementById('root');
+  for (let i = 0; i < 8; i++) {
+    const d = root.appendChild(document.createElement('div'));
+    d.className = 'b';
+    d.id = 'e' + i;
+  }
+  for (const d of root.children) getComputedStyle(d).left;
+  globalThis.__ends = [];
+  document.addEventListener('transitionend', (e) => __ends.push(e.target.id));
+  for (const d of [...root.children].reverse()) d.style.left = '50px';
+  for (const d of root.children) getComputedStyle(d).left;
+})()
+"#,
+    )
+    .expect("transitions should start");
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("transitions should end");
+    let ends = vm
+        .eval("__ends.join(' ')")
+        .expect("end order should be readable");
+    assert_eq!(ends, "e0 e1 e2 e3 e4 e5 e6 e7");
+}
+
+/// Chromium 156: `commitStyles()` on a finished transition writes its end
+/// value to the element's inline style.
+#[test]
+fn css_transition_commit_styles_writes_its_value() {
+    let mut vm = new_rendered_test_vm("https://css-transition-commit.test/", TRANSITION_STYLE);
+    let observed = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  getComputedStyle(t).opacity;
+  t.classList.add('on');
+  const a = t.getAnimations()[0];
+  a.finish();
+  a.commitStyles();
+  t.classList.remove('on');
+  return [t.style.opacity, getComputedStyle(t).opacity].join('|');
+})()
+"#,
+        )
+        .expect("commitStyles should evaluate");
+    assert_eq!(observed, "1|1");
+}
+
+/// Chromium 156: `KeyframeEffect.prototype.getTiming` throws on an object
+/// that is not a `KeyframeEffect`.
+#[test]
+fn keyframe_effect_get_timing_rejects_other_receivers() {
+    let mut vm = new_rendered_test_vm("https://keyframe-effect-get-timing.test/", TRANSITION_STYLE);
+    let observed = vm
+        .eval(
+            "(() => { try { return String(KeyframeEffect.prototype.getTiming.call({}).duration); } \
+             catch (e) { return e.name; } })()",
+        )
+        .expect("getTiming should evaluate");
+    assert_eq!(observed, "TypeError");
+}

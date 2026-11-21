@@ -163,6 +163,11 @@ pub struct NativeDom {
     // and an element's namespace and local name never change, so counting at
     // allocation equals a full arena scan.
     html_frame_element_count: usize,
+    // Whether any element's `style` attribute ever held text that can name a
+    // transition longhand: "transition" in any ASCII case, or a backslash
+    // escape that can spell it. Sticky, like the frame count above, so it
+    // equals a scan of every style attribute this arena ever held.
+    style_attributes_may_specify_transitions: bool,
     document_node_id: NativeNodeId,
     stylesheet_candidate_registries: StylesheetCandidateRegistries,
     parse_errors: Vec<String>,
@@ -175,6 +180,7 @@ impl Clone for NativeDom {
         Self {
             nodes: self.nodes.clone(),
             html_frame_element_count: self.html_frame_element_count,
+            style_attributes_may_specify_transitions: self.style_attributes_may_specify_transitions,
             document_node_id: self.document_node_id,
             stylesheet_candidate_registries: self.stylesheet_candidate_registries.clone(),
             parse_errors: self.parse_errors.clone(),
@@ -205,6 +211,7 @@ impl NativeDom {
         Self {
             nodes: NativeNodeStorage::from_node(document_node),
             html_frame_element_count: 0,
+            style_attributes_may_specify_transitions: false,
             document_node_id,
             stylesheet_candidate_registries: StylesheetCandidateRegistries::default(),
             parse_errors: Vec::new(),
@@ -223,6 +230,7 @@ impl NativeDom {
         Self {
             nodes: NativeNodeStorage::from_node(document_node),
             html_frame_element_count: 0,
+            style_attributes_may_specify_transitions: false,
             document_node_id,
             stylesheet_candidate_registries: StylesheetCandidateRegistries::default(),
             parse_errors: Vec::new(),
@@ -241,6 +249,22 @@ impl NativeDom {
     /// connected or not, in O(1).
     pub fn html_frame_element_count(&self) -> usize {
         self.html_frame_element_count
+    }
+
+    /// Whether a `style` attribute of this arena ever held text that can
+    /// specify a CSS transition (see [`style_attribute_may_specify_transitions`]).
+    pub fn style_attributes_may_specify_transitions(&self) -> bool {
+        self.style_attributes_may_specify_transitions
+    }
+
+    pub(crate) fn mark_style_attributes_may_specify_transitions(&mut self) {
+        self.style_attributes_may_specify_transitions = true;
+    }
+
+    pub(crate) fn note_attribute_value(&mut self, namespace: &str, local_name: &str, value: &str) {
+        if attribute_may_specify_transitions(namespace, local_name, value) {
+            self.style_attributes_may_specify_transitions = true;
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -389,6 +413,17 @@ impl NativeDom {
             && (element.is_html_element("iframe") || element.is_html_element("frame"))
         {
             self.html_frame_element_count += 1;
+        }
+        if let NodeData::Element(element) = &data
+            && element.attributes().iter().any(|attribute| {
+                attribute_may_specify_transitions(
+                    attribute.namespace(),
+                    attribute.local_name(),
+                    attribute.value(),
+                )
+            })
+        {
+            self.style_attributes_may_specify_transitions = true;
         }
         let mut flags = NodeFlags::new(in_document_tree);
         flags.set_connected(connected);
@@ -970,6 +1005,25 @@ fn split_qualified_name(qualified_name: &str) -> Option<(Option<&str>, &str)> {
 }
 
 pub use host::is_builtin_reassociateable_form_associated_element;
+
+/// Whether `style` attribute text can declare a `transition-*` longhand: a
+/// property name is an identifier, which spells "transition" either directly
+/// (ASCII case-insensitively) or through a CSS escape.
+pub fn style_attribute_may_specify_transitions(value: &str) -> bool {
+    value.contains('\\')
+        || value
+            .as_bytes()
+            .windows(b"transition".len())
+            .any(|window| window.eq_ignore_ascii_case(b"transition"))
+}
+
+pub(crate) fn attribute_may_specify_transitions(
+    namespace: &str,
+    local_name: &str,
+    value: &str,
+) -> bool {
+    namespace.is_empty() && local_name == "style" && style_attribute_may_specify_transitions(value)
+}
 
 #[cfg(test)]
 mod tests {

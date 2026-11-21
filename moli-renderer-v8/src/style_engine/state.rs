@@ -96,6 +96,9 @@ pub(super) struct StyleDocumentState {
     /// The roots of the subtrees whose styles changed since the last frame's
     /// style update, which runs their style change events.
     transition_style_roots: RefCell<indexmap::IndexSet<DomHandle>>,
+    /// Sticky: an author stylesheet of the retained style system declared a
+    /// `transition-*` longhand at some update.
+    author_styles_may_specify_transitions: Cell<bool>,
     #[cfg(debug_assertions)]
     completed_style_observation: RefCell<Option<CompletedStyleObservation>>,
     #[cfg(all(test, debug_assertions))]
@@ -124,6 +127,7 @@ impl StyleDocumentState {
             paint_only_visual_inputs: Cell::new(0),
             lazy_invalidation_roots: LazyStyleInvalidationRoots::default(),
             transition_style_roots: RefCell::default(),
+            author_styles_may_specify_transitions: Cell::new(false),
             #[cfg(debug_assertions)]
             completed_style_observation: RefCell::new(None),
             #[cfg(all(test, debug_assertions))]
@@ -258,6 +262,26 @@ impl StyleDocumentState {
         self.transition_style_roots.borrow_mut().extend(roots);
     }
 
+    /// Whether the author stylesheets can declare a `transition-*` longhand:
+    /// one did at a retained style update, or a stylesheet change is not
+    /// scanned yet because no retained style update applied it.
+    pub(super) fn author_styles_may_specify_transitions(&self) -> bool {
+        self.author_styles_may_specify_transitions.get()
+            || self.source_dirty_scopes.requires_retained_style_update()
+            || self
+                .retained_style_system
+                .try_borrow()
+                .map_or(true, |retained| retained.is_none())
+    }
+
+    fn note_author_transition_styles(&self, retained: &RetainedStyleSystem) {
+        if !self.author_styles_may_specify_transitions.get()
+            && super::retained::retained_author_styles_may_specify_transitions(retained)
+        {
+            self.author_styles_may_specify_transitions.set(true);
+        }
+    }
+
     pub(super) fn has_transition_style_roots(&self) -> bool {
         !self.transition_style_roots.borrow().is_empty()
     }
@@ -379,6 +403,7 @@ impl StyleDocumentState {
         #[cfg(test)]
         self.retained_style_system_rebuilds
             .set(self.retained_style_system_rebuild_count().saturating_add(1));
+        self.note_author_transition_styles(&retained);
         *retained_slot = Some(retained);
     }
 
@@ -391,7 +416,9 @@ impl StyleDocumentState {
             let retained = retained
                 .as_mut()
                 .expect("retained style system should exist before an incremental update");
-            update(retained)
+            let result = update(retained);
+            self.note_author_transition_styles(retained);
+            result
         };
         self.retained_style_system_generation.set(
             self.retained_style_system_generation

@@ -68,8 +68,16 @@ impl NativeDom {
             .node_mut(node_id)
             .and_then(|node| node.data_mut().as_element_mut())
             .is_some_and(|element| {
-                element.set_attribute(normalized_name, String::new(), None, value.to_owned())
+                element.set_attribute(
+                    normalized_name.clone(),
+                    String::new(),
+                    None,
+                    value.to_owned(),
+                )
             });
+        if changed {
+            self.note_attribute_value("", &normalized_name, value);
+        }
         if changed && let Some(document) = base_document {
             self.process_base_element(document, false);
         }
@@ -103,6 +111,9 @@ impl NativeDom {
                     value.to_owned(),
                 )
             });
+        if changed {
+            self.note_attribute_value(namespace, local_name, value);
+        }
         if changed && let Some(document) = base_document {
             self.process_base_element(document, false);
         }

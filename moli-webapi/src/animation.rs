@@ -238,6 +238,13 @@ fn keyframe_effect_get_timing_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    if !web_api_interfaces::KeyframeEffect::is_instance(scope, args.this()) {
+        throw_type_error(
+            scope,
+            "KeyframeEffect.getTiming called on incompatible receiver.",
+        );
+        return;
+    }
     let options = get_private_value(scope, args.this(), KEYFRAME_EFFECT_TIMING_SLOT);
     let timing = v8::Object::new(scope);
     let defaults: [(&'static str, v8::Local<v8::Value>); 8] = [

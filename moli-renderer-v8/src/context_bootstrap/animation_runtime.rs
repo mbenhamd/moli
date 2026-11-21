@@ -235,6 +235,8 @@ pub(super) fn animation_commit_styles_callback<'s>(
 ) {
     if let Some(target) = get_private_object(scope, args.this(), CSS_ANIMATION_TARGET_SLOT) {
         commit_css_animation_styles(scope, target);
+    } else if css_transitions::css_transition_id(scope, args.this()).is_some() {
+        css_transitions::commit_css_transition_styles(scope, args.this());
     } else {
         commit_animation_effect_styles(scope, args.this());
     }
@@ -702,6 +704,12 @@ fn set_animation_effect_value<'s>(
     animation: v8::Local<'s, v8::Object>,
     value: v8::Local<'s, v8::Value>,
 ) {
+    // A `CSSTransition` is in its element's transitions, not its script
+    // animations.
+    if css_transitions::css_transition_id(scope, animation).is_some() {
+        set_private_value(scope, animation, ANIMATION_EFFECT_SLOT, value);
+        return;
+    }
     let is_current = matches!(
         animation_play_state(scope, animation).as_str(),
         "running" | "paused"

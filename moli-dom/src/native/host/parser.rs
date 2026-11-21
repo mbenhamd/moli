@@ -189,6 +189,7 @@ impl DomHost {
         let mut named_index_changed = false;
         let mut base_state_changed = false;
         let mut referrer_attribute_changed = false;
+        let mut style_may_specify_transitions = false;
         for attribute in attrs {
             let already_exists = element.attributes().iter().any(|existing| {
                 existing.namespace() == attribute.namespace()
@@ -212,10 +213,19 @@ impl DomHost {
                     && attribute.namespace().is_empty()
                     && matches!(attribute.local_name(), "name" | "content");
                 changed |= attribute_changed;
+                style_may_specify_transitions |= attribute_changed
+                    && crate::native::attribute_may_specify_transitions(
+                        attribute.namespace(),
+                        attribute.local_name(),
+                        attribute.value(),
+                    );
             }
         }
         changed |= element.resanitize_input_value_after_parser_attributes();
         changed |= element.mark_undefined_custom_element_candidate_from_identity();
+        if style_may_specify_transitions {
+            self.dom.mark_style_attributes_may_specify_transitions();
+        }
 
         if changed {
             if named_index_changed {

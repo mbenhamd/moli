@@ -130,7 +130,13 @@ impl CssTransitionEventKind {
 #[derive(Clone, Debug)]
 pub(crate) struct CssTransitionEvent {
     pub(crate) id: u64,
+    /// The Document whose style world ran the transition: its realm holds
+    /// the transition's `CSSTransition`, even after the element moved.
+    pub(crate) document: DomHandle,
     pub(crate) target: DomHandle,
+    /// The style change event that started the transition, for composite
+    /// order.
+    pub(crate) generation: u64,
     pub(crate) kind: CssTransitionEventKind,
     pub(crate) property: String,
     /// Seconds, as `TransitionEvent.elapsedTime`.
@@ -153,6 +159,8 @@ enum TransitionPhase {
 #[derive(Clone, Debug)]
 pub(crate) struct CssTransitionRecord {
     pub(crate) id: u64,
+    /// The Document whose style world runs this transition.
+    pub(crate) document: DomHandle,
     pub(crate) target: DomHandle,
     pub(crate) property: String,
     /// The style change event that started this transition; transitions
@@ -201,7 +209,9 @@ impl CssTransitionRecord {
     ) -> CssTransitionEvent {
         CssTransitionEvent {
             id: self.id,
+            document: self.document,
             target: self.target,
+            generation: self.generation,
             kind,
             property: self.property.clone(),
             elapsed_time,
@@ -253,6 +263,7 @@ struct TransitionStore {
 
 /// One Document's CSS transitions.
 pub(crate) struct DocumentCssTransitions {
+    document: DomHandle,
     animations: DocumentAnimationSet,
     clock: Cell<f64>,
     store: RefCell<TransitionStore>,
@@ -279,9 +290,10 @@ pub(crate) struct DocumentCssTransitions {
     transition_styles_seen: Cell<bool>,
 }
 
-impl Default for DocumentCssTransitions {
-    fn default() -> Self {
+impl DocumentCssTransitions {
+    pub(super) fn new(document: DomHandle) -> Self {
         Self {
+            document,
             animations: DocumentAnimationSet::default(),
             clock: Cell::new(animation_clock_now()),
             store: RefCell::default(),
@@ -308,10 +320,23 @@ impl DocumentCssTransitions {
         (self.animations.clone(), self.clock.get())
     }
 
-    /// Drops every transition, for a Document replacement.
+    /// Drops every transition, for a Document replacement. The running ones
+    /// are canceled: their `CSSTransition`s settle at the next transition
+    /// task, without a `transitioncancel` (their elements left the
+    /// Document with its content).
     pub(super) fn clear(&self) {
         self.animations.sets.write().clear();
-        *self.store.borrow_mut() = TransitionStore::default();
+        let mut store = self.store.borrow_mut();
+        let previous = std::mem::take(&mut *store);
+        store.events = previous.events;
+        let now = self.clock.get();
+        for record in previous.records.into_values() {
+            let elapsed = (now - record.start_time).clamp(0.0, record.duration);
+            store
+                .events
+                .push(record.event(CssTransitionEventKind::Cancel, elapsed, false));
+        }
+        drop(store);
         self.candidates.borrow_mut().clear();
         self.updated_generation.set(None);
         self.in_frame.set(false);
@@ -324,6 +349,61 @@ impl DocumentCssTransitions {
     /// Marks `elements` as having no before-change style.
     pub(super) fn mark_fresh(&self, elements: impl IntoIterator<Item = DomHandle>) {
         self.fresh.borrow_mut().extend(elements);
+    }
+
+    fn consume_fresh(&self, element: DomHandle) {
+        let mut fresh = self.fresh.borrow_mut();
+        if !fresh.is_empty() {
+            fresh.remove(&element);
+        }
+    }
+
+    /// Marks the flat-tree descendants of `element` that have a resolved
+    /// style as having no before-change style.
+    fn mark_styled_descendants_fresh<E: TElement>(&self, element: E) {
+        let mut pending = vec![element];
+        let mut fresh = self.fresh.borrow_mut();
+        while let Some(current) = pending.pop() {
+            for child in current.traversal_children() {
+                let Some(child) = child.as_element() else {
+                    continue;
+                };
+                if child.has_data() {
+                    fresh.insert(DomHandle::new(child.as_node().debug_id()));
+                    pending.push(child);
+                }
+            }
+        }
+    }
+
+    /// Drops the finished and canceled transitions Stylo still keeps for
+    /// `key`, with their ids.
+    fn prune_settled(&self, key: &AnimationSetKey) {
+        let mut sets = self.animations.sets.write();
+        let Some(set) = sets.get_mut(key) else {
+            return;
+        };
+        let mut store = self.store.borrow_mut();
+        let running = |state: &AnimationState| {
+            matches!(state, AnimationState::Pending | AnimationState::Running)
+        };
+        if let Some(ids) = store.ids.get_mut(&key.node) {
+            let mut index = 0;
+            ids.retain(|_| {
+                let keep = set
+                    .transitions
+                    .get(index)
+                    .is_some_and(|transition| running(&transition.state));
+                index += 1;
+                keep
+            });
+        }
+        set.transitions
+            .retain(|transition| running(&transition.state));
+        if set.transitions.is_empty() {
+            sets.remove(key);
+            store.ids.remove(&key.node);
+        }
     }
 
     /// Whether any resolved style of the document specified transitions, so
@@ -344,6 +424,12 @@ impl DocumentCssTransitions {
                 .map(|record| record.target),
         );
         targets.into_iter().collect()
+    }
+
+    /// Whether the document's initial content still awaits its first frame
+    /// style update.
+    pub(super) fn has_unstyled_document(&self) -> bool {
+        !self.document_styled.get()
     }
 
     /// Whether the document's initial content still awaits its first frame
@@ -453,10 +539,12 @@ impl DocumentCssTransitions {
         let ids = {
             let store = self.store.borrow();
             store
-                .records
-                .values()
-                .filter(|record| record.target == target)
-                .map(|record| record.id)
+                .ids
+                .get(&OpaqueNode(target.index()))
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|id| store.records.contains_key(id))
                 .collect::<Vec<_>>()
         };
         for id in &ids {
@@ -508,11 +596,13 @@ impl DocumentCssTransitions {
 
     /// The running transitions of `target`, in composite order.
     pub(crate) fn records_for_element(&self, target: DomHandle) -> Vec<CssTransitionRecord> {
-        let mut records = self
-            .store
-            .borrow()
-            .records
-            .values()
+        let store = self.store.borrow();
+        let mut records = store
+            .ids
+            .get(&OpaqueNode(target.index()))
+            .into_iter()
+            .flatten()
+            .filter_map(|id| store.records.get(id))
             .filter(|record| record.target == target)
             .cloned()
             .collect::<Vec<_>>();
@@ -535,6 +625,15 @@ impl DocumentCssTransitions {
         let mut store = self.store.borrow_mut();
         if store.records.is_empty() {
             self.clock.set(now);
+            // Settled transitions stay in Stylo's set until their element's
+            // next style change; a removed element has none.
+            if !store.ids.is_empty() {
+                let mut sets = self.animations.sets.write();
+                sets.retain(|key, _| connected(DomHandle::new(key.node.0)));
+                store
+                    .ids
+                    .retain(|node, _| connected(DomHandle::new(node.0)));
+            }
             return TransitionSample::default();
         }
         let advanced = now > self.clock.get();
@@ -696,6 +795,7 @@ impl DocumentCssTransitions {
                 id,
                 CssTransitionRecord {
                     id,
+                    document: self.document,
                     target,
                     property: animation.property_id().name().into_owned(),
                     generation,
@@ -776,9 +876,21 @@ pub(super) fn process_css_transitions<E>(
     };
     let handle = DomHandle::new(element.as_node().debug_id());
     let key = AnimationSetKey::new_for_non_pseudo(element.as_node().opaque());
+    // An element that stops being `display: none` reveals a subtree whose
+    // styles were resolved while not rendered: none of them is a
+    // before-change style.
+    if old
+        .as_ref()
+        .is_some_and(|old| old.get_box().clone_display().is_none())
+        && !new_primary.get_box().clone_display().is_none()
+    {
+        transitions.mark_styled_descendants_fresh(element);
+    }
     let specifies_transitions = new_primary.get_ui().specifies_transitions();
     transitions.note_candidate(handle, specifies_transitions);
     if !specifies_transitions && !context.shared.animations.sets.read().contains_key(&key) {
+        // This style is a before-change style from now on.
+        transitions.consume_fresh(handle);
         styles.primary = Some(new_primary);
         return;
     }
@@ -792,6 +904,9 @@ pub(super) fn process_css_transitions<E>(
     }
     let fresh = transitions.fresh.borrow_mut().remove(&handle);
     if old.is_none() || fresh {
+        // Without a before-change style, the transitions this element's
+        // earlier styles settled no longer match a style change.
+        transitions.prune_settled(&key);
         styles.primary = Some(new_primary);
         return;
     }

@@ -55,7 +55,7 @@ impl DocumentStyleWorld {
             linked_stylesheet_sources: RefCell::new(LinkedStylesheetSources::default()),
             adopted_style_sheet_sources: RefCell::new(AdoptedStyleSheetSources::default()),
             inline_style_metadata: InlineStyleMetadataStore::default(),
-            css_transitions: DocumentCssTransitions::default(),
+            css_transitions: DocumentCssTransitions::new(document),
         }
     }
 
