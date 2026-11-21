@@ -2700,13 +2700,18 @@ fn source_bearing_redispatch_keeps_creation_path_and_load_clears_related_target(
               target.dispatchEvent(e);
               container.shadowRoot.append(source);
               out.push('reparent ' + reachesWindow(target, e)); }
+            // The host still sees the target and composedPath of the built path.
             { fresh();
-              const host = add(body), target = add(shadow(host), 'i');
-              let calls = 0;
-              host.addEventListener('command', () => ++calls);
+              const host = add(body), target = add(host.attachShadow({mode: 'closed'}), 'i');
+              let calls = 0, seen = 'none';
+              host.addEventListener('command', e => {
+                ++calls;
+                seen = [e.eventPhase, e.target === host, e.composedPath().includes(target),
+                  e.composedPath().length].join(' ');
+              });
               target.addEventListener('command', () => body.append(target));
               target.dispatchEvent(new CommandEvent('command', {source: body, composed: true}));
-              out.push('moved-target ' + calls); }
+              out.push('moved-target ' + calls + ' ' + seen); }
             // A load has no Window context, so its related target clears.
             { fresh();
               const host = add(body), target = add(shadow(host), 'i');
@@ -2722,6 +2727,29 @@ fn source_bearing_redispatch_keeps_creation_path_and_load_clears_related_target(
               body.dispatchEvent(e);
               e.initEvent('probe', true, false);
               out.push('load-renamed ' + reachesWindow(target, e)); }
+            // A Node load dispatch ends with no target, even redispatched from a shadow tree.
+            { fresh();
+              const plain = new Event('load');
+              add(body).dispatchEvent(plain);
+              const form = add(body, 'form'), button = add(form, 'button');
+              let saved; form.onsubmit = e => { e.preventDefault(); saved = e; };
+              form.requestSubmit(button);
+              saved.initEvent('load', true, false);
+              add(shadow(add(body)), 'i').dispatchEvent(saved);
+              out.push('load-target ' + (plain.target === null) + ' ' + (saved.target === null)); }
+            // A non-Node currentTarget is never read as a Node: no coercion of its internals.
+            { fresh();
+              const xhr = new XMLHttpRequest();
+              let calls = 0, delta = -1, source = '';
+              xhr.upload[Symbol.toPrimitive] = () => { ++calls; return 0; };
+              xhr.addEventListener('probe', e => {
+                const before = calls;
+                const value = e.source;
+                delta = calls - before;
+                source = value === body ? 'body' : String(value);
+              });
+              xhr.dispatchEvent(new CommandEvent('probe', {source: body}));
+              out.push('xhr-source ' + delta + ' ' + source); }
             return out.join('\n');
             })()
             "#,
@@ -2730,6 +2758,40 @@ fn source_bearing_redispatch_keeps_creation_path_and_load_clears_related_target(
     // Chromium 156.0.8078.4 gives these lines for the same script.
     assert_eq!(
         result,
-        "command 1\nsubmit 11\nsubmit-moved true\nreparent true\nmoved-target 1\nload-host 1\nload-renamed true"
+        "command 1\nsubmit 11\nsubmit-moved true\nreparent true\nmoved-target 1 2 true false 5\nload-host 1\nload-renamed true\nload-target true true\nxhr-source 0 body"
     );
+}
+
+// Expected line is Chromium 156.0.8078.4's output for the same script,
+// PF-9474. A Tab focus handler redispatches the keydown as a load on a Node,
+// then on a plain EventTarget. The keyboard dispatch ends with the latest
+// Node dispatch's final target, which a load leaves null.
+#[test]
+fn tab_default_action_restores_the_null_target_of_a_nested_load() {
+    let mut vm = new_storage_test_vm("https://event-dispatch-tab-nested-load.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              if (!document.documentElement) document.appendChild(document.createElement('html'));
+              if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+              const first = document.body.appendChild(document.createElement('input'));
+              const next = document.body.appendChild(document.createElement('input'));
+              let saved = null;
+              first.onkeydown = (e) => { saved = e; };
+              next.onfocus = () => {
+                saved.initEvent('load', true, false);
+                document.body.dispatchEvent(saved);
+                new EventTarget().dispatchEvent(saved);
+              };
+              first.focus();
+              __moliDispatchTrustedKey('keydown', 'Tab', 'Tab', false, false, false, false);
+              return [document.activeElement === next, saved.target === null].join(' ');
+            })()
+            "#,
+        )
+        .expect("nested load redispatch probe should evaluate");
+
+    assert_eq!(result, "true true");
 }
