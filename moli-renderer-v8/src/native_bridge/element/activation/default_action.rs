@@ -10,14 +10,14 @@ use crate::context_bootstrap::{
     LocationNavigationKind, navigate_location_object_with_source_element,
     selection_value_for_window,
 };
-use crate::dom::{
-    forms::{ButtonTypeState, InputType},
-    native::{Element, Node},
-};
 #[cfg(feature = "devtools")]
 use crate::dom::forms::{
     InputStepDirection, InputStepOutcome, InputStepState, RangeKeyboardStep,
     range_value_after_keyboard_step, step_input_value,
+};
+use crate::dom::{
+    forms::{ButtonTypeState, InputType},
+    native::{Element, Node},
 };
 use crate::util::{
     call_object_method, node_wrapper_from_handle, object_number_property,

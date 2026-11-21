@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 
+#[cfg(feature = "devtools")]
+use moli_layout::LayoutHit;
 use moli_layout::{
     LayoutAnswers, LayoutBoxModel, LayoutCaretPosition, LayoutDocumentMetrics,
     LayoutElementMetrics, LayoutError, LayoutFlushReason, LayoutPoint, LayoutQuery,
     LayoutQueryAnswer, LayoutQueryBatch, LayoutResolvedGridTracks, LayoutScrollIntoViewGeometry,
 };
-#[cfg(feature = "devtools")]
-use moli_layout::LayoutHit;
 
 use moli_svg::SvgMatrixComponents;
 
