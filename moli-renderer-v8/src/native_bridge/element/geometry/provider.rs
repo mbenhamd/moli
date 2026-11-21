@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-#[cfg(feature = "devtools")]
+#[cfg(any(test, feature = "devtools"))]
 use moli_layout::LayoutHit;
 use moli_layout::{
     LayoutAnswers, LayoutBoxModel, LayoutCaretPosition, LayoutDocumentMetrics,
@@ -617,7 +617,7 @@ pub(crate) fn observable_caret_position(
     }
 }
 
-#[cfg(feature = "devtools")]
+#[cfg(any(test, feature = "devtools"))]
 pub(crate) fn observable_hit_test_all(
     runtime: &PageScriptHost,
     document: DomHandle,
@@ -655,7 +655,7 @@ pub(super) fn provider_contract_error(answer: &str) -> LayoutError {
 /// Resolve the foremost painted hit and the viewport sampled by the same
 /// frozen layout pass. Single-point DOM APIs consume this query while
 /// penetrating-list APIs use `observable_hit_test_all`.
-#[cfg(feature = "devtools")]
+#[cfg(any(test, feature = "devtools"))]
 pub(crate) fn observable_hit_test(
     runtime: &PageScriptHost,
     document: DomHandle,

@@ -142,7 +142,7 @@ fn build_native_layout_pass_recursive(
             environment_override,
             foreign_object_root,
         };
-        let prepared = styles.prepare(
+        let mut prepared = styles.prepare(
             &source,
             services,
             request,
@@ -150,7 +150,7 @@ fn build_native_layout_pass_recursive(
             &mut styles_ready,
         )?;
         let used_retained_world = prepared.used_retained_world();
-        let applied_sizes = prepared.applied_query_container_sizes().map(<[_]>::to_vec);
+        let applied_sizes = prepared.take_applied_query_container_sizes();
         let mut frames = NativeEmbeddedFrameRenderer {
             runtime,
             reason: request.reason,

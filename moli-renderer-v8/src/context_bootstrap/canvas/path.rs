@@ -257,12 +257,23 @@ impl Canvas2dPathState {
     }
 
     fn append_arc(&mut self, arc: kurbo::Arc) {
+        self.append_arc_ending_at(arc, None);
+    }
+
+    /// `end`, when given, replaces the final cubic's endpoint. Ellipse-center
+    /// arithmetic loses low coordinate bits at large radii, while an SVG arc's
+    /// authored endpoint is exact and anchors the next command.
+    fn append_arc_ending_at(&mut self, arc: kurbo::Arc, end: Option<(f64, f64)>) {
         use kurbo::{PathEl, Shape};
 
         // A relative floor also bounds subdivision for enormous but finite
         // radii. It prevents resource usage growing without bound with radius.
         let tolerance = 0.01_f64.max(arc.radii.x.max(arc.radii.y) / 4096.0);
-        for element in arc.path_elements(tolerance) {
+        let mut elements: Vec<PathEl> = arc.path_elements(tolerance).collect();
+        if let (Some((x, y)), Some(PathEl::CurveTo(_, _, last))) = (end, elements.last_mut()) {
+            *last = kurbo::Point::new(x, y);
+        }
+        for element in elements {
             match element {
                 PathEl::MoveTo(p) => self.line_to(p.x, p.y),
                 PathEl::CurveTo(a, b, p) => self.bezier_curve_to(a.x, a.y, b.x, b.y, p.x, p.y),
@@ -466,7 +477,7 @@ impl Canvas2dPathState {
                         sweep,
                     });
                     match arc {
-                        Some(arc) => state.append_arc(arc),
+                        Some(arc) => state.append_arc_ending_at(arc, Some(current)),
                         None if from != current => state.line_to(current.0, current.1),
                         None => {}
                     }
@@ -657,6 +668,8 @@ mod tests {
         let partial = Canvas2dPathState::from_svg_path_data("M10 10 L50 10 L50 50 Z X 1 2");
         assert_eq!(partial.elements.len(), 4);
         assert!(matches!(partial.elements[3], PaintPathElement::Close));
+        let far = Canvas2dPathState::from_svg_path_data("M10 20 A1e17 1e17 0 0 1 45 20");
+        assert_eq!(far.current, (45.0, 20.0));
     }
 
     #[test]

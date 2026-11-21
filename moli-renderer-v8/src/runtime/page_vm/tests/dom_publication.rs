@@ -384,10 +384,8 @@ async fn document_snapshot_and_layout_agree_on_marker_generation() {
                 </canvas>`;
             "#)?;
 
-        // `::marker { content: "" }` generates no marker box in Chromium 156
-        // (PF-9213), so neither layout nor the snapshot reports #empty.
         let expected = [
-            "native", "following", "explicit", "empty-type", "image", "hidden",
+            "native", "following", "empty", "explicit", "empty-type", "image", "hidden",
             "transparent", "css-item",
         ].into_iter().map(str::to_owned).collect::<std::collections::BTreeSet<_>>();
         let passes = page.vm().layout_pass_observability_for_test().1;

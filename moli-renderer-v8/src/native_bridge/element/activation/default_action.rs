@@ -1726,7 +1726,7 @@ pub(crate) fn perform_number_spin_wheel_default_action(
             }
             if changed
                 && unsafe { &*runtime_ptr }.dom_host().is_connected(handle)
-                && let Some(event) = construct_simple_event(scope, "input", true, false, false)
+                && let Some(event) = construct_simple_event(scope, "input", true, false, true)
             {
                 let _ = dispatch_public_event(scope, runtime_ptr, handle, event);
             }

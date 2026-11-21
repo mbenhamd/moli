@@ -507,6 +507,16 @@ impl TargetNetworkAgentState {
             .set_request_id_for_handle_if_absent(handle, request_id);
     }
 
+    /// The Network request id already bound to `handle`, without allocating.
+    pub(crate) fn bound_subresource_request_id(
+        &self,
+        handle: SubresourceNetworkRequestHandle,
+    ) -> Option<&str> {
+        self.artifacts
+            .subresource_network_artifacts
+            .request_id_for_handle(handle)
+    }
+
     pub(crate) fn record_fetch_pause_announced_request_id(&mut self, request_id: String) {
         self.artifacts
             .subresource_network_artifacts

@@ -947,6 +947,13 @@ impl TargetRuntimeSlot {
             .record_subresource_request_id_for_handle_if_absent(handle, request_id);
     }
 
+    pub(crate) fn bound_subresource_request_id(
+        &self,
+        handle: SubresourceNetworkRequestHandle,
+    ) -> Option<&str> {
+        self.network_agent.bound_subresource_request_id(handle)
+    }
+
     pub(crate) fn record_fetch_pause_announced_request_id(&mut self, request_id: String) {
         self.network_agent
             .record_fetch_pause_announced_request_id(request_id);

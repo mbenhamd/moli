@@ -1444,9 +1444,13 @@ async fn child_frame_classic_and_module_scripts_pause_as_script_and_use_fulfille
         );
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     let mut ctx = TestContext::new();
+    let mut classic_network_id = Value::Null;
     with_loaded_http_document(&mut ctx, &format!("http://{addr}/page"), "SID-1", "TID-1").await;
     let frame_id = child_frame_id_for_single_iframe_async(&mut ctx, 37_900).await;
     ctx.sent.clear();
+    ctx.process_async(json!({"id": 37_899, "sessionId": "SID-1", "method": "Network.enable"}))
+        .await;
+    ctx.expect_result(37_899, json!({}), Some("SID-1"));
     enable_fetch_patterns(&mut ctx, 37_901, json!([{"resourceType": "Script"}])).await;
     enable_runtime_async(&mut ctx, "SID-1", 37_902).await;
 
@@ -1479,6 +1483,9 @@ async fn child_frame_classic_and_module_scripts_pause_as_script_and_use_fulfille
         )
         .await;
         assert_eq!(paused["params"]["frameId"], json!(frame_id), "{url}");
+        if url.ends_with("/c.js") {
+            classic_network_id = paused["params"]["networkId"].clone();
+        }
         ctx.process_async(json!({
             "id": id,
             "method": "Fetch.fulfillRequest",
@@ -1503,5 +1510,28 @@ async fn child_frame_classic_and_module_scripts_pause_as_script_and_use_fulfille
         "fulfilled child frame script sources",
     )
     .await;
+    // Chromium announces the intercepted classic script once, and its pause
+    // and terminal event carry the same Network request id.
+    let network_id = classic_network_id
+        .as_str()
+        .expect("classic script pause carries a networkId")
+        .to_owned();
+    wait_until_message(&mut ctx, "SID-1", "classic child script terminal", |message| {
+        message["method"] == "Network.loadingFinished"
+            && message["params"]["requestId"] == network_id
+    })
+    .await;
+    let classic_url = format!("http://{addr}/c.js");
+    let starts = ctx
+        .sent
+        .iter()
+        .filter(|message| {
+            message["method"] == "Network.requestWillBeSent"
+                && message["params"]["request"]["url"] == classic_url
+        })
+        .map(|message| message["params"]["requestId"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(starts, [json!(network_id)]);
+    assert_eq!(terminal_events(&ctx, &network_id).len(), 1);
     server.abort();
 }

@@ -10,7 +10,7 @@ use std::{
 use crate::DocumentStartScript;
 use crate::content_security_policy::ContentSecurityPolicyScriptElementRequest;
 use crate::dom::NodeId;
-#[cfg(feature = "devtools")]
+#[cfg(any(test, feature = "devtools"))]
 use crate::dom::native::NodeData;
 use crate::dom::native::{Attribute, DomHost, DomMutationEffects, NativeDom, NativeNodeId};
 use crate::frame_owner_model::{
@@ -31,7 +31,7 @@ use crate::runtime::{
     RendererRuntimeInspectorResponseSender, RendererRuntimeRealmInfo,
     RuntimeConsoleMessageSnapshot, SharedRendererBackendNodeRegistry,
 };
-#[cfg(feature = "devtools")]
+#[cfg(any(test, feature = "devtools"))]
 use crate::runtime::{RendererCountEntry, RendererMoliDomMemoryDiagnostics};
 #[cfg(feature = "devtools")]
 use crate::runtime::{RendererInputDispatchOutcome, RendererScrollIntoViewResult};
@@ -184,7 +184,7 @@ const PERFORMANCE_METRICS_SNAPSHOT_EXPRESSION: &str = r#"
 })()
 "#;
 
-#[cfg(feature = "devtools")]
+#[cfg(any(test, feature = "devtools"))]
 fn moli_dom_memory_counters(document: &NativeDom) -> RendererMoliDomMemoryDiagnostics {
     let mut node_counts = BTreeMap::<String, usize>::new();
     let mut element_tags = BTreeMap::<String, usize>::new();
@@ -535,7 +535,7 @@ fn restore_runtime_binding_replay_global_snapshots(
     }
 }
 
-#[cfg(feature = "devtools")]
+#[cfg(any(test, feature = "devtools"))]
 fn parent_is_html_element(document: &NativeDom, parent: Option<NodeId>, local_name: &str) -> bool {
     parent
         .and_then(|parent| document.node(parent))
@@ -543,7 +543,7 @@ fn parent_is_html_element(document: &NativeDom, parent: Option<NodeId>, local_na
         .is_some_and(|element| element.is_html_element(local_name))
 }
 
-#[cfg(feature = "devtools")]
+#[cfg(any(test, feature = "devtools"))]
 fn top_count_entries(counts: BTreeMap<String, usize>, limit: usize) -> Vec<RendererCountEntry> {
     let mut entries = counts
         .into_iter()

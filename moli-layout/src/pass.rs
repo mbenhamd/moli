@@ -229,14 +229,14 @@ where
     F: EmbeddedFrameRenderer<S::NodeId>,
 {
     let mut preparation = LayoutPassPreparation::new(services, request);
-    let prepared = loop {
+    let mut prepared = loop {
         match preparation.prepare(source, styles, services)? {
             LayoutPassStep::Ready(prepared) => break *prepared,
             LayoutPassStep::Restyle(next) => preparation = *next,
         }
     };
     let used_retained_world = prepared.used_retained_world;
-    let applied_sizes = prepared.applied_sizes.clone();
+    let applied_sizes = prepared.take_applied_query_container_sizes();
     let result = finish_prepared_layout_pass(prepared, source, services, frames)?;
     verify_incremental_layout_pass(&result, services, used_retained_world, |services| {
         // Embedded frames verify in their own recursive passes, so the check
@@ -347,9 +347,12 @@ where
         self.used_retained_world
     }
 
-    /// The container sizes last handed to the style resolver.
-    pub fn applied_query_container_sizes(&self) -> Option<&[(N, crate::LayoutQueryContainerSize)]> {
-        self.applied_sizes.as_deref()
+    /// Moves out the container sizes last handed to the style resolver, so an
+    /// incremental check can restore them after its full pass.
+    pub fn take_applied_query_container_sizes(
+        &mut self,
+    ) -> Option<Vec<(N, crate::LayoutQueryContainerSize)>> {
+        self.applied_sizes.take()
     }
 }
 
@@ -455,7 +458,7 @@ where
             };
         if converged {
             let used_retained_world = self.used_retained_world;
-            let applied_sizes = self.applied_sizes.clone();
+            let applied_sizes = self.applied_sizes.take();
             return Ok(LayoutPassStep::Ready(Box::new(PreparedLayoutPass {
                 state: self,
                 world,

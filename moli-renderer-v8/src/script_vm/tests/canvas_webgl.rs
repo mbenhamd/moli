@@ -135,7 +135,9 @@ fn canvas_html_and_offscreen_draw_with_modern_fill_and_stroke_colors() {
       const style = ctx.fillStyle;
       if (ctx.strokeStyle !== style) throw new Error('stroke color differs');
       for (const invalid of ['oklch(invalid)', 'CanvasText', 'light-dark(red, blue)',
-                             'currentcolor', 'rgb(1, 2, 3, 1, 0)', 'rgb(50%, 0, 0)']) {
+                             'currentcolor', 'rgb(1, 2, 3, 1, 0)', 'rgb(50%, 0, 0)',
+                             'color(srgb 1 1)', 'color(srgb 1 1 1 1)',
+                             'color(srgb 1 1 1 / 0.5 0.5)', 'color(srgb red 1 1)']) {
         ctx.fillStyle = invalid;
         ctx.strokeStyle = invalid;
         if (ctx.fillStyle !== style || ctx.strokeStyle !== style) {
@@ -186,6 +188,11 @@ fn canvas_style_getters_keep_modern_color_spaces_and_precision() {
       ['color-mix(in srgb, red 50%, blue 50%)', 'color(srgb 0.5 0 0.5)'],
       ['color(display-p3 1 0.25 0 / 0.1234567)', 'color(display-p3 1 0.25 0 / 0.123457)'],
       ['rgb(none 0 0)', 'color(srgb none 0 0)'],
+      // PF-7851: Chromium 156 getter serialization of computed sRGB colors.
+      ['color(srgb 1 1 1 / 0.82)', 'color(srgb 1 1 1 / 0.82)'],
+      ['COLOR(srgb 100% 50% 0% / 50%)', 'color(srgb 1 0.5 0 / 0.5)'],
+      ['color(srgb 0.2 0.4 0.6 / 1)', 'color(srgb 0.2 0.4 0.6)'],
+      ['color(srgb none 1 1)', 'color(srgb none 1 1)'],
       ['hsl(none 20% 30% / none)', 'hsl(none 20% 30% / none)'],
     ]) {
       ctx.fillStyle = input;
