@@ -18,6 +18,7 @@ impl PageVm {
         &mut self,
         command: RendererPageCommand,
     ) -> Result<RendererPageReply> {
+        self.vm().resolve_unresolved_css_transition_frame_roots();
         let (source_document, command) = match command {
             RendererPageCommand::ForDocument {
                 source_document,

@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 use dom::ElementState as StyloElementState;
 use style::{
     Atom,
-    animation::DocumentAnimationSet,
     computed_value_flags::ComputedValueFlags,
     context::{
         QuirksMode, RegisteredSpeculativePainter, RegisteredSpeculativePainters,
@@ -52,6 +51,7 @@ use super::{
     document_world::DocumentStyleWorld,
     lazy_invalidation::StyleValidationPathEntry,
     source_lifecycle::StyleSourceDocumentContext,
+    transitions::process_css_transitions,
     world_key::StyleWorldKey,
     world_lifecycle::{
         ensure_retained_style_system, ensure_retained_style_system_incrementally,
@@ -983,16 +983,17 @@ fn with_style_resolution_context<'dom, R>(
     let snapshot_map = SnapshotMap::new();
     let empty_painters = EmptyRegisteredSpeculativePainters;
     let mut retained_selector_caches = world.document_state.take_selector_caches();
+    let (animations, current_time_for_animations) = world.css_transitions.resolution_inputs();
     let result = world.document_state.with_retained_style_system(|retained| {
         let shared = SharedStyleContext {
             stylist: &retained.stylist,
             visited_styles_enabled: false,
             options: StyleSystemOptions::default(),
             guards,
-            current_time_for_animations: 0.0,
+            current_time_for_animations,
             traversal_flags: TraversalFlags::empty(),
             snapshot_map: &snapshot_map,
-            animations: DocumentAnimationSet::default(),
+            animations,
             registered_speculative_painters: &empty_painters,
         };
         let _layout_thread_state = StyloLayoutThreadStateGuard::enter();
@@ -1020,13 +1021,16 @@ fn with_style_resolution_context<'dom, R>(
 
 /// Both resolver entry points replace the same canonical ElementData. Keep
 /// pseudo invalidation and restyle publication independent of their scheduling.
-fn clear_element_styles_for_resolution<E: TElement>(world: &DocumentStyleWorld, element: E) {
+/// Returns the primary style being replaced, the before-change style of the
+/// style change event that publishing the new one completes.
+fn clear_element_styles_for_resolution<E: TElement>(
+    world: &DocumentStyleWorld,
+    element: E,
+) -> Option<ServoArc<ComputedValues>> {
     let handle = DomHandle::new(element.as_node().debug_id());
     world.pseudo_style_cache.invalidate_handles([handle]);
     // Keep dirty values published until an observation actually resolves them.
-    unsafe {
-        element.ensure_data().styles = ElementStyles::default();
-    }
+    unsafe { std::mem::take(&mut element.ensure_data().styles).primary }
 }
 
 fn publish_resolved_element_styles<E: TElement>(
@@ -1077,8 +1081,15 @@ fn resolve_element_styles<'dom>(
         let ancestor_resolution_count =
             materialize_ancestor_styles_for_resolution(context, element, world, validation_path);
         let target = DomHandle::new(element.as_node().debug_id());
-        clear_element_styles_for_resolution(world, element);
-        let styles = resolve_style(context, element, RuleInclusion::All, pseudo_element, None);
+        let old_primary = clear_element_styles_for_resolution(world, element);
+        let mut styles = resolve_style(context, element, RuleInclusion::All, pseudo_element, None);
+        process_css_transitions(
+            &world.css_transitions,
+            context,
+            element,
+            old_primary,
+            &mut styles,
+        );
         let required_generation = world
             .document_state
             .lazy_invalidation_roots
@@ -1154,10 +1165,10 @@ pub(super) fn prepare_style_observation_targets(
                             handle,
                             quirks_mode,
                         );
-                        clear_element_styles_for_resolution(&world, element);
+                        let old_primary = clear_element_styles_for_resolution(&world, element);
                         // Unlike the one-off `resolve_style` API, this entry
                         // keeps the observation's recovered ancestor filter.
-                        let styles = StyleResolverForElement::new(
+                        let mut styles = StyleResolverForElement::new(
                             element,
                             context,
                             RuleInclusion::All,
@@ -1165,6 +1176,13 @@ pub(super) fn prepare_style_observation_targets(
                         )
                         .resolve_style_with_default_parents()
                         .into();
+                        process_css_transitions(
+                            &world.css_transitions,
+                            context,
+                            element,
+                            old_primary,
+                            &mut styles,
+                        );
                         let generation = world
                             .document_state
                             .lazy_invalidation_roots
@@ -1226,8 +1244,15 @@ where
         if element_style_is_current(world, ancestor, required_generation) && !force_descendants {
             continue;
         }
-        clear_element_styles_for_resolution(world, ancestor);
-        let styles = resolve_style(context, ancestor, RuleInclusion::All, None, None);
+        let old_primary = clear_element_styles_for_resolution(world, ancestor);
+        let mut styles = resolve_style(context, ancestor, RuleInclusion::All, None, None);
+        process_css_transitions(
+            &world.css_transitions,
+            context,
+            ancestor,
+            old_primary,
+            &mut styles,
+        );
         resolution_count = resolution_count.saturating_add(1);
         publish_resolved_element_styles(world, ancestor, styles, required_generation);
         force_descendants = true;

@@ -901,6 +901,257 @@ async fn css_transition_state_uses_final_values_without_runtime_events() {
     );
 }
 
+/// Chromium 156: a style change after a style flush starts a `CSSTransition`
+/// whose current value applies at once (left 200px at progress 0 for
+/// `steps(1, jump-both)`); `cancel()` drops it and fires `transitioncancel`.
+#[tokio::test]
+async fn css_transition_starts_at_style_change_and_cancels_with_event() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-start-cancel.test/",
+        r#"<html><head><style>
+body { margin: 0; }
+#t { position: absolute; left: 0; width: 10px; height: 10px;
+     transition: left 3600s steps(1, jump-both); }
+#t.on { left: 400px; }
+</style></head><body><div id="t"></div></body></html>"#,
+    );
+
+    let started = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  globalThis.__events = [];
+  for (const type of ['transitionrun', 'transitionstart', 'transitionend', 'transitioncancel']) {
+    t.addEventListener(type, (event) => {
+      __events.push(`${type}:${event.propertyName}:${event.isTrusted}`);
+    });
+  }
+  getComputedStyle(t).left;
+  t.classList.add('on');
+  const animations = t.getAnimations();
+  const animation = animations[0];
+  globalThis.__transition = animation;
+  animation.finished.then(() => 'resolved', (error) => error.name).then((outcome) => {
+    globalThis.__finished = outcome;
+  });
+  const timing = animation.effect.getTiming();
+  return [
+    animations.length,
+    animation.constructor.name,
+    animation.transitionProperty,
+    timing.duration,
+    timing.fill,
+    timing.easing,
+    getComputedStyle(t).left,
+    animation.playState,
+    t.getAnimations()[0] === animation,
+  ].join('|');
+})()
+"#,
+        )
+        .expect("transition start should evaluate");
+    assert_eq!(
+        started,
+        "1|CSSTransition|left|3600000|backwards|steps(1, jump-both)|200px|running|true"
+    );
+    // Layout uses the transition's current value too.
+    publish_layout_for_test(&mut vm);
+    let x = vm
+        .eval("String(document.getElementById('t').getBoundingClientRect().x)")
+        .expect("transition geometry should be readable");
+    assert_eq!(x, "200");
+
+    let canceled = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  __transition.cancel();
+  return [getComputedStyle(t).left, __transition.playState, t.getAnimations().length].join('|');
+})()
+"#,
+        )
+        .expect("transition cancel should evaluate");
+    assert_eq!(canceled, "400px|idle|0");
+
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("transition task should run");
+    let delivered = vm
+        .eval(r#"[globalThis.__finished, __events.join(',')].join('|')"#)
+        .expect("transition events should be readable");
+    assert_eq!(
+        delivered,
+        "AbortError|transitionrun:left:true,transitionstart:left:true,transitioncancel:left:true"
+    );
+}
+
+/// A color transition repaints: its frames restyle the element, but geometry
+/// reads keep the published layout, as no box can have moved. A `left`
+/// transition's frames lay out again.
+#[tokio::test]
+async fn css_color_transition_samples_keep_the_published_layout() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-color-transition-layout.test/",
+        r#"<html><head><style>
+#c { position: absolute; left: 0; width: 10px; height: 10px; color: rgb(0, 0, 0);
+     transition: color 60ms linear; }
+#c.on { color: rgb(255, 0, 0); }
+#l { position: absolute; top: 20px; left: 0; width: 10px; height: 10px;
+     transition: left 60ms linear; }
+#l.on { left: 400px; }
+</style></head><body><div id="c"></div><div id="l"></div></body></html>"#,
+    );
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Live);
+    let start = |vm: &mut StandaloneScriptVmHarness, id: &str| {
+        vm.eval(&format!(
+            "(() => {{ const e = document.getElementById('{id}'); getComputedStyle(e).left; \
+             e.classList.add('on'); e.getBoundingClientRect(); }})()"
+        ))
+        .expect("transition start should evaluate");
+        vm.layout_pass_observability_for_test().1
+    };
+
+    let builds = start(&mut vm, "c");
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("color transition frames should run");
+    let color = vm
+        .eval(
+            "(() => { const c = document.getElementById('c'); \
+             return [c.getBoundingClientRect().x, getComputedStyle(c).color].join('|'); })()",
+        )
+        .expect("settled color transition should be readable");
+    assert_eq!(color, "0|rgb(255, 0, 0)");
+    assert_eq!(vm.layout_pass_observability_for_test().1, builds);
+
+    let builds = start(&mut vm, "l");
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("left transition frames should run");
+    let x = vm
+        .eval("String(document.getElementById('l').getBoundingClientRect().x)")
+        .expect("settled left transition should be readable");
+    assert_eq!(x, "400");
+    assert!(vm.layout_pass_observability_for_test().1 > builds);
+}
+
+/// An ancestor's `display: none` stops rendering the element and cancels its
+/// running transition at the next frame, with no style read in between. As in
+/// Chromium 156, that frame first sends the queued run and start events.
+#[tokio::test]
+async fn css_transition_cancels_when_an_ancestor_stops_rendering() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-ancestor-display.test/",
+        r#"<html><head><style>
+#t { position: absolute; left: 0; width: 10px; height: 10px; transition: left 3600s linear; }
+#t.on { left: 400px; }
+</style></head><body><div id="p"><div id="t"></div></div></body></html>"#,
+    );
+    vm.eval(
+        r#"
+(() => {
+  const t = document.getElementById('t');
+  globalThis.__events = [];
+  for (const type of ['transitionrun', 'transitionstart', 'transitioncancel']) {
+    t.addEventListener(type, (event) => __events.push(`${type}:${event.propertyName}`));
+  }
+  getComputedStyle(t).left;
+  t.classList.add('on');
+  globalThis.__transition = t.getAnimations()[0];
+  document.getElementById('p').style.display = 'none';
+})()
+"#,
+    )
+    .expect("transition start should evaluate");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    vm.advance_timers_until_deadline_for_test_with_deadline(&loader, deadline)
+        .await
+        .expect("transition frames should run");
+    let canceled = vm
+        .eval("[__transition.playState, __events.join(',')].join('|')")
+        .expect("transition state should be readable");
+    assert_eq!(
+        canceled,
+        "idle|transitionrun:left,transitionstart:left,transitioncancel:left"
+    );
+}
+
+/// The style changes of a frame's animation frame callbacks share one style
+/// update after the last callback: a transition one callback starts runs from
+/// the frame's time, and one that a later callback undoes never starts. That
+/// update also styles an element a callback inserted, so a class added at the
+/// next frame transitions although no script read its style.
+#[tokio::test]
+async fn css_transition_style_changes_in_animation_frame_callbacks_start_at_that_frame() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-animation-frame.test/",
+        r#"<html><head><style>
+#a, #b, .c { position: absolute; left: 0; width: 10px; height: 10px;
+             transition: left 1000ms linear; }
+#a.on, #b.on, .c.on { left: 1000px; }
+</style></head><body><div id="a"></div><div id="b"></div></body></html>"#,
+    );
+    vm.eval(
+        r#"
+(() => {
+  const a = document.getElementById('a'), b = document.getElementById('b');
+  globalThis.__bEvents = [];
+  for (const type of ['transitionrun', 'transitioncancel']) {
+    b.addEventListener(type, (event) => __bEvents.push(type));
+  }
+  getComputedStyle(a).left;
+  getComputedStyle(b).left;
+  const c = document.createElement('div');
+  c.className = 'c';
+  globalThis.__order = [];
+  requestAnimationFrame(() => {
+    __order.push('f0');
+    requestAnimationFrame(() => {
+      __order.push('f1a');
+      a.classList.add('on');
+      b.classList.add('on');
+      document.body.append(c);
+      requestAnimationFrame(() => {
+        __order.push('f2');
+        globalThis.__next = [
+          parseFloat(getComputedStyle(a).left) > 0,
+          b.getAnimations().length,
+        ].join('|');
+        c.classList.add('on');
+        requestAnimationFrame(() => {
+          __order.push('f3');
+          globalThis.__inserted = c.getAnimations().length;
+        });
+      });
+    });
+    requestAnimationFrame(() => {
+      __order.push('f1b');
+      b.classList.remove('on');
+    });
+  });
+})()
+"#,
+    )
+    .expect("animation frame callbacks should be requested");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    vm.advance_timers_until_deadline_for_test_with_deadline(&loader, deadline)
+        .await
+        .expect("animation frames should run");
+    let observed = vm
+        .eval(
+            "[__order.join(','), globalThis.__next, __bEvents.join(','), \
+             globalThis.__inserted].join('|')",
+        )
+        .expect("frame observations should be readable");
+    assert_eq!(observed, "f0,f1a,f1b,f2,f3|true|0||1");
+}
+
 #[tokio::test]
 async fn invalid_move_before_does_not_run_plain_transition_runtime() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
@@ -2195,4 +2446,324 @@ fn computed_style_serializes_will_change() {
         result,
         "true|true|auto|color|color|auto|scroll-position, TRANSFORM|scroll-position, TRANSFORM"
     );
+}
+
+/// Chromium 156: an element in a `display: none` subtree starts no
+/// transition and has no before-change style, so showing it shows its final
+/// value with no animation and no transition events.
+#[tokio::test]
+async fn css_transition_does_not_start_in_an_undisplayed_subtree() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-undisplayed-subtree.test/",
+        r#"<html><head><style>
+#t { position: absolute; left: 0; width: 10px; height: 10px;
+     transition: left 3600s steps(1, jump-both); }
+</style></head><body><div id="p" style="display: none"><div id="t"></div></div></body></html>"#,
+    );
+    let hidden = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  globalThis.__events = [];
+  for (const type of ['transitionrun', 'transitionstart', 'transitionend', 'transitioncancel']) {
+    t.addEventListener(type, () => __events.push(type));
+  }
+  getComputedStyle(t).left;
+  t.style.left = '400px';
+  const hidden = t.getAnimations().length;
+  document.getElementById('p').style.display = 'block';
+  return [hidden, getComputedStyle(t).left, t.getAnimations().length].join('|');
+})()
+"#,
+        )
+        .expect("undisplayed transition should evaluate");
+    assert_eq!(hidden, "0|400px|0");
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("frames should run");
+    let events = vm
+        .eval("__events.join(',')")
+        .expect("events should be readable");
+    assert_eq!(events, "");
+}
+
+/// Chromium 156: transitions of a parent document and its child frame are
+/// distinct; `finish()` on the frame's transition leaves the parent's
+/// running at its current value.
+#[tokio::test]
+async fn css_transition_finish_acts_only_on_its_own_document() {
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-two-documents.test/",
+        r#"<html><head><style>
+#t { position: absolute; left: 0; width: 10px; height: 10px;
+     transition: left 3600s steps(1, jump-both); }
+#t.on { left: 400px; }
+</style></head><body><div id="t"></div></body></html>"#,
+    );
+    vm.eval("document.body.appendChild(document.createElement('iframe'))")
+        .expect("frame should be inserted");
+    vm.drain_pending_child_frame_work_for_test();
+    let observed = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  getComputedStyle(t).left;
+  t.classList.add('on');
+  const a = t.getAnimations()[0];
+  const d = document.querySelector('iframe').contentDocument;
+  d.head.appendChild(d.createElement('style')).textContent =
+    '#u { opacity: 1; transition: opacity 3600s steps(1, jump-both); } #u.on { opacity: 0; }';
+  const u = d.body.appendChild(d.createElement('div'));
+  u.id = 'u';
+  d.defaultView.getComputedStyle(u).opacity;
+  u.classList.add('on');
+  const b = u.getAnimations()[0];
+  b.finish();
+  return [a.playState, getComputedStyle(t).left, t.getAnimations().length, b.playState,
+          d.defaultView.getComputedStyle(u).opacity].join('|');
+})()
+"#,
+        )
+        .expect("two-document transitions should evaluate");
+    assert_eq!(observed, "running|200px|1|finished|0");
+}
+
+/// Chromium 156: after `document.open()` replaces the document, a new
+/// transition gets a new `CSSTransition`, never the replaced document's.
+#[tokio::test]
+async fn css_transition_objects_are_not_reused_after_document_open() {
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-document-open.test/",
+        r#"<html><head><style>
+#t { position: absolute; left: 0; width: 10px; height: 10px;
+     transition: left 3600s steps(1, jump-both); }
+#t.on { left: 400px; }
+</style></head><body><div id="t"></div></body></html>"#,
+    );
+    let observed = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  getComputedStyle(t).left;
+  t.classList.add('on');
+  const saved = t.getAnimations()[0];
+  document.open();
+  document.write('<style>#v { opacity: 1; transition: opacity 3600s steps(1, jump-both); }' +
+                 ' #v.on { opacity: 0; }</style><div id="v">v</div>');
+  document.close();
+  const v = document.getElementById('v');
+  getComputedStyle(v).opacity;
+  v.classList.add('on');
+  const c = v.getAnimations()[0];
+  return [c === saved, c.transitionProperty, v.getAnimations()[0] === c].join('|');
+})()
+"#,
+        )
+        .expect("document.open transition should evaluate");
+    assert_eq!(observed, "false|opacity|true");
+}
+
+/// Chromium 156: removing a child frame whose transition queued work does
+/// not hold back the parent's transitions, which still finish.
+#[tokio::test]
+async fn css_transition_finishes_after_a_child_frame_with_transitions_is_removed() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-frame-removal.test/",
+        r#"<html><head><style>
+#t { width: 10px; height: 10px; opacity: 1; transition: opacity 1ms linear; }
+#t.on { opacity: 0; }
+</style></head><body><div id="t"></div></body></html>"#,
+    );
+    vm.eval("document.body.appendChild(document.createElement('iframe'))")
+        .expect("frame should be inserted");
+    vm.drain_pending_child_frame_work_for_test();
+    vm.eval(
+        r#"
+(() => {
+  const f = document.querySelector('iframe');
+  const d = f.contentDocument;
+  d.head.appendChild(d.createElement('style')).textContent =
+    '#u { opacity: 1; transition: opacity 3600s linear; } #u.on { opacity: 0; }';
+  const u = d.body.appendChild(d.createElement('div'));
+  d.defaultView.getComputedStyle(u).opacity;
+  u.className = 'on';
+  u.getAnimations();
+  f.remove();
+  const t = document.getElementById('t');
+  getComputedStyle(t).opacity;
+  t.classList.add('on');
+  globalThis.__outcome = 'pending';
+  t.getAnimations()[0].finished.then(() => { globalThis.__outcome = 'finished'; });
+})()
+"#,
+    )
+    .expect("frame removal should evaluate");
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("transition task should run");
+    let outcome = vm
+        .eval("globalThis.__outcome")
+        .expect("outcome should be readable");
+    assert_eq!(outcome, "finished");
+}
+
+/// Chromium 156: removing an element cancels its transitions and drops its
+/// before-change style, so reinserting it in the same task shows the final
+/// value with no transition.
+#[tokio::test]
+async fn css_transition_cancels_when_its_element_is_removed_and_reinserted() {
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-reinsert.test/",
+        r#"<html><head><style>
+#t { position: absolute; left: 0; width: 10px; height: 10px;
+     transition: left 3600s steps(1, jump-both); }
+#t.on { left: 400px; }
+</style></head><body><div id="t"></div></body></html>"#,
+    );
+    let observed = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  getComputedStyle(t).left;
+  t.classList.add('on');
+  const a = t.getAnimations()[0];
+  t.remove();
+  document.body.append(t);
+  return [t.getAnimations().length, a.playState, getComputedStyle(t).left].join('|');
+})()
+"#,
+        )
+        .expect("reinsertion should evaluate");
+    assert_eq!(observed, "0|idle|400px");
+}
+
+/// Chromium 156: a style change that removes a running transition settles its
+/// `CSSTransition` at the style flush, before any transition event.
+#[tokio::test]
+async fn css_transition_canceled_by_a_style_change_settles_at_the_flush() {
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-style-cancel.test/",
+        r#"<html><head><style>
+#t { position: absolute; left: 0; width: 10px; height: 10px;
+     transition: left 3600s steps(1, jump-both); }
+#t.on { left: 400px; }
+</style></head><body><div id="t"></div></body></html>"#,
+    );
+    let observed = vm
+        .eval(
+            r#"
+(() => {
+  const t = document.getElementById('t');
+  getComputedStyle(t).left;
+  t.classList.add('on');
+  const a = t.getAnimations()[0];
+  t.style.transitionProperty = 'none';
+  return [t.getAnimations().length, a.playState].join('|');
+})()
+"#,
+        )
+        .expect("style cancel should evaluate");
+    assert_eq!(observed, "0|idle");
+}
+
+/// Chromium 156: the `finished` reactions of an ended transition run before
+/// its `transitionend` listeners.
+#[tokio::test]
+async fn css_transition_finished_reactions_run_before_transitionend() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-finished-order.test/",
+        r#"<html><head><style>
+#t { width: 10px; height: 10px; opacity: 1; transition: opacity 1ms linear; }
+#t.on { opacity: 0; }
+</style></head><body><div id="t"></div></body></html>"#,
+    );
+    vm.eval(
+        r#"
+(() => {
+  const t = document.getElementById('t');
+  getComputedStyle(t).opacity;
+  t.classList.add('on');
+  let done = false;
+  t.getAnimations()[0].finished.then(() => { done = true; });
+  t.addEventListener('transitionend', () => { globalThis.__seen = done; });
+})()
+"#,
+    )
+    .expect("transition should start");
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("transition should end");
+    let seen = vm
+        .eval("String(globalThis.__seen)")
+        .expect("listener observation should be readable");
+    assert_eq!(seen, "true");
+}
+
+/// Chromium 156: an animation frame callback that a transition event listener
+/// requests runs in the same frame as one requested before the event.
+#[tokio::test]
+async fn css_transition_listener_animation_frame_joins_the_current_frame() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-listener-raf.test/",
+        r#"<html><head><style>
+#t { position: absolute; left: 0; width: 10px; height: 10px;
+     transition: left 3600s steps(1, jump-both); }
+#t.on { left: 400px; }
+</style></head><body><div id="t"></div></body></html>"#,
+    );
+    vm.eval(
+        r#"
+(() => {
+  const t = document.getElementById('t');
+  getComputedStyle(t).left;
+  t.classList.add('on');
+  const a = t.getAnimations()[0];
+  let one;
+  requestAnimationFrame((ts) => { one = ts; });
+  t.ontransitionend = () => requestAnimationFrame((ts) => { globalThis.__same = ts === one; });
+  a.finish();
+})()
+"#,
+    )
+    .expect("transition should finish");
+    vm.advance_timers_until_deadline_for_test(&loader)
+        .await
+        .expect("frames should run");
+    let same = vm
+        .eval("String(globalThis.__same)")
+        .expect("frame observation should be readable");
+    assert_eq!(same, "true");
+}
+
+/// Chromium 156: a style that depends on a container query starts no
+/// transition at the first layout; the first style already sees the
+/// container's used size.
+#[tokio::test]
+async fn css_transition_does_not_start_from_the_pre_layout_container_estimate() {
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-container-query.test/",
+        r#"<html><head><style>
+#c { container-type: inline-size; width: 500px; }
+#k { color: rgb(0, 0, 0); transition: color 3600s steps(1, jump-both); }
+@container (min-width: 400px) { #k { color: rgb(255, 0, 0); } }
+</style></head><body><div id="c"><div id="k">k</div></div></body></html>"#,
+    );
+    vm.eval("getComputedStyle(document.getElementById('k')).color")
+        .expect("first style should resolve");
+    publish_layout_for_test(&mut vm);
+    let observed = vm
+        .eval(
+            "(() => { const k = document.getElementById('k'); \
+             return [getComputedStyle(k).color, k.getAnimations().length].join('|'); })()",
+        )
+        .expect("container style should be readable");
+    assert_eq!(observed, "rgb(255, 0, 0)|0");
 }

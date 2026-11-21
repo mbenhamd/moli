@@ -17,6 +17,7 @@ use super::{
     },
     source_owner_text::OwnerStyleSheetSources,
     state::{StyleDocumentGenerationSnapshot, StyleDocumentState},
+    transitions::DocumentCssTransitions,
 };
 
 pub(super) struct DocumentStyleWorld {
@@ -30,6 +31,7 @@ pub(super) struct DocumentStyleWorld {
     pub(super) linked_stylesheet_sources: RefCell<LinkedStylesheetSources>,
     pub(super) adopted_style_sheet_sources: RefCell<AdoptedStyleSheetSources>,
     pub(super) inline_style_metadata: InlineStyleMetadataStore,
+    pub(super) css_transitions: DocumentCssTransitions,
 }
 
 pub(super) struct DocumentStyleWorlds {
@@ -53,6 +55,7 @@ impl DocumentStyleWorld {
             linked_stylesheet_sources: RefCell::new(LinkedStylesheetSources::default()),
             adopted_style_sheet_sources: RefCell::new(AdoptedStyleSheetSources::default()),
             inline_style_metadata: InlineStyleMetadataStore::default(),
+            css_transitions: DocumentCssTransitions::default(),
         }
     }
 
@@ -69,6 +72,7 @@ impl DocumentStyleWorld {
         *self.linked_stylesheet_sources.borrow_mut() = LinkedStylesheetSources::default();
         self.adopted_style_sheet_sources.borrow_mut().clear_all();
         self.inline_style_metadata.clear_all();
+        self.css_transitions.clear();
     }
 }
 
@@ -87,6 +91,10 @@ impl DocumentStyleWorlds {
         let world = Rc::new(DocumentStyleWorld::new(document));
         self.worlds.borrow_mut().insert(document, Rc::clone(&world));
         world
+    }
+
+    pub(super) fn active_worlds(&self) -> Vec<Rc<DocumentStyleWorld>> {
+        self.worlds.borrow().values().map(Rc::clone).collect()
     }
 
     pub(super) fn active_world(&self, document: DomHandle) -> Option<Rc<DocumentStyleWorld>> {
@@ -181,7 +189,7 @@ impl DocumentStyleWorlds {
                 let state = &self.for_document(document).document_state;
                 state
                     .lazy_invalidation_roots
-                    .generation()
+                    .layout_generation()
                     .saturating_add(state.computed_cache_generation())
             })
             .fold(0, u64::saturating_add)
@@ -202,6 +210,28 @@ impl DocumentStyleWorlds {
                     document,
                     world.document_state.source_set_generation(),
                     world.document_state.visual_input_generation(),
+                )
+            })
+            .collect()
+    }
+
+    /// `visual_input_generations` without the changes that only repaint: the
+    /// style inputs a published layout tree depends on.
+    pub(super) fn layout_input_generations(
+        &self,
+        documents: impl IntoIterator<Item = DomHandle>,
+    ) -> Vec<(DomHandle, u64, u64)> {
+        let mut documents = documents.into_iter().collect::<Vec<_>>();
+        documents.sort_by_key(|document| document.index());
+        documents.dedup();
+        documents
+            .into_iter()
+            .map(|document| {
+                let state = &self.for_document(document).document_state;
+                (
+                    document,
+                    state.source_set_generation(),
+                    state.layout_input_generation(),
                 )
             })
             .collect()

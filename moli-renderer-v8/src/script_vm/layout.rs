@@ -275,6 +275,9 @@ impl ScriptVm {
             && matches!(&result, Ok(Some(_)))
             && let Err(error) = self.with_current_main_world_scope(|scope, runtime_ptr| {
                 crate::observer_runtime::queue_intersection_checks(scope, runtime_ptr);
+                // A layout pass may run style change events that start
+                // transitions; the next frame starts and advances them.
+                crate::context_bootstrap::queue_css_transition_task_if_due(scope);
                 crate::native_bridge::element::queue_revealed_lazy_image_loads(
                     scope,
                     runtime_ptr,

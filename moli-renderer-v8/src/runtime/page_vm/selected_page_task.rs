@@ -18,6 +18,7 @@ impl PageVm {
         task: RendererPageSchedulerTask,
         loader: &crate::network::ResourceRequestClient,
     ) -> Result<()> {
+        self.vm().resolve_unresolved_css_transition_frame_roots();
         match task {
             RendererPageSchedulerTask::ActionWindow { deadline } => {
                 self.apply_selected_page_action_window_turn(deadline)
