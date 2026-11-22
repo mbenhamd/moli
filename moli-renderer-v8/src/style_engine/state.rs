@@ -282,6 +282,13 @@ impl StyleDocumentState {
         }
     }
 
+    pub(super) fn transition_style_roots_all(&self, predicate: impl Fn(DomHandle) -> bool) -> bool {
+        self.transition_style_roots
+            .borrow()
+            .iter()
+            .all(|&root| predicate(root))
+    }
+
     pub(super) fn has_transition_style_roots(&self) -> bool {
         !self.transition_style_roots.borrow().is_empty()
     }

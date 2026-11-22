@@ -288,6 +288,9 @@ pub(crate) struct DocumentCssTransitions {
     fresh: RefCell<HashSet<DomHandle>>,
     /// Some resolved style in this document specified transitions.
     transition_styles_seen: Cell<bool>,
+    /// The document's style changes wait for a skipped frame's style
+    /// update (`take_skipped_css_transition_frame_roots`).
+    skipped_frame_armed: Cell<bool>,
 }
 
 impl DocumentCssTransitions {
@@ -304,6 +307,7 @@ impl DocumentCssTransitions {
             unresolved_frame_roots: RefCell::default(),
             fresh: RefCell::default(),
             transition_styles_seen: Cell::new(false),
+            skipped_frame_armed: Cell::new(false),
         }
     }
 }
@@ -341,6 +345,7 @@ impl DocumentCssTransitions {
         self.updated_generation.set(None);
         self.in_frame.set(false);
         self.document_styled.set(false);
+        self.skipped_frame_armed.set(false);
         self.unresolved_frame_roots.borrow_mut().clear();
         self.fresh.borrow_mut().clear();
         self.transition_styles_seen.set(false);
@@ -462,6 +467,14 @@ impl DocumentCssTransitions {
     /// style update; marks it as taken.
     pub(super) fn take_unstyled_document(&self) -> bool {
         !self.document_styled.replace(true)
+    }
+
+    pub(super) fn arm_skipped_frame(&self) {
+        self.skipped_frame_armed.set(true);
+    }
+
+    pub(super) fn take_skipped_frame_armed(&self) -> bool {
+        self.skipped_frame_armed.replace(false)
     }
 
     pub(super) fn defer_unresolved_frame_roots(&self, roots: impl IntoIterator<Item = DomHandle>) {

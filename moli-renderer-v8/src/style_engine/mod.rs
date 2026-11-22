@@ -1119,13 +1119,17 @@ impl MoliStyleEngine {
                     // runs its style change event.
                     Some(CSS_TRANSITION_FRAME_INTERVAL_MS)
                 } else {
-                    if self.css_transition_skipped_frame_due.get().is_none() {
-                        self.css_transition_skipped_frame_due
-                            .set(Some(now + CSS_TRANSITION_FRAME_INTERVAL_MS / 1000.0));
-                    }
+                    self.arm_skipped_css_transition_frame(&world, now);
                     None
                 }
             } else {
+                if Self::css_transition_style_changes_undrained(&world) {
+                    // The frame those changes need is skipped: no task
+                    // waits for it, and the next task starts with its style
+                    // update, as for a Document that cannot specify a
+                    // transition.
+                    self.arm_skipped_css_transition_frame(&world, now);
+                }
                 // While a transition runs, its values change every frame:
                 // the task stands in for the rendering update's "update
                 // animations and send events" step at a 60Hz frame rate.
@@ -1180,9 +1184,7 @@ impl MoliStyleEngine {
         self.css_transition_skipped_frame_due.set(None);
         let mut roots = Vec::new();
         for world in self.document_worlds.active_worlds() {
-            if !self.css_transition_style_update_due_for_world(&world)
-                || self.css_transition_frame_needed_for_world(host, &world)
-            {
+            if !world.css_transitions.take_skipped_frame_armed() {
                 continue;
             }
             roots.extend(world.document_state.take_transition_style_roots());
@@ -1216,6 +1218,41 @@ impl MoliStyleEngine {
                 && (world.pending_invalidations.has_work()
                     || transitions.updated_generation()
                         != Some(Self::css_transition_style_generation(world))))
+    }
+
+    /// Whether `world` has style changes the turn-exit drain has not noted
+    /// as roots yet. It runs after the task's due check.
+    fn css_transition_style_changes_undrained(world: &DocumentStyleWorld) -> bool {
+        world.pending_structural_mutations.has_work() || world.pending_invalidations.has_work()
+    }
+
+    fn arm_skipped_css_transition_frame(&self, world: &DocumentStyleWorld, now: f64) {
+        world.css_transitions.arm_skipped_frame();
+        if self.css_transition_skipped_frame_due.get().is_none() {
+            self.css_transition_skipped_frame_due
+                .set(Some(now + CSS_TRANSITION_FRAME_INTERVAL_MS / 1000.0));
+        }
+    }
+
+    /// Whether only transition samples changed `world`'s styles since its
+    /// last frame's style update: the roots they noted are the running
+    /// targets, which the frame reads anyway, and nothing else changed.
+    fn css_transition_sample_only_frame(&self, world: &DocumentStyleWorld) -> bool {
+        let transitions = &world.css_transitions;
+        if world.pending_structural_mutations.has_work()
+            || world.pending_invalidations.has_work()
+            || transitions.updated_generation()
+                != Some(Self::css_transition_style_generation(world))
+        {
+            return false;
+        }
+        let running = transitions
+            .running_targets()
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        world
+            .document_state
+            .transition_style_roots_all(|root| running.contains(&root))
     }
 
     /// Returns subtrees a frame's style update did not reach to their
@@ -1307,6 +1344,11 @@ impl MoliStyleEngine {
             .iter()
             .filter(|world| self.css_transition_style_update_due_for_world(world))
             .flat_map(|world| {
+                if self.css_transition_sample_only_frame(world) {
+                    // No candidate's style changed: only the running
+                    // targets have style change events to run.
+                    return world.css_transitions.running_targets();
+                }
                 world
                     .css_transitions
                     .style_update_targets(|handle| host.is_connected(handle))

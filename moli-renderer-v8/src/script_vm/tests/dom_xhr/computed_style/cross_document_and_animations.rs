@@ -3621,3 +3621,50 @@ fn animation_effect_prototype_has_get_timing() {
     );
     assert_eq!(observed, "function|false");
 }
+
+/// Chromium 156: an element a task appends without reading any style is
+/// styled by the frame that follows, so a later task's first transition
+/// finds that style.
+#[test]
+fn css_transition_skipped_frame_styles_an_unread_append() {
+    let mut vm = new_rendered_test_vm("https://css-transition-unread-append.test/", BODY_ONLY);
+    eval_string(
+        &mut vm,
+        "(() => { globalThis.__d = document.body.appendChild(document.createElement('div')); \
+         return ''; })()",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    vm.resolve_unresolved_css_transition_frame_roots();
+    let observed = eval_string(
+        &mut vm,
+        "(() => { __d.style.cssText = 'opacity: 0; transition: opacity 3600s linear'; \
+         return String(__d.getAnimations().length); })()",
+    );
+    assert_eq!(observed, "1");
+}
+
+/// Chromium 156: a class change no task reads is styled by the frame that
+/// follows, so a later task's first transition starts from its style.
+#[test]
+fn css_transition_skipped_frame_styles_an_unread_class_change() {
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-unread-class.test/",
+        "<html><head><style>.a{opacity:0}</style></head><body></body></html>",
+    );
+    eval_string(
+        &mut vm,
+        "(() => { globalThis.__d = document.body.appendChild(document.createElement('div')); \
+         return getComputedStyle(__d).opacity; })()",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    vm.resolve_unresolved_css_transition_frame_roots();
+    eval_string(&mut vm, "(() => { __d.className = 'a'; return ''; })()");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    vm.resolve_unresolved_css_transition_frame_roots();
+    let observed = eval_string(
+        &mut vm,
+        "(() => { __d.style.cssText = 'opacity: 1; transition: opacity 3600s linear'; \
+         return String(__d.getAnimations().length); })()",
+    );
+    assert_eq!(observed, "1");
+}
