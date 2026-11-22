@@ -73,10 +73,10 @@ pub(crate) fn set_style_property<'s>(
     if mode == StyleMode::Computed {
         return;
     }
-    if property.starts_with("--") && !moli_css_parse::is_cssom_custom_property_name(&property) {
+    if property.starts_with("--") && !moli_css_parse::is_cssom_custom_property_name(property) {
         return;
     }
-    let name = canonical_style_property_name(&property);
+    let name = canonical_style_property_name(property);
     if !priority_text.is_empty() && !priority_text.eq_ignore_ascii_case("important") {
         return;
     }
@@ -89,7 +89,7 @@ pub(crate) fn set_style_property<'s>(
         runtime_ptr,
         handle,
         &name,
-        &value,
+        value,
         priority,
     )
     .is_some()
@@ -119,7 +119,7 @@ pub(crate) fn set_style_property<'s>(
             let Some(parsed_entries) = parse_style_property_entries_for_cssom_fallback_write(
                 &entries,
                 &name,
-                &value,
+                value,
                 priority,
                 Some(&current_base_url),
             ) else {
@@ -144,7 +144,7 @@ pub(crate) fn set_style_property<'s>(
         } else {
             let Some(parsed_entries) = parse_style_property_entries_for_cssom_write(
                 &name,
-                &value,
+                value,
                 priority,
                 Some(&current_base_url),
             ) else {
@@ -167,7 +167,7 @@ pub(crate) fn set_style_property<'s>(
         let Some(parsed_entries) = parse_style_property_entries_for_cssom_fallback_write(
             &entries,
             &name,
-            &value,
+            value,
             priority,
             Some(&current_base_url),
         ) else {
