@@ -328,6 +328,7 @@ impl NativeDom {
         let Some(parent) = self.parent_node(child) else {
             return OwnerLifecycleChanges::default();
         };
+        self.note_detach_from_parent(child, is_atomic_move);
         let old_tree_scope = self.stylesheet_candidate_tree_scope_for_node(child);
         let owner_document = self.node(child).and_then(Node::owner_document);
         let base_document = self.document_tree_owner(child);

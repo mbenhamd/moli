@@ -3,7 +3,7 @@ use std::sync::Arc as StdArc;
 use std::sync::Once;
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::Rc,
 };
 
@@ -180,9 +180,15 @@ pub(crate) struct MoliStyleEngine {
     /// Settled transition events whose dispatch waits for the microtask
     /// checkpoint that follows their animations' settlement.
     css_transition_dispatch_queue: std::cell::RefCell<Vec<transitions::CssTransitionEvent>>,
-    /// Sticky: an inline style resolution text could declare a
-    /// `transition-*` longhand (see `style_attribute_may_specify_transitions`).
-    inline_style_texts_may_specify_transitions: Cell<bool>,
+    /// The Documents an inline style resolution text of which could declare
+    /// a `transition-*` longhand (see
+    /// `style_attribute_may_specify_transitions`). Sticky.
+    inline_style_texts_may_specify_transitions: RefCell<HashSet<DomHandle>>,
+    /// When the frame that a Document none of whose styles can specify a
+    /// transition skipped is due (animation clock seconds): the next task
+    /// or command after it resolves that Document's changed styles, as the
+    /// frame would have.
+    css_transition_skipped_frame_due: Cell<Option<f64>>,
 }
 
 impl Default for MoliStyleEngine {
@@ -210,7 +216,8 @@ impl MoliStyleEngine {
             css_transition_task_due: Cell::new(None),
             css_transition_frame_timestamp: Cell::new(None),
             css_transition_dispatch_queue: std::cell::RefCell::default(),
-            inline_style_texts_may_specify_transitions: Cell::new(false),
+            inline_style_texts_may_specify_transitions: RefCell::default(),
+            css_transition_skipped_frame_due: Cell::new(None),
         }
     }
 
@@ -836,11 +843,12 @@ impl MoliStyleEngine {
         }
         let roots = with_slotted_flat_tree_descendants(host, containers);
         let world = self.world_for_document(document);
-        Self::reset_css_transitions_in_subtrees(host, &world, &roots, false);
+        Self::reset_css_transitions_in_subtrees(host, &world, &roots);
     }
 
     pub(crate) fn clear_for_document_replacement(&mut self, document: DomHandle) {
         self.css_transition_task_due.set(None);
+        self.css_transition_skipped_frame_due.set(None);
         self.css_transition_frame_timestamp.set(None);
         self.css_transition_dispatch_queue.borrow_mut().clear();
         self.clear_owner_document_indexes_for_document(document);
@@ -868,6 +876,15 @@ impl MoliStyleEngine {
     }
 
     #[cfg(test)]
+    pub(crate) fn css_transition_fresh_count_for_test(&self) -> usize {
+        self.document_worlds
+            .active_worlds()
+            .iter()
+            .map(|world| world.css_transitions.fresh_count())
+            .sum()
+    }
+
+    #[cfg(test)]
     pub(crate) fn active_document_style_world_count_for_test(&self) -> usize {
         self.document_worlds.active_world_count()
     }
@@ -890,6 +907,9 @@ impl MoliStyleEngine {
     }
 
     fn clear_owner_document_indexes_for_document(&self, document: DomHandle) {
+        self.inline_style_texts_may_specify_transitions
+            .borrow_mut()
+            .remove(&document);
         retain_owner_documents_except_document(
             &mut self.owner_stylesheet_source_documents.borrow_mut(),
             document,
@@ -1020,19 +1040,27 @@ impl MoliStyleEngine {
     /// Whether transition events wait for delivery to script.
     pub(crate) fn has_pending_css_transition_events(&self) -> bool {
         self.document_worlds
-            .active_worlds()
-            .iter()
-            .any(|world| world.css_transitions.has_pending_events())
+            .has_retired_css_transition_settlements()
+            || self
+                .document_worlds
+                .active_worlds()
+                .iter()
+                .any(|world| world.css_transitions.has_pending_events())
     }
 
     /// The transition events and `Animation` state changes not yet delivered
     /// to script.
     pub(crate) fn take_css_transition_events(&self) -> Vec<transitions::CssTransitionEvent> {
-        self.document_worlds
-            .active_worlds()
-            .iter()
-            .flat_map(|world| world.css_transitions.take_events())
-            .collect()
+        let mut events = self
+            .document_worlds
+            .take_retired_css_transition_settlements();
+        events.extend(
+            self.document_worlds
+                .active_worlds()
+                .iter()
+                .flat_map(|world| world.css_transitions.take_events()),
+        );
+        events
     }
 
     /// Holds settled transition events until their dispatch.
@@ -1055,32 +1083,48 @@ impl MoliStyleEngine {
     pub(crate) fn pending_css_transition_settlements(
         &self,
     ) -> Vec<transitions::CssTransitionEvent> {
-        self.document_worlds
-            .active_worlds()
-            .iter()
-            .flat_map(|world| world.css_transitions.pending_settlements())
-            .collect()
+        let mut events = self.document_worlds.retired_css_transition_settlements();
+        events.extend(
+            self.document_worlds
+                .active_worlds()
+                .iter()
+                .flat_map(|world| world.css_transitions.pending_settlements()),
+        );
+        events
     }
 
     /// Milliseconds until the CSS transitions need a task: zero when events
     /// are pending, the next frame or phase change while transitions run,
     /// and `None` when there are none.
     ///
-    /// A document none of whose styles can specify a transition needs no
-    /// frame for its style changes: they start no transition, so their roots
-    /// are dropped here, where the task that made them ends.
+    /// A Document none of whose styles can specify a transition queues no
+    /// task for its style changes: they start none. The frame it skips is
+    /// due all the same, and the next task or command after it resolves
+    /// the changed styles (`take_skipped_css_transition_frame_roots`), so a
+    /// style that later specifies a transition finds the frame's
+    /// before-change styles.
     pub(crate) fn css_transition_task_delay_ms(&self, host: &DomHost) -> Option<f64> {
         let now = transitions::animation_clock_now();
-        let mut delay: Option<f64> = None;
+        let mut delay = self
+            .document_worlds
+            .has_retired_css_transition_settlements()
+            .then_some(0.0);
         for world in self.document_worlds.active_worlds() {
             let transitions = &world.css_transitions;
-            self.drop_css_transition_style_roots_if_unspecifiable(host, &world);
             let due = if transitions.has_pending_events() {
                 Some(0.0)
             } else if self.css_transition_style_update_due_for_world(&world) {
-                // A style change may start a transition: the next frame runs
-                // its style change event.
-                Some(CSS_TRANSITION_FRAME_INTERVAL_MS)
+                if self.css_transition_frame_needed_for_world(host, &world) {
+                    // A style change may start a transition: the next frame
+                    // runs its style change event.
+                    Some(CSS_TRANSITION_FRAME_INTERVAL_MS)
+                } else {
+                    if self.css_transition_skipped_frame_due.get().is_none() {
+                        self.css_transition_skipped_frame_due
+                            .set(Some(now + CSS_TRANSITION_FRAME_INTERVAL_MS / 1000.0));
+                    }
+                    None
+                }
             } else {
                 // While a transition runs, its values change every frame:
                 // the task stands in for the rendering update's "update
@@ -1104,44 +1148,64 @@ impl MoliStyleEngine {
             .saturating_add(world.document_state.computed_cache_generation())
     }
 
-    /// Whether a style of `world`'s Document can specify a CSS transition: a
-    /// `style` attribute or inline style text named a `transition-*`
-    /// longhand, or an author stylesheet declares one or changed since its
-    /// last scan. The user agent stylesheet declares none. Once true, it
-    /// stays true for style attributes, inline texts and scanned stylesheets.
-    fn css_transitions_may_be_specified(
+    /// Whether a style change of `world`'s Document may start a transition,
+    /// so its frame must run: an element there has transitions, or a style
+    /// of the Document can specify one. That is, a `style` attribute of one
+    /// of its elements or one of its inline style texts declares a
+    /// `transition-*` longhand, or an author stylesheet declares one or
+    /// changed since its last scan. The user agent stylesheet declares none.
+    fn css_transition_frame_needed_for_world(
         &self,
         host: &DomHost,
         world: &DocumentStyleWorld,
     ) -> bool {
-        host.style_attributes_may_specify_transitions()
-            || self.inline_style_texts_may_specify_transitions.get()
+        world.css_transitions.has_candidates()
+            || host.style_attributes_may_specify_transitions(world.document)
+            || self
+                .inline_style_texts_may_specify_transitions
+                .borrow()
+                .contains(&world.document)
             || world.document_state.author_styles_may_specify_transitions()
     }
 
-    /// Drops the style roots and initial-content style of a Document whose
-    /// styles cannot specify a transition: its style changes start none, so
-    /// no frame needs to resolve them.
-    fn drop_css_transition_style_roots_if_unspecifiable(
-        &self,
-        host: &DomHost,
-        world: &DocumentStyleWorld,
-    ) {
-        if !world.document_state.has_transition_style_roots()
-            && !world.css_transitions.has_unstyled_document()
-        {
-            return;
+    /// Takes the changed subtrees of the Documents whose frame was skipped,
+    /// once that frame is due (see `css_transition_task_delay_ms`).
+    pub(crate) fn take_skipped_css_transition_frame_roots(&self, host: &DomHost) -> Vec<DomHandle> {
+        let Some(due) = self.css_transition_skipped_frame_due.get() else {
+            return Vec::new();
+        };
+        if transitions::animation_clock_now() < due {
+            return Vec::new();
         }
-        if self.css_transitions_may_be_specified(host, world) {
-            return;
+        self.css_transition_skipped_frame_due.set(None);
+        let mut roots = Vec::new();
+        for world in self.document_worlds.active_worlds() {
+            if !self.css_transition_style_update_due_for_world(&world)
+                || self.css_transition_frame_needed_for_world(host, &world)
+            {
+                continue;
+            }
+            roots.extend(world.document_state.take_transition_style_roots());
+            if world.css_transitions.take_unstyled_document() {
+                let mut child = host.first_child(world.document);
+                while let Some(current) = child {
+                    roots.push(current);
+                    child = host.next_sibling(current);
+                }
+            }
         }
-        drop(world.document_state.take_transition_style_roots());
-        let _ = world.css_transitions.take_unstyled_document();
+        roots
     }
 
-    pub(super) fn note_inline_style_text_for_css_transitions(&self, text: &str) {
+    pub(super) fn note_inline_style_text_for_css_transitions(
+        &self,
+        text: &str,
+        document: DomHandle,
+    ) {
         if crate::dom::native::style_attribute_may_specify_transitions(text) {
-            self.inline_style_texts_may_specify_transitions.set(true);
+            self.inline_style_texts_may_specify_transitions
+                .borrow_mut()
+                .insert(document);
         }
     }
 
@@ -1172,10 +1236,9 @@ impl MoliStyleEngine {
     /// frame's style update. Elements whose transitions run are left out:
     /// their samples restyle them, and their style changes are updated as
     /// transition targets.
-    pub(crate) fn take_css_transition_style_roots(&self, host: &DomHost) -> Vec<DomHandle> {
+    pub(crate) fn take_css_transition_style_roots(&self) -> Vec<DomHandle> {
         let mut roots = Vec::new();
         for world in self.document_worlds.active_worlds() {
-            self.drop_css_transition_style_roots_if_unspecifiable(host, &world);
             let taken = world.document_state.take_transition_style_roots();
             if taken.is_empty() {
                 continue;
@@ -1227,11 +1290,9 @@ impl MoliStyleEngine {
     /// update's style recalc treats it.
     pub(crate) fn take_unstyled_css_transition_document(
         &self,
-        host: &DomHost,
         document: DomHandle,
     ) -> Option<DomHandle> {
         let world = self.world_for_document(document);
-        self.drop_css_transition_style_roots_if_unspecifiable(host, &world);
         world
             .css_transitions
             .take_unstyled_document()
@@ -1246,10 +1307,9 @@ impl MoliStyleEngine {
             .iter()
             .filter(|world| self.css_transition_style_update_due_for_world(world))
             .flat_map(|world| {
-                world.css_transitions.style_update_targets(
-                    |handle| host.is_connected(handle),
-                    |handle| host.node(handle).is_some(),
-                )
+                world
+                    .css_transitions
+                    .style_update_targets(|handle| host.is_connected(handle))
             })
             .collect()
     }
@@ -1334,24 +1394,14 @@ impl MoliStyleEngine {
 
     /// Leaves the transition candidates inside `roots` without a
     /// before-change style, so their next style change event starts no
-    /// transition; with `cancel`, also cancels their running transitions, as
-    /// a removal does (Chromium clears an element's animations when it
-    /// detaches).
+    /// transition.
     fn reset_css_transitions_in_subtrees(
         host: &DomHost,
         world: &DocumentStyleWorld,
         roots: &[DomHandle],
-        cancel: bool,
-    ) -> Vec<DomHandle> {
+    ) {
         let targets = Self::css_transition_targets_in_subtrees(host, world, roots);
-        world.css_transitions.mark_fresh(targets.iter().copied());
-        if !cancel {
-            return Vec::new();
-        }
-        targets
-            .into_iter()
-            .filter(|&target| world.css_transitions.cancel_for_element(target))
-            .collect()
+        world.css_transitions.mark_fresh(targets);
     }
 
     /// The transition candidates and running targets of `world` inside
@@ -1389,43 +1439,95 @@ impl MoliStyleEngine {
             .collect()
     }
 
-    /// Cancels the transitions in subtrees removed from `document` and drops
-    /// their before-change styles.
+    /// Cancels the transitions in subtrees removed from `document`. A
+    /// subtree `moveBefore()` moved keeps them: an atomic move is no removal.
     pub(super) fn reset_css_transitions_for_detached_subtrees(
         &self,
         host: &DomHost,
         document: DomHandle,
         roots: &[DomHandle],
     ) {
+        let roots = roots
+            .iter()
+            .copied()
+            .filter(|&root| !Self::was_atomically_moved_in_place(host, root))
+            .collect::<Vec<_>>();
+        if roots.is_empty() {
+            return;
+        }
         // A subtree adopted from another Document leaves that Document's
-        // world: its transitions there are canceled, and its elements have
-        // no before-change style in their new Document.
-        let mut adopted = Vec::new();
+        // world: its transitions there are canceled.
         for world in self.document_worlds.active_worlds() {
             if world.document == document {
                 continue;
             }
-            let targets = Self::css_transition_targets_in_subtrees(host, &world, roots);
-            if targets.is_empty() {
-                continue;
-            }
-            world.css_transitions.mark_fresh(targets.iter().copied());
             let mut canceled = false;
-            for &target in &targets {
+            for target in Self::css_transition_targets_in_subtrees(host, &world, &roots) {
                 canceled |= world.css_transitions.cancel_for_element(target);
             }
             if canceled {
                 world.document_state.note_visual_input_change();
             }
-            adopted.extend(targets);
         }
         let world = self.world_for_document(document);
-        world.css_transitions.mark_fresh(adopted);
-        let canceled = Self::reset_css_transitions_in_subtrees(host, &world, roots, true);
+        let canceled = Self::css_transition_targets_in_subtrees(host, &world, &roots)
+            .into_iter()
+            .filter(|&target| world.css_transitions.cancel_for_element(target))
+            .collect::<Vec<_>>();
         if !canceled.is_empty() {
             world.document_state.note_visual_input_change();
             self.invalidation_cleanup_for_world(&world)
                 .invalidate_subtrees(host, canceled);
+        }
+    }
+
+    /// Whether `root`'s last removal was a `moveBefore()` atomic move and it
+    /// is still connected: its state, transitions and styles included,
+    /// survived the move.
+    fn was_atomically_moved_in_place(host: &DomHost, root: DomHandle) -> bool {
+        host.was_atomically_moved(root) && host.is_connected(root)
+    }
+
+    /// Marks the styled elements of subtrees inserted into a Document as
+    /// having no before-change style: a removed element's style was
+    /// discarded with its rendering, so its first style after insertion
+    /// starts no transition. A subtree `moveBefore()` moved keeps its styles.
+    pub(super) fn reset_css_transitions_for_inserted_subtrees(
+        &self,
+        host: &DomHost,
+        roots: impl IntoIterator<Item = DomHandle>,
+    ) {
+        for root in roots {
+            if !host.is_connected(root)
+                || !self.dom_adapter.has_element_data(root)
+                || Self::was_atomically_moved_in_place(host, root)
+            {
+                continue;
+            }
+            let Some(world) = self.active_owner_document_world(host, root) else {
+                continue;
+            };
+            let mut styled = Vec::new();
+            let mut pending = vec![root];
+            while let Some(handle) = pending.pop() {
+                if !self.dom_adapter.has_element_data(handle) {
+                    continue;
+                }
+                styled.push(handle);
+                let mut child = host.first_child(handle);
+                while let Some(current) = child {
+                    pending.push(current);
+                    child = host.next_sibling(current);
+                }
+                if let Some(shadow_root) = host.shadow_root_handle(handle) {
+                    let mut child = host.first_child(shadow_root);
+                    while let Some(current) = child {
+                        pending.push(current);
+                        child = host.next_sibling(current);
+                    }
+                }
+            }
+            world.css_transitions.mark_fresh(styled);
         }
     }
 

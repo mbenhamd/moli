@@ -2,11 +2,12 @@ use super::*;
 use crate::document_runtime::DomHandle;
 use crate::web_api_interfaces;
 pub(super) use moli_webapi::animation::{
-    ANIMATION_EFFECT_SLOT, ANIMATION_FINISH_TOKEN_SLOT, ANIMATION_FINISHED_RESOLVE_SLOT,
-    ANIMATION_FINISHED_SLOT, ANIMATION_ONFINISH_SLOT, ANIMATION_PLAY_STATE_SLOT,
-    ANIMATION_SEQUENCE_SLOT, ANIMATION_START_TIME_SLOT, KEYFRAME_EFFECT_KEYFRAMES_SLOT,
-    KEYFRAME_EFFECT_TARGET_SLOT, animation_constructor_callback, animation_effect_getter,
-    animation_start_time_getter, keyframe_effect_constructor_callback, require_animation_receiver,
+    ANIMATION_EFFECT_SLOT, ANIMATION_FINISH_TOKEN_SLOT, ANIMATION_FINISHED_READ_SLOT,
+    ANIMATION_FINISHED_RESOLVE_SLOT, ANIMATION_FINISHED_SLOT, ANIMATION_ONFINISH_SLOT,
+    ANIMATION_PLAY_STATE_SLOT, ANIMATION_SEQUENCE_SLOT, ANIMATION_START_TIME_SLOT,
+    KEYFRAME_EFFECT_KEYFRAMES_SLOT, KEYFRAME_EFFECT_TARGET_SLOT, animation_constructor_callback,
+    animation_effect_getter, animation_start_time_getter, keyframe_effect_constructor_callback,
+    require_animation_receiver,
 };
 use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
 
@@ -21,7 +22,7 @@ mod element_registry;
 pub(crate) use css_transitions::{
     end_css_transition_animation_frame, flush_deferred_css_transition_dispatch,
     queue_css_transition_task_if_due, resolve_unresolved_css_transition_frame_roots,
-    run_css_transition_frame,
+    run_css_transition_frame, run_skipped_css_transition_frame,
 };
 
 const ANIMATION_MICROTASK_ANIMATION_SLOT: &str = "__moliAnimationMicrotaskAnimation";

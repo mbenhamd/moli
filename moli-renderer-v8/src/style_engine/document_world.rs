@@ -17,7 +17,7 @@ use super::{
     },
     source_owner_text::OwnerStyleSheetSources,
     state::{StyleDocumentGenerationSnapshot, StyleDocumentState},
-    transitions::DocumentCssTransitions,
+    transitions::{CssTransitionEvent, CssTransitionEventKind, DocumentCssTransitions},
 };
 
 pub(super) struct DocumentStyleWorld {
@@ -40,6 +40,9 @@ pub(super) struct DocumentStyleWorlds {
     /// computed-style wrappers distinguishable from later worlds without an
     /// O(navigations) tombstone map keyed by every retired Document.
     lifecycle_generation_floor: Cell<u64>,
+    /// The settlements of the transitions that retired Documents canceled:
+    /// script can still hold their `CSSTransition`s.
+    retired_css_transition_settlements: RefCell<Vec<CssTransitionEvent>>,
 }
 
 impl DocumentStyleWorld {
@@ -81,6 +84,7 @@ impl DocumentStyleWorlds {
         Self {
             worlds: RefCell::new(HashMap::new()),
             lifecycle_generation_floor: Cell::new(0),
+            retired_css_transition_settlements: RefCell::default(),
         }
     }
 
@@ -95,6 +99,18 @@ impl DocumentStyleWorlds {
 
     pub(super) fn active_worlds(&self) -> Vec<Rc<DocumentStyleWorld>> {
         self.worlds.borrow().values().map(Rc::clone).collect()
+    }
+
+    pub(super) fn has_retired_css_transition_settlements(&self) -> bool {
+        !self.retired_css_transition_settlements.borrow().is_empty()
+    }
+
+    pub(super) fn retired_css_transition_settlements(&self) -> Vec<CssTransitionEvent> {
+        self.retired_css_transition_settlements.borrow().clone()
+    }
+
+    pub(super) fn take_retired_css_transition_settlements(&self) -> Vec<CssTransitionEvent> {
+        std::mem::take(&mut *self.retired_css_transition_settlements.borrow_mut())
     }
 
     pub(super) fn active_world(&self, document: DomHandle) -> Option<Rc<DocumentStyleWorld>> {
@@ -116,6 +132,24 @@ impl DocumentStyleWorlds {
         // keep the retired Stylist or stylesheet sources alive past this
         // lifecycle boundary.
         world.clear_for_document_replacement();
+        // The Document is gone: its elements get no events, but the objects
+        // of its transitions still settle.
+        self.retired_css_transition_settlements.borrow_mut().extend(
+            world
+                .css_transitions
+                .take_events()
+                .into_iter()
+                .filter(|event| {
+                    matches!(
+                        event.kind,
+                        CssTransitionEventKind::End | CssTransitionEventKind::Cancel
+                    )
+                })
+                .map(|event| CssTransitionEvent {
+                    dispatch: false,
+                    ..event
+                }),
+        );
         self.raise_lifecycle_generation_floor(world.document_state.generation_snapshot());
         true
     }

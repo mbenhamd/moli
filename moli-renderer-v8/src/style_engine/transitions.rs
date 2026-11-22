@@ -346,6 +346,11 @@ impl DocumentCssTransitions {
         self.transition_styles_seen.set(false);
     }
 
+    #[cfg(test)]
+    pub(super) fn fresh_count(&self) -> usize {
+        self.fresh.borrow().len()
+    }
+
     /// Marks `elements` as having no before-change style.
     pub(super) fn mark_fresh(&self, elements: impl IntoIterator<Item = DomHandle>) {
         self.fresh.borrow_mut().extend(elements);
@@ -372,6 +377,33 @@ impl DocumentCssTransitions {
                     fresh.insert(DomHandle::new(child.as_node().debug_id()));
                     pending.push(child);
                 }
+            }
+        }
+    }
+
+    /// Cancels the running transitions of `element`'s flat-tree descendants.
+    /// The walk stops once every running target is found.
+    fn cancel_in_flat_tree_descendants<E: TElement>(&self, element: E) {
+        let mut remaining = self
+            .store
+            .borrow()
+            .records
+            .values()
+            .map(|record| record.target)
+            .collect::<HashSet<_>>();
+        let mut pending = vec![element];
+        while !remaining.is_empty()
+            && let Some(current) = pending.pop()
+        {
+            for child in current.traversal_children() {
+                let Some(child) = child.as_element() else {
+                    continue;
+                };
+                let handle = DomHandle::new(child.as_node().debug_id());
+                if remaining.remove(&handle) {
+                    self.cancel_for_element(handle);
+                }
+                pending.push(child);
             }
         }
     }
@@ -427,12 +459,6 @@ impl DocumentCssTransitions {
     }
 
     /// Whether the document's initial content still awaits its first frame
-    /// style update.
-    pub(super) fn has_unstyled_document(&self) -> bool {
-        !self.document_styled.get()
-    }
-
-    /// Whether the document's initial content still awaits its first frame
     /// style update; marks it as taken.
     pub(super) fn take_unstyled_document(&self) -> bool {
         !self.document_styled.replace(true)
@@ -466,12 +492,12 @@ impl DocumentCssTransitions {
     pub(super) fn style_update_targets(
         &self,
         connected: impl Fn(DomHandle) -> bool,
-        exists: impl Fn(DomHandle) -> bool,
     ) -> Vec<DomHandle> {
         self.candidates
             .borrow_mut()
             .retain(|&target| connected(target));
-        self.fresh.borrow_mut().retain(|&target| exists(target));
+        // A disconnected element's next insertion marks it again.
+        self.fresh.borrow_mut().retain(|&target| connected(target));
         let mut targets = self
             .candidates
             .borrow()
@@ -885,6 +911,16 @@ pub(super) fn process_css_transitions<E>(
         && !new_primary.get_box().clone_display().is_none()
     {
         transitions.mark_styled_descendants_fresh(element);
+    }
+    // An element that becomes `display: none` stops rendering its subtree:
+    // the transitions there are canceled, as Blink cancels them when it
+    // detaches the subtree's layout.
+    if new_primary.get_box().clone_display().is_none()
+        && old
+            .as_ref()
+            .is_some_and(|old| !old.get_box().clone_display().is_none())
+    {
+        transitions.cancel_in_flat_tree_descendants(element);
     }
     let specifies_transitions = new_primary.get_ui().specifies_transitions();
     transitions.note_candidate(handle, specifies_transitions);

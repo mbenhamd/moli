@@ -76,7 +76,7 @@ impl NativeDom {
                 )
             });
         if changed {
-            self.note_attribute_value("", &normalized_name, value);
+            self.note_attribute_value(node_id, "", &normalized_name, value);
         }
         if changed && let Some(document) = base_document {
             self.process_base_element(document, false);
@@ -112,7 +112,7 @@ impl NativeDom {
                 )
             });
         if changed {
-            self.note_attribute_value(namespace, local_name, value);
+            self.note_attribute_value(node_id, namespace, local_name, value);
         }
         if changed && let Some(document) = base_document {
             self.process_base_element(document, false);

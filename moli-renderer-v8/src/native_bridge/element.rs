@@ -149,7 +149,8 @@ use self::table_elements::*;
 mod shadow_template;
 pub(in crate::native_bridge) use self::base_prototypes::BODY_LEGACY_PROTOTYPE_ACCESSORS;
 pub(crate) use self::base_prototypes::{
-    computed_style_property_for_handle, install_html_select_element_prototype_bindings,
+    computed_style_property_for_handle, computed_value_for_handle, element_has_layout_box,
+    install_html_select_element_prototype_bindings,
 };
 use self::shadow_template::*;
 

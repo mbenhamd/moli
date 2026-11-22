@@ -1186,13 +1186,15 @@ pub(super) struct ScriptVmRendererDocumentIsolateOps<'a> {
 }
 
 impl ScriptVm {
-    /// Resolves the subtrees the last frame's style update left unresolved;
-    /// every task and command runs this before it can change the DOM, a
-    /// style or the viewport. A borrowed host means a callback of a task
-    /// that already ran it.
+    /// Resolves the subtrees the last frame's style update left unresolved,
+    /// and runs the style update of a skipped frame that is due; every task
+    /// and command runs this before it can change the DOM, a style or the
+    /// viewport. A borrowed host means a callback of a task that already
+    /// ran it.
     pub(crate) fn resolve_unresolved_css_transition_frame_roots(&self) {
         if let Ok(host) = self._context_host.try_borrow() {
             crate::context_bootstrap::resolve_unresolved_css_transition_frame_roots(&host);
+            crate::context_bootstrap::run_skipped_css_transition_frame(&host);
         }
     }
 

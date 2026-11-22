@@ -14,6 +14,9 @@ use crate::style_engine::transitions::{
 };
 
 const CSS_TRANSITION_OBJECTS_SLOT: &str = "__moliCssTransitionObjects";
+/// In the main realm: the `CSSTransition` objects of the other realms, which
+/// still settle after their Document is gone (a removed frame).
+const CSS_TRANSITION_OTHER_REALM_OBJECTS_SLOT: &str = "__moliCssTransitionOtherRealmObjects";
 pub(super) const CSS_TRANSITION_ID_SLOT: &str = "__moliCssTransitionId";
 const CSS_TRANSITION_PROPERTY_SLOT: &str = "__moliCssTransitionProperty";
 const CSS_TRANSITION_TARGET_SLOT: &str = "__moliCssTransitionTarget";
@@ -101,14 +104,18 @@ fn css_transition_target<'s>(
 /// transitions, so every realm that asks for one gets the same object and
 /// the transition task finds it.
 fn transition_objects<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Map> {
+    realm_map(scope, CSS_TRANSITION_OBJECTS_SLOT)
+}
+
+fn realm_map<'s>(scope: &mut v8::PinScope<'s, '_>, slot: &str) -> v8::Local<'s, v8::Map> {
     let global = scope.get_current_context().global(scope);
-    if let Some(map) = get_private_value(scope, global, CSS_TRANSITION_OBJECTS_SLOT)
+    if let Some(map) = get_private_value(scope, global, slot)
         .and_then(|value| v8::Local::<v8::Map>::try_from(value).ok())
     {
         return map;
     }
     let map = v8::Map::new(scope);
-    set_private_value(scope, global, CSS_TRANSITION_OBJECTS_SLOT, map.into());
+    set_private_value(scope, global, slot, map.into());
     map
 }
 
@@ -116,7 +123,15 @@ fn existing_transition_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     id: u64,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let map = transition_objects(scope);
+    map_object(scope, CSS_TRANSITION_OBJECTS_SLOT, id)
+}
+
+fn map_object<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    slot: &str,
+    id: u64,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let map = realm_map(scope, slot);
     let key = v8::Number::new(scope, id as f64);
     map.get(scope, key.into())
         .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
@@ -124,6 +139,24 @@ fn existing_transition_object<'s>(
 
 fn forget_transition_object(scope: &mut v8::PinScope<'_, '_>, id: u64) {
     let map = transition_objects(scope);
+    let key = v8::Number::new(scope, id as f64);
+    let _ = map.delete(scope, key.into());
+}
+
+/// Forgets `id` in the main realm's map of other realms' objects.
+fn forget_other_realm_transition_object(
+    scope: &mut v8::PinScope<'_, '_>,
+    host: &PageScriptHost,
+    id: u64,
+) {
+    let Some(main) = host.node_event_execution_context(scope, host.document_handle()) else {
+        return;
+    };
+    let scope = &mut v8::ContextScope::new(scope, main);
+    let map = realm_map(scope, CSS_TRANSITION_OTHER_REALM_OBJECTS_SLOT);
+    if map.size() == 0 {
+        return;
+    }
     let key = v8::Number::new(scope, id as f64);
     let _ = map.delete(scope, key.into());
 }
@@ -177,43 +210,71 @@ pub(super) fn css_transition_object<'s>(
     renew_finished_promise(scope, animation);
     let map = transition_objects(scope);
     let _ = map.set(scope, id.into(), animation.into());
+    if record.document != runtime.document_handle()
+        && let Some(main) = runtime.node_event_execution_context(scope, runtime.document_handle())
+    {
+        let scope = &mut v8::ContextScope::new(scope, main);
+        let map = realm_map(scope, CSS_TRANSITION_OTHER_REALM_OBJECTS_SLOT);
+        let id = v8::Number::new(scope, record.id as f64);
+        let _ = map.set(scope, id.into(), animation.into());
+    }
     Some(animation)
 }
 /// `commitStyles()` on a `CSSTransition`: writes its property's current
 /// value, the target's computed value with the transition applied, to the
-/// target's inline style (Web Animations §4.4.19).
+/// target's inline style through the native `setProperty` (Web Animations
+/// §4.4.19). A target without a box throws `InvalidStateError`.
 pub(super) fn commit_css_transition_styles<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     animation: v8::Local<'s, v8::Object>,
 ) {
-    if animation_play_state(scope, animation) == "idle" {
-        return;
-    }
     let Some(target) = css_transition_target(scope, animation) else {
-        return;
-    };
-    let Some(property) = get_private_value(scope, animation, CSS_TRANSITION_PROPERTY_SLOT)
-        .map(|property| property.to_rust_string_lossy(scope))
-    else {
         return;
     };
     let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, target) else {
         return;
     };
-    let value = crate::native_bridge::element::computed_style_property_for_handle(
+    flush_element_css_transitions(unsafe { &*runtime_ptr }, handle);
+    settle_pending_css_transition_objects(scope, runtime_ptr);
+    if unsafe { &*runtime_ptr }
+        .style_engine_ref()
+        .has_pending_css_transition_events()
+    {
+        queue_css_transition_task_if_due(scope);
+    }
+    if !crate::native_bridge::element::element_has_layout_box(unsafe { &*runtime_ptr }, handle) {
+        crate::native_bridge::throw_dom_exception(
+            scope,
+            "InvalidStateError",
+            11,
+            "Target element is not rendered.",
+        );
+        return;
+    }
+    if animation_play_state(scope, animation) == "idle" {
+        return;
+    }
+    let Some(property) = get_private_value(scope, animation, CSS_TRANSITION_PROPERTY_SLOT)
+        .map(|property| property.to_rust_string_lossy(scope))
+    else {
+        return;
+    };
+    let Some(value) = crate::native_bridge::element::computed_value_for_handle(
         unsafe { &*runtime_ptr },
         handle,
         &property,
-    );
+    ) else {
+        return;
+    };
     let Some(style) = target
         .get(scope, v8str(scope, "style").into())
         .and_then(|style| v8::Local::<v8::Object>::try_from(style).ok())
     else {
         return;
     };
-    let Some(set_property) = style
-        .get(scope, v8str(scope, "setProperty").into())
-        .and_then(|function| v8::Local::<v8::Function>::try_from(function).ok())
+    let Some(set_property) =
+        v8::Function::builder(crate::native_bridge::element::style_set_property_callback)
+            .build(scope)
     else {
         return;
     };
@@ -310,6 +371,22 @@ fn renew_finished_promise<'s>(
         CSS_TRANSITION_FINISHED_RESOLVER_SLOT,
         resolver.into(),
     );
+    let unread = v8::Boolean::new(scope, false);
+    set_private_value(
+        scope,
+        animation,
+        ANIMATION_FINISHED_READ_SLOT,
+        unread.into(),
+    );
+}
+
+/// Whether script read `animation`'s current `finished` promise.
+fn finished_promise_read<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    animation: v8::Local<'s, v8::Object>,
+) -> bool {
+    get_private_value(scope, animation, ANIMATION_FINISHED_READ_SLOT)
+        .is_some_and(|value| value.is_true())
 }
 
 fn finished_resolver<'s>(
@@ -361,13 +438,15 @@ fn settle_finished<'s>(
 /// Settles a `CSSTransition` whose transition was canceled: it becomes idle,
 /// and its `finished` promise, while still pending, rejects with an
 /// `AbortError`, handled, and is replaced (Web Animations §4.4.15, "cancel
-/// an animation").
+/// an animation"). A promise script never read is replaced without a
+/// rejection, as Blink creates it on the first read; a cancel of an idle
+/// object leaves a rejection the transition task owes alone.
 fn settle_canceled<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     animation: v8::Local<'s, v8::Object>,
     settlement: Settlement,
 ) {
-    if settlement != Settlement::StyleFlush && reject_pending_finished_promise(scope, animation) {
+    if settlement == Settlement::Task && reject_pending_finished_promise(scope, animation) {
         return;
     }
     if animation_play_state(scope, animation) == "idle" {
@@ -376,6 +455,10 @@ fn settle_canceled<'s>(
     set_animation_play_state(scope, animation, "idle");
     let null = v8::null(scope).into();
     set_private_value(scope, animation, ANIMATION_START_TIME_SLOT, null);
+    if !finished_promise_read(scope, animation) {
+        renew_finished_promise(scope, animation);
+        return;
+    }
     if settlement == Settlement::StyleFlush {
         let pending = v8::Boolean::new(scope, true);
         set_private_value(
@@ -454,6 +537,9 @@ pub(super) fn settle_css_transition_from_script<'s>(
     if let Some(context) = animation.get_creation_context(scope) {
         let scope = &mut v8::ContextScope::new(scope, context);
         forget_transition_object(scope, id);
+    }
+    if let Some(host_ptr) = crate::util::context_host_ptr_from_global_bridge(scope) {
+        forget_other_realm_transition_object(scope, unsafe { &*host_ptr }, id);
     }
     queue_css_transition_task_if_due(scope);
 }
@@ -653,7 +739,10 @@ fn queue_css_transition_dispatch_task(
 }
 
 /// Orders the end and cancel events by their targets' tree order, then by
-/// composite order, in the places they hold among the events.
+/// composite order, in the places they hold among the events. A
+/// transition's end or cancel never moves before its own run or start
+/// event: each place takes the first event in that order whose transition
+/// has no event left after it.
 fn sort_settlement_events(dom: &DomHost, events: &mut [CssTransitionEvent]) {
     let places = events
         .iter()
@@ -668,6 +757,16 @@ fn sort_settlement_events(dom: &DomHost, events: &mut [CssTransitionEvent]) {
         .collect::<Vec<_>>();
     if places.len() < 2 {
         return;
+    }
+    // The place after the last run or start event of each transition.
+    let mut earliest = std::collections::HashMap::<u64, usize>::new();
+    for (place, event) in events.iter().enumerate() {
+        if matches!(
+            event.kind,
+            CssTransitionEventKind::Run | CssTransitionEventKind::Start
+        ) {
+            earliest.insert(event.id, place + 1);
+        }
     }
     let mut settled = places
         .iter()
@@ -684,8 +783,24 @@ fn sort_settlement_events(dom: &DomHost, events: &mut [CssTransitionEvent]) {
             .then_with(|| left.generation.cmp(&right.generation))
             .then_with(|| left.property.cmp(&right.property))
     });
-    for (place, (_, event)) in places.into_iter().zip(settled) {
-        events[place] = event;
+    let mut settled = settled
+        .into_iter()
+        .map(|(_, event)| Some(event))
+        .collect::<Vec<_>>();
+    for place in places {
+        // The event that held this place qualifies, so one always does.
+        let Some(next) = settled.iter_mut().find(|event| {
+            event.as_ref().is_some_and(|event| {
+                earliest
+                    .get(&event.id)
+                    .is_none_or(|&earliest| earliest <= place)
+            })
+        }) else {
+            continue;
+        };
+        if let Some(event) = next.take() {
+            events[place] = event;
+        }
     }
 }
 
@@ -787,10 +902,8 @@ pub(crate) fn update_css_transition_styles(host: &PageScriptHost, resolve_subtre
     // takes them, so a node inserted during this frame is styled now.
     host.drain_pending_style_invalidations_for_computed_style_read();
     let targets = engine.css_transition_style_update_targets(dom);
-    let mut roots = engine.take_css_transition_style_roots(dom);
-    if let Some(document) =
-        engine.take_unstyled_css_transition_document(dom, host.document_handle())
-    {
+    let mut roots = engine.take_css_transition_style_roots();
+    if let Some(document) = engine.take_unstyled_css_transition_document(host.document_handle()) {
         let mut child = dom.first_child(document);
         while let Some(current) = child {
             roots.push(current);
@@ -830,6 +943,18 @@ pub(crate) fn resolve_unresolved_css_transition_frame_roots(host: &PageScriptHos
         return;
     }
     update_changed_subtree_styles(host, engine.take_unresolved_css_transition_frame_roots());
+}
+
+/// Runs the style update of the frames that Documents none of whose styles
+/// can specify a transition skipped, once due: a task or command starts
+/// with it, as it would follow the frame.
+pub(crate) fn run_skipped_css_transition_frame(host: &PageScriptHost) {
+    let roots = host
+        .style_engine_ref()
+        .take_skipped_css_transition_frame_roots(host.dom_host());
+    if !roots.is_empty() {
+        update_changed_subtree_styles(host, roots);
+    }
 }
 
 /// Resolves the styles of the subtrees whose styles changed, as the
@@ -926,26 +1051,47 @@ fn settle_css_transition_object_for_event(
     ) {
         return;
     }
+    let host = unsafe { &*host_ptr };
     // The `CSSTransition` objects belong to the realm of the Document whose
     // style world ran the transition (a same-origin child frame has its
     // own), even after the element moved to another Document.
-    let Some(context) = unsafe { &*host_ptr }.node_event_execution_context(scope, event.document)
+    if let Some(context) = host.node_event_execution_context(scope, event.document) {
+        let scope = &mut v8::ContextScope::new(scope, context);
+        if let Some(animation) = existing_transition_object(scope, event.id) {
+            settle_transition_object(scope, animation, event, settlement);
+            if settlement == Settlement::Task {
+                forget_transition_object(scope, event.id);
+                forget_other_realm_transition_object(scope, host, event.id);
+            }
+            return;
+        }
+    }
+    // A removed frame's realm no longer settles its objects: the main realm
+    // keeps them.
+    let Some(main) = host.node_event_execution_context(scope, host.document_handle()) else {
+        return;
+    };
+    let scope = &mut v8::ContextScope::new(scope, main);
+    let Some(animation) = map_object(scope, CSS_TRANSITION_OTHER_REALM_OBJECTS_SLOT, event.id)
     else {
         return;
     };
-    let scope = &mut v8::ContextScope::new(scope, context);
-    let Some(animation) = existing_transition_object(scope, event.id) else {
-        return;
-    };
+    settle_transition_object(scope, animation, event, settlement);
+    if settlement == Settlement::Task {
+        forget_other_realm_transition_object(scope, host, event.id);
+    }
+}
+
+fn settle_transition_object<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    animation: v8::Local<'s, v8::Object>,
+    event: &CssTransitionEvent,
+    settlement: Settlement,
+) {
     if event.kind == CssTransitionEventKind::End {
         settle_finished(scope, animation, settlement);
     } else {
         settle_canceled(scope, animation, settlement);
-    }
-    // A flush settles the object's state; the transition task still finds
-    // it to deliver the rest.
-    if settlement == Settlement::Task {
-        forget_transition_object(scope, event.id);
     }
 }
 

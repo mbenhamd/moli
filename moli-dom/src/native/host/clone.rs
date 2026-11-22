@@ -582,7 +582,7 @@ impl DomHost {
         // Detached clones must be queryable before any tree insertion refreshes them.
         self.record_named_index_candidate(clone);
         if style_may_specify_transitions {
-            self.dom.mark_style_attributes_may_specify_transitions();
+            self.dom.note_element_attributes(clone);
         }
     }
 }

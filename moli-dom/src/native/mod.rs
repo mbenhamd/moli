@@ -163,11 +163,15 @@ pub struct NativeDom {
     // and an element's namespace and local name never change, so counting at
     // allocation equals a full arena scan.
     html_frame_element_count: usize,
-    // Whether any element's `style` attribute ever held text that can name a
-    // transition longhand: "transition" in any ASCII case, or a backslash
-    // escape that can spell it. Sticky, like the frame count above, so it
-    // equals a scan of every style attribute this arena ever held.
-    style_attributes_may_specify_transitions: bool,
+    // The elements whose `style` attribute last set can declare a
+    // `transition-*` longhand (see `style_attribute_may_specify_transitions`).
+    // An element leaves the set when its attribute is set to text that
+    // cannot; a removed attribute keeps it there, which only costs a check.
+    transition_style_elements: std::collections::HashSet<NativeNodeId>,
+    // The nodes whose last removal from a parent was a `moveBefore()` atomic
+    // move: their state, transitions included, survives the move. An
+    // ordinary removal takes a node out again.
+    atomically_moved_nodes: std::collections::HashSet<NativeNodeId>,
     document_node_id: NativeNodeId,
     stylesheet_candidate_registries: StylesheetCandidateRegistries,
     parse_errors: Vec<String>,
@@ -180,7 +184,8 @@ impl Clone for NativeDom {
         Self {
             nodes: self.nodes.clone(),
             html_frame_element_count: self.html_frame_element_count,
-            style_attributes_may_specify_transitions: self.style_attributes_may_specify_transitions,
+            transition_style_elements: self.transition_style_elements.clone(),
+            atomically_moved_nodes: self.atomically_moved_nodes.clone(),
             document_node_id: self.document_node_id,
             stylesheet_candidate_registries: self.stylesheet_candidate_registries.clone(),
             parse_errors: self.parse_errors.clone(),
@@ -211,7 +216,8 @@ impl NativeDom {
         Self {
             nodes: NativeNodeStorage::from_node(document_node),
             html_frame_element_count: 0,
-            style_attributes_may_specify_transitions: false,
+            transition_style_elements: std::collections::HashSet::new(),
+            atomically_moved_nodes: std::collections::HashSet::new(),
             document_node_id,
             stylesheet_candidate_registries: StylesheetCandidateRegistries::default(),
             parse_errors: Vec::new(),
@@ -230,7 +236,8 @@ impl NativeDom {
         Self {
             nodes: NativeNodeStorage::from_node(document_node),
             html_frame_element_count: 0,
-            style_attributes_may_specify_transitions: false,
+            transition_style_elements: std::collections::HashSet::new(),
+            atomically_moved_nodes: std::collections::HashSet::new(),
             document_node_id,
             stylesheet_candidate_registries: StylesheetCandidateRegistries::default(),
             parse_errors: Vec::new(),
@@ -251,19 +258,63 @@ impl NativeDom {
         self.html_frame_element_count
     }
 
-    /// Whether a `style` attribute of this arena ever held text that can
-    /// specify a CSS transition (see [`style_attribute_may_specify_transitions`]).
-    pub fn style_attributes_may_specify_transitions(&self) -> bool {
-        self.style_attributes_may_specify_transitions
+    /// Whether the `style` attribute of an element owned by `document` can
+    /// declare a `transition-*` longhand (see
+    /// [`style_attribute_may_specify_transitions`]).
+    pub fn style_attributes_may_specify_transitions(&self, document: NativeNodeId) -> bool {
+        self.transition_style_elements
+            .iter()
+            .any(|&element| self.node(element).and_then(Node::owner_document) == Some(document))
     }
 
-    pub(crate) fn mark_style_attributes_may_specify_transitions(&mut self) {
-        self.style_attributes_may_specify_transitions = true;
+    /// Notes the attribute `element` was given.
+    pub(crate) fn note_attribute_value(
+        &mut self,
+        element: NativeNodeId,
+        namespace: &str,
+        local_name: &str,
+        value: &str,
+    ) {
+        if !namespace.is_empty() || local_name != "style" {
+            return;
+        }
+        if style_attribute_may_specify_transitions(value) {
+            self.transition_style_elements.insert(element);
+        } else {
+            self.transition_style_elements.remove(&element);
+        }
     }
 
-    pub(crate) fn note_attribute_value(&mut self, namespace: &str, local_name: &str, value: &str) {
-        if attribute_may_specify_transitions(namespace, local_name, value) {
-            self.style_attributes_may_specify_transitions = true;
+    /// Notes an element created or cloned with its attributes.
+    pub(crate) fn note_element_attributes(&mut self, element: NativeNodeId) {
+        let specifies = self
+            .node(element)
+            .and_then(|node| node.data().as_element())
+            .is_some_and(|element| {
+                element.attributes().iter().any(|attribute| {
+                    attribute_may_specify_transitions(
+                        attribute.namespace(),
+                        attribute.local_name(),
+                        attribute.value(),
+                    )
+                })
+            });
+        if specifies {
+            self.transition_style_elements.insert(element);
+        }
+    }
+
+    /// Whether `node`'s last removal from a parent was a `moveBefore()`
+    /// atomic move.
+    pub fn was_atomically_moved(&self, node: NativeNodeId) -> bool {
+        self.atomically_moved_nodes.contains(&node)
+    }
+
+    pub(crate) fn note_detach_from_parent(&mut self, node: NativeNodeId, is_atomic_move: bool) {
+        if is_atomic_move {
+            self.atomically_moved_nodes.insert(node);
+        } else if !self.atomically_moved_nodes.is_empty() {
+            self.atomically_moved_nodes.remove(&node);
         }
     }
 
@@ -414,21 +465,14 @@ impl NativeDom {
         {
             self.html_frame_element_count += 1;
         }
-        if let NodeData::Element(element) = &data
-            && element.attributes().iter().any(|attribute| {
-                attribute_may_specify_transitions(
-                    attribute.namespace(),
-                    attribute.local_name(),
-                    attribute.value(),
-                )
-            })
-        {
-            self.style_attributes_may_specify_transitions = true;
-        }
+        let is_element = matches!(data, NodeData::Element(_));
         let mut flags = NodeFlags::new(in_document_tree);
         flags.set_connected(connected);
         self.nodes
             .push(Node::new(node_id, None, owner_document, flags, data));
+        if is_element {
+            self.note_element_attributes(node_id);
+        }
         node_id
     }
 
@@ -1006,15 +1050,36 @@ fn split_qualified_name(qualified_name: &str) -> Option<(Option<&str>, &str)> {
 
 pub use host::is_builtin_reassociateable_form_associated_element;
 
-/// Whether `style` attribute text can declare a `transition-*` longhand: a
-/// property name is an identifier, which spells "transition" either directly
-/// (ASCII case-insensitively) or through a CSS escape.
+/// Whether `style` attribute text can declare a `transition-*` longhand.
+///
+/// Every declaration ends at a `;` and names its property before its first
+/// `:`, so a declaration that names `transition` or `transition-*` (ASCII
+/// case-insensitively, or through a CSS escape) is found. Splitting inside a
+/// string or a custom property value can only find more names, so the
+/// answer may be a false `true`, never a false `false`. Custom properties,
+/// such as `--label: transition`, name no transition.
 pub fn style_attribute_may_specify_transitions(value: &str) -> bool {
-    value.contains('\\')
-        || value
-            .as_bytes()
-            .windows(b"transition".len())
-            .any(|window| window.eq_ignore_ascii_case(b"transition"))
+    let mut text = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("/*") {
+        text.push_str(&rest[..start]);
+        text.push(' ');
+        rest = rest[start + 2..]
+            .find("*/")
+            .map_or("", |end| &rest[start + 2 + end + 2..]);
+    }
+    text.push_str(rest);
+    text.split(';').any(|declaration| {
+        let Some((name, _)) = declaration.split_once(':') else {
+            return false;
+        };
+        let name = name.trim_matches(|c: char| c.is_ascii_whitespace());
+        let prefix = b"transition";
+        name.contains('\\')
+            || name.len() >= prefix.len()
+                && name.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix)
+                && (name.len() == prefix.len() || name.as_bytes()[prefix.len()] == b'-')
+    })
 }
 
 pub(crate) fn attribute_may_specify_transitions(

@@ -224,7 +224,7 @@ impl DomHost {
         changed |= element.resanitize_input_value_after_parser_attributes();
         changed |= element.mark_undefined_custom_element_candidate_from_identity();
         if style_may_specify_transitions {
-            self.dom.mark_style_attributes_may_specify_transitions();
+            self.dom.note_element_attributes(node_id);
         }
 
         if changed {

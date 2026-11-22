@@ -634,10 +634,10 @@ impl MoliStyleEngine {
         handle: DomHandle,
         text: String,
     ) {
-        self.note_inline_style_text_for_css_transitions(&text);
         let Some(document) = owner_document_for_source_owner(host, handle) else {
             return;
         };
+        self.note_inline_style_text_for_css_transitions(&text, document);
         self.move_inline_style_metadata_to_document(handle, document);
         self.world_for_document(document)
             .inline_style_metadata

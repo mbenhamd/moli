@@ -83,6 +83,9 @@ impl ScriptVm {
         &mut self,
         loader: &ResourceRequestClient,
     ) -> Result<bool> {
+        // As the selected Page task does, the turn starts with the frame
+        // work a task must see first.
+        self.resolve_unresolved_css_transition_frame_roots();
         let result = self.run_next_due_timer_callback_body(
             crate::page_task_queue::RendererPageTimerSelection::AnyReady,
         )?;

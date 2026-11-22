@@ -16,6 +16,10 @@ const ANIMATION_READY_SLOT: &str = "__moliAnimationReady";
 
 pub const ANIMATION_FINISHED_SLOT: &str = "__moliAnimationFinished";
 
+/// True once script read `finished`: Blink creates the promise on that
+/// first read, so a cancel before it rejects nothing.
+pub const ANIMATION_FINISHED_READ_SLOT: &str = "__moliAnimationFinishedRead";
+
 pub const ANIMATION_FINISHED_RESOLVE_SLOT: &str = "__moliAnimationFinishedResolve";
 
 const ANIMATION_PROMISE_RESOLVE_SLOT: &str = "__moliAnimationPromiseResolve";
@@ -88,6 +92,13 @@ struct KeyframeEffectObjectDeclaration<'s> {
 struct KeyframeEffectPrototypeDeclaration {
     #[webapi(method, length = 1, callback = keyframe_effect_set_keyframes_callback, receiver = false)]
     set_keyframes: (),
+}
+
+/// `getTiming()` belongs to `AnimationEffect.prototype` (Web Animations
+/// §4.5); `KeyframeEffect` inherits it.
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::AnimationEffect, enumerable)]
+struct AnimationEffectPrototypeDeclaration {
     #[webapi(method, length = 0, callback = keyframe_effect_get_timing_callback, receiver = false)]
     get_timing: (),
 }
@@ -380,6 +391,13 @@ fn animation_finished_getter<'s>(
     if !require_animation_receiver(scope, args.this(), "finished getter") {
         return;
     }
+    let read = v8::Boolean::new(scope, true);
+    set_private_value(
+        scope,
+        args.this(),
+        ANIMATION_FINISHED_READ_SLOT,
+        read.into(),
+    );
     rv.set(animation_finished_value(scope, args.this()));
 }
 
@@ -524,6 +542,9 @@ pub fn install_value_template_bindings<'s>(
         }
         "KeyframeEffect" => {
             KeyframeEffectPrototypeDeclaration::initialize_prototype_template(scope, prototype)
+        }
+        "AnimationEffect" => {
+            AnimationEffectPrototypeDeclaration::initialize_prototype_template(scope, prototype)
         }
         _ => (),
     }
