@@ -538,15 +538,11 @@ impl DialogCloseRequest {
 /// `cancel` event is fired at the dialog, and the dialog closes unless the
 /// event is canceled (or the keydown itself was prevented, which the caller
 /// already checks).
-pub(crate) fn perform_dialog_escape_default_action_for_dispatched_event(
+pub(super) fn perform_dialog_escape_default_action(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
-    event: v8::Local<'_, v8::Object>,
     document: DomHandle,
 ) {
-    if event_string_property(scope, event, "key").as_deref() != Some("Escape") {
-        return;
-    }
     let Some(request) = DialogCloseRequest::new(unsafe { &*runtime_ptr }, document) else {
         return;
     };
@@ -565,16 +561,4 @@ pub(crate) fn perform_dialog_escape_default_action_for_dispatched_event(
     {
         close_dialog_element(scope, runtime_ptr, request.dialog, None);
     }
-}
-
-fn event_string_property(
-    scope: &mut v8::PinScope<'_, '_>,
-    event: v8::Local<'_, v8::Object>,
-    name: &str,
-) -> Option<String> {
-    let key = v8_string(scope, name)?;
-    crate::context_bootstrap::event_backing(scope, event)
-        .get(scope, key.into())
-        .and_then(|value| v8::Local::<v8::String>::try_from(value).ok())
-        .map(|value| value.to_rust_string_lossy(scope))
 }

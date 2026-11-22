@@ -1,13 +1,9 @@
+pub(crate) use moli_webapi::events::subclasses::construct_native_form_data_event as construct_form_data_event;
 #[cfg(any(test, feature = "devtools"))]
 use moli_webapi::events::subclasses::construct_native_keyboard_event;
-pub(crate) use moli_webapi::events::subclasses::{
-    construct_native_command_event as construct_command_event,
-    construct_native_form_data_event as construct_form_data_event,
-    construct_native_interest_event as construct_interest_event,
-    construct_native_toggle_event as construct_toggle_event,
-};
 use moli_webapi::events::subclasses::{
-    construct_native_focus_event, construct_native_input_event, construct_native_submit_event,
+    construct_native_command_event, construct_native_focus_event, construct_native_input_event,
+    construct_native_interest_event, construct_native_submit_event, construct_native_toggle_event,
 };
 #[cfg(feature = "devtools")]
 mod devtools;
@@ -458,7 +454,10 @@ pub(crate) fn construct_submit_event<'s>(
         .wrap_handle(scope, runtime_ptr, target)?;
     let context = crate::native_bridge::node_relevant_context(scope, target)?;
     let scope = &mut v8::ContextScope::new(scope, context);
-    construct_native_submit_event(scope, submitter, bubbles, cancelable)
+    let submitter_value = submitter.unwrap_or_else(|| v8::null(scope).into());
+    let event = construct_native_submit_event(scope, submitter, bubbles, cancelable)?;
+    crate::document_runtime::mark_event_source_composed(scope, event, submitter_value);
+    Some(event)
 }
 
 pub(crate) fn construct_simple_event_for_target<'s>(
@@ -476,6 +475,40 @@ pub(crate) fn construct_simple_event_for_target<'s>(
     let context = crate::native_bridge::node_relevant_context(scope, target)?;
     let scope = &mut v8::ContextScope::new(scope, context);
     construct_simple_event(scope, event_type, bubbles, cancelable, composed)
+}
+
+pub(crate) fn construct_command_event<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    command: &str,
+    source: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let event = construct_native_command_event(scope, command, source)?;
+    crate::document_runtime::mark_event_source_composed(scope, event, source);
+    Some(event)
+}
+
+pub(crate) fn construct_toggle_event<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    event_type: &str,
+    old_state: &str,
+    new_state: &str,
+    cancelable: bool,
+    source: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let event =
+        construct_native_toggle_event(scope, event_type, old_state, new_state, cancelable, source)?;
+    crate::document_runtime::mark_event_source_composed(scope, event, source);
+    Some(event)
+}
+
+pub(crate) fn construct_interest_event<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    event_type: &str,
+    source: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let event = construct_native_interest_event(scope, event_type, source)?;
+    crate::document_runtime::mark_event_source_composed(scope, event, source);
+    Some(event)
 }
 
 pub(in crate::native_bridge::element) fn construct_click_event<'s>(

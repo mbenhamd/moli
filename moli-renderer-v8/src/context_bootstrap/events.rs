@@ -114,6 +114,29 @@ pub(crate) use base::{
     mark_event_trusted, set_event_composed_path, set_event_internal_flag, set_event_trusted,
 };
 
+/// How a CommandEvent, ToggleEvent, InterestEvent or SubmitEvent starts
+/// its Blink `related_target_`: from `source`, or from the submitter.
+#[derive(Clone, Copy)]
+pub(crate) enum ReferenceTargetEventInterface {
+    Source,
+    Submit,
+}
+
+/// The reference-target interface backing `event`, if any. Blink adjusts
+/// these interfaces' paths for any event type.
+pub(crate) fn reference_target_event_interface<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    event: v8::Local<'s, v8::Object>,
+) -> Option<ReferenceTargetEventInterface> {
+    match event_subclass_kind(scope, event)? {
+        EventSubclassKind::CommandEvent
+        | EventSubclassKind::ToggleEvent
+        | EventSubclassKind::InterestEvent => Some(ReferenceTargetEventInterface::Source),
+        EventSubclassKind::SubmitEvent => Some(ReferenceTargetEventInterface::Submit),
+        _ => None,
+    }
+}
+
 pub(crate) fn event_is_error_event<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     event: v8::Local<'s, v8::Object>,
