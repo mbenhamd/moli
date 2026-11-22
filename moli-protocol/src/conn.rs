@@ -63,6 +63,7 @@ mod command_owner_scope;
 mod command_view;
 mod command_wait_lifetime;
 mod command_workflow;
+mod session_command_admission;
 pub(crate) use command_workflow::{
     CommandWorkflowContext, CommandWorkflowContextReturn, CommandWorkflowFailureCleanup,
     CompletedCommandWorkflow, PreparedCommandWorkflow,
@@ -100,8 +101,7 @@ mod resource_runtime_support;
 mod runtime_eval;
 mod session_cleanup;
 pub(crate) use session_cleanup::{
-    CompletedSessionPageUpdates, CompletedSessionScriptCleanup, SessionPageUpdateResult,
-    SessionPageUpdates, SessionScriptCleanup,
+    CompletedSessionPageUpdates, SessionPageUpdateResult, SessionPageUpdates,
 };
 mod runtime_load;
 mod scheduler_hooks;
@@ -665,12 +665,6 @@ impl CommandDispatchContext {
             .into_single_stream()
     }
 
-    /// Browser/Target commands explicitly compose independently owned renderer
-    /// streams without moving their response out of the command lifecycle.
-    pub(crate) fn add_renderer_output_dependency(&mut self, fence: moli_core::RendererOutputFence) {
-        self.renderer_output_dependencies.add(fence);
-    }
-
     pub(crate) fn extend_renderer_output_dependencies(
         &mut self,
         dependencies: RendererOutputDependencies,
@@ -714,10 +708,10 @@ pub(crate) use runtime_eval::runtime_realm_inventory_using;
 pub(crate) use runtime_eval::{
     BidiChannelDispatchIdentity, BidiChannelDispatchOutput, BidiChannelObjectGroupLease,
     BidiChannelOutput, ClaimedPendingInspectorAwait, ClaimedPendingInspectorAwaitOwner,
-    CompletedSessionWorkerCleanup, PreparedBidiChannelAction, PreparedRendererNavigationFinish,
-    PreparedRuntimeDomQuery, PreparedRuntimeHelper, PreparedRuntimePageQuery,
-    PreparedRuntimeRealmInventory, RuntimeBindingCallEvent, RuntimeEnableEventsReplay,
-    RuntimeEnableReplayEvent, RuntimeHelperIdentity, RuntimeInspectorError, SessionWorkerCleanup,
+    PreparedBidiChannelAction, PreparedRendererNavigationFinish, PreparedRuntimeDomQuery,
+    PreparedRuntimeHelper, PreparedRuntimePageQuery, PreparedRuntimeRealmInventory,
+    RuntimeBindingCallEvent, RuntimeEnableEventsReplay, RuntimeEnableReplayEvent,
+    RuntimeHelperIdentity, RuntimeInspectorError, SessionWorkerCleanup,
 };
 pub use runtime_eval::{
     CompletedMoliDiagnosticsDispatch, CompletedRuntimeBindingPageCommandDispatch,

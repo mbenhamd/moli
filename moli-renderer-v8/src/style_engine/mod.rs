@@ -105,8 +105,9 @@ mod world_update;
 use cleanup::StyleInvalidationCleanup;
 pub(crate) use computed::{
     ComputedDisplayKind, ComputedRenderedStyleFacts, ComputedTextTransformKind,
-    ComputedTextWrapModeKind, ComputedWhiteSpaceCollapseKind, StyleObservationSnapshot,
-    StyloAnonymousBoxKind, StyloComputedStyleSnapshot, serialize_resolved_computed_property,
+    ComputedTextWrapModeKind, ComputedWhiteSpaceCollapseKind, MarkerStyleDecision,
+    StyleObservationSnapshot, StyleResolutionPass, StyloAnonymousBoxKind,
+    StyloComputedStyleSnapshot, marker_style_decision, serialize_resolved_computed_property,
 };
 use document_world::{DocumentStyleWorld, DocumentStyleWorlds};
 pub(in crate::style_engine) use drain::StyleInvalidationDrainBoundary;
@@ -127,7 +128,6 @@ pub(crate) use registered_properties::{
 #[cfg(test)]
 use scope::style_source_scope_for_mutation_effects;
 pub(crate) use source::adopted::AdoptedStyleSheetInstallation;
-pub(crate) use source::imports::stylesheet_top_level_import_urls;
 pub(crate) use source::inline::InlineStyleCspState;
 pub(crate) use source::store::{
     OwnerStyleSheetSource, StylesheetFontFaceDescriptor, StyloStylesheetSource,
@@ -1750,14 +1750,38 @@ impl MoliStyleEngine {
         )
     }
 
-    pub(crate) fn prepare_style_observation_targets(
+    pub(crate) fn style_world_update_plan_for_observation(
+        &self,
+        host: &DomHost,
+        document: DomHandle,
+        viewport: StyleViewport,
+        environment: StyloStyleEnvironment,
+        tree_scope_versions: StyleTreeScopeVersions,
+    ) -> Option<StyleWorldUpdatePlan> {
+        let world = self.world_for_document(document);
+        computed::style_world_update_plan_for_observation(
+            host,
+            &world,
+            viewport,
+            environment,
+            computed::document_quirks_mode(host, document),
+            tree_scope_versions,
+        )
+    }
+
+    pub(crate) fn with_style_resolution_pass<R>(
         &self,
         host: &DomHost,
         document_url: &url::Url,
         document: DomHandle,
-        handles: &[DomHandle],
-    ) {
-        computed::prepare_style_observation_targets(self, host, document_url, document, handles);
+        update: Option<(&PreparedStyleWorldUpdate, StyleSourceDocumentContext<'_>)>,
+        resolve: impl FnOnce(&mut computed::StyleResolutionPass<'_, '_>) -> R,
+    ) -> R {
+        if let Some((update, document_context)) = update {
+            let world = self.world_for_document(document);
+            computed::apply_style_world_update(self, host, &world, update, document_context);
+        }
+        computed::with_style_resolution_pass(self, host, document_url, document, resolve)
     }
 
     pub(crate) fn computed_style_snapshot_from_current_observation(
@@ -1823,28 +1847,6 @@ impl MoliStyleEngine {
             read_document,
         )
     }
-
-    pub(crate) fn computed_anonymous_style_snapshot_from_current_observation(
-        &self,
-        host: &DomHost,
-        document_url: &url::Url,
-        owner: DomHandle,
-        parent_style: &style::properties::ComputedValues,
-        anonymous_kind: StyloAnonymousBoxKind,
-        document_context: StyleSourceDocumentContext<'_>,
-        read_document: DomHandle,
-    ) -> Option<StyloComputedStyleSnapshot> {
-        computed::computed_anonymous_style_snapshot_from_current_observation(
-            self,
-            host,
-            document_url,
-            owner,
-            parent_style,
-            anonymous_kind,
-            document_context,
-            read_document,
-        )
-    }
 }
 
 pub(crate) fn ensure_stylo_browser_compat_prefs() {
@@ -1883,7 +1885,7 @@ fn stylo_source_metadata_for_css_text(
     css_text: &str,
     base_url: &url::Url,
 ) -> source::store::StyleSourceMetadata {
-    stylesheet::style_source_metadata_for_css_text(css_text, base_url)
+    stylesheet::style_source_metadata_for_css_text(css_text, base_url).0
 }
 
 fn retain_owner_documents_except_document(

@@ -1804,9 +1804,10 @@ JSON.stringify(ids.map((id) => {
     }
 }
 
-/// Chromium 156 generates no marker box for `::marker { content: '' }`: the
-/// closed and open summary text starts at the body edge (x=8), and an inside
-/// or outside list item's text starts at the list padding edge (x=48), as with
+/// Chromium 156 lays out `::marker { content: '' }` with no text displacement
+/// (the generated marker stays visible to DevTools but is empty): the closed
+/// and open summary text starts at the body edge (x=8), and an inside or
+/// outside list item's text starts at the list padding edge (x=48), as with
 /// `content: none`. A non-empty string marker still offsets the text.
 #[test]
 fn empty_string_marker_content_generates_no_marker_box() {

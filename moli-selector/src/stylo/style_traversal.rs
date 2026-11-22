@@ -20,7 +20,7 @@ use selectors::{
 use style::{
     Atom, LocalName, Namespace,
     context::{QuirksMode, SharedStyleContext},
-    data::{ElementDataMut, ElementDataRef, ElementDataWrapper},
+    data::{ElementDataMut, ElementDataRef, ElementDataWrapper, ElementStyles},
     dom::{LayoutIterator, NodeInfo, OpaqueNode, TDocument, TElement, TNode, TShadowRoot},
     invalidation::{element::restyle_hints::RestyleHint, stylesheets::StylesheetInvalidationSet},
     properties::{PropertyDeclarationBlock, longhands::display::computed_value::T as Display},
@@ -177,6 +177,10 @@ impl StyloDomStyleAdapter {
         host: &DomHost,
         f: impl for<'scope> FnOnce(&'scope StyleDomHostBinding<'scope>) -> R,
     ) -> R {
+        assert!(
+            self.state.host.get().is_null(),
+            "nested style bindings would invalidate live Stylo node wrappers"
+        );
         self.bind_host(host);
         let binding = StyleDomHostBinding { state: &self.state };
         f(&binding)
@@ -297,6 +301,18 @@ impl StyloDomStyleAdapter {
     /// resolved element style for this Document.
     pub fn has_element_styles_for_document(&self, document: NodeId) -> bool {
         self.state.has_element_styles_for_document(document)
+    }
+
+    /// Clones the published styles for a locally clean entry. The caller
+    /// validates document ownership and inherited style invalidation.
+    pub fn clone_clean_element_styles(
+        &self,
+        document: NodeId,
+        handle: NodeId,
+    ) -> Option<ElementStyles> {
+        let documents = self.state.element_data.documents.borrow();
+        let data = documents.get(&document)?.data.get(&handle)?.borrow();
+        (data.has_styles() && data.hint.is_empty()).then(|| data.styles.clone())
     }
 
     pub fn set_inline_style_attribute(
@@ -450,6 +466,10 @@ fn collect_dirty_style_roots<'a>(roots: impl IntoIterator<Item = StyleElement<'a
 impl<'binding> StyleDomHostBinding<'binding> {
     pub fn shared_lock(&self) -> &SharedRwLock {
         &self.state.shared_lock
+    }
+
+    pub fn bound_node_count(&self) -> usize {
+        self.state.node_data.borrow().len()
     }
 
     pub fn document<'scope>(&'scope self, host: &DomHost) -> StyleDocument<'scope> {

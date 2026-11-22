@@ -77,6 +77,7 @@ pub(crate) struct RendererInspectorIoCommand {
     envelope: RendererDevToolsIoCommandEnvelope,
     first_dispatch_tx: Option<RendererInspectorIoFirstDispatchSender>,
     claimed_by: Option<RendererInspectorIoCommandConsumer>,
+    connection: super::session::RendererInspectorSessionAdmission,
 }
 
 #[cfg(feature = "devtools")]
@@ -92,6 +93,12 @@ impl RendererInspectorIoCommand {
 
     pub(crate) fn kind(&self) -> RendererDevToolsIoCommandKind {
         self.envelope.kind()
+    }
+
+    pub(crate) fn completes_idle_termination(&self) -> bool {
+        self.envelope
+            .inspector_envelope()
+            .is_some_and(RendererInspectorCommandEnvelope::completes_idle_termination)
     }
 
     pub(crate) fn raw_json(&self) -> &str {
@@ -264,16 +271,18 @@ impl RendererInspectorIoOwnerWake {
 
 struct RendererInspectorIoState {
     #[cfg(feature = "devtools")]
+    connections: super::session::RendererInspectorSessionConnections,
+    #[cfg(feature = "devtools")]
     commands: VecDeque<RendererInspectorIoCommand>,
     // Isolate-owned notifications, not session commands. They remain eligible
     // during session detach and an active command's nested debugger pause.
     environment_notifications: ProcessEnvironmentNotifications,
     #[cfg(feature = "devtools")]
     active_command_id: Option<u64>,
-    // One count per lane is enough: every detach guard completes at most once,
-    // and commands stay blocked until all outstanding guards have completed.
+    // Initialization and detach can overlap. A lane becomes eligible only
+    // after every outstanding lifecycle hold has been released.
     #[cfg(feature = "devtools")]
-    session_detaches: BTreeMap<RendererDevToolsSessionLaneKey, usize>,
+    session_holds: BTreeMap<RendererDevToolsSessionLaneKey, usize>,
     closed: bool,
     owner_wake_tx: Option<tokio::sync::mpsc::UnboundedSender<RendererInspectorIoOwnerWake>>,
 }
@@ -291,12 +300,13 @@ impl RendererInspectorIoState {
         !self.closed
             && self.active_command_id.is_none()
             && self.commands.iter().any(|command| {
-                !self
-                    .session_detaches
-                    .contains_key(&RendererDevToolsSessionLaneKey::new(
-                        command.agent_token,
-                        command.ticket().session().clone(),
-                    ))
+                command.connection.ready()
+                    && !self
+                        .session_holds
+                        .contains_key(&RendererDevToolsSessionLaneKey::new(
+                            command.agent_token,
+                            command.ticket().session().clone(),
+                        ))
             })
     }
 
@@ -319,8 +329,22 @@ impl RendererInspectorIoState {
     }
 }
 
-/// Owns the target IO task slot only until the command reaches its executor.
-/// A later interrupt command must not wait for an asynchronous response.
+/// Blocks one session's IO until its initialization or cleanup settles.
+#[cfg(all(test, feature = "devtools"))]
+pub(crate) struct RendererInspectorIoSessionHold {
+    ingress: RendererInspectorIoIngress,
+    agent: RendererDevToolsAgentToken,
+    session: DevToolsSessionKey,
+}
+
+#[cfg(all(test, feature = "devtools"))]
+impl Drop for RendererInspectorIoSessionHold {
+    fn drop(&mut self) {
+        self.ingress.release_session_hold(self.agent, &self.session);
+    }
+}
+
+/// Owns the target IO slot only until a command reaches its executor.
 #[cfg(feature = "devtools")]
 pub(crate) struct RendererInspectorIoFirstDispatchGuard {
     ingress: RendererInspectorIoIngress,
@@ -419,11 +443,13 @@ impl RendererInspectorIoIngress {
                 state: Mutex::new(RendererInspectorIoState {
                     #[cfg(feature = "devtools")]
                     commands: VecDeque::new(),
+                    #[cfg(feature = "devtools")]
+                    connections: Default::default(),
                     environment_notifications: ProcessEnvironmentNotifications::default(),
                     #[cfg(feature = "devtools")]
                     active_command_id: None,
                     #[cfg(feature = "devtools")]
-                    session_detaches: BTreeMap::new(),
+                    session_holds: BTreeMap::new(),
                     closed: false,
                     owner_wake_tx: None,
                 }),
@@ -521,6 +547,26 @@ impl RendererInspectorIoIngress {
     }
 
     #[cfg(feature = "devtools")]
+    pub(crate) fn session_connections(
+        &self,
+    ) -> super::session::RendererInspectorSessionConnections {
+        self.shared.state.lock().connections.clone()
+    }
+
+    #[cfg(feature = "devtools")]
+    pub(crate) fn session_is_detaching(
+        &self,
+        agent: RendererDevToolsAgentToken,
+        session: &DevToolsSessionKey,
+    ) -> bool {
+        self.shared
+            .state
+            .lock()
+            .session_holds
+            .contains_key(&RendererDevToolsSessionLaneKey::new(agent, session.clone()))
+    }
+
+    #[cfg(feature = "devtools")]
     pub(crate) fn enqueue_command(
         &self,
         agent_token: RendererDevToolsAgentToken,
@@ -544,8 +590,14 @@ impl RendererInspectorIoIngress {
             envelope,
             first_dispatch_tx: Some(first_dispatch_tx),
             claimed_by: None,
+            connection: state
+                .connections
+                .admission(&RendererDevToolsSessionLaneKey::new(
+                    agent_token,
+                    ticket.session().clone(),
+                )),
         };
-        let rejected = if state.closed {
+        let rejected = if state.closed || !command.connection.accepts() {
             Some((command, "Inspector IO target is closed"))
         } else {
             state.commands.push_back(command);
@@ -618,12 +670,13 @@ impl RendererInspectorIoIngress {
             .commands
             .iter()
             .position(|command| {
-                !state
-                    .session_detaches
-                    .contains_key(&RendererDevToolsSessionLaneKey::new(
-                        command.agent_token,
-                        command.ticket().session().clone(),
-                    ))
+                command.connection.ready()
+                    && !state
+                        .session_holds
+                        .contains_key(&RendererDevToolsSessionLaneKey::new(
+                            command.agent_token,
+                            command.ticket().session().clone(),
+                        ))
             })
             .expect("a ready Inspector task runner must have an eligible command");
         let mut command = state
@@ -683,6 +736,32 @@ impl RendererInspectorIoIngress {
         }
     }
 
+    /// Keep a newly attached session's IO work behind its Main initialization.
+    /// Other sessions and environment notifications remain eligible.
+    #[cfg(feature = "devtools")]
+    #[cfg(test)]
+    pub(crate) fn hold_session(
+        &self,
+        agent: RendererDevToolsAgentToken,
+        session: DevToolsSessionKey,
+    ) -> RendererInspectorIoSessionHold {
+        let mut state = self.shared.state.lock();
+        if !state.closed {
+            let holds = state
+                .session_holds
+                .entry(RendererDevToolsSessionLaneKey::new(agent, session.clone()))
+                .or_default();
+            *holds = holds
+                .checked_add(1)
+                .expect("Inspector IO session hold count overflow");
+        }
+        RendererInspectorIoSessionHold {
+            ingress: self.clone(),
+            agent,
+            session,
+        }
+    }
+
     #[cfg(feature = "devtools")]
     pub(crate) fn begin_session_detach(
         &self,
@@ -695,7 +774,7 @@ impl RendererInspectorIoIngress {
             if state.closed {
                 Vec::new()
             } else {
-                let pending_detaches = state.session_detaches.entry(lane_key).or_default();
+                let pending_detaches = state.session_holds.entry(lane_key).or_default();
                 *pending_detaches = pending_detaches
                     .checked_add(1)
                     .expect("renderer Inspector IO pending-detach count overflow");
@@ -710,28 +789,50 @@ impl RendererInspectorIoIngress {
     }
 
     #[cfg(feature = "devtools")]
+    pub(crate) fn reject_failed_connections(&self) {
+        let commands = self
+            .shared
+            .state
+            .lock()
+            .drain_commands(|command| !command.connection.accepts());
+        for command in commands {
+            fail_io_command(command, "Inspector IO session connection failed");
+        }
+        self.notify_execution_opportunities();
+    }
+
+    #[cfg(feature = "devtools")]
     pub(crate) fn finish_session_detach(
+        &self,
+        agent_token: RendererDevToolsAgentToken,
+        session: &DevToolsSessionKey,
+    ) {
+        self.release_session_hold(agent_token, session);
+    }
+
+    #[cfg(feature = "devtools")]
+    fn release_session_hold(
         &self,
         agent_token: RendererDevToolsAgentToken,
         session: &DevToolsSessionKey,
     ) {
         let lane_key = RendererDevToolsSessionLaneKey::new(agent_token, session.clone());
         let mut state = self.shared.state.lock();
-        let finished_last_detach = match state.session_detaches.get_mut(&lane_key) {
-            Some(pending_detaches) => {
-                *pending_detaches -= 1;
-                *pending_detaches == 0
+        let finished_last_hold = match state.session_holds.get_mut(&lane_key) {
+            Some(pending_holds) => {
+                *pending_holds -= 1;
+                *pending_holds == 0
             }
             None => {
                 debug_assert!(
                     state.closed,
-                    "only a closed target may finish an unarmed IO detach"
+                    "only a closed target may release an unarmed IO session hold"
                 );
                 false
             }
         };
-        if finished_last_detach {
-            state.session_detaches.remove(&lane_key);
+        if finished_last_hold {
+            state.session_holds.remove(&lane_key);
         }
         drop(state);
         self.notify_execution_opportunities();
@@ -741,6 +842,8 @@ impl RendererInspectorIoIngress {
         let mut state = self.shared.state.lock();
         state.closed = true;
         state.environment_notifications.close();
+        #[cfg(feature = "devtools")]
+        state.session_holds.clear();
         #[cfg(feature = "devtools")]
         let commands = state.commands.drain(..).collect::<Vec<_>>();
         drop(state);
@@ -781,7 +884,7 @@ impl RendererInspectorIoIngress {
         }
     }
 
-    fn notify_execution_opportunities(&self) {
+    pub(crate) fn notify_execution_opportunities(&self) {
         let owner_wake = {
             let state = self.shared.state.lock();
             state
@@ -940,6 +1043,68 @@ mod tests {
             Some(session.to_owned()),
             RendererInspectorCommandRoute::Io,
         )
+    }
+
+    #[tokio::test]
+    async fn initialization_hold_blocks_only_its_session_and_survives_detach_overlap() {
+        let io = ingress();
+        let agent = RendererDevToolsAgentToken::allocate();
+        let session = DevToolsSessionKey::from_wire_session_id(Some("new-session"));
+        let initialization = io.hold_session(agent, session.clone());
+        let old = enqueue(
+            &io,
+            agent,
+            Some("new-session"),
+            r#"{"id":1,"method":"Runtime.terminateExecution"}"#,
+        );
+        let _peer = enqueue(
+            &io,
+            agent,
+            Some("ready-session"),
+            r#"{"id":2,"method":"Runtime.terminateExecution"}"#,
+        );
+        let mut peer = io
+            .claim_for_owner()
+            .expect("another session stays eligible");
+        assert_eq!(
+            peer.ticket().session(),
+            &DevToolsSessionKey::from_wire_session_id(Some("ready-session"))
+        );
+        io.first_dispatch_guard(&mut peer).release();
+        assert!(
+            io.claim_for_owner().is_none(),
+            "new session must wait for initialization"
+        );
+
+        io.begin_session_detach(agent, &session);
+        assert!(matches!(
+            old.wait_for_first_dispatch().await,
+            Ok(RendererRuntimeInspectorIoCommandClaim::Canceled(_))
+        ));
+        let _replacement = enqueue(
+            &io,
+            agent,
+            Some("new-session"),
+            r#"{"id":3,"method":"Runtime.terminateExecution"}"#,
+        );
+        drop(initialization);
+        assert!(
+            io.claim_for_owner().is_none(),
+            "initialization cannot release an outstanding detach"
+        );
+        io.finish_session_detach(agent, &session);
+        let mut command = io.claim_for_owner().expect("all holds released");
+        io.first_dispatch_guard(&mut command).release();
+        assert!(
+            io.shared.state.lock().session_holds.is_empty(),
+            "completed lifecycle holds leave no entries"
+        );
+
+        let initialization = io.hold_session(agent, session.clone());
+        io.close("target disposed during initialization");
+        let closed_initialization = io.hold_session(agent, session);
+        drop((initialization, closed_initialization));
+        assert!(io.shared.state.lock().session_holds.is_empty());
     }
 
     #[test]

@@ -4,24 +4,15 @@ use moli_core::page::{CompletedPageCommand, Page, PendingPageCommand, RendererAg
 
 use super::{CdpConnection, CommandOwnerScope, RendererPageResidenceIdentity};
 
-pub(crate) struct SessionScriptCleanup {
-    owner: CommandOwnerScope,
-    session: moli_page_types::DevToolsSessionKey,
-    removals: Vec<(String, SessionPageUpdates)>,
-}
-
-pub(crate) struct CompletedSessionScriptCleanup {
-    owner: CommandOwnerScope,
-    session: moli_page_types::DevToolsSessionKey,
-    removals: Vec<(String, CompletedSessionPageUpdates)>,
-}
-
 impl CdpConnection {
     pub(crate) fn prepare_session_script_cleanup(
         &mut self,
         session_id: &str,
-    ) -> SessionScriptCleanup {
-        let owner = CommandOwnerScope::capture(self, Some(session_id));
+    ) -> SessionPageUpdates {
+        let owner = self
+            .session_route(Some(session_id))
+            .map(CommandOwnerScope::for_route)
+            .unwrap_or_else(|| CommandOwnerScope::for_session(session_id));
         let inspector =
             self.target_renderer_runtime_inspector_session_id_for_session(Some(session_id));
         let session =
@@ -30,78 +21,22 @@ impl CdpConnection {
             .target_owner_state_for_session(Some(session_id))
             .map(|state| state.document_start_script_registry_keys_for_session(&session))
             .unwrap_or_default();
-        let mut removals = Vec::with_capacity(keys.len());
+        // Browser withdrawal takes effect for every later navigation even if
+        // the original renderer's script removal is still pending or fails.
+        let _ = self.with_target_owner_state_for_owner_mut(&owner, |state| {
+            state.remove_document_start_scripts_for_session(&session)
+        });
+        let mut updates = SessionPageUpdates::default();
         if let Some(page) = self.loaded_page_mut_for_owner(&owner) {
             for key in keys {
-                let mut updates = SessionPageUpdates::default();
                 updates.push(
                     page,
                     "detached-session document-start script cleanup",
                     page.start_remove_document_start_script_by_registry_key(&key),
                 );
-                removals.push((key, updates));
             }
-        } else {
-            let _ = self.with_target_owner_state_for_session_mut(Some(session_id), |state| {
-                state.remove_document_start_scripts_for_session(&session)
-            });
         }
-        SessionScriptCleanup {
-            owner,
-            session,
-            removals,
-        }
-    }
-}
-
-impl SessionScriptCleanup {
-    pub(crate) async fn wait(self) -> CompletedSessionScriptCleanup {
-        let mut removals = Vec::with_capacity(self.removals.len());
-        for (key, updates) in self.removals {
-            removals.push((key, updates.wait().await));
-        }
-        CompletedSessionScriptCleanup {
-            owner: self.owner,
-            session: self.session,
-            removals,
-        }
-    }
-}
-
-impl CompletedSessionScriptCleanup {
-    pub(crate) fn finish(self, mut conn: Option<&mut CdpConnection>) -> SessionPageUpdateResult {
-        let mut result = SessionPageUpdateResult::default();
-        for (key, updates) in self.removals {
-            let completed = updates.finish(
-                conn.as_deref_mut()
-                    .and_then(|conn| conn.loaded_page_mut_for_owner(&self.owner)),
-            );
-            if completed.first_error.is_none()
-                && let Some(conn) = conn.as_deref_mut()
-            {
-                let _ = conn.with_target_owner_state_for_session_mut(
-                    self.owner.session_id(),
-                    |state| {
-                        state.remove_document_start_script_registry_key_for_session(
-                            &self.session,
-                            &key,
-                        )
-                    },
-                );
-            }
-            result.extend(completed);
-        }
-        // Failed registry keys retain cleanup authority until retry or exact
-        // Page retirement. Unkeyed scripts require no renderer round trip.
-        if result.first_error.is_none()
-            && let Some(conn) = conn
-        {
-            let _ = conn
-                .with_target_owner_state_for_session_mut(self.owner.session_id(), |state| {
-                    state.remove_document_start_scripts_for_session(&self.session)
-                });
-        }
-        result
+        updates.retain_session_cleanup_authority()
     }
 }
 
@@ -133,14 +68,6 @@ pub(crate) struct SessionPageUpdateResult {
 }
 
 impl SessionPageUpdateResult {
-    pub(crate) fn extend(&mut self, other: Self) {
-        if self.first_error.is_none() {
-            self.first_error = other.first_error;
-        }
-        if let Some(predecessor) = other.predecessor {
-            predecessor.merge_into_same_stream_tail(&mut self.predecessor);
-        }
-    }
     #[cfg(test)]
     pub(crate) fn into_result(self) -> Result<()> {
         self.first_error.map_or(Ok(()), Err)
@@ -148,6 +75,20 @@ impl SessionPageUpdateResult {
 }
 
 impl SessionPageUpdates {
+    pub(crate) fn retain_session_cleanup_authority(mut self) -> Self {
+        self.pending = self
+            .pending
+            .into_iter()
+            .map(|mut update| {
+                update.result = update
+                    .result
+                    .map(PendingPageCommand::retain_session_cleanup_authority);
+                update
+            })
+            .collect();
+        self
+    }
+
     pub(crate) fn record_error(&mut self, error: anyhow::Error) {
         self.first_error.get_or_insert(error);
     }

@@ -154,6 +154,14 @@ impl TargetRuntimeSlot {
         &mut self.page_slot
     }
 
+    pub(crate) fn current_inspector_endpoint(
+        &self,
+    ) -> Option<moli_core::page::RendererPageInspectorEndpoint> {
+        self.page_slot
+            .prepared_document_inspector_endpoint()
+            .or_else(|| self.loaded_page().map(Page::inspector_endpoint))
+    }
+
     pub(crate) fn loaded_page(&self) -> Option<&Page> {
         self.page_slot.loaded_page()
     }
@@ -200,6 +208,12 @@ impl TargetRuntimeSlot {
         crate::conn::CommandWaitLifetime,
     )> {
         self.page_slot.reserve_initial_document_navigation()
+    }
+
+    pub(crate) fn navigation_page_adoption_waiter(
+        &self,
+    ) -> Option<crate::conn::CommandWaitLifetime> {
+        self.page_slot.navigation_page_adoption_waiter()
     }
 
     pub(crate) fn start_initial_document_page_build(&mut self) {
@@ -732,9 +746,14 @@ impl TargetRuntimeSlot {
         token: &DocumentNavigationToken,
         attachment: RendererAgentAttachmentId,
         fact: std::sync::Arc<moli_core::page::RendererMainDocumentCommit>,
+        inspector_endpoint: Option<moli_core::page::RendererPageInspectorEndpoint>,
     ) -> bool {
-        self.page_slot
-            .register_renderer_document_commit(token, attachment, fact)
+        self.page_slot.register_renderer_document_commit(
+            token,
+            attachment,
+            fact,
+            inspector_endpoint,
+        )
     }
 
     pub(crate) fn observe_prepared_renderer_document_commit(
@@ -926,6 +945,13 @@ impl TargetRuntimeSlot {
     ) {
         self.network_agent
             .record_subresource_request_id_for_handle_if_absent(handle, request_id);
+    }
+
+    pub(crate) fn bound_subresource_request_id(
+        &self,
+        handle: SubresourceNetworkRequestHandle,
+    ) -> Option<&str> {
+        self.network_agent.bound_subresource_request_id(handle)
     }
 
     pub(crate) fn record_fetch_pause_announced_request_id(&mut self, request_id: String) {
@@ -1192,12 +1218,6 @@ impl TargetRuntimeSlot {
             .has_loaded_page()
             .then(|| self.observable_queue.observable_output_cursor_end())
             .flatten()
-    }
-
-    pub(crate) fn inspector_issues(&self) -> Option<Vec<moli_core::page::InspectorIssueSnapshot>> {
-        self.page_slot
-            .has_loaded_page()
-            .then(|| self.observable_queue.inspector_issues())
     }
 
     #[cfg(test)]
@@ -1726,7 +1746,7 @@ mod tests {
         page::{
             RendererDocumentToken, RendererFrameToken, RendererLifecycleEpoch,
             ScriptNetworkOutputItem, SubresourceNetworkRecord, SubresourceRequestInitiatorType,
-            SubresourceRequestStarted, SubresourceResourceType, WebSocketFrameDirection,
+            SubresourceRequestSnapshot, SubresourceResourceType, WebSocketFrameDirection,
             WebSocketFrameOpcode, WebSocketNetworkEvent,
         },
     };
@@ -1854,7 +1874,7 @@ mod tests {
         let request_url =
             Url::parse("https://old.example/keepalive").expect("request URL should parse");
         let started = ScriptNetworkOutputItem::SubresourceRequestStarted(Box::new(
-            SubresourceRequestStarted::new(
+            SubresourceRequestSnapshot::new(
                 handle,
                 None,
                 document_url,

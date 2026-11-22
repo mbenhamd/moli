@@ -434,18 +434,30 @@ impl ParsedCdpCommand {
         self.renderer_policy
     }
 
-    /// Whether dispatch joins an already pending initial Page build. This is
-    /// distinct from renderer thread access: Page.enable also needs installed
-    /// agents, while dialog handling, close, and cancellation remain available.
+    /// Whether Renderer work waits for Page adoption. Browser subscriptions,
+    /// dialog handling, close, and cancellation have their own admission rules.
     pub fn requires_initial_document_adoption(&self) -> bool {
-        match self.method().split_once('.') {
-            Some(("Runtime", action)) => !matches!(action, "terminateExecution" | "disable"),
-            Some(("Page", action)) => matches!(
-                action,
-                "enable" | "navigate" | "getFrameTree" | "getResourceTree" | "createIsolatedWorld"
-            ),
-            _ => false,
+        // Before the first Page, disabling Runtime only retires Browser state.
+        if matches!(
+            self.method(),
+            "Runtime.disable" | "HeapProfiler.moliDiagnostics" | "Page.crash"
+        ) {
+            return false;
         }
+        self.renderer_access() != CdpRendererCommandAccess::OwnerIndependent
+            || matches!(self.method(), "Page.navigate")
+    }
+
+    pub fn requires_session_command_admission(&self) -> bool {
+        self.requires_initial_document_adoption() || self.method() == "Runtime.disable"
+    }
+
+    pub fn can_use_prepared_inspector_endpoint(&self) -> bool {
+        self.renderer_access() == CdpRendererCommandAccess::Io
+            && matches!(
+                self.method().split('.').next(),
+                Some("Runtime" | "Debugger")
+            )
     }
 
     pub fn renderer_access(&self) -> CdpRendererCommandAccess {
@@ -750,11 +762,17 @@ mod tests {
             "Runtime.evaluate",
             "Runtime.awaitPromise",
             "Runtime.getIsolateId",
-            "Page.enable",
-            "Page.navigate",
+            "Runtime.terminateExecution",
+            "Debugger.enable",
+            "Debugger.resume",
+            "Debugger.disable",
+            "DOM.getDocument",
+            "CSS.getMatchedStylesForNode",
+            "Performance.getMetrics",
             "Page.getFrameTree",
             "Page.getResourceTree",
             "Page.createIsolatedWorld",
+            "Page.navigate",
         ] {
             let command =
                 ParsedCdpCommand::parse_value(serde_json::json!({"id": 1, "method": method}))
@@ -771,18 +789,18 @@ mod tests {
     }
 
     #[test]
-    fn prompt_close_and_execution_controls_do_not_wait_for_initial_document_adoption() {
+    fn browser_prompt_close_and_cancellation_do_not_wait_for_initial_document_adoption() {
         for method in [
+            "Page.enable",
+            "Page.disable",
             "Page.handleJavaScriptDialog",
             "Page.close",
             "Target.closeTarget",
             "Target.disposeBrowserContext",
             "Browser.close",
             "Page.stopLoading",
-            "Runtime.terminateExecution",
+            "Page.crash",
             "Runtime.disable",
-            "Debugger.resume",
-            "Debugger.disable",
             "Fetch.continueRequest",
             "Fetch.continueResponse",
             "IO.close",

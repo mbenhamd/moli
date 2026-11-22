@@ -2062,3 +2062,319 @@ async fn websocket_cdp_javascript_dialog_is_reported_to_and_resolvable_by_every_
     let _ = socket.close(None).await;
     abort_test_cdp_server(protocol_server).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_cdp_attach_to_dialog_blocked_target_responds_and_settles_bindings() {
+    let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
+    let browser_url = discover_browser_websocket_url(cdp_addr)
+        .await
+        .expect("discover browser endpoint");
+    let (mut first, _) = connect_async(browser_url.clone())
+        .await
+        .expect("connect first cdp websocket");
+    let browser_context_id = cdp_create_browser_context(&mut first, 1).await;
+    let session = cdp_create_attached_target(&mut first, 2, &browser_context_id).await;
+    let target_id = session.target_id;
+    let session_a = session.session_id;
+
+    let _ = send_cdp_command(&mut first, 4, "Runtime.enable", Some(&session_a), json!({})).await;
+    let binding_added = send_cdp_command(
+        &mut first,
+        5,
+        "Runtime.addBinding",
+        Some(&session_a),
+        json!({ "name": "__moliIssue3069Probe" }),
+    )
+    .await;
+    assert!(
+        binding_added
+            .iter()
+            .any(|message| message["id"] == json!(5_u64) && message["result"] == json!({})),
+        "Runtime.addBinding must register the stored binding: {binding_added:#?}"
+    );
+    let _ = cdp_navigate_and_wait_for_load(
+        &mut first,
+        6,
+        &session_a,
+        "data:text/html,<title>issue 3069</title><body>dialog target</body>",
+    )
+    .await;
+
+    // Open a modal confirm() without waiting for the evaluate response: the
+    // renderer owner parks inside the modal wait.
+    send_cdp_command_without_wait(
+        &mut first,
+        7,
+        "Runtime.evaluate",
+        Some(&session_a),
+        json!({
+            "expression": "confirm('issue 3069 dialog');",
+            "returnByValue": true
+        }),
+    )
+    .await;
+    let opening = recv_until_match(&mut first, |message| {
+        message["sessionId"].as_str() == Some(session_a.as_str())
+            && message["method"] == json!("Page.javascriptDialogOpening")
+            && message["params"]["message"] == json!("issue 3069 dialog")
+    })
+    .await;
+    assert!(
+        opening
+            .iter()
+            .any(|message| message["method"] == json!("Page.javascriptDialogOpening")),
+        "the dialog must open before the attach attempt"
+    );
+
+    // Chromium completes Target.attachToTarget in ~0 ms while the dialog is
+    // open. A second connection must get its session now, not after the
+    // dialog resolves.
+    let (mut second, _) = connect_async(browser_url)
+        .await
+        .expect("connect second cdp websocket");
+    let attach_started = std::time::Instant::now();
+    let attach = send_cdp_command(
+        &mut second,
+        1,
+        "Target.attachToTarget",
+        None,
+        json!({ "targetId": target_id, "flatten": true }),
+    )
+    .await;
+    let attach_elapsed = attach_started.elapsed();
+    let session_b = attach
+        .iter()
+        .find(|message| message["id"] == json!(1_u64))
+        .and_then(|message| message["result"]["sessionId"].as_str())
+        .expect("attachToTarget must respond while the dialog is open")
+        .to_owned();
+    assert!(
+        attach.iter().any(
+            |message| message["method"] == json!("Target.attachedToTarget")
+                && message["params"]["sessionId"] == json!(session_b)
+        ),
+        "Target.attachedToTarget must precede the attach response: {attach:#?}"
+    );
+    assert!(
+        attach_elapsed < std::time::Duration::from_secs(10),
+        "the attach must not park behind the modal: {attach_elapsed:?}"
+    );
+
+    // A second not-yet-connected endpoint can retire while the modal stays
+    // open. It must settle its queued IO without unlocking or retiring B.
+    let transient = send_cdp_command(
+        &mut second,
+        20,
+        "Target.attachToTarget",
+        None,
+        json!({"targetId":target_id,"flatten":true}),
+    )
+    .await;
+    let session_c = transient
+        .iter()
+        .find(|message| message["id"] == 20)
+        .unwrap()["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    send_cdp_command_without_wait(
+        &mut second,
+        21,
+        "Runtime.terminateExecution",
+        Some(&session_c),
+        json!({}),
+    )
+    .await;
+    let detached = send_cdp_command(
+        &mut second,
+        22,
+        "Target.detachFromTarget",
+        None,
+        json!({"sessionId":session_c}),
+    )
+    .await;
+    assert!(
+        detached
+            .iter()
+            .any(|message| message["id"] == 22 && message["result"] == json!({})),
+        "detach cannot wait for the modal: {detached:#?}"
+    );
+    let canceled_io = if let Some(message) = detached.iter().find(|message| message["id"] == 21) {
+        message.clone()
+    } else {
+        recv_until_match(&mut second, |message| message["id"] == 21)
+            .await
+            .into_iter()
+            .find(|message| message["id"] == 21)
+            .unwrap()
+    };
+    assert!(
+        canceled_io.get("error").is_some(),
+        "the withdrawn endpoint must terminate its queued IO: {canceled_io}"
+    );
+    let retired = send_cdp_command(
+        &mut second,
+        23,
+        "Runtime.evaluate",
+        Some(&session_c),
+        json!({"expression":"1+1"}),
+    )
+    .await;
+    assert!(
+        retired
+            .iter()
+            .any(|message| message["id"] == 23 && message.get("error").is_some())
+    );
+
+    // This is B's first command: no Runtime.enable or Main command can
+    // initialize its Inspector session on the side. IO must wait behind the
+    // exact native connection while A still owns the dialog.
+    send_cdp_command_without_wait(
+        &mut second,
+        2,
+        "Runtime.terminateExecution",
+        Some(&session_b),
+        json!({}),
+    )
+    .await;
+
+    // Resolve the dialog from the first session.
+    let resolved = send_cdp_command(
+        &mut first,
+        8,
+        "Page.handleJavaScriptDialog",
+        Some(&session_a),
+        json!({ "accept": true }),
+    )
+    .await;
+    assert!(
+        resolved
+            .iter()
+            .any(|message| message["id"] == json!(8_u64) && message["result"] == json!({})),
+        "the first session must still handle the dialog: {resolved:#?}"
+    );
+
+    // Ordered Main binding replay follows native connection: the new
+    // session gets the stored binding state. Stored bindings keep their
+    // owning session's delivery route, so a call made on the new session is
+    // captured and delivered to the session that added the binding.
+    let first_io = recv_until_match(&mut second, |message| message["id"] == json!(2_u64)).await;
+    assert!(
+        first_io
+            .iter()
+            .any(|message| message["id"] == json!(2_u64) && message["result"] == json!({})),
+        "first IO command must wait for Inspector initialization: {first_io:#?}"
+    );
+    send_cdp_command_without_wait(
+        &mut second,
+        3,
+        "Runtime.evaluate",
+        Some(&session_b),
+        json!({
+            "expression": "__moliIssue3069Probe('issue-3069-payload'); 'called'",
+            "returnByValue": true
+        }),
+    )
+    .await;
+    let evaluate = recv_until_match(&mut second, |message| {
+        message["id"] == json!(3_u64) && message["result"]["result"]["value"] == json!("called")
+    })
+    .await;
+    assert!(
+        evaluate.iter().any(|message| message["id"] == json!(3_u64)),
+        "the new session must be able to call the settled stored binding"
+    );
+    let binding_call = recv_until_match(&mut first, |message| {
+        message["sessionId"].as_str() == Some(session_a.as_str())
+            && message["method"] == json!("Runtime.bindingCalled")
+            && message["params"]["name"] == json!("__moliIssue3069Probe")
+            && message["params"]["payload"] == json!("issue-3069-payload")
+    })
+    .await;
+    assert!(
+        binding_call
+            .iter()
+            .any(|message| message["method"] == json!("Runtime.bindingCalled")),
+        "the settled binding must capture calls made on the new session"
+    );
+
+    second.close(None).await.expect("close second websocket");
+    first.close(None).await.expect("close first websocket");
+    abort_test_cdp_server(protocol_server).await;
+}
+
+#[tokio::test]
+async fn websocket_cdp_empty_attached_session_survives_crash_rebinding_and_first_io() {
+    let (address, server) = spawn_test_protocol_server().await;
+    let endpoint = discover_browser_websocket_url(address).await.unwrap();
+    let (mut socket, _) = connect_async(endpoint).await.unwrap();
+    let context = cdp_create_browser_context(&mut socket, 1).await;
+    let first = cdp_create_attached_target(&mut socket, 2, &context).await;
+    let attached = send_cdp_command(
+        &mut socket,
+        4,
+        "Target.attachToTarget",
+        None,
+        json!({"targetId":first.target_id,"flatten":true}),
+    )
+    .await;
+    let empty_session =
+        attached.iter().find(|message| message["id"] == 4).unwrap()["result"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+    // No domain enable, V8 command or binding on this session before replacing
+    // its Renderer. Endpoint membership cannot be derived from configuration.
+    let crashed = send_cdp_command(
+        &mut socket,
+        5,
+        "Page.crash",
+        Some(&first.session_id),
+        json!({}),
+    )
+    .await;
+    assert!(
+        crashed
+            .iter()
+            .any(|message| message["id"] == 5 && message.get("result").is_some()),
+        "crash response: {crashed:#?}"
+    );
+    cdp_navigate_and_wait_for_load(
+        &mut socket,
+        6,
+        &first.session_id,
+        "data:text/html,<title>new renderer</title>",
+    )
+    .await;
+    let interrupt = send_cdp_command(
+        &mut socket,
+        7,
+        "Runtime.terminateExecution",
+        Some(&empty_session),
+        json!({}),
+    )
+    .await;
+    assert!(
+        interrupt
+            .iter()
+            .any(|message| message["id"] == 7 && message["result"] == json!({})),
+        "first IO requires the replacement endpoint: {interrupt:#?}"
+    );
+    let evaluate = send_cdp_command(
+        &mut socket,
+        8,
+        "Runtime.evaluate",
+        Some(&empty_session),
+        json!({"expression":"document.title","returnByValue":true}),
+    )
+    .await;
+    assert!(
+        evaluate
+            .iter()
+            .any(|message| message["id"] == 8
+                && message["result"]["result"]["value"] == "new renderer"),
+        "new endpoint must address the replacement Document: {evaluate:#?}"
+    );
+    socket.close(None).await.unwrap();
+    abort_test_cdp_server(server).await;
+}

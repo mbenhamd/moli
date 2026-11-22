@@ -23,7 +23,7 @@ use crate::content_security_policy::{
     ContentSecurityPolicyDisposition, ContentSecurityPolicyReportingEndpoints,
 };
 use crate::context_bootstrap::flush_one_pending_file_reading_task;
-use crate::exception_reporting::{V8ExceptionReport, build_event_handler_exception_report};
+use crate::exception_reporting::build_event_handler_exception_report;
 #[cfg(test)]
 use crate::network::ResourceRequestClientOwner;
 use crate::network::{
@@ -57,13 +57,12 @@ use dispatch::{
     dispatch_service_worker_notification_event, dispatch_service_worker_periodic_sync_event,
     dispatch_service_worker_push_event, dispatch_service_worker_sync_event,
     dispatch_shared_worker_connect_event, dispatch_worker_error_event,
-    dispatch_worker_exception_with_phase, dispatch_worker_exception_with_phase_and_source,
-    enqueue_service_worker_navigation_preload_stream_chunk,
+    dispatch_worker_reported_error, enqueue_service_worker_navigation_preload_stream_chunk,
     fail_service_worker_navigation_preload_response,
     finish_service_worker_navigation_preload_stream, fire_timer_callback,
     install_worker_promise_rejection_dispatch,
     perform_worker_microtask_checkpoint_and_report_pending_promise_rejections,
-    report_exception_to_parent, start_service_worker_navigation_preload_response,
+    start_service_worker_navigation_preload_response,
 };
 use isolate::WorkerIsolateState;
 use moli_fetch::RequestCredentialsMode;
@@ -73,11 +72,11 @@ use runtime_inspector::WorkerRuntimeInspector;
 use super::global_scope::{
     WorkerFetchEvent, WorkerGlobalState, WorkerIsolateTimerQueues, WorkerOpfsCompletion,
     WorkerWebCryptoCompletion, WorkerXhrCompletion, close_worker_owned_broadcast_channels,
-    close_worker_owned_message_ports, dispatch_nested_worker_event,
-    dispatch_worker_csp_violation_event, dispatch_worker_websocket_event,
-    drain_service_worker_client_focus_result, drain_service_worker_client_navigate_result,
-    drain_service_worker_client_query_result, drain_service_worker_clients_open_window_result,
-    drain_service_worker_get_notifications_result,
+    close_worker_owned_message_ports, close_worker_owned_nested_workers,
+    dispatch_nested_worker_event, dispatch_worker_csp_violation_event,
+    dispatch_worker_websocket_event, drain_service_worker_client_focus_result,
+    drain_service_worker_client_navigate_result, drain_service_worker_client_query_result,
+    drain_service_worker_clients_open_window_result, drain_service_worker_get_notifications_result,
     drain_service_worker_periodic_sync_get_tags_result,
     drain_service_worker_periodic_sync_registration_result,
     drain_service_worker_periodic_sync_unregistration_result,
@@ -88,15 +87,17 @@ use super::global_scope::{
     drain_worker_xhr_completion, install_worker_global_scope,
     prepare_worker_global_scope_templates, service_worker_fetch_handler_type,
 };
+#[cfg(test)]
+use super::handle::WorkerErrorReport;
 use super::handle::{
     WorkerBootstrapCompletion, WorkerBootstrapFailure, WorkerBootstrapSuccess, WorkerControlHandle,
     WorkerErrorPhase, WorkerErrorSource, WorkerFetchHandlerType, WorkerHandle, WorkerMessage,
     WorkerNetworkPolicy, WorkerParentErrorEventKind, WorkerRuntimeInspectorMessageBatch,
     WorkerScriptResource, WorkerToParentMessage,
 };
-use super::inspector_task_runner::{
-    WorkerInspectorTask, WorkerInspectorTaskMode, WorkerInspectorTaskRunner,
-};
+use super::inspector_task_runner::WorkerInspectorTaskRunner;
+#[cfg(feature = "devtools")]
+use super::inspector_task_runner::{WorkerInspectorTask, WorkerInspectorTaskMode};
 use super::module_runtime::{
     WorkerBootstrapError, WorkerModuleBootstrapResume, WorkerModuleBootstrapStart,
     WorkerModuleEvaluationCompletion, WorkerModuleFetchedSource, WorkerModuleGraphFetchCompletion,
@@ -109,21 +110,9 @@ use super::module_runtime::{
     worker_has_runnable_dynamic_module_imports,
 };
 
+pub(crate) use moli_webapi::worker_options::WorkerScriptKind;
+
 const WORKER_STACK_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumString, crate::webidl::WebIdlEnum)]
-#[webidl(name = "WorkerType", parse_with = Self::parse_webidl_token)]
-#[strum(serialize_all = "lowercase")]
-pub(crate) enum WorkerScriptKind {
-    Classic,
-    Module,
-}
-
-impl WorkerScriptKind {
-    fn parse_webidl_token(value: &str) -> Option<Self> {
-        value.parse().ok()
-    }
-}
 
 #[derive(Debug, Clone)]
 pub(crate) enum WorkerScriptSource {
@@ -210,6 +199,36 @@ pub(crate) struct WorkerSpawnOptions {
 pub(crate) enum WorkerTestRequestClient {
     Handle(ResourceRequestClient),
     Owned(ResourceRequestClientOwner),
+}
+
+#[cfg(test)]
+type NestedErrorSelectionGate = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+#[cfg(test)]
+thread_local! {
+    static NEXT_NESTED_ERROR_SELECTION_GATE: std::cell::Cell<Option<NestedErrorSelectionGate>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_nested_error_selection_gate_for_test<T>(
+    spawn: impl FnOnce() -> T,
+) -> (
+    T,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (selected_tx, selected_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+    NEXT_NESTED_ERROR_SELECTION_GATE.with(|slot| {
+        assert!(slot.replace(Some((selected_tx, resume_rx))).is_none());
+        let result = spawn();
+        assert!(slot.take().is_none(), "worker spawn must take the gate");
+        (result, selected_rx, resume_tx)
+    })
 }
 
 #[cfg(test)]
@@ -454,6 +473,11 @@ impl WorkerSpawnOptions {
         runtime: RendererWorkerContextRuntime,
     ) -> Self {
         self.worker_context_runtime = runtime;
+        self
+    }
+
+    pub(crate) fn with_diagnostic_source(mut self, source: crate::DiagnosticSource) -> Self {
+        self.worker_context_runtime = self.worker_context_runtime.with_diagnostic_source(source);
         self
     }
 
@@ -923,6 +947,7 @@ fn drain_worker_dynamic_module_imports_for_context(
     drain_worker_dynamic_module_imports(scope, state, module_graph_fetch_tx);
 }
 
+#[cfg(feature = "devtools")]
 fn dispatch_worker_inspector_task(
     worker_isolate: &mut WorkerIsolateState,
     context: &v8::Global<v8::Context>,
@@ -942,9 +967,11 @@ fn dispatch_worker_inspector_task(
 
 async fn run_worker_pre_bootstrap_debugger_pause(
     worker_isolate: &mut WorkerIsolateState,
-    context: &v8::Global<v8::Context>,
+    #[cfg(feature = "devtools")] context: &v8::Global<v8::Context>,
     state: &Rc<RefCell<WorkerGlobalState>>,
-    module_graph_fetch_tx: &mpsc::UnboundedSender<WorkerModuleGraphFetchCompletion>,
+    #[cfg(feature = "devtools")] module_graph_fetch_tx: &mpsc::UnboundedSender<
+        WorkerModuleGraphFetchCompletion,
+    >,
     script_url: &str,
     rx: &mut mpsc::UnboundedReceiver<WorkerMessage>,
     pending_bootstrap_messages: &mut VecDeque<WorkerMessage>,
@@ -963,6 +990,7 @@ async fn run_worker_pre_bootstrap_debugger_pause(
                     invalidation.notify_isolate(worker_isolate.worker_isolate_mut());
                 }
             }
+            #[cfg(feature = "devtools")]
             Some(WorkerMessage::RunInspectorTask(mode)) => {
                 if let Some(task) = inspector_task_runner.claim_task(mode) {
                     dispatch_worker_inspector_task(
@@ -1387,6 +1415,8 @@ pub(crate) fn spawn_worker_with_options(options: WorkerSpawnOptions) -> WorkerHa
     let network_cancel = control.network_cancel_handle();
     let termination_requested = Arc::new(AtomicBool::new(false));
     let worker_termination_requested = Arc::clone(&termination_requested);
+    #[cfg(test)]
+    let nested_error_selection_gate = NEXT_NESTED_ERROR_SELECTION_GATE.take();
 
     let join_handle = std::thread::Builder::new()
         .name(format!("worker:{script_url}"))
@@ -1433,6 +1463,8 @@ pub(crate) fn spawn_worker_with_options(options: WorkerSpawnOptions) -> WorkerHa
                 worker_isolate_handle,
                 worker_termination_requested,
                 worker_inspector_tasks,
+                #[cfg(test)]
+                nested_error_selection_gate,
             ));
         })
         .expect("failed to spawn worker thread");
@@ -1565,6 +1597,7 @@ async fn worker_main(
     isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
     termination_requested: Arc<AtomicBool>,
     inspector_task_runner: WorkerInspectorTaskRunner,
+    #[cfg(test)] mut nested_error_selection_gate: Option<NestedErrorSelectionGate>,
 ) {
     debug!(url = %script_url, "worker started");
     let mut bootstrap_completion = WorkerBootstrapCompletionReporter::new(bootstrap_completion_tx);
@@ -1606,6 +1639,7 @@ async fn worker_main(
         matches!(global_kind, WorkerGlobalKind::Shared { .. }),
         worker_context_runtime.debugger_enabled(),
     );
+    #[cfg(feature = "devtools")]
     worker_isolate
         .worker_runtime_inspector()
         .bind_request_client(loader.request_client().clone());
@@ -1881,8 +1915,10 @@ async fn worker_main(
     if pause_evaluation_until_debugger
         && !run_worker_pre_bootstrap_debugger_pause(
             &mut worker_isolate,
+            #[cfg(feature = "devtools")]
             &context,
             &state,
+            #[cfg(feature = "devtools")]
             &module_graph_fetch_tx,
             &script_url,
             &mut rx,
@@ -1924,30 +1960,20 @@ async fn worker_main(
                 pending_module_bootstrap = Some(bootstrap);
             }
             WorkerBootstrapStart::Failed { error, phase } => {
-                let (report, exception, parent_event_kind) = *error;
-                let exception = exception.as_ref().map(|value| v8::Local::new(scope, value));
+                let parent_event_kind = error.event_kind;
                 let error_source = if script_kind == WorkerScriptKind::Classic {
                     WorkerErrorSource::InitialScriptEvaluation
                 } else {
                     WorkerErrorSource::Runtime
                 };
-                bootstrap_completion.mark_failure(
-                    &report,
-                    &script_url,
-                    parent_event_kind,
-                    phase,
-                    error_source,
-                );
-                let handled = dispatch_worker_exception_with_phase_and_source(
+                let handled = bootstrap_completion.report_failure(
                     scope,
                     global,
-                    report,
-                    exception,
-                    parent_event_kind,
+                    *error,
+                    &script_url,
                     phase,
                     error_source,
                     &parent_tx,
-                    &script_url,
                 );
                 bootstrap_failed = phase == WorkerErrorPhase::Bootstrap
                     && !handled
@@ -2078,12 +2104,36 @@ async fn worker_main(
             }
         };
 
+        #[cfg(test)]
+        if nested_error_selection_gate.is_some()
+            && matches!(
+                &wake,
+                WorkerLoopWake::Message(Some(WorkerMessage::NestedWorkerEvent { message, .. }))
+                    if matches!(
+                        message.as_ref(),
+                        WorkerToParentMessage::Error(WorkerErrorReport { phase: WorkerErrorPhase::Runtime, .. })
+                    )
+            )
+            && let Some((selected, resume)) = nested_error_selection_gate.take()
+        {
+            let _ = selected.send(());
+            let _ = resume.await;
+        }
+
         // `MessagePortWake` and `Terminate` can be sent through different
         // clones of the worker channel. The explicit lifecycle bit, rather
         // than cross-sender queue order, decides whether the selected task is
         // still allowed to enter V8.
         if termination_requested.load(Ordering::Acquire) {
-            trace!(url = %script_url, "worker termination discarded a selected task");
+            if let WorkerLoopWake::Message(Some(message)) = wake
+                && matches!(
+                    state.borrow().global_kind,
+                    WorkerGlobalKind::Dedicated { .. }
+                )
+            {
+                crate::worker::forward_nested_worker_error_after_owner_close(message, &parent_tx);
+            }
+            trace!(url = %script_url, "worker termination stopped a selected task");
             break;
         }
 
@@ -2769,35 +2819,27 @@ async fn worker_main(
                 let scope = &mut scope.init();
                 let ctx = v8::Local::new(scope, &context);
                 let scope = &mut v8::ContextScope::new(scope, ctx);
-                let result = dispatch_nested_worker_event(scope, &state, worker_id, &message);
-                if let Some(error) = result.unhandled_error {
+                let result = dispatch_nested_worker_event(scope, &state, worker_id, *message);
+                if let Some(mut error) = result.unhandled_error {
                     let global = ctx.global(scope);
-                    let report = V8ExceptionReport {
-                        summary: error.message,
-                        source: Some(error.filename),
-                        line: Some(error.lineno as usize),
-                        column: Some(error.colno as usize),
-                        source_line: None,
-                        stack: None,
-                        callback_context: None,
-                        exception: None,
-                    };
                     // Propagation to the owner's global uses omitError: the
                     // child exception cannot cross the worker agent boundary.
                     let omitted_error = v8::null(scope).into();
-                    if !dispatch_worker_error_event(
-                        scope,
-                        global,
-                        &report,
-                        Some(omitted_error),
-                        &script_url,
-                    ) {
-                        report_exception_to_parent(
-                            &report,
-                            &script_url,
-                            error.event_kind,
-                            &parent_tx,
-                        );
+                    let handled =
+                        dispatch_worker_error_event(scope, global, &error, Some(omitted_error));
+                    if handled
+                        || !matches!(
+                            state.borrow().global_kind,
+                            WorkerGlobalKind::Dedicated { .. }
+                        )
+                    {
+                        error.complete(|| {
+                            crate::ErrorReportOutcome::from_default_prevented(handled)
+                        });
+                    }
+                    if !handled {
+                        error.source = WorkerErrorSource::Runtime;
+                        let _ = parent_tx.send(WorkerToParentMessage::Error(error));
                     }
                 }
                 if result.dispatched {
@@ -2814,6 +2856,7 @@ async fn worker_main(
                     invalidation.notify_isolate(worker_isolate.worker_isolate_mut());
                 }
             }
+            #[cfg(feature = "devtools")]
             WorkerLoopWake::Message(Some(WorkerMessage::RunInspectorTask(mode))) => {
                 if let Some(task) = inspector_task_runner.claim_task(mode) {
                     dispatch_worker_inspector_task(
@@ -3056,26 +3099,14 @@ async fn worker_main(
                             }
                             WorkerModuleBootstrapResume::WaitingEvaluation => {}
                             WorkerModuleBootstrapResume::Failed(error) => {
-                                let (report, exception, parent_event_kind) = *error;
-                                let exception =
-                                    exception.as_ref().map(|value| v8::Local::new(scope, value));
-                                let global = ctx.global(scope);
-                                bootstrap_completion.mark_failure(
-                                    &report,
-                                    &script_url,
-                                    parent_event_kind,
-                                    WorkerErrorPhase::Bootstrap,
-                                    WorkerErrorSource::Runtime,
-                                );
-                                dispatch_worker_exception_with_phase(
+                                bootstrap_completion.report_failure(
                                     scope,
                                     global,
-                                    report,
-                                    exception,
-                                    parent_event_kind,
-                                    WorkerErrorPhase::Bootstrap,
-                                    &parent_tx,
+                                    *error,
                                     &script_url,
+                                    WorkerErrorPhase::Bootstrap,
+                                    WorkerErrorSource::Runtime,
+                                    &parent_tx,
                                 );
                                 forward_worker_script_loaded(&runtime_inspector, &parent_tx);
                                 break;
@@ -3135,26 +3166,14 @@ async fn worker_main(
                         }
                         WorkerModuleBootstrapResume::WaitingEvaluation => {}
                         WorkerModuleBootstrapResume::Failed(error) => {
-                            let (report, exception, parent_event_kind) = *error;
-                            let exception =
-                                exception.as_ref().map(|value| v8::Local::new(scope, value));
-                            let global = ctx.global(scope);
-                            bootstrap_completion.mark_failure(
-                                &report,
-                                &script_url,
-                                parent_event_kind,
-                                WorkerErrorPhase::Bootstrap,
-                                WorkerErrorSource::Runtime,
-                            );
-                            dispatch_worker_exception_with_phase(
+                            bootstrap_completion.report_failure(
                                 scope,
                                 global,
-                                report,
-                                exception,
-                                parent_event_kind,
-                                WorkerErrorPhase::Bootstrap,
-                                &parent_tx,
+                                *error,
                                 &script_url,
+                                WorkerErrorPhase::Bootstrap,
+                                WorkerErrorSource::Runtime,
+                                &parent_tx,
                             );
                             forward_worker_script_loaded(&runtime_inspector, &parent_tx);
                             break;
@@ -3245,6 +3264,21 @@ async fn worker_main(
     }
 
     // ── Cleanup ────────────────────────────────────────────────────────────
+    // Forward nested exceptions already queued when an intermediate Worker
+    // stops. Its relays forward any later reports directly to the same owner.
+    rx.close();
+    if matches!(
+        state.borrow().global_kind,
+        WorkerGlobalKind::Dedicated { .. }
+    ) {
+        for message in pending_bootstrap_messages.drain(..) {
+            crate::worker::forward_nested_worker_error_after_owner_close(message, &parent_tx);
+        }
+        while let Some(message) = rx.recv().await {
+            crate::worker::forward_nested_worker_error_after_owner_close(message, &parent_tx);
+        }
+    }
+    drop(rx);
     // Stop admitting inside-settings work before any V8-owned completion
     // routes are destroyed. Ordinary transports are cancelled here;
     // explicitly keepalive loads are reduced to browser-runtime network-only
@@ -3264,6 +3298,8 @@ async fn worker_main(
         let scope = pin!(v8::HandleScope::new(isolate));
         let scope = &mut scope.init();
         let ctx = v8::Local::new(scope, &context);
+        let scope = &mut v8::ContextScope::new(scope, ctx);
+        close_worker_owned_nested_workers(scope, &state);
         retire_worker_module_runtime(ctx);
         crate::context_bootstrap::retire_indexed_db_context(ctx);
         runtime_inspector.context_destroyed(ctx);
@@ -3417,19 +3453,43 @@ impl WorkerBootstrapCompletionReporter {
         self.send(WorkerBootstrapCompletion::success(success));
     }
 
-    fn mark_failure(
+    fn report_failure<'s>(
         &mut self,
-        report: &V8ExceptionReport,
+        scope: &mut v8::PinScope<'s, '_>,
+        global: v8::Local<'s, v8::Object>,
+        error: WorkerBootstrapError,
         script_url: &str,
-        event_kind: WorkerParentErrorEventKind,
         phase: WorkerErrorPhase,
         source: WorkerErrorSource,
-    ) {
+        parent_tx: &mpsc::UnboundedSender<WorkerToParentMessage>,
+    ) -> bool {
+        if crate::worker::worker_termination_requested(scope) {
+            return false;
+        }
+        let WorkerBootstrapError {
+            report,
+            exception,
+            event_kind,
+            failed_resource,
+        } = error;
+        let exception = exception.as_ref().map(|value| v8::Local::new(scope, value));
         self.send(WorkerBootstrapCompletion::failure(
             WorkerBootstrapFailure::from_exception_report(
-                report, script_url, event_kind, phase, source,
+                &report, script_url, event_kind, phase, source,
             ),
         ));
+        dispatch_worker_reported_error(
+            scope,
+            global,
+            report,
+            exception,
+            event_kind,
+            phase,
+            source,
+            parent_tx,
+            script_url,
+            failed_resource.as_ref(),
+        )
     }
 
     fn mark_install_global_failure(&mut self, script_url: &str, message: String) {
@@ -3469,14 +3529,7 @@ fn evaluate_classic_worker_bootstrap_script(
     scope: &mut v8::PinScope<'_, '_>,
     script_source: &str,
     script_url: &str,
-) -> Option<(
-    (
-        V8ExceptionReport,
-        Option<v8::Global<v8::Value>>,
-        WorkerParentErrorEventKind,
-    ),
-    WorkerErrorPhase,
-)> {
+) -> Option<(WorkerBootstrapError, WorkerErrorPhase)> {
     let try_catch = pin!(v8::TryCatch::new(scope));
     let mut scope = try_catch.init();
     let source_str = v8::String::new(&scope, script_source).expect("v8 string allocation");
@@ -3496,7 +3549,7 @@ fn evaluate_classic_worker_bootstrap_script(
                     stack_trace,
                 );
                 Some((
-                    (
+                    WorkerBootstrapError::new(
                         report,
                         exception.map(|value| v8::Global::new(&scope, value)),
                         WorkerParentErrorEventKind::ErrorEvent,
@@ -3514,7 +3567,7 @@ fn evaluate_classic_worker_bootstrap_script(
             let report =
                 build_event_handler_exception_report(&mut scope, exception, message, stack_trace);
             Some((
-                (
+                WorkerBootstrapError::new(
                     report,
                     exception.map(|value| v8::Global::new(&scope, value)),
                     WorkerParentErrorEventKind::Event,

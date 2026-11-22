@@ -519,6 +519,7 @@ document.head.append(second);
         );
 
         wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        crate::live_stylesheet::reset_live_stylesheet_parse_count_for_test();
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
@@ -527,6 +528,11 @@ document.head.append(second);
                 )
                 .await?,
             "the shared import graph must complete as one Networking turn"
+        );
+        assert_eq!(
+            crate::live_stylesheet::live_stylesheet_parse_count_for_test(),
+            0,
+            "a matching parse should remain available until the owner installation batch"
         );
         assert_eq!(
             page_vm.vm_mut().eval(
@@ -619,6 +625,124 @@ document.head.append(late);
     })
     .await
     .expect("shared cache-hit stylesheet import test should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn uninstalled_linked_import_parses_are_released_before_late_owner_replay() {
+    run_page_vm_async_test(async move {
+        for invalidate_root in [
+            "original.remove()",
+            "original.sheet.insertRule('.unrelated { color: red; }', 1)",
+        ] {
+            let leaf_text = ".replayed-import { color: rgb(17, 34, 51); }";
+            let (base_url, server) = spawn_path_response_http_server(vec![
+                (
+                    "/root.css",
+                    "HTTP/1.1 200 OK",
+                    "@import './leaf.css';".to_owned(),
+                    Duration::ZERO,
+                ),
+                (
+                    "/leaf.css",
+                    "HTTP/1.1 200 OK",
+                    leaf_text.to_owned(),
+                    Duration::ZERO,
+                ),
+            ])
+            .await;
+            let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())?;
+            let document_url = Url::parse(&format!("{base_url}/page.html"))?;
+            let root_url = document_url.join("/root.css")?;
+            let (mut page_vm, _resource_source, mut wake_rx) =
+                page_vm_with_bound_task_sources_and_owner_wake(&loader, document_url);
+            page_vm.vm_mut().eval(&format!(
+                r#"
+const original = document.createElement('link');
+original.rel = 'stylesheet';
+original.href = '{root_url}';
+document.head.append(original);
+const probe = document.body.appendChild(document.createElement('div'));
+probe.className = 'replayed-import';
+"queued"
+"#,
+            ))?;
+            page_vm
+                .vm_mut()
+                .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+            wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+            assert!(
+                page_vm
+                    .run_exact_selected_page_task_for_test(
+                        PageSelectedTaskTestSelector::StylesheetCompletion,
+                        &loader,
+                    )
+                    .await?
+            );
+            assert_eq!(
+                page_vm
+                    .vm_mut()
+                    .eval("String(original.sheet.cssRules[0].styleSheet)")?,
+                "null"
+            );
+            wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+            let completion = page_vm
+                .take_stylesheet_networking_body_task_for_test()
+                .expect("the import response is already parsed");
+            page_vm
+                .vm_mut()
+                .eval(&format!("{invalidate_root}; 'invalidated'"))?;
+            let outcome = page_vm.apply_selected_page_stylesheet_networking_turn(completion)?;
+            assert_eq!(
+                outcome.action.target_effect,
+                PageStylesheetNetworkingTargetEffect::AppliedToCurrentOwner
+            );
+            assert_ne!(
+                page_vm.vm_mut().eval("getComputedStyle(probe).color")?,
+                "rgb(17, 34, 51)",
+                "the invalidated root should not install the imported rule"
+            );
+            {
+                let graph = page_vm
+                    .vm()
+                    .document_runtime
+                    .completed_linked_stylesheet_import_graph_for_test(&root_url)
+                    .expect("the current Document should retain the network graph");
+                let [leaf] = graph.network_results() else {
+                    panic!("expected one completed import response");
+                };
+                assert_eq!(
+                    leaf.terminal().ready_response().unwrap().body_text(),
+                    leaf_text
+                );
+                assert!(
+                    leaf.parsed_stylesheet()
+                        .expect("the background graph had parsed the leaf")
+                        .take_if(|_| true)
+                        .is_none(),
+                    "the completed graph retained its detached parse after {invalidate_root}"
+                );
+            }
+
+            assert_eq!(
+                page_vm.vm_mut().eval(&format!(
+                    r#"
+const late = document.createElement('link');
+late.rel = 'stylesheet';
+late.href = '{root_url}';
+document.head.append(late);
+[late.sheet.cssRules[0].styleSheet.cssRules.length, getComputedStyle(probe).color].join('|')
+"#,
+                ))?,
+                "1|rgb(17, 34, 51)",
+                "the retained response should install for the later owner after {invalidate_root}"
+            );
+            assert!(!page_vm.has_ready_page_networking_task());
+            server.await.expect("linked import fixture server");
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("discarded linked import parse test should run");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1904,6 +2028,126 @@ document.head.append(link);
     })
     .await
     .expect("native linked import graph test should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn font_support_queries_match_nested_imports_and_supports_rules() {
+    run_page_vm_async_test(async move {
+        let cases = [
+            ("/format.css", "font-format(WOFF2)", true),
+            ("/tech.css", "font-tech(variations)", true),
+            ("/aat.css", "font-tech(features-aat)", true),
+            ("/eot.css", "font-format(embedded-opentype)", false),
+            ("/svg-color.css", "font-tech(color-svg)", false),
+            (
+                "/and.css",
+                "(display: block) and font-tech(variations)",
+                true,
+            ),
+            ("/not.css", "not font-format(woff2)", false),
+            (
+                "/or.css",
+                "(not font-tech(color-svg)) or font-format(svg)",
+                true,
+            ),
+        ];
+        let mut features = String::new();
+        let mut responses = vec![(
+            "/root.css",
+            "HTTP/1.1 200 OK",
+            "@import 'features.css';".to_owned(),
+            Duration::ZERO,
+        )];
+        let mut expected_paths = vec!["/root.css", "/features.css"];
+        for (index, (path, condition, supported)) in cases.iter().enumerate() {
+            features.push_str(&format!("@import '{path}' supports({condition});\n"));
+            responses.push((
+                *path,
+                "HTTP/1.1 200 OK",
+                format!(".probe {{ --import-{index}: yes; }}"),
+                Duration::ZERO,
+            ));
+            if *supported {
+                expected_paths.push(path);
+            }
+        }
+        for (index, (_, condition, _)) in cases.iter().enumerate() {
+            features.push_str(&format!(
+                "@supports {condition} {{ .probe {{ --block-{index}: yes; }} }}\n"
+            ));
+        }
+        responses.push(("/features.css", "HTTP/1.1 200 OK", features, Duration::ZERO));
+
+        let (base_url, shutdown, server) =
+            spawn_shutdown_path_response_http_server(responses).await;
+        let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())?;
+        let document_url = Url::parse(&format!("{base_url}/page.html"))?;
+        let (mut page_vm, _resource_source, mut wake_rx) =
+            page_vm_with_bound_task_sources_and_owner_wake(&loader, document_url);
+        page_vm.vm_mut().eval(&format!(
+            r#"
+const probe = document.createElement('p');
+probe.className = 'probe';
+document.body.append(probe);
+const link = document.createElement('link');
+link.rel = 'stylesheet';
+link.href = '{base_url}/root.css';
+document.head.append(link);
+"queued"
+"#,
+        ))?;
+        page_vm
+            .vm_mut()
+            .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+
+        for _ in 0..2 {
+            wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+            assert!(
+                page_vm
+                    .run_exact_selected_page_task_for_test(
+                        PageSelectedTaskTestSelector::StylesheetCompletion,
+                        &loader,
+                    )
+                    .await?
+            );
+        }
+
+        let cases_json = serde_json::to_string(&cases)?;
+        let result = page_vm.vm_mut().eval(&format!(
+            r#"
+(() => {{
+  const style = getComputedStyle(document.querySelector('.probe'));
+  const rules = document.styleSheets[0].cssRules[0].styleSheet.cssRules;
+  return JSON.stringify({cases_json}.map(([, condition], index) => [
+    CSS.supports(condition),
+    style.getPropertyValue('--block-' + index),
+    style.getPropertyValue('--import-' + index),
+    rules[index].styleSheet !== null,
+  ]));
+}})()
+"#,
+        ))?;
+        let actual: Vec<(bool, String, String, bool)> = serde_json::from_str(&result)?;
+        for ((_, condition, supported), (query, block, import, sheet)) in cases.iter().zip(&actual)
+        {
+            let expected = if *supported { "yes" } else { "" };
+            assert_eq!(
+                (*query, block.as_str(), import.as_str(), *sheet),
+                (*supported, expected, expected, *supported),
+                "{condition}"
+            );
+        }
+        assert_eq!(actual.len(), cases.len());
+
+        shutdown.send(()).expect("stop stylesheet fixture server");
+        let mut requests = server.await.expect("stylesheet fixture server");
+        requests.sort();
+        expected_paths.sort();
+        assert_eq!(requests, expected_paths);
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("font support queries should agree throughout the import graph");
 }
 
 #[tokio::test(flavor = "current_thread")]

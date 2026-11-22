@@ -79,6 +79,7 @@ fn pointer_capture_queries_pending_target_before_native_dispatch() {
     );
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn pointer_capture_accepts_child_frame_nodes_with_detached_identity() {
     // A child browsing context's Document is not the root Document, but it

@@ -1063,7 +1063,7 @@ impl NativeModuleGraphJob {
                 "module graph fetch request was missing its module tree client token",
             )
         })?;
-        if let Err(error) = &source {
+        let source = if let Err(error) = source {
             let key = request.pending_fetch_key().cloned().ok_or_else(|| {
                 ModuleLoadError::new(
                     ModuleLoadStage::Fetch,
@@ -1071,9 +1071,13 @@ impl NativeModuleGraphJob {
                 )
             })?;
             // Settle the shared fetch before failing this graph, so joined
-            // clients and later imports observe the cached fetch failure.
+            // clients and later imports observe the same failed resource.
+            let error = error.with_failed_resource(key.clone());
             owner.mark_module_failed(key, error.clone());
-        }
+            Err(error)
+        } else {
+            source
+        };
         self.finish_pending_chromium_tree_fetch_for_client_with_owner(
             owner, client, request, source,
         )
@@ -1161,8 +1165,9 @@ impl NativeModuleGraphJob {
                     let admission = context.check_initial_request(key.url());
                     owner.queue_module_fetch_csp_violations(&context);
                     if let Err(error) = admission {
-                        let error = ModuleLoadError::new(ModuleLoadStage::Fetch, error.to_string());
-                        owner.mark_module_failed(key.clone(), error.clone());
+                        let error = ModuleLoadError::new(ModuleLoadStage::Fetch, error.to_string())
+                            .with_failed_resource(key.clone());
+                        owner.mark_module_failed(key, error.clone());
                         return Err(error);
                     }
                     let request = request.with_csp_context(Some(context));
@@ -2042,35 +2047,36 @@ fn chromium_request_record(request: &ModuleRequestRecord) -> module_tree::Module
 }
 
 fn chromium_module_key(key: &ModuleMapKey) -> module_tree::ModuleMapKey {
+    into_chromium_module_key(key.clone())
+}
+
+fn into_chromium_module_key(key: ModuleMapKey) -> module_tree::ModuleMapKey {
+    let (url, kind, attributes) = key.into_parts();
     module_tree::ModuleMapKey::new(
-        key.url().clone(),
-        chromium_module_kind(key.kind()),
-        chromium_attributes(key.attributes()),
+        url,
+        chromium_module_kind(kind),
+        module_tree::ModuleAttributesKey {
+            attributes: attributes.into_pairs(),
+        },
     )
 }
 
 fn local_module_key(
     key: &module_tree::ModuleMapKey,
 ) -> std::result::Result<ModuleMapKey, ModuleLoadError> {
-    let attributes = local_attributes(&key.attributes);
+    Ok(into_local_module_key(key.clone()))
+}
+
+fn into_local_module_key(key: module_tree::ModuleMapKey) -> ModuleMapKey {
+    let attributes = ModuleAttributesKey::from_pairs(key.attributes.attributes);
     match key.kind {
-        module_tree::ModuleKind::JavaScript => Ok(ModuleMapKey::java_script_with_attributes(
-            key.url.clone(),
-            attributes,
-        )),
-        module_tree::ModuleKind::Json => Ok(ModuleMapKey::json_with_attributes(
-            key.url.clone(),
-            attributes,
-        )),
-        module_tree::ModuleKind::Css => Ok(ModuleMapKey::css_with_attributes(
-            key.url.clone(),
-            attributes,
-        )),
-        module_tree::ModuleKind::Text => Ok(ModuleMapKey::text_with_attributes(
-            key.url.clone(),
-            attributes,
-        )),
-        module_tree::ModuleKind::WebAssembly => Ok(ModuleMapKey::webassembly(key.url.clone())),
+        module_tree::ModuleKind::JavaScript => {
+            ModuleMapKey::java_script_with_attributes(key.url, attributes)
+        }
+        module_tree::ModuleKind::Json => ModuleMapKey::json_with_attributes(key.url, attributes),
+        module_tree::ModuleKind::Css => ModuleMapKey::css_with_attributes(key.url, attributes),
+        module_tree::ModuleKind::Text => ModuleMapKey::text_with_attributes(key.url, attributes),
+        module_tree::ModuleKind::WebAssembly => ModuleMapKey::webassembly(key.url),
     }
 }
 
@@ -2096,9 +2102,14 @@ fn local_graph(graph: module_tree::ModuleGraphHandle) -> ModuleGraphHandle {
 }
 
 fn chromium_error(error: ModuleLoadError) -> module_tree::ModuleLoadError {
-    let mut converted =
-        module_tree::ModuleLoadError::new(chromium_load_stage(error.stage()), error.message());
-    if let Some(constructor) = error.error_constructor() {
+    let stage = chromium_load_stage(error.stage());
+    let constructor = error.error_constructor();
+    let (message, failed_resource) = error.into_message_and_failed_resource();
+    let mut converted = module_tree::ModuleLoadError::new(stage, message);
+    if let Some(key) = failed_resource {
+        converted = converted.with_key(into_chromium_module_key(*key));
+    }
+    if let Some(constructor) = constructor {
         let constructor = match constructor {
             ScriptErrorConstructorKind::Error => module_tree::ModuleErrorConstructorKind::Error,
             ScriptErrorConstructorKind::SyntaxError => {
@@ -2121,6 +2132,11 @@ fn chromium_error(error: ModuleLoadError) -> module_tree::ModuleLoadError {
 
 fn local_error(error: module_tree::ModuleLoadError) -> ModuleLoadError {
     let mut converted = ModuleLoadError::new(local_load_stage(error.stage), error.message);
+    if error.stage == module_tree::ModuleLoadStage::Fetch
+        && let Some(key) = error.key
+    {
+        converted = converted.with_failed_resource(into_local_module_key(*key));
+    }
     if let Some(constructor) = error.error_constructor {
         converted = converted.with_error_constructor(local_error_constructor(constructor));
     }
@@ -2524,9 +2540,10 @@ fn module_script_inline_tree_job_for_owner(
         let admission = context.check_initial_request(key.url());
         vm.queue_module_fetch_csp_violations(&context);
         if let Err(error) = admission {
-            let error = ModuleLoadError::new(ModuleLoadStage::Fetch, error.to_string());
+            let error = ModuleLoadError::new(ModuleLoadStage::Fetch, error.to_string())
+                .with_failed_resource(key.clone());
             vm.document_runtime
-                .mark_native_module_failed(key.clone(), error.clone());
+                .mark_native_module_failed(key, error.clone());
             return Err(error);
         }
     }
@@ -5324,6 +5341,42 @@ import "./shared.mjs";
     }
 
     #[test]
+    fn fetch_error_conversion_moves_message_and_resource_buffers() {
+        let message = "failed to fetch the dependency".to_owned();
+        let key = ModuleMapKey::json_with_attributes(
+            url("https://app.example.test/dependency.json"),
+            ModuleAttributesKey::from_pairs(vec![("type".into(), "json".into())]),
+        );
+        let message_buffer = message.as_ptr();
+        let url_buffer = key.url().as_str().as_ptr();
+        let attributes_buffer = key.attributes().pairs().as_ptr();
+
+        let error = ModuleLoadError::new(ModuleLoadStage::Fetch, message)
+            .with_failed_resource(key)
+            .with_error_constructor(ScriptErrorConstructorKind::TypeError);
+        let chromium = chromium_error(error);
+        let chromium_key = chromium.key.as_deref().expect("failed dependency key");
+        assert_eq!(chromium.message.as_ptr(), message_buffer);
+        assert_eq!(chromium_key.url.as_str().as_ptr(), url_buffer);
+        assert_eq!(
+            chromium_key.attributes.attributes.as_ptr(),
+            attributes_buffer
+        );
+
+        let local = local_error(chromium);
+        let local_key = local.failed_resource().expect("failed dependency key");
+        assert_eq!(local.message().as_ptr(), message_buffer);
+        assert_eq!(local_key.url().as_str().as_ptr(), url_buffer);
+        assert_eq!(local_key.attributes().pairs().as_ptr(), attributes_buffer);
+        assert_eq!(local_key.kind(), ModuleKind::Json);
+        assert_eq!(local.stage(), ModuleLoadStage::Fetch);
+        assert_eq!(
+            local.error_constructor(),
+            Some(ScriptErrorConstructorKind::TypeError)
+        );
+    }
+
+    #[test]
     fn failed_owned_fetch_settles_module_map_and_notifies_joined_graph() {
         let mut vm = new_test_vm("https://app.example.test/page");
         let initiator_url = url("https://app.example.test/page");
@@ -5370,7 +5423,10 @@ import "./shared.mjs";
             Ok(_) => panic!("the owning runtime module graph should fail"),
             Err(error) => error,
         };
-        assert_eq!(error, fetch_error);
+        assert_eq!(
+            error,
+            fetch_error.with_failed_resource(dependency_key.clone())
+        );
 
         let dependency_entry = vm
             .document_runtime
@@ -5381,6 +5437,10 @@ import "./shared.mjs";
                 .native_module_entry_state(dependency_entry),
             ModuleMapEntryState::Failed,
             "the fetch owner must settle the shared module map entry before its graph fails"
+        );
+        assert_eq!(
+            vm.document_runtime.native_module_failure(dependency_entry),
+            Some(error),
         );
 
         let event = vm

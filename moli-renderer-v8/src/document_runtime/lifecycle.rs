@@ -157,6 +157,13 @@ impl DocumentRuntime {
             authority,
             self.stylesheet_service_worker_fetch_context(),
         )
+        .with_quirks_mode(
+            self.dom_host
+                .dom()
+                .document()
+                .map(|document| document.quirks_mode())
+                .unwrap_or(style::context::QuirksMode::NoQuirks),
+        )
         .with_interception(self.stylesheet_lifecycle.interception_context.clone(), None)
     }
 
@@ -197,6 +204,14 @@ impl DocumentRuntime {
                 },
             ),
         )
+        .with_quirks_mode(
+            host.dom_host()
+                .owner_document_handle(owner)
+                .and_then(|document| host.dom_host().node(document))
+                .and_then(Node::as_document)
+                .map(|document| document.quirks_mode())
+                .unwrap_or(style::context::QuirksMode::NoQuirks),
+        )
         .with_interception(
             self.stylesheet_lifecycle.interception_context.clone(),
             host.subresource_request_environment(&loader, scope)
@@ -236,6 +251,7 @@ impl DocumentRuntime {
             )
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn take_pending_devtools_dom_mutations(
         &mut self,
     ) -> Vec<super::devtools_mutations::DevToolsDomMutationFact> {

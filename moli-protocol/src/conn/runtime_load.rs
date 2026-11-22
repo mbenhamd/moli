@@ -321,7 +321,7 @@ pub(crate) enum InitialDocumentPageInstallResult {
 #[derive(Debug)]
 pub(crate) enum FailedInitialDocumentPageBuild {
     Build {
-        owner: InitialDocumentPageOwner,
+        owner: Box<InitialDocumentPageOwner>,
         message: String,
     },
     Joined {
@@ -372,7 +372,7 @@ impl PendingInitialDocumentPageBuild {
                     Ok(built) => built,
                     Err(error) => {
                         return Err(FailedInitialDocumentPageBuild::Build {
-                            owner,
+                            owner: Box::new(owner),
                             message: format!("initial document page build failed: {error:#}"),
                         });
                     }
@@ -535,6 +535,13 @@ impl ResponseCommitReady {
             prepared_page.renderer_owner_local_host_id(),
             prepared_page.renderer_page_id(),
         )
+    }
+
+    pub(crate) fn inspector_endpoint(&self) -> moli_core::page::RendererPageInspectorEndpoint {
+        self.prepared_page
+            .as_ref()
+            .expect("response commit-ready value retains its prepared Page")
+            .inspector_endpoint()
     }
 
     pub(crate) fn issue_commit_permit(&self) -> PreparedDocumentPageCommitPermit {

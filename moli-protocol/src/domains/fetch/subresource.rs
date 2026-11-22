@@ -251,6 +251,20 @@ fn prepare_subresource_fetch_pause_sources(
         } else {
             network_request_id
         };
+        // A detached child classic script announces its request natively
+        // before the Fetch pause. When Network already published that start,
+        // the pause reuses its id and publishes no second start, so the pause
+        // networkId, the start and the terminal event share one id.
+        let renderer_announced_id = detached_parser_script_fetch_continuation
+            .as_ref()
+            .and(info.network_request_handle)
+            .and_then(|handle| {
+                conn.runtime_session_owner_slot_for_owner(owner)?
+                    .bound_subresource_request_id(handle)
+                    .map(str::to_owned)
+            });
+        let observe_network = observe_network && renderer_announced_id.is_none();
+        let network_request_id = renderer_announced_id.unwrap_or(network_request_id);
         let (network_request_id, request_loader_id) = match &child_document {
             Some(document) => (document.loader_id.clone(), document.loader_id.clone()),
             None => {

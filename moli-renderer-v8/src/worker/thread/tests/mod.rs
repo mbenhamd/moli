@@ -69,7 +69,7 @@ use crate::service_worker_runtime::{
 };
 use crate::structured_clone::V8StructuredClonePayload;
 use crate::worker::handle::{
-    WorkerErrorPhase, WorkerFetchHandlerType, WorkerHandle, WorkerNetworkPolicy,
+    WorkerErrorPhase, WorkerErrorReport, WorkerFetchHandlerType, WorkerHandle, WorkerNetworkPolicy,
     WorkerPendingFetchContinue, WorkerPendingXhrContinue, WorkerToParentMessage,
 };
 
@@ -400,7 +400,7 @@ async fn dispatch_service_worker_lifecycle_event_for_test(
             WorkerToParentMessage::ServiceWorkerLifecycleCompleted(completion) => {
                 return completion;
             }
-            WorkerToParentMessage::Error { message, .. } => {
+            WorkerToParentMessage::Error(WorkerErrorReport { ref message, .. }) => {
                 panic!(
                     "unexpected service worker error while waiting for lifecycle completion: {message}"
                 );
@@ -439,8 +439,9 @@ async fn dispatch_service_worker_lifecycle_event_for_test(
             | WorkerToParentMessage::ServiceWorkerSkipWaiting { .. }
             | WorkerToParentMessage::ServiceWorkerClientsClaim { .. }
             | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-            | WorkerToParentMessage::RuntimeInspectorResponse(_)
             | WorkerToParentMessage::SharedWorkerClosed => {}
+            #[cfg(feature = "devtools")]
+            WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
         }
     }
 }
@@ -492,7 +493,7 @@ async fn dispatch_service_worker_fetch_event_with_request_for_test(
             .expect("service worker channel closed");
         match message {
             WorkerToParentMessage::ServiceWorkerFetchCompleted(completion) => return completion,
-            WorkerToParentMessage::Error { message, .. } => {
+            WorkerToParentMessage::Error(WorkerErrorReport { ref message, .. }) => {
                 panic!(
                     "unexpected service worker error while waiting for fetch completion: {message}"
                 );
@@ -531,8 +532,9 @@ async fn dispatch_service_worker_fetch_event_with_request_for_test(
             | WorkerToParentMessage::ServiceWorkerSkipWaiting { .. }
             | WorkerToParentMessage::ServiceWorkerClientsClaim { .. }
             | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-            | WorkerToParentMessage::RuntimeInspectorResponse(_)
             | WorkerToParentMessage::SharedWorkerClosed => {}
+            #[cfg(feature = "devtools")]
+            WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
         }
     }
 }
@@ -574,7 +576,7 @@ async fn dispatch_service_worker_message_event_object_for_test(
             .expect("service worker channel closed");
         match message {
             WorkerToParentMessage::ServiceWorkerMessageCompleted(completion) => return completion,
-            WorkerToParentMessage::Error { message, .. } => {
+            WorkerToParentMessage::Error(WorkerErrorReport { ref message, .. }) => {
                 panic!(
                     "unexpected service worker error while waiting for message completion: {message}"
                 );
@@ -613,8 +615,9 @@ async fn dispatch_service_worker_message_event_object_for_test(
             | WorkerToParentMessage::ServiceWorkerSkipWaiting { .. }
             | WorkerToParentMessage::ServiceWorkerClientsClaim { .. }
             | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-            | WorkerToParentMessage::RuntimeInspectorResponse(_)
             | WorkerToParentMessage::SharedWorkerClosed => {}
+            #[cfg(feature = "devtools")]
+            WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
         }
     }
 }
@@ -633,7 +636,7 @@ async fn dispatch_service_worker_notification_event_for_test(
             WorkerToParentMessage::ServiceWorkerNotificationCompleted(completion) => {
                 return completion;
             }
-            WorkerToParentMessage::Error { message, .. } => {
+            WorkerToParentMessage::Error(WorkerErrorReport { ref message, .. }) => {
                 panic!(
                     "unexpected service worker error while waiting for notification completion: {message}"
                 );
@@ -672,8 +675,9 @@ async fn dispatch_service_worker_notification_event_for_test(
             | WorkerToParentMessage::ServiceWorkerSkipWaiting { .. }
             | WorkerToParentMessage::ServiceWorkerClientsClaim { .. }
             | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-            | WorkerToParentMessage::RuntimeInspectorResponse(_)
             | WorkerToParentMessage::SharedWorkerClosed => {}
+            #[cfg(feature = "devtools")]
+            WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
         }
     }
 }
@@ -698,7 +702,7 @@ async fn dispatch_service_worker_push_event_for_test(
             .expect("service worker channel closed");
         match message {
             WorkerToParentMessage::ServiceWorkerPushCompleted(completion) => return completion,
-            WorkerToParentMessage::Error { message, .. } => {
+            WorkerToParentMessage::Error(WorkerErrorReport { ref message, .. }) => {
                 panic!(
                     "unexpected service worker error while waiting for push completion: {message}"
                 );
@@ -737,8 +741,9 @@ async fn dispatch_service_worker_push_event_for_test(
             | WorkerToParentMessage::ServiceWorkerSkipWaiting { .. }
             | WorkerToParentMessage::ServiceWorkerClientsClaim { .. }
             | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-            | WorkerToParentMessage::RuntimeInspectorResponse(_)
             | WorkerToParentMessage::SharedWorkerClosed => {}
+            #[cfg(feature = "devtools")]
+            WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
         }
     }
 }
@@ -765,7 +770,7 @@ async fn dispatch_service_worker_sync_event_for_test(
             .expect("service worker channel closed");
         match message {
             WorkerToParentMessage::ServiceWorkerSyncCompleted(completion) => return completion,
-            WorkerToParentMessage::Error { message, .. } => {
+            WorkerToParentMessage::Error(WorkerErrorReport { ref message, .. }) => {
                 panic!(
                     "unexpected service worker error while waiting for sync completion: {message}"
                 );
@@ -804,8 +809,9 @@ async fn dispatch_service_worker_sync_event_for_test(
             | WorkerToParentMessage::ServiceWorkerSkipWaiting { .. }
             | WorkerToParentMessage::ServiceWorkerClientsClaim { .. }
             | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-            | WorkerToParentMessage::RuntimeInspectorResponse(_)
             | WorkerToParentMessage::SharedWorkerClosed => {}
+            #[cfg(feature = "devtools")]
+            WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
         }
     }
 }
@@ -833,7 +839,7 @@ async fn dispatch_service_worker_periodic_sync_event_for_test(
             WorkerToParentMessage::ServiceWorkerPeriodicSyncCompleted(completion) => {
                 return completion;
             }
-            WorkerToParentMessage::Error { message, .. } => {
+            WorkerToParentMessage::Error(WorkerErrorReport { ref message, .. }) => {
                 panic!(
                     "unexpected service worker error while waiting for periodic sync completion: {message}"
                 );
@@ -872,8 +878,9 @@ async fn dispatch_service_worker_periodic_sync_event_for_test(
             | WorkerToParentMessage::ServiceWorkerSkipWaiting { .. }
             | WorkerToParentMessage::ServiceWorkerClientsClaim { .. }
             | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-            | WorkerToParentMessage::RuntimeInspectorResponse(_)
             | WorkerToParentMessage::SharedWorkerClosed => {}
+            #[cfg(feature = "devtools")]
+            WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
         }
     }
 }
@@ -1563,6 +1570,7 @@ mod modules;
 mod strict_script_mime;
 
 mod network;
+mod onerror;
 mod postmessage;
 mod stream_clone_failures;
 
@@ -1585,3 +1593,5 @@ mod performance_user_timing;
 mod abort_controller_receivers;
 
 mod synthetic_exceptions;
+
+mod wasm_csp;

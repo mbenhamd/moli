@@ -95,23 +95,9 @@ impl PageScriptHost {
             crate::worker::WorkerToParentMessage::Post(payload) => Ok(
                 RendererDedicatedWorkerMessageEvent::Message(Box::new(payload)),
             ),
-            crate::worker::WorkerToParentMessage::Error {
-                message,
-                filename,
-                lineno,
-                colno,
-                event_kind,
-                phase,
-                source,
-            } => Ok(RendererDedicatedWorkerMessageEvent::Error {
-                message,
-                filename,
-                lineno,
-                colno,
-                event_kind,
-                phase,
-                source,
-            }),
+            crate::worker::WorkerToParentMessage::Error(error) => {
+                Ok(RendererDedicatedWorkerMessageEvent::Error(error))
+            }
             message => Err(Box::new(message)),
         }
     }
@@ -172,6 +158,9 @@ impl PageScriptHost {
         let mut worker_handle = spawn_worker_with_options(
             options
                 .with_interception_context(context)
+                .with_diagnostic_source(crate::DiagnosticSource::DedicatedWorker {
+                    instance_id: renderer_instance_id,
+                })
                 .with_pause_evaluation_until_debugger(true),
         );
         self.browser_context_runtime()
@@ -593,12 +582,16 @@ impl PageScriptHost {
         if let Some(client_id) = reserved_service_worker_client_id {
             spawn_options = spawn_options.with_reserved_service_worker_client_id(client_id);
         }
-        let mut worker_handle = spawn_worker_with_options(spawn_options);
         let renderer_instance_id = self
             .workers
             .get(&worker_id)
             .map(|state| state.renderer_instance_id)
             .expect("loading DedicatedWorker must retain its renderer instance identity");
+        let mut worker_handle = spawn_worker_with_options(spawn_options.with_diagnostic_source(
+            crate::DiagnosticSource::DedicatedWorker {
+                instance_id: renderer_instance_id,
+            },
+        ));
         self.browser_context_runtime()
             .attach_dedicated_worker_control(
                 renderer_instance_id,
@@ -761,10 +754,18 @@ impl PageScriptHost {
         let Some(state) = self.workers.get(&worker_id) else {
             return false;
         };
+        let instance_id = state.renderer_instance_id;
+        self.browser_context_runtime.diagnostics().emit(|| {
+            Some(crate::DiagnosticEvent::script_load_failure(
+                crate::DiagnosticSource::DedicatedWorker { instance_id },
+                &script_url,
+                &script_url,
+                &error_message,
+            ))
+        });
         if !state.target_created {
             return true;
         }
-        let instance_id = state.renderer_instance_id;
         self.append_dedicated_worker_target_lifecycle(
             crate::runtime::RendererDedicatedWorkerTargetEvent::ScriptLoadFailed {
                 instance_id,
@@ -980,29 +981,35 @@ impl PageScriptHost {
             .map(|state| state.client_event_producer.clone())
     }
 
-    /// Resolve the already-authorized V8 target without performing another
-    /// current/stale arbitration in the executor.
+    /// Resolve the authorized Worker wrapper or the surviving owner Window
+    /// for an exception that can propagate after its wrapper is gone.
     pub(crate) fn authorized_dedicated_worker_dispatch_target<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
         worker_id: DedicatedWorkerId,
         execution_context: super::super::WindowExecutionContextIdentity,
+        propagates_to_window: bool,
     ) -> Option<(
         super::super::OwnerDispatchScope,
         v8::Local<'s, v8::Context>,
-        v8::Local<'s, v8::Object>,
+        Option<v8::Local<'s, v8::Object>>,
     )> {
-        let state = self.workers.get(&worker_id)?;
-        assert_eq!(
-            state.client_event_producer.owner().execution_context(),
-            execution_context,
-            "authorized DedicatedWorker event target changed inside one owner turn"
-        );
-        Some((
-            state.owner.dispatch_scope(),
-            state.owner.context(scope),
-            v8::Local::new(scope, &state.wrapper),
-        ))
+        if let Some(state) = self.workers.get(&worker_id)
+            && state.client_event_producer.owner().execution_context() == execution_context
+        {
+            return Some((
+                state.owner.dispatch_scope(),
+                state.owner.context(scope),
+                Some(v8::Local::new(scope, &state.wrapper)),
+            ));
+        }
+        if !propagates_to_window {
+            return None;
+        }
+        let dispatch_scope = execution_context.dispatch_scope();
+        let (realm, context) =
+            self.window_execution_context(scope, execution_context.owner(), dispatch_scope)?;
+        (realm == execution_context.realm_token()).then_some((dispatch_scope, context, None))
     }
 
     pub(crate) fn worker_dispatch_target<'s>(

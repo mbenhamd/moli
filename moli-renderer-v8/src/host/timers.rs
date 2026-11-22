@@ -4,9 +4,7 @@ use crate::v8_execution_watchdog::{
     V8ExecutionWatchdog, V8ExecutionWatchdogKind, V8ExecutionWatchdogOutcome,
 };
 use crate::{
-    context_bootstrap::{
-        CHILD_BROWSING_CONTEXT_HANDLE_SLOT, dispatch_window_error_event_with_details,
-    },
+    context_bootstrap::CHILD_BROWSING_CONTEXT_HANDLE_SLOT,
     document_runtime::DomHandle,
     native_bridge::{
         CALLBACK_ERROR_WINDOW_HANDLE_SLOT, OwnerDispatchScope, ResourceTimingBufferId,
@@ -23,19 +21,8 @@ use crate::{
     },
 };
 use moli_time::{TimerId, TimerScheduler};
-use moli_webapi_declare::WebApiObject;
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct TimerErrorEventInitDeclaration<'scope> {
-    cancelable: bool,
-    bubbles: bool,
-    message: v8::Local<'scope, v8::String>,
-    filename: v8::Local<'scope, v8::Value>,
-    lineno: f64,
-    colno: f64,
-    error: v8::Local<'scope, v8::Value>,
-}
+use moli_webapi::events::subclasses::error::construct_original_error_event;
+use moli_webapi::events::{construct_native_event, init::EventInit};
 
 struct ScheduledTimerSource {
     context: v8::Global<v8::Context>,
@@ -1459,25 +1446,10 @@ fn report_window_timer_exception<'s>(
         .or_else(|| {
             relevant_identity.and_then(|identity| identity.dispatch_scope().child_window())
         });
-    if let Some(handle) = child_handle
-        && let Some(event) = timer_callback_error_event_from_report(scope, report)
-    {
-        unsafe { &mut *host_ptr }.dispatch_child_window_event(scope, handle, "error", event);
-        return;
-    }
-    let error_value = report
-        .exception
-        .as_ref()
-        .map(|exception| v8::Local::new(scope, exception));
-    let _ = dispatch_window_error_event_with_details(
-        scope,
-        host_ptr,
-        &report.summary,
-        report.source.as_deref().unwrap_or(""),
-        report.line.unwrap_or(0) as u32,
-        report.column.unwrap_or(0) as u32,
-        error_value,
-    );
+    let child_event = child_handle.and_then(|handle| {
+        timer_callback_error_event_from_report(scope, report).map(|event| (handle, event))
+    });
+    dispatch_window_callback_exception(scope, host_ptr, child_event, report);
 }
 
 fn callback_error_window_handle<'s>(
@@ -1505,36 +1477,24 @@ fn timer_callback_error_event_from_report<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     report: &V8ExceptionReport,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let global = scope.get_current_context().global(scope);
     let message_value = v8_string(scope, &report.summary)?;
     let error_value = v8::Exception::error(scope, message_value);
-
-    let filename = v8_string(scope, report.source.as_deref().unwrap_or(""))
-        .map(Into::into)
-        .unwrap_or_else(|| v8::null(scope).into());
-    let init = TimerErrorEventInitDeclaration::new(
-        true,
-        false,
-        message_value,
-        filename,
-        report.line.unwrap_or(0) as f64,
-        report.column.unwrap_or(0) as f64,
+    construct_original_error_event(
+        scope,
+        &report.summary,
+        report.source.as_deref().unwrap_or(""),
+        report.line.unwrap_or(0) as u32,
+        report.column.unwrap_or(0) as u32,
         error_value,
     )
-    .bind(scope)
-    .ok()?;
-
-    let event_type = v8str(scope, "error");
-    global
-        .get(scope, v8str(scope, "ErrorEvent").into())
-        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
-        .and_then(|constructor| constructor.new_instance(scope, &[event_type.into(), init.into()]))
-        .or_else(|| {
-            global
-                .get(scope, v8str(scope, "Event").into())
-                .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
-                .and_then(|constructor| {
-                    constructor.new_instance(scope, &[event_type.into(), init.into()])
-                })
-        })
+    .or_else(|| {
+        construct_native_event(
+            scope,
+            "error",
+            EventInit {
+                cancelable: true,
+                ..EventInit::default()
+            },
+        )
+    })
 }

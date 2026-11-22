@@ -1,6 +1,10 @@
 //! Nested worker ownership, creation snapshots and parent event delivery.
 
 use crate::content_security_policy::ContentSecurityPolicy;
+use crate::diagnostics::ErrorReportOutcome;
+use crate::worker::handle::{
+    WorkerErrorPhase, WorkerErrorReport, WorkerMessage, WorkerToParentMessage,
+};
 
 use super::*;
 
@@ -24,7 +28,8 @@ pub(crate) struct NestedWorkerContext {
     pub(crate) require_trusted_types_for_script: bool,
     pub(crate) network_policy: crate::worker::handle::WorkerNetworkPolicy,
     pub(crate) policy_context: crate::types::SubresourcePolicyContext,
-    pub(crate) wake_tx: mpsc::UnboundedSender<crate::worker::handle::WorkerMessage>,
+    pub(crate) wake_tx: mpsc::UnboundedSender<WorkerMessage>,
+    pub(crate) closed_owner_error_tx: Option<mpsc::UnboundedSender<WorkerToParentMessage>>,
 }
 
 pub(crate) fn reserve_nested_worker_context(
@@ -47,7 +52,7 @@ pub(crate) fn reserve_nested_worker_context(
         worker_id,
         base_url,
         loader: state.loader.clone(),
-        worker_context_runtime: state.worker_context_runtime.clone(),
+        worker_context_runtime: state.worker_context_runtime.clone().for_nested_dedicated_worker(),
         service_worker_runtime: state.service_worker_runtime.clone(),
         service_worker_client_id: state.service_worker_client_id,
         storage_key_top_level_site: state.storage_key.top_level_site().to_owned(),
@@ -71,20 +76,14 @@ pub(crate) fn reserve_nested_worker_context(
         },
         policy_context: state.policy_context,
         wake_tx: state.worker_wake_tx.clone(),
+        closed_owner_error_tx: matches!(state.global_kind, WorkerGlobalKind::Dedicated { .. })
+            .then(|| state.parent_tx.clone()),
     })
-}
-
-pub(in crate::worker) struct NestedWorkerUnhandledError {
-    pub(in crate::worker) message: String,
-    pub(in crate::worker) filename: String,
-    pub(in crate::worker) lineno: u32,
-    pub(in crate::worker) colno: u32,
-    pub(in crate::worker) event_kind: crate::worker::handle::WorkerParentErrorEventKind,
 }
 
 pub(in crate::worker) struct NestedWorkerDispatchResult {
     pub(in crate::worker) dispatched: bool,
-    pub(in crate::worker) unhandled_error: Option<NestedWorkerUnhandledError>,
+    pub(in crate::worker) unhandled_error: Option<WorkerErrorReport>,
 }
 
 pub(crate) fn forget_nested_worker_context(
@@ -98,60 +97,96 @@ pub(crate) fn forget_nested_worker_context(
     state.nested_worker_wrappers.remove(&worker_id).is_some()
 }
 
+pub(in crate::worker) fn close_worker_owned_nested_workers(
+    scope: &mut v8::PinScope<'_, '_>,
+    state: &Rc<RefCell<WorkerGlobalState>>,
+) {
+    let wrappers = std::mem::take(&mut state.borrow_mut().nested_worker_wrappers);
+    for wrapper in wrappers.into_values() {
+        let worker = v8::Local::new(scope, wrapper);
+        crate::context_bootstrap::terminate_worker_handle(scope, worker);
+    }
+}
+
+/// A stopped DedicatedWorker has no callbacks to cancel a descendant's
+/// report. Forward the existing exception to its owner.
+pub(crate) fn forward_nested_worker_error_after_owner_close(
+    message: WorkerMessage,
+    parent_tx: &mpsc::UnboundedSender<WorkerToParentMessage>,
+) {
+    if let WorkerMessage::NestedWorkerEvent { message, .. } = message
+        && matches!(
+            message.as_ref(),
+            WorkerToParentMessage::Error(WorkerErrorReport {
+                phase: WorkerErrorPhase::Runtime,
+                ..
+            })
+        )
+    {
+        let _ = parent_tx.send(*message);
+    }
+}
+
 pub(in crate::worker) fn dispatch_nested_worker_event(
     scope: &mut v8::PinScope<'_, '_>,
     state: &Rc<RefCell<WorkerGlobalState>>,
     worker_id: DedicatedWorkerId,
-    message: &crate::worker::handle::WorkerToParentMessage,
+    message: WorkerToParentMessage,
 ) -> NestedWorkerDispatchResult {
-    let Some(worker) = state
+    let worker = state
         .borrow()
         .nested_worker_wrappers
         .get(&worker_id)
-        .map(|worker| v8::Local::new(scope, worker))
-    else {
-        return NestedWorkerDispatchResult {
-            dispatched: false,
-            unhandled_error: None,
-        };
-    };
+        .map(|worker| v8::Local::new(scope, worker));
 
-    match message {
-        crate::worker::handle::WorkerToParentMessage::Post(_) => {
+    match (worker, message) {
+        (Some(worker), message @ WorkerToParentMessage::Post(_)) => {
             let has_message_delivery_listener =
                 crate::context_bootstrap::worker_has_message_delivery_listener(scope, worker);
-            let _ = crate::context_bootstrap::dispatch_worker_event(scope, worker, message);
+            let _ = crate::context_bootstrap::dispatch_worker_event(scope, worker, &message);
             NestedWorkerDispatchResult {
                 dispatched: has_message_delivery_listener,
                 unhandled_error: None,
             }
         }
-        crate::worker::handle::WorkerToParentMessage::Error {
-            message: error_message,
-            filename,
-            lineno,
-            colno,
-            event_kind,
-            phase,
-            ..
-        } => {
-            let unhandled = crate::context_bootstrap::dispatch_worker_event(scope, worker, message);
+        (worker, WorkerToParentMessage::Error(mut error)) => {
+            let unhandled = if let Some(worker) = worker {
+                let omitted_error = v8::null(scope).into();
+                crate::context_bootstrap::dispatch_worker_error_event_with_kind(
+                    scope,
+                    worker,
+                    &error.message,
+                    &error.filename,
+                    error.lineno,
+                    error.colno,
+                    omitted_error,
+                    error.event_kind,
+                )
+            } else if error.phase == WorkerErrorPhase::Runtime {
+                Some(true)
+            } else {
+                None
+            };
             // Bootstrap failures only fire an Event at the child Worker. Only
             // uncanceled runtime errors propagate to its owner's global scope.
-            let propagate = unhandled && *phase == crate::worker::handle::WorkerErrorPhase::Runtime;
+            let unhandled_error =
+                if unhandled == Some(true) && error.phase == WorkerErrorPhase::Runtime {
+                    Some(error)
+                } else {
+                    if let Some(unhandled) = unhandled {
+                        error.complete(|| ErrorReportOutcome::from_default_prevented(!unhandled));
+                    }
+                    None
+                };
             NestedWorkerDispatchResult {
-                dispatched: true,
-                unhandled_error: propagate.then(|| NestedWorkerUnhandledError {
-                    message: error_message.clone(),
-                    filename: filename.clone(),
-                    lineno: *lineno,
-                    colno: *colno,
-                    event_kind: *event_kind,
-                }),
+                dispatched: worker.is_some() || unhandled_error.is_some(),
+                unhandled_error,
             }
         }
-        _ => NestedWorkerDispatchResult {
-            dispatched: crate::context_bootstrap::dispatch_worker_event(scope, worker, message),
+        (worker, message) => NestedWorkerDispatchResult {
+            dispatched: worker.is_some_and(|worker| {
+                crate::context_bootstrap::dispatch_worker_event(scope, worker, &message)
+            }),
             unhandled_error: None,
         },
     }

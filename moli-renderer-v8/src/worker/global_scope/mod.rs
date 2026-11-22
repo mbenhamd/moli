@@ -31,7 +31,7 @@ use moli_fetch::{
     should_request_be_blocked_due_to_bad_port,
 };
 use moli_storage_key::MoliStorageKey;
-use moli_webapi_declare::{ObjectLiteralDeclaration, WebApiFunctionTemplate, WebApiObject};
+use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
 use moli_websocket::{
     ConnectOptions as WebSocketConnectOptions, ConnectionHandle as WebSocketConnectionHandle,
     Event as WebSocketEvent, spawn_connection, spawn_failed_connection, websocket_cookie_url,
@@ -150,7 +150,7 @@ pub(super) use content_security_policy::{
 pub(crate) use content_security_policy::{
     dispatch_worker_trusted_types_sink_violation_event, worker_allows_eval_code_generation_by_csp,
     worker_allows_trusted_type_policy_name, worker_allows_trusted_types_eval,
-    worker_trusted_types_for_script_requirements,
+    worker_allows_wasm_code_generation_by_csp, worker_trusted_types_for_script_requirements,
 };
 use event_handlers::install_worker_global_event_handler_accessors;
 pub(super) use event_handlers::service_worker_fetch_handler_type;
@@ -180,10 +180,11 @@ pub(crate) use messaging::{
     worker_broadcast_channel_wrapper, worker_message_port_registry,
     worker_message_port_wake_sender, worker_message_port_wrapper,
 };
-pub(super) use nested_workers::dispatch_nested_worker_event;
 pub(crate) use nested_workers::{
-    NestedWorkerContext, forget_nested_worker_context, reserve_nested_worker_context,
+    NestedWorkerContext, forget_nested_worker_context,
+    forward_nested_worker_error_after_owner_close, reserve_nested_worker_context,
 };
+pub(super) use nested_workers::{close_worker_owned_nested_workers, dispatch_nested_worker_event};
 pub(super) use network_state::{
     PendingWorkerFetch, PendingWorkerXhr, WorkerWebSocketState, WorkerXhrCompletion,
 };

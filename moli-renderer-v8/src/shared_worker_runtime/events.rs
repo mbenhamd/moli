@@ -21,16 +21,10 @@ impl RendererSharedWorkerHost {
             #[cfg(test)]
             WorkerToParentMessage::PendingSubresourceFetch(_)
             | WorkerToParentMessage::SubresourceContinue(_) => {}
-            WorkerToParentMessage::Error {
-                message,
-                filename,
-                lineno,
-                colno,
-                event_kind,
-                phase,
-                source,
-            } => {
-                if phase == WorkerErrorPhase::Bootstrap {
+            WorkerToParentMessage::Error(error) => {
+                if error.phase == WorkerErrorPhase::Bootstrap {
+                    let (lineno, colno, event_kind) = (error.lineno, error.colno, error.event_kind);
+                    let (message, filename) = (error.message, error.filename);
                     if event_kind == WorkerParentErrorEventKind::ErrorEvent {
                         self.notify_all_clients_error_with_location(
                             message, filename, lineno, colno, event_kind,
@@ -42,19 +36,21 @@ impl RendererSharedWorkerHost {
                 }
                 trace!(
                     url = %script_url,
-                    message,
-                    filename,
-                    lineno,
-                    colno,
-                    ?event_kind,
-                    ?source,
+                    message = error.message,
+                    filename = error.filename,
+                    lineno = error.lineno,
+                    colno = error.colno,
+                    event_kind = ?error.event_kind,
+                    source = ?error.source,
                     "dropping shared worker runtime error; SharedWorker.onerror is reserved for load and connection failures"
                 );
             }
             WorkerToParentMessage::SharedWorkerClosed => {
+                #[cfg(feature = "devtools")]
                 self.begin_runtime_response_retirement();
                 self.notify_worker_closed();
             }
+            #[cfg(feature = "devtools")]
             WorkerToParentMessage::RuntimeInspectorResponse(publication) => {
                 self.publish_runtime_inspector_response(publication);
             }

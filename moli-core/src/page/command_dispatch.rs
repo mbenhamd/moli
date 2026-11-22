@@ -40,6 +40,12 @@ pub struct PendingPageCommand {
 }
 
 impl PendingPageCommand {
+    #[cfg(feature = "devtools")]
+    pub fn retain_session_cleanup_authority(mut self) -> Self {
+        self.pending = self.pending.retain_session_cleanup_authority();
+        self
+    }
+
     pub(crate) fn from_renderer(pending: RendererPageCommandPending) -> Self {
         Self {
             pending,

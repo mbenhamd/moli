@@ -64,6 +64,7 @@ struct RendererInspectorClient {
     isolate: UnsafeCell<v8::UnsafeRawIsolatePtr>,
     context_registry: DocumentInspectorContextRegistry,
     unique_id_state: Rc<RendererInspectorClientUniqueIdState>,
+    #[cfg(feature = "devtools")]
     page_targets: RendererInspectorPageTargets,
 }
 
@@ -91,6 +92,7 @@ struct RendererInspectorSessionExecutorLocal {
     route_id: RendererInspectorSessionExecutorRouteId,
     page_targets: RendererInspectorPageTargets,
     isolate_environment_ingress: Option<RendererInspectorIoIngress>,
+    #[cfg(feature = "devtools")]
     output_journal: RefCell<Option<crate::runtime::RendererTurnOutputJournal>>,
     #[cfg(feature = "devtools")]
     sessions: RefCell<HashMap<(i32, DevToolsSessionKey), RendererInspectorSessionRoute>>,
@@ -163,6 +165,7 @@ impl RendererInspectorSessionExecutorLocal {
             route_id,
             page_targets,
             isolate_environment_ingress,
+            #[cfg(feature = "devtools")]
             output_journal: RefCell::new(None),
             #[cfg(feature = "devtools")]
             sessions: RefCell::new(HashMap::new()),
@@ -430,9 +433,9 @@ impl RendererInspectorSessionExecutorLocal {
     }
 
     #[cfg(feature = "devtools")]
-    fn dispatch_next_io_command_from_owner(&self) {
+    fn dispatch_next_io_command_from_owner(&self) -> bool {
         let Some(command) = self.target.io_ref().claim_for_owner() else {
-            return;
+            return false;
         };
         let session_key = command.ticket().session();
         let session = self
@@ -440,7 +443,9 @@ impl RendererInspectorSessionExecutorLocal {
             .borrow()
             .get(&(command.agent_token, session_key.clone()))
             .cloned();
+        let completes_termination = command.completes_idle_termination() && session.is_some();
         self.dispatch_io_command_to_session(command, session);
+        completes_termination
     }
 
     #[cfg(feature = "devtools")]
@@ -712,12 +717,13 @@ impl RendererInspectorClient {
         isolate: v8::UnsafeRawIsolatePtr,
         context_registry: DocumentInspectorContextRegistry,
         unique_id_state: Rc<RendererInspectorClientUniqueIdState>,
-        page_targets: RendererInspectorPageTargets,
+        #[cfg(feature = "devtools")] page_targets: RendererInspectorPageTargets,
     ) -> Self {
         Self {
             isolate: UnsafeCell::new(isolate),
             context_registry,
             unique_id_state,
+            #[cfg(feature = "devtools")]
             page_targets,
         }
     }
@@ -835,6 +841,7 @@ impl RendererInspectorIsolateBackend {
                     self.isolate_ptr,
                     self.context_registry.clone(),
                     self.unique_id_state.clone(),
+                    #[cfg(feature = "devtools")]
                     self.page_targets.clone(),
                 )));
             let mut isolate_ptr = self.isolate_ptr;
@@ -869,7 +876,10 @@ impl RendererInspectorIsolateBackend {
             main_ingress,
             io_ingress,
         );
-        let page_targets = RendererInspectorPageTargets::new(context_registry.clone());
+        let page_targets = RendererInspectorPageTargets::new(
+            #[cfg(feature = "devtools")]
+            context_registry.clone(),
+        );
         let session_executor = RendererInspectorSessionExecutorLocal::new(
             isolate_ptr,
             target.clone(),
@@ -1014,6 +1024,7 @@ impl RendererInspectorIsolateBackend {
         }
     }
 
+    #[cfg(any(test, feature = "devtools"))]
     pub(in crate::script_vm) fn default_context_registry_count(&self) -> usize {
         self.context_registry.len()
     }
@@ -1053,7 +1064,7 @@ impl RendererInspectorIsolateBackendHandle {
         );
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "devtools"))]
     pub(super) fn new_for_test() -> Self {
         let pause_bridge = RendererInspectorPauseBridge::default();
         let route_id = RendererInspectorSessionExecutorRouteId::new(1);
@@ -1078,7 +1089,7 @@ impl RendererInspectorIsolateBackendHandle {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "devtools"))]
     pub(super) fn is_same_backend(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.endpoint.identity, &other.endpoint.identity)
     }

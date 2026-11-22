@@ -549,12 +549,6 @@ pub struct CompletedRuntimeBindingPageCommandDispatch {
     completion: moli_core::page::CompletedPageCommand,
 }
 
-impl CompletedRuntimeBindingPageCommandDispatch {
-    pub(crate) fn renderer_output_predecessor(&self) -> Option<moli_core::RendererOutputFence> {
-        self.completion.renderer_output_predecessor()
-    }
-}
-
 pub struct CompletedRuntimeChildDefaultContextLookupDispatch {
     owner: CommandOwnerScope,
     completion: moli_core::page::CompletedPageCommand,
@@ -932,7 +926,7 @@ mod worker_cleanup;
 pub(crate) use replay::{
     CompletedRendererCallReplay, PendingRendererCallReplay, PreparedRendererNavigationFinish,
 };
-pub(crate) use worker_cleanup::{CompletedSessionWorkerCleanup, SessionWorkerCleanup};
+pub(crate) use worker_cleanup::SessionWorkerCleanup;
 mod runtime_dispatch;
 
 fn send_renderer_replacement_error(

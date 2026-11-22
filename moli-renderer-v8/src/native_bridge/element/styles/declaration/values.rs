@@ -29,8 +29,7 @@ use style::{properties::ComputedValues, servo_arc::Arc as ServoArc, stylesheets:
 
 use super::super::super::super::PageScriptHost;
 use super::observation::{
-    ComputedStyleRead, PreparedAnonymousStyleContext, RetainedStyleObservation,
-    StyleComputationContext, StyleObservation,
+    ComputedStyleRead, RetainedStyleObservation, StyleComputationContext, StyleObservation,
 };
 use super::sizing::{transform_reference_box_from_layout_snapshot, used_size_from_layout_snapshot};
 use super::style_world::{effective_raw_stylesheet_sources, stylesheet_source_document_for_handle};
@@ -293,19 +292,6 @@ impl<'a> ComputedStyleRead<'a> {
         self.stylo_style
             .as_ref()
             .is_some_and(StyloComputedStyleSnapshot::depends_on_size_container)
-    }
-
-    pub(crate) fn prepare_anonymous_style_context(
-        &self,
-    ) -> Option<PreparedAnonymousStyleContext<'a>> {
-        self.stylo_style.as_ref()?;
-        let read_document = self
-            .context
-            .resolved_read_document(self.runtime, self.handle);
-        Some(PreparedAnonymousStyleContext::new(
-            self.runtime,
-            read_document,
-        ))
     }
 
     fn property_in_prepared_scope(&self, property: &str) -> String {

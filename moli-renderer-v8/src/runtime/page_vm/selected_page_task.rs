@@ -20,6 +20,7 @@ impl PageVm {
     ) -> Result<()> {
         self.vm().resolve_unresolved_css_transition_frame_roots();
         match task {
+            #[cfg(any(test, feature = "devtools"))]
             RendererPageSchedulerTask::ActionWindow { deadline } => {
                 self.apply_selected_page_action_window_turn(deadline)
             }

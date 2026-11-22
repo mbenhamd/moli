@@ -3260,3 +3260,138 @@ async fn adapter_closes_provisional_load_window_and_delivers_in_the_same_turn() 
         })
         .await;
 }
+
+#[tokio::test]
+async fn attachment_churn_needs_no_browser_readiness_waiter_and_reclaims_native_cleanup() {
+    async fn command(
+        scheduler: &mut CdpScheduler,
+        value: serde_json::Value,
+    ) -> Vec<serde_json::Value> {
+        let command = moli_protocol::ParsedCdpCommand::parse_str(value.to_string()).unwrap();
+        let (mut step, permit, mut context) = scheduler.start_command_dispatch(&command);
+        loop {
+            match step {
+                super::CommandTaskStep::Pending(pending) => {
+                    let completed = pending.wait().await;
+                    step = scheduler
+                        .complete_pending_command_dispatch_with_context(completed, &mut context);
+                }
+                super::CommandTaskStep::Complete(output) => {
+                    let (messages, _, _, _, _, release) =
+                        output.with_output_release_permit(permit).into_parts();
+                    scheduler.finish_command_dispatch_output_flush(release);
+                    return messages.into_messages();
+                }
+            }
+        }
+    }
+
+    async fn detach(scheduler: &mut CdpScheduler, session: &str) {
+        let detached = command(
+            scheduler,
+            json!({"id":2,"method":"Target.detachFromTarget","params":{"sessionId":session}}),
+        )
+        .await;
+        assert!(
+            detached
+                .iter()
+                .any(|value| value["id"] == 2 && value.get("result").is_some()),
+            "detach: {detached:?}"
+        );
+    }
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (mut scheduler, mut receivers) =
+                CdpScheduler::new_with_initial_state_runtime_config(
+                    moli_protocol::CdpInitialStoragePartition::memory(),
+                    moli_core::runtime::NavigationRuntimeConfig::new(
+                        moli_fetch::FetchConfig::default(),
+                        moli_core::OptionalResourceFetchMask::NONE,
+                        true,
+                        moli_core::LayoutPolicy::OnDemand,
+                    ),
+                );
+            let context = AutomationContext {
+                protocol: FrontendProtocol::Cdp,
+                session_id: None,
+                target_id: Some(moli_protocol::DEFAULT_CDP_PAGE_TARGET_ID.into()),
+                browser_context_id: None,
+            };
+            scheduler
+                .execute_automation_command_with_protocol_messages(
+                    &mut receivers,
+                    AutomationCommand::Navigate(
+                        moli_protocol::automation::DevToolsNavigateCommand {
+                            context: context.clone(),
+                            url: "about:blank".to_owned(),
+                            referrer: None,
+                            wait: DevToolsNavigationWait::Load,
+                        },
+                    ),
+                )
+                .await
+                .result
+                .expect("fixture page installed");
+            while let Ok(completion) = receivers.protocol_work_completion_rx.try_recv() {
+                scheduler.complete_protocol_work(completion).unwrap();
+            }
+            assert!(scheduler.protocol_tasks.take_tasks().is_empty());
+
+            let root = command(
+                &mut scheduler,
+                json!({"id":99,"method":"Target.attachToTarget","params":{
+                    "targetId":moli_protocol::DEFAULT_CDP_PAGE_TARGET_ID,"flatten":true
+                }}),
+            )
+            .await;
+            let root_session =
+                root.iter().find(|value| value["id"] == 99).unwrap()["result"]["sessionId"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+            command(
+                &mut scheduler,
+                json!({"id":100,"sessionId":root_session,"method":"Page.enable"}),
+            )
+            .await;
+            for cycle in 0..64_u64 {
+                let attach = command(
+                    &mut scheduler,
+                    json!({"id":1,"method":"Target.attachToTarget","params":{
+                        "targetId":moli_protocol::DEFAULT_CDP_PAGE_TARGET_ID,"flatten":true
+                    }}),
+                )
+                .await;
+                let session = attach
+                    .iter()
+                    .find(|value| value["id"] == 1)
+                    .and_then(|value| value["result"]["sessionId"].as_str())
+                    .expect("attach acknowledged")
+                    .to_owned();
+                assert_eq!(
+                    scheduler.protocol_tasks.task_count(),
+                    0,
+                    "Browser attach owns no readiness observer"
+                );
+                // Only native cleanup is supervised. Real modal blocking is
+                // covered by the WebSocket lifecycle regression.
+                detach(&mut scheduler, &session).await;
+                assert_eq!(scheduler.protocol_tasks.task_count(), 1);
+                let completion = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    receivers.protocol_work_completion_rx.recv(),
+                )
+                .await
+                .expect("native cleanup completion")
+                .expect("live supervisor");
+                scheduler.complete_protocol_work(completion).unwrap();
+                assert_eq!(
+                    scheduler.protocol_tasks.task_count(),
+                    0,
+                    "no task survives cycle {cycle}"
+                );
+            }
+        })
+        .await;
+}

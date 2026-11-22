@@ -595,7 +595,7 @@ async fn service_worker_skip_waiting_posts_runtime_request() {
             | WorkerToParentMessage::ServiceWorkerClientsOpenWindow(_) => {}
             WorkerToParentMessage::ServiceWorkerClientsClaim { .. }
             | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. } => {}
-            WorkerToParentMessage::Error { message, .. } => {
+            WorkerToParentMessage::Error(WorkerErrorReport { ref message, .. }) => {
                 panic!("unexpected service worker error: {message}");
             }
             WorkerToParentMessage::SubresourceNetwork(_)
@@ -604,15 +604,16 @@ async fn service_worker_skip_waiting_posts_runtime_request() {
             | WorkerToParentMessage::Console(_)
             | WorkerToParentMessage::RuntimeInspectorMessages(_)
             | WorkerToParentMessage::Post(_)
-            | WorkerToParentMessage::RuntimeInspectorResponse(_)
             | WorkerToParentMessage::SharedWorkerClosed => {}
+            #[cfg(feature = "devtools")]
+            WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
         }
     }
     handle.terminate_and_join();
 }
 
 #[tokio::test]
-async fn service_worker_clients_claim_posts_runtime_request() {
+async fn service_worker_clients_claim_waits_for_runtime_result() {
     ensure_v8();
     let mut handle = spawn_service_worker_for_test(
         r#"
@@ -630,8 +631,8 @@ async fn service_worker_clients_claim_posts_runtime_request() {
         kind: ServiceWorkerLifecycleEventKind::Activate,
     });
 
-    let mut saw_clients_claim = false;
-    while !saw_clients_claim {
+    let mut acknowledged_claim = false;
+    loop {
         let message = timeout(TIMEOUT, handle.recv())
             .await
             .expect("timed out waiting for service worker clients.claim")
@@ -640,19 +641,33 @@ async fn service_worker_clients_claim_posts_runtime_request() {
             WorkerToParentMessage::ServiceWorkerClientsClaim {
                 registration_id,
                 version_id,
+                request_id,
             } => {
                 assert_eq!(
                     registration_id,
                     ServiceWorkerRegistrationId::from_u64_for_test(1)
                 );
                 assert_eq!(version_id, ServiceWorkerVersionId::from_u64_for_test(1));
-                saw_clients_claim = true;
+                assert!(!acknowledged_claim, "one claim request");
+                handle.dispatch_service_worker_client_query_result(
+                    crate::runtime::ServiceWorkerClientQueryResult {
+                        request_id,
+                        clients: Vec::new(),
+                    },
+                );
+                acknowledged_claim = true;
             }
             WorkerToParentMessage::ServiceWorkerLifecycleCompleted(completion) => {
+                assert!(
+                    acknowledged_claim,
+                    "activation must wait for the claim reply"
+                );
                 assert_eq!(
                     completion.event_id,
                     ServiceWorkerEventId::from_u64_for_worker(6)
                 );
+                assert_eq!(completion.result, Ok(()));
+                break;
             }
             WorkerToParentMessage::ServiceWorkerFetchCompleted(_)
             | WorkerToParentMessage::ServiceWorkerFetchStreamStarted(_)
@@ -680,7 +695,7 @@ async fn service_worker_clients_claim_posts_runtime_request() {
             | WorkerToParentMessage::ServiceWorkerClientFocus(_)
             | WorkerToParentMessage::ServiceWorkerClientsOpenWindow(_) => {}
             WorkerToParentMessage::ServiceWorkerSkipWaiting { .. } => {}
-            WorkerToParentMessage::Error { message, .. } => {
+            WorkerToParentMessage::Error(WorkerErrorReport { ref message, .. }) => {
                 panic!("unexpected service worker error: {message}");
             }
             WorkerToParentMessage::SubresourceNetwork(_)
@@ -690,8 +705,9 @@ async fn service_worker_clients_claim_posts_runtime_request() {
             | WorkerToParentMessage::RuntimeInspectorMessages(_)
             | WorkerToParentMessage::Post(_)
             | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-            | WorkerToParentMessage::RuntimeInspectorResponse(_)
             | WorkerToParentMessage::SharedWorkerClosed => {}
+            #[cfg(feature = "devtools")]
+            WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
         }
     }
     handle.terminate_and_join();
@@ -919,7 +935,7 @@ async fn service_worker_clients_match_all_and_get_resolve_from_parent_query_resu
                 assert_eq!(completion.result, Ok(()));
                 break;
             }
-            WorkerToParentMessage::Error { message, .. } => {
+            WorkerToParentMessage::Error(WorkerErrorReport { ref message, .. }) => {
                 panic!("unexpected service worker error: {message}");
             }
             WorkerToParentMessage::ServiceWorkerFetchCompleted(_)
@@ -954,8 +970,9 @@ async fn service_worker_clients_match_all_and_get_resolve_from_parent_query_resu
             | WorkerToParentMessage::RuntimeInspectorMessages(_)
             | WorkerToParentMessage::Post(_)
             | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-            | WorkerToParentMessage::RuntimeInspectorResponse(_)
             | WorkerToParentMessage::SharedWorkerClosed => {}
+            #[cfg(feature = "devtools")]
+            WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
         }
     }
     handle.terminate_and_join();
@@ -1133,13 +1150,14 @@ async fn assert_service_worker_base_client_query_shape(
                 assert_eq!(completion.result, Ok(()));
                 break;
             }
-            WorkerToParentMessage::Error { message, .. } => {
+            WorkerToParentMessage::Error(WorkerErrorReport { ref message, .. }) => {
                 panic!("unexpected service worker error: {message}");
             }
             WorkerToParentMessage::Console(_)
             | WorkerToParentMessage::RuntimeInspectorMessages(_)
-            | WorkerToParentMessage::RuntimeInspectorResponse(_)
             | WorkerToParentMessage::SharedWorkerClosed => {}
+            #[cfg(feature = "devtools")]
+            WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
             other => panic!("unexpected worker message: {other:?}"),
         }
     }
@@ -1278,7 +1296,7 @@ self.addEventListener("message", event => {
                 assert_eq!(completion.result, Ok(()));
                 break;
             }
-            WorkerToParentMessage::Error { message, .. } => {
+            WorkerToParentMessage::Error(WorkerErrorReport { ref message, .. }) => {
                 panic!("unexpected service worker error: {message}");
             }
             WorkerToParentMessage::ServiceWorkerLifecycleCompleted(_)
@@ -1312,8 +1330,9 @@ self.addEventListener("message", event => {
             | WorkerToParentMessage::RuntimeInspectorMessages(_)
             | WorkerToParentMessage::Post(_)
             | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-            | WorkerToParentMessage::RuntimeInspectorResponse(_)
             | WorkerToParentMessage::SharedWorkerClosed => {}
+            #[cfg(feature = "devtools")]
+            WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
         }
     }
     handle.terminate_and_join();
@@ -1416,7 +1435,7 @@ self.addEventListener("message", event => {
                 assert_eq!(completion.result, Ok(()));
                 break;
             }
-            WorkerToParentMessage::Error { message, .. } => {
+            WorkerToParentMessage::Error(WorkerErrorReport { ref message, .. }) => {
                 panic!("unexpected service worker error: {message}");
             }
             WorkerToParentMessage::ServiceWorkerLifecycleCompleted(_)
@@ -1452,8 +1471,9 @@ self.addEventListener("message", event => {
             | WorkerToParentMessage::RuntimeInspectorMessages(_)
             | WorkerToParentMessage::Post(_)
             | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-            | WorkerToParentMessage::RuntimeInspectorResponse(_)
             | WorkerToParentMessage::SharedWorkerClosed => {}
+            #[cfg(feature = "devtools")]
+            WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
         }
     }
     handle.terminate_and_join();

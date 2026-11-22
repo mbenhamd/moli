@@ -16,7 +16,6 @@ use mouse_boundary::dispatch_mouse_boundary_events;
 use touch_tap::dispatch_touch_tap_activation;
 
 use super::input_dispatch_outcome;
-use super::input_helpers::{mouse_button_mask, single_changed_mouse_button};
 use super::inspector::{
     current_selection_state, is_space_key, key_target_info, keyboard_event_target,
     option_is_disabled, radio_group_members,
@@ -2566,7 +2565,7 @@ impl ScriptVm {
                 let _ = cache_input_files_from_selected_files(scope, input, &selected_files);
             }
             if changed {
-                if let Some(event) = construct_simple_event(scope, "input", true, false, false) {
+                if let Some(event) = construct_simple_event(scope, "input", true, false, true) {
                     let _ = dispatch_public_event(scope, runtime_ptr, handle, event);
                 }
                 if let Some(event) = construct_simple_event(scope, "change", true, false, false) {
@@ -2930,7 +2929,7 @@ impl ScriptVm {
                     );
                 }
                 let _ = runtime.set_select_explicit_none(scope, runtime_ptr, handle, false);
-                if let Some(event) = construct_simple_event(scope, "input", true, false, false) {
+                if let Some(event) = construct_simple_event(scope, "input", true, false, true) {
                     let _ = dispatch_public_event(scope, runtime_ptr, handle, event);
                 }
                 if let Some(event) = construct_simple_event(scope, "change", true, false, false) {
@@ -3132,4 +3131,34 @@ fn key_and_editing_targets(
         .or_else(|| runtime.document_focus_fallback_handle())
         .unwrap_or(handle);
     Some((handle, editing_handle))
+}
+
+fn mouse_button_mask(button: i32) -> i32 {
+    match button {
+        0 => 1,
+        1 => 4,
+        2 => 2,
+        3 => 8,
+        4 => 16,
+        _ => 0,
+    }
+}
+
+fn mouse_button_from_mask(mask: i32) -> Option<i32> {
+    match mask {
+        1 => Some(0),
+        4 => Some(1),
+        2 => Some(2),
+        8 => Some(3),
+        16 => Some(4),
+        _ => None,
+    }
+}
+
+fn single_changed_mouse_button(mask: i32) -> Option<i32> {
+    if mask.count_ones() == 1 {
+        mouse_button_from_mask(mask)
+    } else {
+        None
+    }
 }

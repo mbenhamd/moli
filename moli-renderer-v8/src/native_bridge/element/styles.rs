@@ -13,6 +13,10 @@ mod accessors;
 mod ancestry;
 mod computed_names;
 mod declaration;
+#[cfg(feature = "devtools")]
+mod marker_snapshot;
+#[cfg(feature = "devtools")]
+pub(crate) use marker_snapshot::marker_hosts_for_document_snapshot;
 mod methods;
 mod named;
 #[cfg(test)]
@@ -22,7 +26,7 @@ pub(crate) use accessors::{
     style_css_text_getter_callback, style_css_text_setter_callback, style_length_getter_callback,
 };
 pub(in crate::native_bridge::element) use declaration::style_base_url;
-pub(crate) use declaration::{ComputedStyleRead, PreparedAnonymousStyleContext, StyleObservation};
+pub(crate) use declaration::{ComputedStyleRead, StyleObservation};
 use declaration::{
     StyleComputationContext, style_property_count_with_context, style_property_value_with_context,
     style_runtime_and_handle_from_object,
@@ -619,7 +623,7 @@ pub(crate) fn computed_style_export_values_for_document_snapshot(
                 values: vec![String::new(); properties.len()],
                 ..Default::default()
             },
-            Some(DocumentSnapshotStyleComputation::Available(_)) => {
+            Some(DocumentSnapshotStyleComputation::Available { .. }) => {
                 available.push((values.len(), handle));
                 ComputedStyleExportValues::default()
             }
@@ -651,7 +655,7 @@ pub(crate) fn computed_style_properties_for_inspector_handle(
     if !node.is_element() {
         return Some(Vec::new());
     }
-    let Some(DocumentSnapshotStyleComputation::Available(context)) =
+    let Some(DocumentSnapshotStyleComputation::Available { context }) =
         style_computation_context_for_document_snapshot(host, handle)
     else {
         // Chromium resolves the node identity independently from whether the
@@ -663,88 +667,15 @@ pub(crate) fn computed_style_properties_for_inspector_handle(
     Some(ComputedStyleRead::new_with_context(host, handle, context).properties())
 }
 
-pub(crate) fn marker_pseudo_element_is_generated_for_document_snapshot(
-    host: &PageScriptHost,
-    handle: DomHandle,
-) -> Option<bool> {
-    let DocumentSnapshotStyleComputation::Available(context) =
-        style_computation_context_for_document_snapshot(host, handle)?
-    else {
-        return Some(false);
-    };
-    let style = ComputedStyleRead::new_with_context(host, handle, context);
-    if !style
-        .property("display")
-        .split_ascii_whitespace()
-        .any(|component| component.eq_ignore_ascii_case("list-item"))
-    {
-        return Some(false);
-    }
-    if document_snapshot_has_display_none_ancestor(host, handle, context) {
-        return Some(false);
-    }
-
-    let content = style.raw_pseudo_property("marker", "content");
-    if content.eq_ignore_ascii_case("none") {
-        return Some(false);
-    }
-    if !content.is_empty() && !content.eq_ignore_ascii_case("normal") {
-        return Some(true);
-    }
-
-    Some(
-        !style
-            .property("list-style-type")
-            .eq_ignore_ascii_case("none")
-            || !style
-                .property("list-style-image")
-                .eq_ignore_ascii_case("none"),
-    )
-}
-
-fn document_snapshot_has_display_none_ancestor(
-    host: &PageScriptHost,
-    handle: DomHandle,
-    context: StyleComputationContext,
-) -> bool {
-    let mut current = document_snapshot_flat_tree_parent(host, handle);
-    while let Some(candidate) = current {
-        if host
-            .dom_host()
-            .node(candidate)
-            .is_some_and(crate::dom::native::Node::is_element)
-            && ComputedStyleRead::new_with_context(host, candidate, context).property("display")
-                == "none"
-        {
-            return true;
-        }
-        current = document_snapshot_flat_tree_parent(host, candidate);
-    }
-    false
-}
-
-fn document_snapshot_flat_tree_parent(
-    host: &PageScriptHost,
-    handle: DomHandle,
-) -> Option<DomHandle> {
-    if let Some(slot) = host.dom_host().assigned_slot_for_node(handle) {
-        return Some(slot);
-    }
-    let parent = host
-        .dom_host()
-        .node(handle)
-        .and_then(crate::dom::native::Node::parent_node)?;
-    if host.dom_host().is_shadow_root(parent) {
-        return host.dom_host().shadow_root_host(parent);
-    }
-    Some(parent)
-}
-
 enum DocumentSnapshotStyleComputation {
-    Available(StyleComputationContext),
+    Available {
+        #[cfg(feature = "devtools")]
+        context: StyleComputationContext,
+    },
     HiddenChildFrame,
 }
 
+#[cfg(feature = "devtools")]
 fn style_computation_context_for_document_snapshot(
     host: &PageScriptHost,
     handle: DomHandle,
@@ -768,18 +699,21 @@ fn document_snapshot_style_context(
         if !target_is_in_flat_tree(handle) {
             return None;
         }
-        Some(DocumentSnapshotStyleComputation::Available(
-            StyleComputationContext::new(host.style_viewport()).with_read_document(Some(document)),
-        ))
+        Some(DocumentSnapshotStyleComputation::Available {
+            #[cfg(feature = "devtools")]
+            context: StyleComputationContext::new(host.style_viewport())
+                .with_read_document(Some(document)),
+        })
     } else {
         let frame_handle = host.child_browsing_context_host_for_document_handle(document)?;
         if style_property_value(host, frame_handle, StyleMode::Computed, "display") == "none" {
             return Some(DocumentSnapshotStyleComputation::HiddenChildFrame);
         }
-        Some(DocumentSnapshotStyleComputation::Available(
-            StyleComputationContext::new(style_viewport_for_document(host, document))
+        Some(DocumentSnapshotStyleComputation::Available {
+            #[cfg(feature = "devtools")]
+            context: StyleComputationContext::new(style_viewport_for_document(host, document))
                 .with_read_document(Some(document)),
-        ))
+        })
     }
 }
 

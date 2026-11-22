@@ -1,6 +1,6 @@
 use crate::helpers::svg_number_list;
 use crate::matrix::SvgMatrixComponents;
-use crate::path::path_geometry;
+use crate::path::parse_path_data;
 use kurbo::{
     Arc, BezPath, Circle, Ellipse, Line, ParamCurve, ParamCurveArclen, ParamCurveExtrema,
     ParamCurveNearest, PathEl, PathSeg, Point, Rect, Shape,
@@ -329,9 +329,7 @@ pub fn is_point_in_shape_hit_area(
             )
         }
         SvgGeometryElement::Path { d } => {
-            let Some(path) = path_geometry(d) else {
-                return Ok(false);
-            };
+            let path = parse_path_data(d);
             if path.elements().is_empty() || outside(path.control_box()) {
                 return Ok(false);
             }
@@ -670,7 +668,7 @@ fn geometry_path(element: &SvgGeometryElement) -> Option<BezPath> {
             path.line_to((*x2, *y2));
             Some(path)
         }
-        SvgGeometryElement::Path { d } => path_geometry(d),
+        SvgGeometryElement::Path { d } => Some(parse_path_data(d)),
         SvgGeometryElement::Polygon { points } => poly_points_geometry_path(points, true),
         SvgGeometryElement::Polyline { points } => poly_points_geometry_path(points, false),
         SvgGeometryElement::Rect {

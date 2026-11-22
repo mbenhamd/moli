@@ -2,9 +2,26 @@ use super::*;
 use crate::web_api_interfaces;
 use crate::webidl;
 use moli_selector::StyleRuleNamespaceContext;
-use moli_webapi_declare::WebApiObject;
-
-pub const CSS_STYLE_SHEET_RULES_SLOT: &str = "__moliCssStyleSheetRules";
+pub use moli_webapi::css_stylesheet::{
+    CSS_AT_RULE_TYPE_SLOT, CSS_FONT_FEATURE_VALUES_RULE_FONT_FAMILY_SLOT,
+    CSS_KEYFRAME_RULE_KEY_TEXT_SLOT, CSS_KEYFRAME_RULE_STYLE_TEXT_SLOT, CSS_MARGIN_RULE_NAME_SLOT,
+    CSS_MARGIN_RULE_STYLE_TEXT_SLOT, CSS_MEDIA_LIST_OWNER_KIND_SLOT,
+    CSS_MEDIA_LIST_OWNER_RULE_SLOT, CSS_NESTED_DECLARATIONS_STYLE_TEXT_SLOT,
+    CSS_PROPERTY_RULE_INHERITS_SLOT, CSS_PROPERTY_RULE_INITIAL_VALUE_SLOT,
+    CSS_PROPERTY_RULE_NAME_SLOT, CSS_PROPERTY_RULE_SYNTAX_SLOT, CSS_RULE_CONTAINER_RULE_TYPE,
+    CSS_RULE_COUNTER_STYLE_RULE_TYPE, CSS_RULE_DETACHED_SNAPSHOT_TEXT_SLOT,
+    CSS_RULE_FONT_FACE_RULE_TYPE, CSS_RULE_FONT_FEATURE_VALUES_RULE_TYPE,
+    CSS_RULE_IMPORT_RULE_TYPE, CSS_RULE_KEYFRAME_RULE_TYPE, CSS_RULE_KEYFRAMES_RULE_TYPE,
+    CSS_RULE_LIST_LENGTH_SLOT, CSS_RULE_MARGIN_RULE_TYPE, CSS_RULE_MEDIA_RULE_TYPE,
+    CSS_RULE_NAMESPACE_RULE_TYPE, CSS_RULE_PAGE_RULE_TYPE, CSS_RULE_PARENT_RULE_SLOT,
+    CSS_RULE_PARENT_STYLE_SHEET_SLOT, CSS_RULE_STYLE_RULE_TYPE, CSS_RULE_SUPPORTS_RULE_TYPE,
+    CSS_RULE_UNKNOWN_RULE_TYPE, CSS_STYLE_RULE_SELECTOR_TEXT_SLOT, CSS_STYLE_RULE_STYLE_TEXT_SLOT,
+    CSS_STYLE_SHEET_RULES_SLOT, CssAtRuleDeclaration, CssFontFeatureValuesRuleDeclaration,
+    CssKeyframeRuleDeclaration, CssMarginRuleDeclaration, CssNestedDeclarationsRuleDeclaration,
+    CssPropertyRuleDeclaration, CssRuleConstantsDeclaration, CssRuleListDeclaration,
+    CssStyleRuleDeclaration, CssStyleSheetDeclaration, MediaListDeclaration,
+    STYLE_SHEET_LIST_LENGTH_SLOT, StyleSheetListDeclaration,
+};
 
 pub const CSS_STYLE_SHEET_OWNER_RULE_SLOT: &str = "__moliCssStyleSheetOwnerRule";
 
@@ -27,8 +44,6 @@ pub const CSS_STYLE_SHEET_ID_SLOT: &str = "__moliCssStyleSheetId";
 
 pub const CSS_STYLE_SHEET_WRAPPER_LEASE_ID_SLOT: &str = "__moliCssStyleSheetWrapperLeaseId";
 
-pub const CSS_RULE_DETACHED_SNAPSHOT_TEXT_SLOT: &str = "__moliCssRuleDetachedSnapshotText";
-
 pub const CSS_RULE_DETACHED_CHILD_SNAPSHOTS_SLOT: &str = "__moliCssRuleDetachedChildSnapshots";
 
 pub const CSS_RULE_NATIVE_WRAPPER_LEASE_ID_SLOT: &str = "__moliCssRuleNativeWrapperLeaseId";
@@ -38,12 +53,6 @@ pub const CSS_RULE_STYLO_DECLARATION_BLOCK_ID_SLOT: &str = "__moliCssRuleStyloDe
 pub const CSS_RULE_STYLO_DECLARATION_BLOCK_VALID_SLOT: &str =
     "__moliCssRuleStyloDeclarationBlockValid";
 
-pub const CSS_AT_RULE_TYPE_SLOT: &str = "__moliCssRuleType";
-
-pub const CSS_RULE_PARENT_RULE_SLOT: &str = "__moliCssRuleParentRule";
-
-pub const CSS_RULE_PARENT_STYLE_SHEET_SLOT: &str = "__moliCssRuleParentStyleSheet";
-
 pub const CSS_AT_RULE_NESTED_STYLE_TEXT_SLOT: &str = "__moliCssAtRuleNestedStyleText";
 
 pub const CSS_AT_RULE_NESTED_RULES_SLOT: &str = "__moliCssAtRuleNestedRules";
@@ -52,28 +61,13 @@ pub const CSS_AT_RULE_STYLE_OBJECT_SLOT: &str = "__moliCssAtRuleStyleObject";
 
 pub const CSS_KEYFRAMES_RULE_RULES_SLOT: &str = "__moliCssKeyframesRuleRules";
 
-pub const CSS_KEYFRAME_RULE_KEY_TEXT_SLOT: &str = "__moliCssKeyframeRuleKeyText";
-
-pub const CSS_KEYFRAME_RULE_STYLE_TEXT_SLOT: &str = "__moliCssKeyframeRuleStyleText";
-
 pub const CSS_KEYFRAME_RULE_STYLE_OBJECT_SLOT: &str = "__moliCssKeyframeRuleStyleObject";
 
-pub const CSS_MARGIN_RULE_NAME_SLOT: &str = "__moliCssMarginRuleName";
-
-pub const CSS_MARGIN_RULE_STYLE_TEXT_SLOT: &str = "__moliCssMarginRuleStyleText";
-
 pub const CSS_MARGIN_RULE_STYLE_OBJECT_SLOT: &str = "__moliCssMarginRuleStyleObject";
-
-pub const CSS_STYLE_RULE_SELECTOR_TEXT_SLOT: &str = "__moliCssStyleRuleSelectorText";
-
-pub const CSS_STYLE_RULE_STYLE_TEXT_SLOT: &str = "__moliCssStyleRuleStyleText";
 
 pub const CSS_STYLE_RULE_STYLE_OBJECT_SLOT: &str = "__moliCssStyleRuleStyleObject";
 
 pub const CSS_STYLE_RULE_NESTED_RULES_SLOT: &str = "__moliCssStyleRuleNestedRules";
-
-pub const CSS_FONT_FEATURE_VALUES_RULE_FONT_FAMILY_SLOT: &str =
-    "__moliCssFontFeatureValuesRuleFontFamily";
 
 pub const CSS_FONT_FEATURE_VALUES_RULE_ANNOTATION_SLOT: &str =
     "__moliCssFontFeatureValuesRuleAnnotation";
@@ -97,18 +91,6 @@ pub const CSS_FONT_FEATURE_VALUES_MAP_OWNER_RULE_SLOT: &str =
 
 pub const CSS_FONT_FEATURE_VALUES_MAP_GROUP_SLOT: &str = "__moliCssFontFeatureValuesMapGroup";
 
-pub const CSS_FONT_FEATURE_VALUES_MAP_BACKING_SLOT: &str = "__moliCssFontFeatureValuesMapBacking";
-
-pub const CSS_PROPERTY_RULE_NAME_SLOT: &str = "__moliCssPropertyRuleName";
-
-pub const CSS_PROPERTY_RULE_SYNTAX_SLOT: &str = "__moliCssPropertyRuleSyntax";
-
-pub const CSS_PROPERTY_RULE_INHERITS_SLOT: &str = "__moliCssPropertyRuleInherits";
-
-pub const CSS_PROPERTY_RULE_INITIAL_VALUE_SLOT: &str = "__moliCssPropertyRuleInitialValue";
-
-pub const CSS_NESTED_DECLARATIONS_STYLE_TEXT_SLOT: &str = "__moliCssNestedDeclarationsStyleText";
-
 pub const CSS_NESTED_DECLARATIONS_STYLE_OBJECT_SLOT: &str =
     "__moliCssNestedDeclarationsStyleObject";
 
@@ -120,15 +102,7 @@ pub const CSS_IMPORT_RULE_MEDIA_LIST_SLOT: &str = "__moliCssImportRuleMediaList"
 
 pub const CSS_IMPORT_RULE_STYLE_SHEET_SLOT: &str = "__moliCssImportRuleStyleSheet";
 
-pub const CSS_MEDIA_LIST_OWNER_RULE_SLOT: &str = "__moliCssMediaListOwnerRule";
-
-pub const CSS_MEDIA_LIST_OWNER_KIND_SLOT: &str = "__moliCssMediaListOwnerKind";
-
 pub const CSS_MEDIA_LIST_LENGTH_SLOT: &str = "__moliCssMediaListLength";
-
-pub const STYLE_SHEET_LIST_LENGTH_SLOT: &str = "__moliStyleSheetListLength";
-
-pub const CSS_RULE_LIST_LENGTH_SLOT: &str = "__moliCssRuleListLength";
 
 pub const CSS_RULE_LIST_MATERIALIZED_ITEMS_SLOT: &str = "__moliCssRuleListMaterializedItems";
 
@@ -146,34 +120,6 @@ pub const CSS_MEDIA_LIST_OWNER_STYLE_SHEET: &str = "styleSheet";
 
 pub const ADOPTED_STYLE_SHEETS_ARRAY_TRACKED_SHEETS_SLOT: &str =
     "__moliAdoptedStyleSheetsArrayTrackedSheets";
-
-pub const CSS_RULE_UNKNOWN_RULE_TYPE: u32 = 0;
-
-pub const CSS_RULE_STYLE_RULE_TYPE: u32 = 1;
-
-pub const CSS_RULE_IMPORT_RULE_TYPE: u32 = 3;
-
-pub const CSS_RULE_MEDIA_RULE_TYPE: u32 = 4;
-
-pub const CSS_RULE_FONT_FACE_RULE_TYPE: u32 = 5;
-
-pub const CSS_RULE_PAGE_RULE_TYPE: u32 = 6;
-
-pub const CSS_RULE_KEYFRAMES_RULE_TYPE: u32 = 7;
-
-pub const CSS_RULE_KEYFRAME_RULE_TYPE: u32 = 8;
-
-pub const CSS_RULE_MARGIN_RULE_TYPE: u32 = 9;
-
-pub const CSS_RULE_NAMESPACE_RULE_TYPE: u32 = 10;
-
-pub const CSS_RULE_COUNTER_STYLE_RULE_TYPE: u32 = 11;
-
-pub const CSS_RULE_SUPPORTS_RULE_TYPE: u32 = 12;
-
-pub const CSS_RULE_FONT_FEATURE_VALUES_RULE_TYPE: u32 = 14;
-
-pub const CSS_RULE_CONTAINER_RULE_TYPE: u32 = 17;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CssAtRuleKind {
@@ -217,202 +163,6 @@ pub enum CssRulePdbDeclarationKind {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::CSSRule)]
-pub struct CssRuleConstantsDeclaration {
-    #[webapi(constant = "UNKNOWN_RULE", value = CSS_RULE_UNKNOWN_RULE_TYPE)]
-    pub unknown_rule: (),
-
-    #[webapi(constant = "STYLE_RULE", value = CSS_RULE_STYLE_RULE_TYPE)]
-    pub style_rule: (),
-
-    #[webapi(constant = "CHARSET_RULE", value = 2u32)]
-    pub charset_rule: (),
-
-    #[webapi(constant = "IMPORT_RULE", value = CSS_RULE_IMPORT_RULE_TYPE)]
-    pub import_rule: (),
-
-    #[webapi(constant = "MEDIA_RULE", value = CSS_RULE_MEDIA_RULE_TYPE)]
-    pub media_rule: (),
-
-    #[webapi(constant = "FONT_FACE_RULE", value = CSS_RULE_FONT_FACE_RULE_TYPE)]
-    pub font_face_rule: (),
-
-    #[webapi(constant = "PAGE_RULE", value = CSS_RULE_PAGE_RULE_TYPE)]
-    pub page_rule: (),
-
-    #[webapi(constant = "KEYFRAMES_RULE", value = CSS_RULE_KEYFRAMES_RULE_TYPE)]
-    pub keyframes_rule: (),
-
-    #[webapi(constant = "KEYFRAME_RULE", value = CSS_RULE_KEYFRAME_RULE_TYPE)]
-    pub keyframe_rule: (),
-
-    #[webapi(constant = "MARGIN_RULE", value = CSS_RULE_MARGIN_RULE_TYPE)]
-    pub margin_rule: (),
-
-    #[webapi(constant = "NAMESPACE_RULE", value = CSS_RULE_NAMESPACE_RULE_TYPE)]
-    pub namespace_rule: (),
-
-    #[webapi(
-        constant = "COUNTER_STYLE_RULE",
-        value = CSS_RULE_COUNTER_STYLE_RULE_TYPE
-    )]
-    pub counter_style_rule: (),
-
-    #[webapi(constant = "SUPPORTS_RULE", value = CSS_RULE_SUPPORTS_RULE_TYPE)]
-    pub supports_rule: (),
-
-    #[webapi(
-        constant = "FONT_FEATURE_VALUES_RULE",
-        value = CSS_RULE_FONT_FEATURE_VALUES_RULE_TYPE
-    )]
-    pub font_feature_values_rule: (),
-
-    #[webapi(constant = "VIEWPORT_RULE", value = 15u32)]
-    pub viewport_rule: (),
-
-    #[webapi(constant = "REGION_STYLE_RULE", value = 16u32)]
-    pub region_style_rule: (),
-
-    #[webapi(constant = "CONTAINER_RULE", value = CSS_RULE_CONTAINER_RULE_TYPE)]
-    pub container_rule: (),
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::CSSStyleSheet)]
-pub struct CssStyleSheetDeclaration<'scope> {
-    #[webapi(slot = CSS_STYLE_SHEET_RULES_SLOT)]
-    pub rules: v8::Local<'scope, v8::Value>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::StyleSheetList)]
-pub struct StyleSheetListDeclaration {
-    #[webapi(slot = STYLE_SHEET_LIST_LENGTH_SLOT, init = 0)]
-    pub length: (),
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::CSSRuleList)]
-pub struct CssRuleListDeclaration {
-    #[webapi(slot = CSS_RULE_LIST_LENGTH_SLOT)]
-    pub length: u32,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::CSSRule)]
-pub struct CssAtRuleDeclaration<'scope> {
-    #[webapi(slot = CSS_RULE_DETACHED_SNAPSHOT_TEXT_SLOT)]
-    pub css_text: String,
-    #[webapi(slot = CSS_AT_RULE_TYPE_SLOT)]
-    pub rule_type: u32,
-    #[webapi(slot = CSS_RULE_PARENT_RULE_SLOT)]
-    pub parent_rule: Option<v8::Local<'scope, v8::Object>>,
-    #[webapi(slot = CSS_RULE_PARENT_STYLE_SHEET_SLOT)]
-    pub parent_style_sheet: Option<v8::Local<'scope, v8::Object>>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::CSSMarginRule)]
-pub struct CssMarginRuleDeclaration<'scope> {
-    #[webapi(slot = CSS_RULE_DETACHED_SNAPSHOT_TEXT_SLOT)]
-    pub css_text: String,
-    #[webapi(slot = CSS_MARGIN_RULE_NAME_SLOT)]
-    pub name: String,
-    #[webapi(slot = CSS_MARGIN_RULE_STYLE_TEXT_SLOT)]
-    pub style_text: String,
-    #[webapi(slot = CSS_RULE_PARENT_RULE_SLOT)]
-    pub parent_rule: Option<v8::Local<'scope, v8::Object>>,
-    #[webapi(slot = CSS_RULE_PARENT_STYLE_SHEET_SLOT)]
-    pub parent_style_sheet: Option<v8::Local<'scope, v8::Object>>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::CSSKeyframeRule)]
-pub struct CssKeyframeRuleDeclaration<'scope> {
-    #[webapi(slot = CSS_RULE_DETACHED_SNAPSHOT_TEXT_SLOT)]
-    pub css_text: String,
-    #[webapi(slot = CSS_KEYFRAME_RULE_KEY_TEXT_SLOT)]
-    pub key_text: String,
-    #[webapi(slot = CSS_KEYFRAME_RULE_STYLE_TEXT_SLOT)]
-    pub style_text: String,
-    #[webapi(slot = CSS_RULE_PARENT_RULE_SLOT)]
-    pub parent_rule: Option<v8::Local<'scope, v8::Object>>,
-    #[webapi(slot = CSS_RULE_PARENT_STYLE_SHEET_SLOT)]
-    pub parent_style_sheet: Option<v8::Local<'scope, v8::Object>>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::CSSFontFeatureValuesRule)]
-pub struct CssFontFeatureValuesRuleDeclaration<'scope> {
-    #[webapi(slot = CSS_RULE_DETACHED_SNAPSHOT_TEXT_SLOT)]
-    pub css_text: String,
-    #[webapi(slot = CSS_FONT_FEATURE_VALUES_RULE_FONT_FAMILY_SLOT)]
-    pub font_family: String,
-    #[webapi(slot = CSS_RULE_PARENT_RULE_SLOT)]
-    pub parent_rule: Option<v8::Local<'scope, v8::Object>>,
-    #[webapi(slot = CSS_RULE_PARENT_STYLE_SHEET_SLOT)]
-    pub parent_style_sheet: Option<v8::Local<'scope, v8::Object>>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::CSSPropertyRule)]
-pub struct CssPropertyRuleDeclaration<'scope> {
-    #[webapi(slot = CSS_RULE_DETACHED_SNAPSHOT_TEXT_SLOT)]
-    pub css_text: String,
-    #[webapi(slot = CSS_AT_RULE_TYPE_SLOT)]
-    pub rule_type: u32,
-    #[webapi(slot = CSS_PROPERTY_RULE_NAME_SLOT)]
-    pub name: String,
-    #[webapi(slot = CSS_PROPERTY_RULE_SYNTAX_SLOT)]
-    pub syntax: String,
-    #[webapi(slot = CSS_PROPERTY_RULE_INHERITS_SLOT)]
-    pub inherits: bool,
-    #[webapi(slot = CSS_PROPERTY_RULE_INITIAL_VALUE_SLOT)]
-    pub initial_value: Option<String>,
-    #[webapi(slot = CSS_RULE_PARENT_RULE_SLOT)]
-    pub parent_rule: Option<v8::Local<'scope, v8::Object>>,
-    #[webapi(slot = CSS_RULE_PARENT_STYLE_SHEET_SLOT)]
-    pub parent_style_sheet: Option<v8::Local<'scope, v8::Object>>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::CSSStyleRule)]
-pub struct CssStyleRuleDeclaration<'scope> {
-    #[webapi(slot = CSS_RULE_DETACHED_SNAPSHOT_TEXT_SLOT)]
-    pub css_text: String,
-    #[webapi(slot = CSS_STYLE_RULE_SELECTOR_TEXT_SLOT)]
-    pub selector_text: String,
-    #[webapi(slot = CSS_STYLE_RULE_STYLE_TEXT_SLOT)]
-    pub style_text: String,
-    #[webapi(slot = CSS_RULE_PARENT_RULE_SLOT)]
-    pub parent_rule: Option<v8::Local<'scope, v8::Object>>,
-    #[webapi(slot = CSS_RULE_PARENT_STYLE_SHEET_SLOT)]
-    pub parent_style_sheet: Option<v8::Local<'scope, v8::Object>>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::CSSNestedDeclarations)]
-pub struct CssNestedDeclarationsRuleDeclaration<'scope> {
-    #[webapi(slot = CSS_RULE_DETACHED_SNAPSHOT_TEXT_SLOT)]
-    pub css_text: String,
-    #[webapi(slot = CSS_NESTED_DECLARATIONS_STYLE_TEXT_SLOT)]
-    pub style_text: String,
-    #[webapi(slot = CSS_RULE_PARENT_RULE_SLOT)]
-    pub parent_rule: v8::Local<'scope, v8::Object>,
-    #[webapi(slot = CSS_RULE_PARENT_STYLE_SHEET_SLOT)]
-    pub parent_style_sheet: Option<v8::Local<'scope, v8::Object>>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::MediaList)]
-pub struct MediaListDeclaration<'scope> {
-    #[webapi(slot = CSS_MEDIA_LIST_OWNER_RULE_SLOT)]
-    pub owner: v8::Local<'scope, v8::Object>,
-    #[webapi(slot = CSS_MEDIA_LIST_OWNER_KIND_SLOT)]
-    pub owner_kind: &'static str,
-}
-
-#[derive(WebApiFunctionTemplate)]
 #[webapi(interface = web_api_interfaces::StyleSheet, enumerable)]
 pub struct StyleSheetBasePrototypeDeclaration {
     #[webapi(accessor_property, getter = css_style_sheet_type_getter_callback)]
@@ -452,7 +202,7 @@ pub struct CssStyleSheetPrototypeDeclaration {
     pub insert_rule: (),
     #[webapi(method, length = 1, callback = css_style_sheet_delete_rule_callback)]
     pub delete_rule: (),
-    #[webapi(method, length = 1, callback = css_style_sheet_replace_callback)]
+    #[webapi(method, length = 1, returns_promise, callback = css_style_sheet_replace_callback)]
     pub replace: (),
     #[webapi(method, length = 1, callback = css_style_sheet_replace_sync_callback)]
     pub replace_sync: (),
