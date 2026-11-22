@@ -1516,10 +1516,15 @@ async fn child_frame_classic_and_module_scripts_pause_as_script_and_use_fulfille
         .as_str()
         .expect("classic script pause carries a networkId")
         .to_owned();
-    wait_until_message(&mut ctx, "SID-1", "classic child script terminal", |message| {
-        message["method"] == "Network.loadingFinished"
-            && message["params"]["requestId"] == network_id
-    })
+    wait_until_message(
+        &mut ctx,
+        "SID-1",
+        "classic child script terminal",
+        |message| {
+            message["method"] == "Network.loadingFinished"
+                && message["params"]["requestId"] == network_id
+        },
+    )
     .await;
     let classic_url = format!("http://{addr}/c.js");
     let starts = ctx

@@ -1333,6 +1333,7 @@ document.body.innerHTML = '<div id=g><i>1</i><i>2</i><i>3</i></div><div id=w></d
     .expect("live computed Grid track fixture should run");
 }
 
+#[cfg(feature = "devtools")]
 #[tokio::test(flavor = "current_thread")]
 async fn live_geometry_hover_lays_out_only_when_a_hover_rule_restyles() {
     run_page_vm_async_test(async move {
