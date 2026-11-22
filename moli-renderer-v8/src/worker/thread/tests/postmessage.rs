@@ -1965,9 +1965,11 @@ async fn worker_error_propagation() {
         .expect("timed out")
         .expect("channel closed");
     match msg {
-        WorkerToParentMessage::Error {
-            message, filename, ..
-        } => {
+        WorkerToParentMessage::Error(WorkerErrorReport {
+            ref message,
+            ref filename,
+            ..
+        }) => {
             assert!(message.contains("worker error"), "got: {message}");
             assert_eq!(filename, "test://error");
         }
@@ -2401,6 +2403,34 @@ async fn worker_offscreen_canvas_exposes_webgl_identity_consistently() {
         expect_post_json(msg),
         r#"{"offscreenCanvas":"function","offscreen2d":"function","webgl":"function","webgl2":"function","extensionGlobal":"undefined","contextInstance":true,"twoDimensionalInstance":true,"vendor":"","renderer":""}"#
     );
+}
+
+#[tokio::test]
+async fn worker_offscreen_canvas_path2d_paints_pixels() {
+    ensure_v8();
+    let mut worker = spawn_worker(
+        r#"
+        const path = new Path2D();
+        path.moveTo(2,4);
+        path.lineTo(10,4);
+        const ctx = new OffscreenCanvas(12,12).getContext('2d');
+        ctx.lineWidth = 2;
+        ctx.stroke(path);
+        postMessage([
+            path instanceof Path2D,
+            ctx.getImageData(6,4,1,1).data[3],
+            ctx.getImageData(6,8,1,1).data[3]
+        ]);
+        close();
+        "#
+        .into(),
+        "test://worker_offscreen_canvas_path2d".into(),
+    );
+    let message = timeout(TIMEOUT, worker.recv())
+        .await
+        .expect("timed out")
+        .expect("channel closed");
+    assert_eq!(expect_post_json(message), "[true,255,0]");
 }
 
 #[tokio::test]

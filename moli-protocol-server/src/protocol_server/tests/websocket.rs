@@ -3,11 +3,15 @@ use super::*;
 mod browser_close;
 mod captured_document_navigation;
 mod child_navigation_wait;
+mod child_script_network_progress;
+mod child_script_redirect_extra_info;
+mod child_script_service_worker;
 mod concurrent_frontends;
 mod dialog_sessions;
 mod inspector_json;
 mod navigation_debugger;
 mod prepared_document_actions;
+mod shared_script_cancellation;
 mod target_message;
 
 fn assert_cdp_event_precedes_response(

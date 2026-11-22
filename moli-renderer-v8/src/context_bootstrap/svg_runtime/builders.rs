@@ -2,251 +2,16 @@ use super::callbacks::*;
 use super::*;
 use crate::util::serialize_v8_iter_array;
 use crate::web_api_interfaces;
+pub(super) use moli_webapi::svg_values::{
+    SvgAngleObjectDeclaration, SvgAnimatedAngleObjectDeclaration,
+    SvgAnimatedBooleanObjectDeclaration, SvgAnimatedLengthListObjectDeclaration,
+    SvgAnimatedLengthObjectDeclaration, SvgAnimatedNumberListObjectDeclaration,
+    SvgAnimatedRectObjectDeclaration, SvgAnimatedStringObjectDeclaration,
+    SvgAnimatedTransformListObjectDeclaration, SvgLengthObjectDeclaration,
+    SvgStringListObjectDeclaration, build_svg_animated_enumeration, build_svg_animated_integer,
+    build_svg_animated_number, build_svg_number,
+};
 use moli_webapi_declare::WebApiObject;
-
-#[derive(WebApiObject)]
-#[webapi(
-    interface = web_api_interfaces::SVGAnimatedString,
-    own_to_string_tag = "SVGAnimatedString"
-)]
-struct SvgAnimatedStringObjectDeclaration {
-    #[webapi(slot = SVG_ANIMATED_STRING_BASE_VAL_SLOT)]
-    base_val: String,
-    #[webapi(slot = SVG_ANIMATED_STRING_ANIM_VAL_SLOT)]
-    anim_val: String,
-}
-
-#[derive(WebApiObject)]
-#[webapi(
-    interface = web_api_interfaces::SVGAnimatedBoolean,
-    own_to_string_tag = "SVGAnimatedBoolean"
-)]
-struct SvgAnimatedBooleanObjectDeclaration {
-    #[webapi(slot = SVG_ANIMATED_BOOLEAN_BASE_VAL_SLOT)]
-    base_val: bool,
-    #[webapi(slot = SVG_ANIMATED_BOOLEAN_ANIM_VAL_SLOT)]
-    anim_val: bool,
-}
-
-#[derive(WebApiObject)]
-#[webapi(
-    interface = web_api_interfaces::SVGAnimatedNumber,
-    own_to_string_tag = "SVGAnimatedNumber"
-)]
-struct SvgAnimatedNumberObjectDeclaration {
-    #[webapi(slot = SVG_ANIMATED_NUMBER_BASE_VAL_SLOT)]
-    base_val: f64,
-    #[webapi(slot = SVG_ANIMATED_NUMBER_ANIM_VAL_SLOT)]
-    anim_val: f64,
-}
-
-#[derive(WebApiObject)]
-#[webapi(
-    interface = web_api_interfaces::SVGAnimatedInteger,
-    own_to_string_tag = "SVGAnimatedInteger"
-)]
-struct SvgAnimatedIntegerObjectDeclaration {
-    #[webapi(slot = SVG_ANIMATED_INTEGER_BASE_VAL_SLOT)]
-    base_val: i32,
-    #[webapi(slot = SVG_ANIMATED_INTEGER_ANIM_VAL_SLOT)]
-    anim_val: i32,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::SVGNumber, own_to_string_tag = "SVGNumber")]
-struct SvgNumberObjectDeclaration {
-    #[webapi(slot = SVG_NUMBER_VALUE_SLOT)]
-    value: f64,
-}
-
-#[derive(WebApiObject)]
-#[webapi(
-    interface = web_api_interfaces::SVGAnimatedEnumeration,
-    own_to_string_tag = "SVGAnimatedEnumeration"
-)]
-struct SvgAnimatedEnumerationObjectDeclaration {
-    #[webapi(slot = SVG_ANIMATED_ENUMERATION_BASE_VAL_SLOT)]
-    base_val: u32,
-    #[webapi(slot = SVG_ANIMATED_ENUMERATION_ANIM_VAL_SLOT)]
-    anim_val: u32,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::SVGMatrix, own_to_string_tag = "SVGMatrix")]
-struct SvgMatrixObjectDeclaration {
-    #[webapi(slot = SVG_MATRIX_A_SLOT)]
-    a: f64,
-    #[webapi(slot = SVG_MATRIX_B_SLOT)]
-    b: f64,
-    #[webapi(slot = SVG_MATRIX_C_SLOT)]
-    c: f64,
-    #[webapi(slot = SVG_MATRIX_D_SLOT)]
-    d: f64,
-    #[webapi(slot = SVG_MATRIX_E_SLOT)]
-    e: f64,
-    #[webapi(slot = SVG_MATRIX_F_SLOT)]
-    f: f64,
-    #[webapi(method, callback = svg_matrix_multiply_callback, length = 1)]
-    multiply: (),
-    #[webapi(method, callback = svg_matrix_inverse_callback, length = 0)]
-    inverse: (),
-    #[webapi(method, callback = svg_matrix_translate_callback, length = 2)]
-    translate: (),
-    #[webapi(method, callback = svg_matrix_scale_callback, length = 1)]
-    scale: (),
-    #[webapi(
-        method,
-        callback = svg_matrix_scale_non_uniform_callback,
-        length = 2
-    )]
-    scale_non_uniform: (),
-    #[webapi(method, callback = svg_matrix_rotate_callback, length = 1)]
-    rotate: (),
-    #[webapi(
-        method,
-        callback = svg_matrix_rotate_from_vector_callback,
-        length = 2
-    )]
-    rotate_from_vector: (),
-    #[webapi(method, callback = svg_matrix_flip_x_callback, length = 0)]
-    flip_x: (),
-    #[webapi(method, callback = svg_matrix_flip_y_callback, length = 0)]
-    flip_y: (),
-    #[webapi(method, callback = svg_matrix_skew_x_callback, length = 1)]
-    skew_x: (),
-    #[webapi(method, callback = svg_matrix_skew_y_callback, length = 1)]
-    skew_y: (),
-}
-
-#[derive(WebApiObject)]
-#[webapi(
-    interface = web_api_interfaces::SVGAnimatedLength,
-    fallback_to_string_tag = "SVGAnimatedLength"
-)]
-struct SvgAnimatedLengthObjectDeclaration<'scope> {
-    #[webapi(slot = SVG_ANIMATED_LENGTH_BASE_VAL_SLOT)]
-    base_val: v8::Local<'scope, v8::Object>,
-    #[webapi(slot = SVG_ANIMATED_LENGTH_ANIM_VAL_SLOT)]
-    anim_val: v8::Local<'scope, v8::Object>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(
-    interface = web_api_interfaces::SVGAnimatedAngle,
-    fallback_to_string_tag = "SVGAnimatedAngle"
-)]
-struct SvgAnimatedAngleObjectDeclaration<'scope> {
-    #[webapi(slot = SVG_ANIMATED_ANGLE_BASE_VAL_SLOT)]
-    base_val: v8::Local<'scope, v8::Object>,
-    #[webapi(slot = SVG_ANIMATED_ANGLE_ANIM_VAL_SLOT)]
-    anim_val: v8::Local<'scope, v8::Object>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(
-    interface = web_api_interfaces::SVGAnimatedRect,
-    fallback_to_string_tag = "SVGAnimatedRect"
-)]
-struct SvgAnimatedRectObjectDeclaration<'scope> {
-    #[webapi(slot = SVG_ANIMATED_RECT_BASE_VAL_SLOT)]
-    base_val: v8::Local<'scope, v8::Object>,
-    #[webapi(slot = SVG_ANIMATED_RECT_ANIM_VAL_SLOT)]
-    anim_val: v8::Local<'scope, v8::Object>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(
-    interface = web_api_interfaces::SVGPreserveAspectRatio,
-    fallback_to_string_tag = "SVGPreserveAspectRatio"
-)]
-struct SvgPreserveAspectRatioObjectDeclaration<'scope> {
-    #[webapi(slot = SVG_PRESERVE_ASPECT_RATIO_ALIGN_SLOT)]
-    align: u32,
-    #[webapi(slot = SVG_PRESERVE_ASPECT_RATIO_MEET_OR_SLICE_SLOT)]
-    meet_or_slice: u32,
-    #[webapi(slot = SVG_PRESERVE_ASPECT_RATIO_OWNER_ELEMENT_SLOT)]
-    owner: v8::Local<'scope, v8::Object>,
-    #[webapi(slot = SVG_PRESERVE_ASPECT_RATIO_READ_ONLY_SLOT)]
-    read_only: bool,
-}
-
-#[derive(WebApiObject)]
-#[webapi(
-    interface = web_api_interfaces::SVGAnimatedPreserveAspectRatio,
-    fallback_to_string_tag = "SVGAnimatedPreserveAspectRatio"
-)]
-struct SvgAnimatedPreserveAspectRatioObjectDeclaration<'scope> {
-    #[webapi(slot = SVG_ANIMATED_PRESERVE_ASPECT_RATIO_BASE_VAL_SLOT)]
-    base_val: v8::Local<'scope, v8::Object>,
-    #[webapi(slot = SVG_ANIMATED_PRESERVE_ASPECT_RATIO_ANIM_VAL_SLOT)]
-    anim_val: v8::Local<'scope, v8::Object>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::SVGLength, fallback_to_string_tag = "SVGLength")]
-struct SvgLengthObjectDeclaration {
-    #[webapi(slot = SVG_LENGTH_UNIT_TYPE_SLOT)]
-    unit_type: u32,
-    #[webapi(slot = SVG_LENGTH_UNIT_SUFFIX_SLOT)]
-    unit_suffix: String,
-    #[webapi(slot = SVG_LENGTH_VALUE_SLOT)]
-    value: f64,
-    #[webapi(slot = SVG_LENGTH_VALUE_IN_SPECIFIED_UNITS_SLOT)]
-    value_in_specified_units: f64,
-    #[webapi(slot = SVG_LENGTH_VALUE_AS_STRING_SLOT)]
-    value_as_string: String,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::SVGAngle, fallback_to_string_tag = "SVGAngle")]
-struct SvgAngleObjectDeclaration {
-    #[webapi(slot = SVG_ANGLE_UNIT_TYPE_SLOT)]
-    unit_type: u32,
-    #[webapi(slot = SVG_ANGLE_VALUE_SLOT)]
-    value: f64,
-    #[webapi(slot = SVG_ANGLE_VALUE_IN_SPECIFIED_UNITS_SLOT)]
-    value_in_specified_units: f64,
-    #[webapi(slot = SVG_ANGLE_VALUE_AS_STRING_SLOT)]
-    value_as_string: String,
-    #[webapi(slot = SVG_ANGLE_READ_ONLY_SLOT)]
-    read_only: bool,
-}
-
-#[derive(WebApiObject)]
-#[webapi(
-    interface = web_api_interfaces::SVGAnimatedLengthList,
-    own_to_string_tag = "SVGAnimatedLengthList"
-)]
-struct SvgAnimatedLengthListObjectDeclaration<'scope> {
-    #[webapi(slot = SVG_ANIMATED_LENGTH_LIST_BASE_VAL_SLOT)]
-    base_val: v8::Local<'scope, v8::Object>,
-    #[webapi(slot = SVG_ANIMATED_LENGTH_LIST_ANIM_VAL_SLOT)]
-    anim_val: v8::Local<'scope, v8::Object>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(
-    interface = web_api_interfaces::SVGAnimatedNumberList,
-    own_to_string_tag = "SVGAnimatedNumberList"
-)]
-struct SvgAnimatedNumberListObjectDeclaration<'scope> {
-    #[webapi(slot = SVG_ANIMATED_NUMBER_LIST_BASE_VAL_SLOT)]
-    base_val: v8::Local<'scope, v8::Object>,
-    #[webapi(slot = SVG_ANIMATED_NUMBER_LIST_ANIM_VAL_SLOT)]
-    anim_val: v8::Local<'scope, v8::Object>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(
-    interface = web_api_interfaces::SVGAnimatedTransformList,
-    own_to_string_tag = "SVGAnimatedTransformList"
-)]
-struct SvgAnimatedTransformListObjectDeclaration<'scope> {
-    #[webapi(slot = SVG_ANIMATED_TRANSFORM_LIST_BASE_VAL_SLOT)]
-    base_val: v8::Local<'scope, v8::Object>,
-    #[webapi(slot = SVG_ANIMATED_TRANSFORM_LIST_ANIM_VAL_SLOT)]
-    anim_val: v8::Local<'scope, v8::Object>,
-}
 
 #[derive(WebApiObject)]
 #[webapi(interface = web_api_interfaces::SVGLengthList, own_to_string_tag = "SVGLengthList")]
@@ -327,13 +92,6 @@ struct SvgPointListObjectDeclaration<'scope> {
     remove_item: (),
     #[webapi(method, callback = svg_point_list_append_item_callback, length = 1)]
     append_item: (),
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::SVGStringList, own_to_string_tag = "SVGStringList")]
-struct SvgStringListObjectDeclaration<'scope> {
-    #[webapi(slot = SVG_STRING_LIST_ITEMS_SLOT)]
-    items: Vec<v8::Local<'scope, v8::Value>>,
 }
 
 #[derive(WebApiObject)]
@@ -584,15 +342,6 @@ pub(super) fn build_svg_animated_transform_list_for_attribute<'s>(
     object
 }
 
-pub(super) fn build_svg_animated_number<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    value: f64,
-) -> v8::Local<'s, v8::Object> {
-    SvgAnimatedNumberObjectDeclaration::new(value, value)
-        .bind(scope)
-        .expect("SVGAnimatedNumber declaration should bind")
-}
-
 pub(super) fn build_svg_animated_number_for_attribute<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     owner: v8::Local<'s, v8::Object>,
@@ -634,15 +383,6 @@ pub(super) fn svg_animated_number_property_for_object<'s>(
 
 pub(super) fn svg_animated_number_cache_slot(property: SvgAnimatedNumberProperty) -> String {
     format!("__moliSvgAnimatedNumberProperty{}", property.index)
-}
-
-pub(super) fn build_svg_animated_integer<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    value: i32,
-) -> v8::Local<'s, v8::Object> {
-    SvgAnimatedIntegerObjectDeclaration::new(value, value)
-        .bind(scope)
-        .expect("SVGAnimatedInteger declaration should bind")
 }
 
 pub(super) fn build_svg_animated_integer_for_property<'s>(
@@ -791,24 +531,6 @@ fn parse_svg_integer_pair(value: &str) -> Option<(i32, i32)> {
         None => first,
     };
     values.next().is_none().then_some((first, second))
-}
-
-pub(super) fn build_svg_number<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    value: f64,
-) -> v8::Local<'s, v8::Object> {
-    SvgNumberObjectDeclaration::new(value)
-        .bind(scope)
-        .expect("SVGNumber declaration should bind")
-}
-
-pub(super) fn build_svg_animated_enumeration<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    value: u32,
-) -> v8::Local<'s, v8::Object> {
-    SvgAnimatedEnumerationObjectDeclaration::new(value, value)
-        .bind(scope)
-        .expect("SVGAnimatedEnumeration declaration should bind")
 }
 
 pub(super) fn build_svg_animated_enumeration_for_property<'s>(
@@ -1207,22 +929,6 @@ pub(super) fn build_svg_transform<'s>(
     .expect("SVGTransform declaration should bind")
 }
 
-pub(super) fn build_svg_matrix<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    components: SvgMatrixComponents,
-) -> v8::Local<'s, v8::Object> {
-    SvgMatrixObjectDeclaration::new(
-        components.a,
-        components.b,
-        components.c,
-        components.d,
-        components.e,
-        components.f,
-    )
-    .bind(scope)
-    .expect("SVGMatrix declaration should bind")
-}
-
 pub(super) fn build_svg_animated_length_for_attribute<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     owner: v8::Local<'s, v8::Object>,
@@ -1289,15 +995,12 @@ pub(super) fn build_svg_animated_preserve_aspect_ratio<'s>(
     owner: v8::Local<'s, v8::Object>,
 ) -> v8::Local<'s, v8::Object> {
     let [align, meet_or_slice] = svg_preserve_aspect_ratio_attribute_value(scope, owner);
-    let base_val = SvgPreserveAspectRatioObjectDeclaration::new(align, meet_or_slice, owner, false)
-        .bind(scope)
-        .expect("SVGPreserveAspectRatio base value declaration should bind");
-    let anim_val = SvgPreserveAspectRatioObjectDeclaration::new(align, meet_or_slice, owner, true)
-        .bind(scope)
-        .expect("SVGPreserveAspectRatio animated value declaration should bind");
-    SvgAnimatedPreserveAspectRatioObjectDeclaration::new(base_val, anim_val)
-        .bind(scope)
-        .expect("SVGAnimatedPreserveAspectRatio declaration should bind")
+    moli_webapi::svg_values::new_svg_animated_preserve_aspect_ratio(
+        scope,
+        owner,
+        align,
+        meet_or_slice,
+    )
 }
 
 pub(super) fn build_svg_angle<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Object> {
@@ -1790,29 +1493,6 @@ pub(super) fn svg_list_item_or_throw<'s>(
             None
         }
     }
-}
-
-pub(super) fn svg_matrix_value_or_throw<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    value: v8::Local<'s, v8::Value>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let object = v8::Local::<v8::Object>::try_from(value).ok();
-    if let Some(object) = object
-        && web_api_interfaces::SVGMatrix::is_instance(scope, object)
-    {
-        return Some(object);
-    }
-    webidl::throw_type_error(scope, "Argument 1 can not be converted to SVGMatrix");
-    None
-}
-
-pub(super) fn cloned_svg_matrix_value_or_throw<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    value: v8::Local<'s, v8::Value>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let matrix = svg_matrix_value_or_throw(scope, value)?;
-    let components = svg_matrix_components(scope, matrix);
-    Some(build_svg_matrix(scope, components))
 }
 
 pub(super) fn svg_value_list_item_or_throw<'s>(
@@ -2468,20 +2148,6 @@ pub(super) fn svg_number_slot<'s>(
     get_private_value(scope, object, slot).and_then(|value| value.number_value(scope))
 }
 
-pub(super) fn svg_matrix_components<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    object: v8::Local<'s, v8::Object>,
-) -> SvgMatrixComponents {
-    SvgMatrixComponents {
-        a: svg_number_slot(scope, object, SVG_MATRIX_A_SLOT).unwrap_or(1.0),
-        b: svg_number_slot(scope, object, SVG_MATRIX_B_SLOT).unwrap_or(0.0),
-        c: svg_number_slot(scope, object, SVG_MATRIX_C_SLOT).unwrap_or(0.0),
-        d: svg_number_slot(scope, object, SVG_MATRIX_D_SLOT).unwrap_or(1.0),
-        e: svg_number_slot(scope, object, SVG_MATRIX_E_SLOT).unwrap_or(0.0),
-        f: svg_number_slot(scope, object, SVG_MATRIX_F_SLOT).unwrap_or(0.0),
-    }
-}
-
 pub(super) fn svg_transform_matrix_components<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     transform: v8::Local<'s, v8::Object>,
@@ -2490,25 +2156,6 @@ pub(super) fn svg_transform_matrix_components<'s>(
         .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
         .map(|matrix| svg_matrix_components(scope, matrix))
         .unwrap_or_else(SvgMatrixComponents::identity)
-}
-
-pub(super) fn svg_matrix_slot(name: &str) -> Option<&'static str> {
-    match name {
-        "a" => Some(SVG_MATRIX_A_SLOT),
-        "b" => Some(SVG_MATRIX_B_SLOT),
-        "c" => Some(SVG_MATRIX_C_SLOT),
-        "d" => Some(SVG_MATRIX_D_SLOT),
-        "e" => Some(SVG_MATRIX_E_SLOT),
-        "f" => Some(SVG_MATRIX_F_SLOT),
-        _ => None,
-    }
-}
-
-pub(super) fn svg_matrix_default(slot: &str) -> f64 {
-    match slot {
-        SVG_MATRIX_A_SLOT | SVG_MATRIX_D_SLOT => 1.0,
-        _ => 0.0,
-    }
 }
 
 pub(super) fn svg_animated_length_attribute_slot(name: &str) -> &'static str {

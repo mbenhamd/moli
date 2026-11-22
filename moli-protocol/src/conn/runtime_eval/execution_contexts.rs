@@ -87,6 +87,36 @@ pub(crate) async fn runtime_realm_inventory_using(
 }
 
 impl CdpConnection {
+    pub(crate) fn prepare_page_inspector_session_retirements(
+        &mut self,
+        owner: &CommandOwnerScope,
+    ) -> Vec<moli_core::page::RendererRuntimeInspectorSessionRetirement> {
+        let session_id = self.target_renderer_runtime_inspector_session_id_for_owner(owner);
+        let prepared = self
+            .runtime_session_owner_slot_for_owner(owner)
+            .and_then(|slot| slot.page_slot().prepared_document_inspector_endpoint());
+        let installed = self
+            .runtime_session_owner_slot_mut_for_owner(owner)
+            .and_then(|slot| slot.loaded_page_mut())
+            .map(|page| {
+                (
+                    page.inspector_endpoint().agent(),
+                    page.prepare_runtime_inspector_session_retirement(session_id.clone()),
+                )
+            });
+        let mut retirements = Vec::new();
+        let installed_agent = installed.as_ref().map(|(agent, _)| *agent);
+        if let Some((_, retirement)) = installed {
+            retirements.push(retirement);
+        }
+        if let Some(endpoint) = prepared
+            && Some(endpoint.agent()) != installed_agent
+        {
+            retirements.push(endpoint.prepare_runtime_inspector_session_retirement(session_id));
+        }
+        retirements
+    }
+
     pub(crate) fn start_child_default_execution_context_lookup_for_owner(
         &mut self,
         owner: &CommandOwnerScope,
@@ -128,6 +158,34 @@ impl CdpConnection {
             operation: "runtime binding install",
             pending,
         })
+    }
+
+    /// Covers implicit Primary access and bindings installed after a navigation
+    /// took its restore snapshot. Admission uses the exact native agent,
+    /// including its interval before Page adoption.
+    pub(crate) fn initialize_runtime_inspector_endpoint_for_owner(
+        &mut self,
+        owner: &CommandOwnerScope,
+    ) {
+        if self
+            .target_devtools_session_state_for_owner(owner)
+            .is_some_and(|state| state.is_closing())
+        {
+            return;
+        }
+        let inspector_session_id =
+            self.target_renderer_runtime_inspector_session_id_for_owner(owner);
+        let endpoint = self
+            .runtime_session_owner_slot_for_owner(owner)
+            .and_then(|slot| slot.current_inspector_endpoint());
+        let Some(endpoint) = endpoint else {
+            return;
+        };
+        if endpoint.has_session(inspector_session_id.as_deref()) {
+            return;
+        }
+        let bindings = self.target_runtime_bindings_for_current_inspector_owner(owner);
+        endpoint.connect(inspector_session_id, &bindings);
     }
 
     pub(crate) fn start_apply_stored_runtime_bindings_for_owner(

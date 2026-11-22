@@ -261,6 +261,22 @@ fn initial_navigation_request(request: Request) -> Request {
 }
 
 impl Browser {
+    /// Subscribe to future diagnostics from this Browser's Pages and Workers.
+    ///
+    /// The first call creates this Browser's only subscription. Subsequent
+    /// calls return `None`. Closing or dropping the receiver permanently stops
+    /// diagnostics for this Browser. Consume events regularly to limit the
+    /// memory used by the unbounded queue.
+    ///
+    /// Runtime exception diagnostics describe completed reports, including
+    /// reports canceled by event handlers. A momentarily empty queue can
+    /// still have reports in flight.
+    pub fn subscribe_diagnostics(&self) -> Option<crate::DiagnosticsSubscription> {
+        self.js_runtime
+            .browser_context_runtime()
+            .subscribe_diagnostics()
+    }
+
     fn resource_request_client(&self) -> ResourceRequestClient {
         ResourceRequestClient::from_browser_resource_runtime_with_page_network_policy(
             self.resource_runtime.clone(),

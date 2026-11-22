@@ -155,7 +155,7 @@ pub(crate) use css_state::{
 pub(in crate::native_bridge) use custom_element_options::validate_registry_association_for_document;
 pub(in crate::native_bridge::document) use custom_element_options::{
     CreateElementOptions, DocumentCreateElementArgs, DocumentCreateElementNsArgs,
-    parse_import_node_options,
+    flatten_create_element_options, initialize_non_html_element, parse_import_node_options,
 };
 pub(super) use detached_install::install_detached_bridge_methods;
 pub(in crate::native_bridge) use detached_install::{
@@ -269,7 +269,9 @@ pub(in crate::native_bridge) use detached_surface::{
 pub(in crate::native_bridge::document) use detached_surface::{
     set_detached_document_character_set, set_detached_document_content_type,
 };
-pub(crate) use hit_test::{install_caret_position_template_bindings, svg_content_hits};
+pub(crate) use hit_test::install_caret_position_template_bindings;
+#[cfg(any(test, feature = "devtools"))]
+pub(crate) use hit_test::svg_content_hits;
 pub(super) use hit_test::{
     node_document_caret_position_from_point_callback, node_document_element_from_point_callback,
     node_document_elements_from_point_callback, node_shadow_root_element_from_point_callback,

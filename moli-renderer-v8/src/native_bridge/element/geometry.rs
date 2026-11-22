@@ -1,4 +1,5 @@
 mod client_rect;
+#[cfg(any(test, feature = "devtools"))]
 mod hit_test;
 mod metrics;
 mod mock;

@@ -1,6 +1,9 @@
 use super::{OwnerDispatchScope, PageScriptHost};
 use crate::{
-    context_bootstrap::{error_event_handler_arguments, event_is_error_event},
+    context_bootstrap::{
+        error_event_handler_arguments, event_is_error_event,
+        event_target_dispatch::{begin_at_target_dispatch, finish_dispatch},
+    },
     document_runtime::DomHandle,
     document_runtime::EventTargetHandle,
     exception_reporting::invoke_event_handler,
@@ -404,6 +407,26 @@ impl PageScriptHost {
         let previous_active_child_window =
             enter_child_window_event_dispatch(scope, target.child_handle());
         self.push_child_subresource_request_scope(target.child_handle());
+        let status = self.invoke_child_window_event_listeners(
+            scope,
+            target,
+            event_type,
+            event,
+            dispatch_slots,
+        );
+        self.pop_child_subresource_request_scope();
+        restore_child_window_event_dispatch(scope, previous_active_child_window);
+        status
+    }
+
+    fn invoke_child_window_event_listeners<'s>(
+        &mut self,
+        scope: &mut v8::PinScope<'s, '_>,
+        target: ChildWindowEventTarget,
+        event_type: &str,
+        event: v8::Local<'s, v8::Object>,
+        dispatch_slots: Vec<ChildWindowEventDispatchSlot>,
+    ) -> DispatchStatus {
         let mut status = DispatchStatus::Continue;
         for slot in dispatch_slots {
             let Some(ready) = self.prepare_child_window_event_listener_invocation(
@@ -451,8 +474,6 @@ impl PageScriptHost {
                 status = DispatchStatus::StopPropagation;
             }
         }
-        self.pop_child_subresource_request_scope();
-        restore_child_window_event_dispatch(scope, previous_active_child_window);
         status
     }
 
@@ -476,69 +497,29 @@ impl PageScriptHost {
         self.push_child_subresource_request_scope(handle);
         let target = if event_type == "unload" {
             self.child_browsing_context_document_wrapper(scope, handle)
-                .map(Into::into)
-                .unwrap_or_else(|| window.into())
+                .unwrap_or(window)
         } else {
-            window.into()
+            window
         };
-        let _ = crate::context_bootstrap::event_backing(scope, event).set(
-            scope,
-            v8str(scope, "target").into(),
-            target,
-        );
-        let _ = crate::context_bootstrap::event_backing(scope, event).set(
-            scope,
-            v8str(scope, "currentTarget").into(),
-            window.into(),
-        );
-
-        if event_type == "load" {
-            install_child_body_load_attribute_handler_if_needed(scope, self, handle);
-        }
-
-        if event_type == "storage" {
-            dispatch_child_body_storage_attribute(scope, window, event);
-        }
-
-        let dispatch_slots = self.child_window_event_dispatch_slots(handle, event_type, None, None);
-        for slot in dispatch_slots {
-            let Some(ready) = self
-                .prepare_child_window_event_listener_invocation(scope, handle, event_type, slot)
-            else {
-                if let Some(callback_id) = self.remove_child_window_event_registration_by_id(
-                    handle,
-                    event_type,
-                    slot.registration_id,
-                ) {
-                    self.unregister_abort_target_listener(callback_id);
-                    self.release_event_callback(callback_id);
-                }
-                continue;
-            };
-            if ready.once
-                && let Some(callback_id) = self.remove_child_window_event_registration_by_id(
-                    handle,
-                    event_type,
-                    ready.registration_id,
-                )
-            {
-                self.unregister_abort_target_listener(callback_id);
-                self.release_event_callback(callback_id);
+        if begin_at_target_dispatch(scope, target, window, event) {
+            if event_type == "load" {
+                install_child_body_load_attribute_handler_if_needed(scope, self, handle);
             }
-            let registration_kind = ready.registration_kind;
-            let (invoked, returned) =
-                self.invoke_ready_child_window_event_listener(scope, ready, event_type, event);
-            if registration_kind == ChildWindowEventRegistrationKind::EventHandlerProperty {
-                apply_child_window_event_handler_return(scope, event_type, event, returned);
+
+            if event_type == "storage" {
+                dispatch_child_body_storage_attribute(scope, window, event);
             }
-            let status = event_dispatch_status(scope, event);
-            if !invoked
-                || !self.child_window_event_target_is_current(dispatch_target)
-                || status == DispatchStatus::StopImmediate
-            {
-                break;
-            }
+
+            let slots = self.child_window_event_dispatch_slots(handle, event_type, None, None);
+            self.invoke_child_window_event_listeners(
+                scope,
+                dispatch_target,
+                event_type,
+                event,
+                slots,
+            );
         }
+        finish_dispatch(scope, event);
         self.pop_child_subresource_request_scope();
         restore_child_window_event_dispatch(scope, previous_active_child_window);
     }

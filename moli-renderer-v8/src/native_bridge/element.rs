@@ -115,6 +115,8 @@ pub(crate) use forms::{
 pub(in crate::native_bridge) use forms::{form_named_control_matches, form_named_image_matches};
 #[cfg(test)]
 pub(crate) use styles::iframe_width_attribute_viewport_width;
+#[cfg(feature = "devtools")]
+pub(crate) use styles::marker_hosts_for_document_snapshot;
 pub(crate) use styles::{
     ComputedStyleTargetContext, STYLE_DECLARATION_FORCED_EMPTY_COMPUTED_SLOT,
     STYLE_DECLARATION_PSEUDO_ELEMENT_SLOT, STYLE_DECLARATION_READ_DOCUMENT_SLOT,
@@ -122,8 +124,7 @@ pub(crate) use styles::{
     STYLE_DECLARATION_TARGET_CONTEXT_EPOCH_SLOT, STYLE_DECLARATION_TARGET_EMPTY_COMPUTED_SLOT,
     STYLE_DECLARATION_VIEWPORT_HEIGHT_SLOT, STYLE_DECLARATION_VIEWPORT_WIDTH_SLOT,
     StyleObservation, computed_style_target_context, iframe_handle_viewport,
-    iframe_handle_viewport_for_script, marker_pseudo_element_is_generated_for_document_snapshot,
-    style_viewport_for_document,
+    iframe_handle_viewport_for_script, style_viewport_for_document,
 };
 mod stylesheets;
 mod template_install;
@@ -175,9 +176,9 @@ pub(crate) use styles::computed_style_properties_for_inspector_handle;
 #[cfg(feature = "devtools")]
 pub(crate) use styles::computed_style_property_values_for_document_snapshot;
 pub(crate) use styles::{
-    ComputedStyleExportValues, ComputedStyleRead, PreparedAnonymousStyleContext, StyleMode,
-    active_css_animation_transform_value, computed_style_export_values_for_document_snapshot,
-    css_animation_start_applies, cssom_style_entry_requires_structured_parser,
+    ComputedStyleExportValues, ComputedStyleRead, StyleMode, active_css_animation_transform_value,
+    computed_style_export_values_for_document_snapshot, css_animation_start_applies,
+    cssom_style_entry_requires_structured_parser,
     cssom_style_property_mutation_affected_names_with_pdb,
     cssom_style_property_mutation_cleanup_names_with_pdb,
     cssom_style_property_uses_preferred_pdb_supplemental_entries,
@@ -301,24 +302,22 @@ use event_handlers::{
     body_onload_setter_function, body_onmessageerror_getter_function,
     body_onmessageerror_setter_function,
 };
-pub(in crate::native_bridge::element) use events::construct_event;
 pub(crate) use events::construct_focus_event;
 #[cfg(any(test, feature = "devtools"))]
 pub(crate) use events::construct_keyboard_event;
 use events::{ClickEventSource, construct_click_event};
 pub(crate) use events::{
     InputEventCoordinates, NodePublicEventDispatchOutcome, TextEditInputType,
-    construct_command_event, construct_drop_input_event, construct_form_data_event,
-    construct_input_event, construct_interest_event, construct_simple_event,
-    construct_simple_event_for_target, construct_submit_event, construct_toggle_event,
-    dispatch_beforeinput, dispatch_public_event,
+    construct_command_event, construct_form_data_event, construct_input_event,
+    construct_interest_event, construct_simple_event, construct_simple_event_for_target,
+    construct_submit_event, construct_toggle_event, dispatch_beforeinput, dispatch_public_event,
 };
 #[cfg(any(feature = "devtools", test))]
 pub(crate) use events::{TouchEventPoint, construct_touch_event_with_points};
 #[cfg(feature = "devtools")]
 pub(crate) use events::{
-    construct_drag_event_with_related_target, construct_mouse_event_for_target,
-    construct_mouse_event_with_detail_for_target,
+    construct_drag_event_with_related_target, construct_drop_input_event,
+    construct_mouse_event_for_target, construct_mouse_event_with_detail_for_target,
     construct_mouse_event_with_related_target_for_target, construct_pointer_event_with_modifiers,
     construct_pointer_event_with_related_target_and_modifiers, construct_wheel_event_for_target,
 };
@@ -328,8 +327,6 @@ pub(crate) use events::{construct_pointer_event, construct_pointer_event_with_re
 pub(crate) use focus::focus_live_element_for_inspector;
 pub(crate) use focus::is_disabled_form_control;
 use focus::is_focusable;
-#[cfg(feature = "devtools")]
-pub(crate) use focus::perform_mouse_focus_default_action;
 pub(crate) use focus::{
     blur_active_element_that_lost_focusability, contenteditable_editing_host, focus_element,
     initial_contenteditable_caret, perform_access_key_default_action_for_dispatched_event,
@@ -337,9 +334,13 @@ pub(crate) use focus::{
     perform_tab_focus_default_action_for_dispatched_event, post_parse_autofocus_is_pending,
     process_post_parse_autofocus, reset_focus_from_previous_handle,
     reset_focus_from_previous_handle_with_previous_focus_within, schedule_focus_blur_if_needed,
-    update_focus, update_focus_preserving_selection,
+    update_focus,
 };
 pub(super) use focus::{node_blur_callback, node_focus_callback};
+#[cfg(feature = "devtools")]
+pub(crate) use focus::{perform_mouse_focus_default_action, update_focus_preserving_selection};
+#[cfg(feature = "devtools")]
+pub(crate) use forms::cache_input_files_from_selected_files;
 #[cfg(feature = "devtools")]
 pub(crate) use forms::perform_implicit_submission_from_control;
 pub(super) use forms::{
@@ -442,16 +443,13 @@ pub(super) use forms::{
     textarea_type_getter_function, textarea_value_getter_function, textarea_value_setter_function,
     textarea_wrap_getter_function, textarea_wrap_setter_function,
 };
-pub(crate) use forms::{
-    cache_input_files_from_selected_files, form_control_is_effectively_disabled,
-    input_files_for_object,
-};
 pub(crate) use forms::{control_label_handles, v8_pattern_is_usable};
 pub(crate) use forms::{
     dispatch_text_control_event, is_text_control,
     queue_text_control_document_selection_change_event, replace_text_control_selection,
     replace_text_control_selection_for_insert_html, text_control_value,
 };
+pub(crate) use forms::{form_control_is_effectively_disabled, input_files_for_object};
 pub(in crate::native_bridge) use forms::{
     resize_select_options, select_add_insertion_point, select_options_resize_target,
 };
@@ -633,7 +631,7 @@ use pointer_capture::{
     node_has_pointer_capture_callback, node_release_pointer_capture_callback,
     node_set_pointer_capture_callback,
 };
-pub(crate) use popover::{dispatch_popover_removal_events, perform_popover_invoker_default_action};
+pub(crate) use popover::perform_popover_invoker_default_action;
 pub(super) use popover::{dispatch_popover_show_events, dispatch_popover_toggle_events};
 pub(super) use popover::{
     node_hide_popover_callback, node_popover_getter_function, node_popover_setter_function,

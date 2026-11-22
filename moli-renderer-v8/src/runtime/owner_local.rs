@@ -22,6 +22,7 @@ pub struct RendererAttachedPage {
     pub(super) page_context_cancel_tx: RendererPageContextCancelSender,
     pub(super) javascript_dialog_broker: RendererJavaScriptDialogBroker,
     pub(super) devtools_target: crate::devtools::target::RendererDevToolsTargetHandle,
+    #[cfg(feature = "devtools")]
     pub(super) script_execution_control:
         crate::script_execution_control::RendererScriptExecutionControl,
     pub(super) page_state: Arc<RendererPageState>,
@@ -73,6 +74,7 @@ impl RendererAttachedPage {
                 page_context_cancel_tx: self.page_context_cancel_tx,
                 javascript_dialog_broker: self.javascript_dialog_broker,
                 devtools_target: self.devtools_target,
+                #[cfg(feature = "devtools")]
                 script_execution_control: self.script_execution_control,
                 committed_document_post_response_continuation: self
                     .committed_document_post_response_continuation,
@@ -134,6 +136,7 @@ pub struct RendererPageHandle {
     page_context_cancel_tx: RendererPageContextCancelSender,
     javascript_dialog_broker: RendererJavaScriptDialogBroker,
     devtools_target: crate::devtools::target::RendererDevToolsTargetHandle,
+    #[cfg(feature = "devtools")]
     script_execution_control: crate::script_execution_control::RendererScriptExecutionControl,
     committed_document_post_response_continuation:
         Option<RendererPageCommandPostResponseContinuation>,
@@ -157,9 +160,8 @@ impl RendererPageProtocolCommandTarget {
         command: RendererPageCommand,
         session: Option<String>,
     ) -> Result<RendererPageCommandPending> {
-        let javascript_dialog_watch = command
-            .interruptible_by_javascript_dialog()
-            .then(|| self.dialogs.watch());
+        let javascript_dialog_watch =
+            renderer_page_javascript_dialog_watch(&command, || self.dialogs.watch());
         let route = self.target.main_ref().enqueue_protocol_page_command(
             self.token,
             self.agent,
@@ -167,8 +169,12 @@ impl RendererPageProtocolCommandTarget {
             session,
             RendererPageStateCapturePolicy::ProtocolTurn,
         );
+        let cleanup_control = Some(route.cleanup_control());
         Ok(RendererPageCommandPending {
-            dispatch: RendererPageCommandPendingDispatch::InspectorMain(Box::new(route)),
+            cleanup_control,
+            dispatch: RendererPageCommandPendingDispatch::InspectorMain(Box::pin(
+                route.wait_for_completion(),
+            )),
             javascript_dialog_watch,
         })
     }
@@ -249,13 +255,25 @@ impl RendererDocumentCommandTarget {
 pub struct RendererPageCommandPending {
     dispatch: RendererPageCommandPendingDispatch,
     javascript_dialog_watch: Option<RendererJavaScriptDialogWatch>,
+    #[cfg(feature = "devtools")]
+    cleanup_control: Option<crate::devtools::ingress::main::RendererInspectorMainCleanupControl>,
 }
 
 impl RendererPageCommandPending {
+    #[cfg(feature = "devtools")]
+    pub fn retain_session_cleanup_authority(mut self) -> Self {
+        if let Some(control) = self.cleanup_control.take() {
+            control.retain();
+        }
+        self
+    }
+
     pub(super) fn from_owner_reply(reply: oneshot::Receiver<Result<RendererOwnerReply>>) -> Self {
         Self {
             dispatch: RendererPageCommandPendingDispatch::Owner(reply),
             javascript_dialog_watch: None,
+            #[cfg(feature = "devtools")]
+            cleanup_control: None,
         }
     }
 }
@@ -263,7 +281,12 @@ impl RendererPageCommandPending {
 enum RendererPageCommandPendingDispatch {
     Owner(oneshot::Receiver<anyhow::Result<RendererOwnerReply>>),
     #[cfg(feature = "devtools")]
-    InspectorMain(Box<RendererRuntimeInspectorMainCommandRoute>),
+    InspectorMain(
+        futures_util::future::BoxFuture<
+            'static,
+            Result<RendererRuntimeInspectorMainCommandCompletion>,
+        >,
+    ),
 }
 
 #[derive(Clone)]
@@ -300,6 +323,12 @@ impl RendererRuntimeInspectorSessionDetachGuard {
         }
     }
 
+    pub(crate) fn belongs_to_agent(&self, agent: RendererDevToolsAgentToken) -> bool {
+        self.pending_detach
+            .as_ref()
+            .is_some_and(|(_, expected, _)| *expected == agent)
+    }
+
     pub(crate) fn complete(&mut self) {
         if let Some((target, agent_token, session)) = self.pending_detach.take() {
             target.finish_session_detach(agent_token, &session);
@@ -320,6 +349,170 @@ impl Drop for RendererRuntimeInspectorSessionDetachGuard {
         if let Some(inspector_pause_bridge) = self.inspector_pause_bridge.take() {
             inspector_pause_bridge.disarm_session_detach();
         }
+    }
+}
+
+/// Inspector admission and retirement for one exact native agent, including
+/// the interval before its Page handle is adopted. It carries no DOM access.
+#[cfg(feature = "devtools")]
+#[derive(Clone)]
+pub struct RendererPageInspectorEndpoint {
+    runtime: RenderRuntimeHandle,
+    token: RendererPageToken,
+    agent: RendererDevToolsAgentToken,
+    target: crate::devtools::target::RendererDevToolsTargetHandle,
+}
+
+#[cfg(feature = "devtools")]
+impl std::fmt::Debug for RendererPageInspectorEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RendererPageInspectorEndpoint")
+            .field("agent", &self.agent)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "devtools")]
+impl RendererPageInspectorEndpoint {
+    pub(crate) fn new(
+        runtime: RenderRuntimeHandle,
+        token: RendererPageToken,
+        agent: RendererDevToolsAgentToken,
+        target: crate::devtools::target::RendererDevToolsTargetHandle,
+    ) -> Self {
+        Self {
+            runtime,
+            token,
+            agent,
+            target,
+        }
+    }
+
+    pub fn agent(&self) -> RendererDevToolsAgentToken {
+        self.agent
+    }
+
+    pub fn has_session(&self, id: Option<&str>) -> bool {
+        self.target.io_ref().session_connections().contains(
+            &crate::devtools::ingress::lane::RendererDevToolsSessionLaneKey::new(
+                self.agent,
+                DevToolsSessionKey::from_wire_session_id(id),
+            ),
+        )
+    }
+
+    #[cfg(feature = "devtools")]
+    pub fn connect(
+        &self,
+        inspector_session_id: Option<String>,
+        session_runtime_bindings: &[crate::protocol_types::RuntimeBindingRegistration],
+    ) {
+        // Prepared-page installation may not have passed through an ordinary
+        // Main command yet. The connection itself owns its execution wake.
+        self.target
+            .main_ref()
+            .configure_owner_wake(self.runtime.clone());
+        if let Some(connection) = self.target.io_ref().session_connections().begin(
+            self.agent,
+            DevToolsSessionKey::from_wire_session_id(inspector_session_id.as_deref()),
+            self.target.main_ref().clone(),
+            self.target.io_ref().clone(),
+        ) {
+            // Both operations are target-owned. Connect releases IO locally;
+            // configuration retains a separate position before later Main work.
+            self.target.main_ref().enqueue_session_initialization(
+                self.token,
+                self.agent,
+                RendererPageCommand::DevTools(
+                    RendererDevToolsPageCommand::ConnectRuntimeInspectorSession {
+                        inspector_session_id: inspector_session_id.clone(),
+                        connection,
+                    },
+                ),
+                inspector_session_id.clone(),
+            );
+        }
+        self.target.main_ref().enqueue_session_initialization(
+            self.token,
+            self.agent,
+            RendererPageCommand::DevTools(
+                RendererDevToolsPageCommand::SetSessionRuntimeBindingState {
+                    agent: self.agent,
+                    inspector_session_id: inspector_session_id.clone(),
+                    session_runtime_bindings: session_runtime_bindings.to_vec(),
+                },
+            ),
+            inspector_session_id,
+        );
+    }
+
+    #[cfg(feature = "devtools")]
+    pub fn enqueue_runtime_inspector_io_command(
+        &self,
+        envelope: RendererInspectorCommandEnvelope,
+    ) -> RendererRuntimeInspectorIoCommandRoute {
+        self.target.io_ref().enqueue_command(
+            self.agent,
+            RendererDevToolsIoCommandEnvelope::inspector(envelope),
+        )
+    }
+
+    #[cfg(feature = "devtools")]
+    pub fn prepare_runtime_inspector_session_retirement(
+        &self,
+        inspector_session_id: Option<String>,
+    ) -> RendererRuntimeInspectorSessionRetirement {
+        let session = DevToolsSessionKey::from_wire_session_id(
+            inspector_session_id.as_deref().filter(|id| !id.is_empty()),
+        );
+        let guard = RendererRuntimeInspectorSessionDetachGuard::new(
+            self.target.pause(),
+            self.target.clone(),
+            self.agent,
+            session,
+        );
+        RendererRuntimeInspectorSessionRetirement {
+            runtime: self.runtime.clone(),
+            token: self.token,
+            inspector_session_id,
+            guard: Some(guard),
+        }
+    }
+}
+
+/// Original native cleanup authority, independent of the revoked Browser route.
+#[cfg(feature = "devtools")]
+pub struct RendererRuntimeInspectorSessionRetirement {
+    runtime: RenderRuntimeHandle,
+    token: RendererPageToken,
+    inspector_session_id: Option<String>,
+    guard: Option<RendererRuntimeInspectorSessionDetachGuard>,
+}
+
+#[cfg(feature = "devtools")]
+impl RendererRuntimeInspectorSessionRetirement {
+    pub fn finish(mut self) -> Result<()> {
+        self.enqueue_finalizer()
+    }
+
+    fn enqueue_finalizer(&mut self) -> Result<()> {
+        if let Some(pause_guard) = self.guard.take() {
+            self.runtime.dispatch_detached(
+                RendererOwnerCommand::FinalizeRuntimeInspectorSessionDetach {
+                    token: self.token,
+                    inspector_session_id: self.inspector_session_id.take(),
+                    pause_guard,
+                },
+            )?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "devtools")]
+impl Drop for RendererRuntimeInspectorSessionRetirement {
+    fn drop(&mut self) {
+        let _ = self.enqueue_finalizer();
     }
 }
 
@@ -420,14 +613,36 @@ impl RendererPageHandle {
     }
 
     #[cfg(feature = "devtools")]
+    pub fn has_runtime_inspector_session_endpoint(&self, id: Option<&str>) -> bool {
+        self.inspector_endpoint().has_session(id)
+    }
+
+    #[cfg(feature = "devtools")]
+    pub fn inspector_endpoint(&self) -> RendererPageInspectorEndpoint {
+        RendererPageInspectorEndpoint::new(
+            self.render_runtime.clone(),
+            self.token(),
+            self.devtools_agent_token,
+            self.devtools_target.clone(),
+        )
+    }
+
+    #[cfg(feature = "devtools")]
+    pub fn connect_runtime_inspector_session(
+        &self,
+        id: Option<String>,
+        bindings: &[crate::protocol_types::RuntimeBindingRegistration],
+    ) {
+        self.inspector_endpoint().connect(id, bindings);
+    }
+
+    #[cfg(feature = "devtools")]
     pub fn enqueue_runtime_inspector_io_command(
         &self,
         envelope: RendererInspectorCommandEnvelope,
     ) -> RendererRuntimeInspectorIoCommandRoute {
-        self.devtools_target.io_ref().enqueue_command(
-            self.devtools_agent_token,
-            RendererDevToolsIoCommandEnvelope::inspector(envelope),
-        )
+        self.inspector_endpoint()
+            .enqueue_runtime_inspector_io_command(envelope)
     }
 
     #[doc(hidden)]
@@ -588,27 +803,18 @@ impl RendererPageHandle {
     pub fn detach_runtime_inspector_session(
         &self,
         inspector_session_id: Option<String>,
-    ) -> anyhow::Result<()> {
-        let session = DevToolsSessionKey::from_wire_session_id(
-            inspector_session_id
-                .as_deref()
-                .filter(|session_id| !session_id.is_empty()),
-        );
-        let pause_guard = RendererRuntimeInspectorSessionDetachGuard::new(
-            self.devtools_target.pause(),
-            self.devtools_target.clone(),
-            self.devtools_agent_token,
-            session,
-        );
-        let reply_rx = self.render_runtime.enqueue(
-            RendererOwnerCommand::FinalizeRuntimeInspectorSessionDetach {
-                token: self.token(),
-                inspector_session_id,
-                pause_guard,
-            },
-        )?;
-        drop(reply_rx);
-        Ok(())
+    ) -> Result<()> {
+        self.prepare_runtime_inspector_session_retirement(inspector_session_id)
+            .finish()
+    }
+
+    #[cfg(feature = "devtools")]
+    pub fn prepare_runtime_inspector_session_retirement(
+        &self,
+        id: Option<String>,
+    ) -> RendererRuntimeInspectorSessionRetirement {
+        self.inspector_endpoint()
+            .prepare_runtime_inspector_session_retirement(id)
     }
 
     pub fn enqueue_async_command(
@@ -665,9 +871,9 @@ impl RendererPageHandle {
     ) -> anyhow::Result<RendererPageCommandPending> {
         #[cfg(not(feature = "devtools"))]
         let _ = (route_protocol_main_receiver, inspector_session_id);
-        let javascript_dialog_watch = command
-            .interruptible_by_javascript_dialog()
-            .then(|| self.javascript_dialog_broker.watch());
+        let javascript_dialog_watch = renderer_page_javascript_dialog_watch(&command, || {
+            self.javascript_dialog_broker.watch()
+        });
         if moli_trace::cdp_nav_timing_enabled()
             && let Some(command_label) = command.cdp_nav_timing_label()
         {
@@ -690,8 +896,12 @@ impl RendererPageHandle {
                     inspector_session_id,
                     capture_policy,
                 );
+            let cleanup_control = Some(route.cleanup_control());
             return Ok(RendererPageCommandPending {
-                dispatch: RendererPageCommandPendingDispatch::InspectorMain(Box::new(route)),
+                cleanup_control,
+                dispatch: RendererPageCommandPendingDispatch::InspectorMain(Box::pin(
+                    route.wait_for_completion(),
+                )),
                 javascript_dialog_watch,
             });
         }
@@ -704,8 +914,12 @@ impl RendererPageHandle {
                     envelope,
                     capture_policy,
                 );
+                let cleanup_control = Some(route.cleanup_control());
                 return Ok(RendererPageCommandPending {
-                    dispatch: RendererPageCommandPendingDispatch::InspectorMain(Box::new(route)),
+                    cleanup_control,
+                    dispatch: RendererPageCommandPendingDispatch::InspectorMain(Box::pin(
+                        route.wait_for_completion(),
+                    )),
                     javascript_dialog_watch,
                 });
             }
@@ -724,11 +938,16 @@ impl RendererPageHandle {
                     command,
                 }
             }
+            RendererPageStateCapturePolicy::BackgroundInitialization => unreachable!(
+                "unobserved session initialization must use its target-owned Main receiver"
+            ),
         };
         let reply_rx = self.render_runtime.enqueue(owner_command)?;
         Ok(RendererPageCommandPending {
             dispatch: RendererPageCommandPendingDispatch::Owner(reply_rx),
             javascript_dialog_watch,
+            #[cfg(feature = "devtools")]
+            cleanup_control: None,
         })
     }
 
@@ -854,64 +1073,76 @@ impl RendererPageHandle {
     }
 }
 
+/// Observation commands may fail fast when a modal prevents their execution.
+fn renderer_page_javascript_dialog_watch(
+    command: &RendererPageCommand,
+    watch: impl FnOnce() -> RendererJavaScriptDialogWatch,
+) -> Option<RendererJavaScriptDialogWatch> {
+    command.interruptible_by_javascript_dialog().then(watch)
+}
+
+fn decode_owner_page_command_reply(
+    reply: Result<Result<RendererOwnerReply>, oneshot::error::RecvError>,
+) -> Result<RendererCommandTurnOutput> {
+    match reply.map_err(|_| anyhow!("render runtime reply channel closed"))?? {
+        RendererOwnerReply::AsyncPageCommandRan(result) => Ok(*result),
+        _ => Err(anyhow!(
+            "renderer owner returned non-async page-command reply for async page command"
+        )),
+    }
+}
+
+#[cfg(feature = "devtools")]
+fn decode_inspector_main_page_command_completion(
+    completion: Result<RendererRuntimeInspectorMainCommandCompletion>,
+) -> Result<RendererCommandTurnOutput> {
+    match completion? {
+        RendererRuntimeInspectorMainCommandCompletion::Owner(output) => Ok(*output),
+        RendererRuntimeInspectorMainCommandCompletion::Page(output) => Ok(*output),
+        RendererRuntimeInspectorMainCommandCompletion::Inspector
+        | RendererRuntimeInspectorMainCommandCompletion::InspectorSessionResponse { .. } => Err(
+            anyhow!("an owner-only Inspector Main command entered nested dispatch"),
+        ),
+        RendererRuntimeInspectorMainCommandCompletion::OwnerSessionResponse { .. }
+        | RendererRuntimeInspectorMainCommandCompletion::OwnerSessionErrorSettled(_) => Err(
+            anyhow!("an owner-only Page command settled a DevTools session response"),
+        ),
+        RendererRuntimeInspectorMainCommandCompletion::Canceled(message) => Err(anyhow!(message)),
+    }
+}
+
 impl RendererPageCommandPending {
     pub async fn wait(self) -> Result<RendererCommandTurnOutput> {
         let RendererPageCommandPending {
             dispatch,
             javascript_dialog_watch,
+            ..
         } = self;
         let wait_for_dispatch = async move {
             match dispatch {
                 RendererPageCommandPendingDispatch::Owner(reply_rx) => {
-                    match reply_rx
-                        .await
-                        .map_err(|_| anyhow!("render runtime reply channel closed"))??
-                    {
-                        RendererOwnerReply::AsyncPageCommandRan(result) => Ok(*result),
-                        _ => Err(anyhow!(
-                            "renderer owner returned non-async page-command reply for async page command"
-                        )),
-                    }
+                    decode_owner_page_command_reply(reply_rx.await)
                 }
                 #[cfg(feature = "devtools")]
                 RendererPageCommandPendingDispatch::InspectorMain(route) => {
-                    match route.wait_for_completion().await? {
-                        RendererRuntimeInspectorMainCommandCompletion::Owner(output) => Ok(*output),
-                        RendererRuntimeInspectorMainCommandCompletion::Page(output) => Ok(*output),
-                        RendererRuntimeInspectorMainCommandCompletion::Inspector
-                        | RendererRuntimeInspectorMainCommandCompletion::InspectorSessionResponse {
-                            ..
-                        } => Err(anyhow!(
-                            "an owner-only Inspector Main command entered nested dispatch"
-                        )),
-                        RendererRuntimeInspectorMainCommandCompletion::OwnerSessionResponse {
-                            ..
-                        }
-                        | RendererRuntimeInspectorMainCommandCompletion::OwnerSessionErrorSettled(
-                            _,
-                        ) => Err(anyhow!(
-                            "an owner-only Page command settled a DevTools session response"
-                        )),
-                        RendererRuntimeInspectorMainCommandCompletion::Canceled(message) => {
-                            Err(anyhow!(message))
-                        }
-                    }
+                    decode_inspector_main_page_command_completion(route.await)
                 }
             }
         };
         tokio::pin!(wait_for_dispatch);
-        let reply = if let Some(javascript_dialog_watch) = javascript_dialog_watch {
-            tokio::select! {
-                biased;
-                reply = &mut wait_for_dispatch => reply?,
-                () = javascript_dialog_watch.wait_until_open() => {
-                    return Err(anyhow!(
-                        "renderer page observation interrupted by an open JavaScript dialog"
-                    ));
+        let reply = match javascript_dialog_watch {
+            Some(javascript_dialog_watch) => {
+                tokio::select! {
+                    biased;
+                    reply = &mut wait_for_dispatch => reply?,
+                    () = javascript_dialog_watch.wait_until_open() => {
+                        return Err(anyhow!(
+                            "renderer page observation interrupted by an open JavaScript dialog"
+                        ));
+                    }
                 }
             }
-        } else {
-            wait_for_dispatch.await?
+            None => wait_for_dispatch.await?,
         };
         Ok(reply)
     }

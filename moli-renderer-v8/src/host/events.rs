@@ -2,32 +2,15 @@ use super::*;
 use crate::{
     context_bootstrap::{
         CHILD_BROWSING_CONTEXT_HANDLE_SLOT, clear_event_composed_path,
-        error_event_handler_arguments, mark_event_trusted, set_event_composed_path,
+        error_event_handler_arguments, event_target_dispatch::finish_dispatch, mark_event_trusted,
+        set_event_composed_path,
     },
     dom_parser::DOM_PARSER_FOREIGN_NODE_SLOT,
     util::{get_private_object, get_private_value, serialize_v8_iter_array},
 };
-use moli_webapi_declare::WebApiObject;
+use moli_webapi::events::subclasses::error::construct_original_error_event;
+use moli_webapi::events::{construct_native_event, init::EventInit};
 use std::collections::HashSet;
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct HostErrorEventInitDeclaration<'scope> {
-    cancelable: bool,
-    bubbles: bool,
-    message: v8::Local<'scope, v8::String>,
-    filename: v8::Local<'scope, v8::String>,
-    lineno: f64,
-    colno: f64,
-    error: v8::Local<'scope, v8::Value>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct HostEventInitDeclaration {
-    bubbles: bool,
-    cancelable: bool,
-}
 
 struct EventListenerEntry {
     id: u64,
@@ -74,6 +57,7 @@ pub(crate) struct EventListenerRegistration {
     passive: bool,
 }
 
+#[cfg(feature = "devtools")]
 #[derive(Clone, Debug)]
 pub(crate) struct EventListenerInspectorSnapshot {
     pub(crate) registration_id: u64,
@@ -777,31 +761,12 @@ pub(crate) fn report_event_callback_exception<'s>(
             | crate::native_bridge::OwnerDispatchScope::LightweightPopup(_) => None,
         })
     });
-    if let Some(handle) = child_handle {
-        let event = {
-            let host = unsafe { &mut *host_ptr };
-            host.child_browsing_context_window_wrapper(scope, handle)
-                .and_then(|window| event_listener_error_event_from_report(scope, window, report))
-        };
-        if let Some(event) = event {
-            unsafe { &mut *host_ptr }.dispatch_child_window_event(scope, handle, "error", event);
-            return;
-        }
-    }
-
-    let error_value = report
-        .exception
-        .as_ref()
-        .map(|exception| v8::Local::new(scope, exception));
-    let _ = dispatch_window_error_event_with_details(
-        scope,
-        host_ptr,
-        &report.summary,
-        report.source.as_deref().unwrap_or(""),
-        report.line.unwrap_or(0) as u32,
-        report.column.unwrap_or(0) as u32,
-        error_value,
-    );
+    let child_event = child_handle.and_then(|handle| {
+        let host = unsafe { &mut *host_ptr };
+        let window = host.child_browsing_context_window_wrapper(scope, handle)?;
+        event_listener_error_event_from_report(scope, window, report).map(|event| (handle, event))
+    });
+    dispatch_window_callback_exception(scope, host_ptr, child_event, report);
 }
 
 fn callback_error_window_handle<'s>(
@@ -842,33 +807,21 @@ fn event_listener_error_event_from_report<'s>(
     global: v8::Local<'s, v8::Object>,
     report: &V8ExceptionReport,
 ) -> Option<v8::Local<'s, v8::Object>> {
+    let context = global.get_creation_context(scope)?;
+    let scope = &mut v8::ContextScope::new(scope, context);
     let error_value = report
         .exception
         .as_ref()
         .map(|exception| v8::Local::new(scope, exception))
         .unwrap_or_else(|| v8::null(scope).into());
-
-    let message = v8_string(scope, &report.summary).unwrap_or_else(|| v8str(scope, ""));
-    let filename = v8_string(scope, report.source.as_deref().unwrap_or(""))
-        .unwrap_or_else(|| v8str(scope, ""));
-    let init = HostErrorEventInitDeclaration::new(
-        true,
-        false,
-        message,
-        filename,
-        report.line.unwrap_or(0) as f64,
-        report.column.unwrap_or(0) as f64,
+    construct_original_error_event(
+        scope,
+        &report.summary,
+        report.source.as_deref().unwrap_or(""),
+        report.line.unwrap_or(0) as u32,
+        report.column.unwrap_or(0) as u32,
         error_value,
     )
-    .bind(scope)
-    .ok()?;
-
-    global
-        .get(scope, v8str(scope, "ErrorEvent").into())
-        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
-        .and_then(|constructor| {
-            constructor.new_instance(scope, &[v8str(scope, "error").into(), init.into()])
-        })
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1925,18 +1878,7 @@ fn dispatch_public_event_with_original_target_impl<'s, 'i>(
             );
         }
     }
-    set_event_phase(scope, event, 0);
-    set_event_internal_flag(scope, event, EVENT_DISPATCHING_SLOT, false);
-    set_event_internal_flag(scope, event, EVENT_STOP_PROPAGATION_SLOT, false);
-    set_event_internal_flag(scope, event, EVENT_STOP_IMMEDIATE_SLOT, false);
-    set_event_internal_flag(scope, event, EVENT_PASSIVE_SLOT, false);
-    let current_target_key = v8str(scope, "currentTarget");
-    let _ = crate::context_bootstrap::event_backing(scope, event).set(
-        scope,
-        current_target_key.into(),
-        v8::null(scope).into(),
-    );
-    clear_event_composed_path(scope, event);
+    finish_dispatch(scope, event);
     Ok(PublicEventDispatchResult {
         default_prevented: event_default_prevented(scope, event),
         canceled_before_dispatch: false,
@@ -2156,10 +2098,8 @@ pub(crate) fn create_host_event<'s>(
     bubbles: bool,
     cancelable: bool,
 ) -> std::result::Result<v8::Local<'s, v8::Object>, String> {
-    // The intrinsic constructor owns the complete Event initialization and
-    // prototype surface. Host dispatch only adds browser-controlled trust and
-    // target state; installing methods or accessors here would incorrectly
-    // turn prototype members into per-event own properties.
+    // The shared factory uses this realm's Event template. The dispatch owner
+    // supplies trust and target state.
     let event = construct_event_instance(scope, event_type, bubbles, cancelable)?;
     mark_event_trusted(scope, event);
     set_event_target(scope, event, target);
@@ -2175,19 +2115,18 @@ fn construct_event_instance<'s>(
     bubbles: bool,
     cancelable: bool,
 ) -> std::result::Result<v8::Local<'s, v8::Object>, String> {
-    let constructor =
-        crate::context_bootstrap::ensure_intrinsic_interface_constructor(scope, "Event")
-            .map_err(|error| format!("failed to resolve intrinsic Event constructor: {error}"))?;
-    let init = HostEventInitDeclaration::new(bubbles, cancelable)
-        .bind(scope)
-        .map_err(|error| format!("failed to build EventInit dictionary: {error}"))?;
-    let event_type = v8_string(scope, event_type)
-        .ok_or_else(|| format!("failed to allocate event type `{event_type}`"))?;
     let try_catch = std::pin::pin!(v8::TryCatch::new(scope));
-    let scope = try_catch.init();
-    constructor
-        .new_instance(&scope, &[event_type.into(), init.into()])
-        .ok_or_else(|| "intrinsic Event constructor failed for a host event".to_owned())
+    let mut scope = try_catch.init();
+    construct_native_event(
+        &mut scope,
+        event_type,
+        EventInit {
+            bubbles,
+            cancelable,
+            composed: false,
+        },
+    )
+    .ok_or_else(|| "failed to initialize a host Event".to_owned())
 }
 
 fn normalize_public_event_record<'s>(

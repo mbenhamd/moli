@@ -39,7 +39,7 @@ use crate::{
             NetworkBodySourceId, PendingSubresourceAuthState, PendingSubresourceFetchState,
             PendingSubresourceResponseState, PendingWebSocketResponseState,
             RunningSubresourceFetchState, ScriptErrorConstructorKind, ScriptNetworkOutputItem,
-            StreamingSubresourceFetchState,
+            StreamingSubresourceFetchState, SubresourceNetworkRequestHandle,
         },
         util::{
             string_from_utf16_units_lossy, utf16_units, utf16_units_contain_unpaired_surrogate,
@@ -135,6 +135,7 @@ pub(crate) use text_track_loads::{
 mod message_ports;
 mod messages;
 mod module_owner_tasks;
+#[cfg(feature = "devtools")]
 mod mouse_click;
 #[cfg(feature = "devtools")]
 pub(crate) use mouse_click::MouseReleaseFollowUp;
@@ -733,6 +734,7 @@ pub(crate) struct PendingImageLoadEvent {
     target: WindowDocumentTaskTarget,
     owner: PendingImageLoadEventOwner,
     request_initiator_type: crate::types::SubresourceRequestInitiatorType,
+    resource_timing_initiator_type: &'static str,
     network_state: PendingImageLoadNetworkState,
     terminal_followup_queued: bool,
 }
@@ -761,6 +763,7 @@ impl PendingImageLoadEvent {
         target: WindowDocumentTaskTarget,
         owner: PendingImageLoadEventOwner,
         request_initiator_type: crate::types::SubresourceRequestInitiatorType,
+        resource_timing_initiator_type: &'static str,
     ) -> Self {
         Self {
             id,
@@ -768,6 +771,7 @@ impl PendingImageLoadEvent {
             target,
             owner,
             request_initiator_type,
+            resource_timing_initiator_type,
             network_state: PendingImageLoadNetworkState::Unbound,
             terminal_followup_queued: false,
         }
@@ -791,6 +795,10 @@ impl PendingImageLoadEvent {
 
     pub(crate) fn request_initiator_type(self) -> crate::types::SubresourceRequestInitiatorType {
         self.request_initiator_type
+    }
+
+    pub(crate) fn resource_timing_initiator_type(self) -> &'static str {
+        self.resource_timing_initiator_type
     }
 
     pub(crate) fn network_request_id(self) -> Option<u64> {
@@ -998,6 +1006,7 @@ pub(crate) struct PageScriptHost {
     active_pointer_capture_ids: HashSet<i32>,
     pending_pointer_capture_targets: HashMap<i32, DomHandle>,
     pointer_capture_targets: HashMap<i32, DomHandle>,
+    #[cfg(feature = "devtools")]
     mouse_input: mouse_click::MouseInputState,
     lazy_media_load_candidates: HashSet<DomHandle>,
     canvas_resources: canvas_resources::CanvasResourceStore,
@@ -1023,6 +1032,8 @@ pub(crate) struct PageScriptHost {
         document_script_ready_inputs::ChildDocumentScriptReadyTaskLedger,
     pending_child_external_classic_document_scripts:
         HashMap<u64, child_frames::PendingChildExternalClassicDocumentScriptLoad>,
+    pending_child_classic_script_network_loads:
+        HashMap<SubresourceNetworkRequestHandle, crate::network::loads::ResourceLoadLease>,
     pending_child_modulepreload_work_awaiting_realm:
         VecDeque<crate::frame_owner_model::FrameDocumentModulepreloadWorkAwaitingRealm>,
     character_data_utf16_overrides: HashMap<DomHandle, U16String>,
@@ -1261,6 +1272,7 @@ fn child_browsing_context_url_inherits_security_origin(url: &url::Url) -> bool {
 
 pub use crate::protocol_types::PendingRuntimeBindingCall;
 
+#[cfg(feature = "devtools")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PointerCaptureDispatchEvent {
     pub(crate) event_name: &'static str,

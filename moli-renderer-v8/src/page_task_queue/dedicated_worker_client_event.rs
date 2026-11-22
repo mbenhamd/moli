@@ -7,10 +7,7 @@ use crate::{
     resource_ready::{ReadyPageTask, RendererPageTaskReadyMetadata},
     runtime::{PageOwnerTurnOutcome, RendererDocumentToken},
     types::{DedicatedWorkerId, SubresourcePolicyContext},
-    worker::{
-        WorkerErrorPhase, WorkerErrorSource, WorkerParentErrorEventKind, WorkerScriptKind,
-        WorkerScriptSource,
-    },
+    worker::{WorkerErrorPhase, WorkerErrorReport, WorkerScriptKind, WorkerScriptSource},
 };
 
 use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
@@ -41,7 +38,6 @@ impl RendererPageDedicatedWorkerClientEventOwner {
         }
     }
 
-    #[cfg(test)]
     pub(crate) const fn root_document(self) -> RendererDocumentToken {
         self.root_document
     }
@@ -63,15 +59,7 @@ impl RendererPageDedicatedWorkerClientEventOwner {
 #[derive(Debug)]
 pub(crate) enum RendererDedicatedWorkerMessageEvent {
     Message(Box<crate::structured_clone::V8StructuredClonePayload>),
-    Error {
-        message: String,
-        filename: String,
-        lineno: u32,
-        colno: u32,
-        event_kind: WorkerParentErrorEventKind,
-        phase: WorkerErrorPhase,
-        source: WorkerErrorSource,
-    },
+    Error(WorkerErrorReport),
 }
 
 /// One owner-side task emitted by a DedicatedWorker relay.
@@ -126,7 +114,7 @@ impl RendererDedicatedWorkerClientEvent {
             Self::Message(RendererDedicatedWorkerMessageEvent::Message(_)) => {
                 RendererDedicatedWorkerClientEventKind::Message
             }
-            Self::Message(RendererDedicatedWorkerMessageEvent::Error { .. }) => {
+            Self::Message(RendererDedicatedWorkerMessageEvent::Error(_)) => {
                 RendererDedicatedWorkerClientEventKind::Error
             }
             Self::ClientSourceDrained => {
@@ -156,6 +144,18 @@ impl RendererPageDedicatedWorkerClientEventTask {
 
     pub(crate) const fn event_kind(&self) -> RendererDedicatedWorkerClientEventKind {
         self.event.kind()
+    }
+
+    pub(crate) fn propagates_to_window(&self) -> bool {
+        matches!(
+            &self.event,
+            RendererDedicatedWorkerClientEvent::Message(
+                RendererDedicatedWorkerMessageEvent::Error(WorkerErrorReport {
+                    phase: WorkerErrorPhase::Runtime,
+                    ..
+                })
+            )
+        )
     }
 
     pub(crate) fn into_event(self) -> RendererDedicatedWorkerClientEvent {

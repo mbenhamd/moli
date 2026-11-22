@@ -176,7 +176,7 @@ pub use protocol_support::{
     SubresourceBodyFinishedResult, SubresourceDataReceived, SubresourceEventSourceMessageReceived,
     SubresourceInterceptionClasses, SubresourceJsonPathEquals, SubresourceJsonPathRegex,
     SubresourceNetworkOutcome, SubresourceNetworkRecord, SubresourceNetworkRequestHandle,
-    SubresourceRequestInitiatorType, SubresourceRequestStarted, SubresourceResourceType,
+    SubresourceRequestInitiatorType, SubresourceRequestSnapshot, SubresourceResourceType,
     SubresourceResponseBody, SubresourceResponseStarted, SubresourceResponseWaitCriteria,
     ViewportSurface, WebSocketFrameDirection, WebSocketFrameOpcode, WebSocketLifecycleEvent,
     WebSocketLifecycleKind, WebSocketNetworkEvent, extract_subresource_auth_challenge,
@@ -381,3 +381,8 @@ mod tests {
 
 mod resource_command;
 pub use resource_command::{CompletedResourceCommand, PendingResourceCommand};
+
+#[cfg(feature = "devtools")]
+pub use moli_renderer_v8::{
+    RendererPageInspectorEndpoint, RendererRuntimeInspectorSessionRetirement,
+};

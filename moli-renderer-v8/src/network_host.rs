@@ -37,10 +37,12 @@ use moli_fetch::{Request, Response, observe_cookie_access_report_for_request};
 use crate::network::ResourceRequestClient;
 
 pub(crate) use self::async_fetch::{
-    collect_image_response_into_parkable,
-    fetch_browser_subresource_with_preflight_and_network_metadata,
-    fetch_browser_subresource_with_preflight_headers, fetch_intercepted_window_hop,
+    collect_image_response_into_parkable, fetch_browser_subresource_with_preflight_headers,
     spawn_async_subresource_fetch,
+};
+#[cfg(any(test, feature = "devtools"))]
+pub(crate) use self::async_fetch::{
+    fetch_browser_subresource_with_preflight_and_network_metadata, fetch_intercepted_window_hop,
 };
 pub(crate) use self::beacon::{navigator_send_beacon_callback, send_link_audit_ping};
 pub(super) use self::bindings::install_window_network_bindings;
@@ -101,9 +103,8 @@ pub(crate) use self::fetch_surface::{
     request_slot_string, set_response_slot_bool,
 };
 pub(crate) use self::fetch_surface::{
-    RESPONSE_BODY_SLOT, RESPONSE_BODY_USED_SLOT, RESPONSE_HEADERS_SLOT, RESPONSE_OK_SLOT,
-    RESPONSE_REDIRECTED_SLOT, RESPONSE_STATUS_SLOT, RESPONSE_STATUS_TEXT_SLOT, RESPONSE_TYPE_SLOT,
-    RESPONSE_URL_SLOT, is_branded_response_object,
+    RESPONSE_BODY_SLOT, RESPONSE_BODY_USED_SLOT, RESPONSE_HEADERS_SLOT, RESPONSE_STATUS_SLOT,
+    RESPONSE_STATUS_TEXT_SLOT, RESPONSE_URL_SLOT, is_branded_response_object,
 };
 pub(crate) use self::fetch_surface::{
     consume_webassembly_streaming_response_value, install_request_bindings,

@@ -540,6 +540,15 @@ async fn inline_svg_client_rects_include_graphics_text_and_viewport_transforms()
         assert_eq!(values["hidden"]["rect"], json!([0,0,0,0]));
         assert!(values["label"]["rect"][2].as_f64().unwrap() > 100.0, "text must be shaped: {values}");
         assert!(values["label"]["rect"][3].as_f64().unwrap() > 30.0, "text must be shaped: {values}");
+        let range: serde_json::Value = serde_json::from_str(&page_vm.vm_mut().eval(r#"
+            const text = document.getElementById('label').firstChild;
+            const range = document.createRange();
+            range.setStart(text, 0);
+            range.setEnd(text, text.length);
+            const {x, y, width, height} = range.getBoundingClientRect();
+            JSON.stringify([x, y, width, height]);
+        "#)?)?;
+        assert_eq!(range, values["label"]["rect"], "whole SVG text selection");
         assert!(values["group"]["rect"][3].as_f64().unwrap() > 120.0, "group must include text: {values}");
 
         assert_eq!(page_vm.vm_mut().eval("document.getElementById('shape').getAttribute('fill')")?, "none", "geometry projection must not change authored paint");
@@ -598,7 +607,7 @@ async fn inline_svg_chart_can_size_itself_from_group_and_text_client_rects() {
         // antialiased color coverage over white, without requiring axes and
         // glyphs to land on whole pixels in every font rasterizer.
         let color_coverage = |color: [u8; 3]| {
-            raster.rgba.chunks_exact(4).map(|pixel| {
+            raster.rgba.as_chunks::<4>().0.iter().map(|pixel| {
                 let alpha = f64::from(255 - pixel[0]) / f64::from(255 - color[0]);
                 if (1..3).all(|channel| {
                     (f64::from(pixel[channel]) - (255.0 - alpha * f64::from(255 - color[channel]))).abs() < 2.0

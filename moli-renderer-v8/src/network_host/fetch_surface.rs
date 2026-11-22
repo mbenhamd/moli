@@ -1,5 +1,7 @@
-use super::headers::{build_headers_object, headers_entries, headers_list, mark_headers_immutable};
-use super::response::{ParsedResponseInit, install_response_body_methods};
+use super::headers::{headers_entries, headers_list};
+use super::response::{
+    ParsedResponseInit, install_response_body_methods, new_error_response, new_response_with_init,
+};
 use super::*;
 use crate::context_bootstrap::readable_stream_disturbed;
 use crate::network_host::request_scope::callback_child_handle;
@@ -32,50 +34,19 @@ pub(in crate::network_host) const REQUEST_IS_RELOAD_NAVIGATION_SLOT: &str =
     "__lmRequestIsReloadNavigation";
 pub(in crate::network_host) const REQUEST_BODY_SLOT: &str = "__lmRequestBody";
 pub(in crate::network_host) const REQUEST_BODY_USED_SLOT: &str = "__lmRequestBodyUsed";
-pub(crate) const RESPONSE_TYPE_SLOT: &str = "__lmResponseType";
-pub(crate) const RESPONSE_URL_SLOT: &str = "__lmResponseUrl";
-pub(crate) const RESPONSE_INTERNAL_STATUS_SLOT: &str = "__lmResponseInternalStatus";
-pub(crate) const RESPONSE_INTERNAL_STATUS_TEXT_SLOT: &str = "__lmResponseInternalStatusText";
-pub(crate) const RESPONSE_INTERNAL_HEADERS_SLOT: &str = "__lmResponseInternalHeadersObject";
-pub(crate) const RESPONSE_REDIRECTED_SLOT: &str = "__lmResponseRedirected";
-pub(crate) const RESPONSE_STATUS_SLOT: &str = "__lmResponseStatus";
-pub(crate) const RESPONSE_OK_SLOT: &str = "__lmResponseOk";
-pub(crate) const RESPONSE_STATUS_TEXT_SLOT: &str = "__lmResponseStatusText";
-pub(crate) const RESPONSE_HEADERS_SLOT: &str = "__lmResponseHeadersObject";
-pub(crate) const RESPONSE_BODY_SLOT: &str = "__lmResponseBody";
-pub(crate) const RESPONSE_BODY_USED_SLOT: &str = "__lmResponseBodyUsed";
+pub(crate) use moli_webapi::fetch_response::{
+    RESPONSE_BODY_SLOT, RESPONSE_BODY_USED_SLOT, RESPONSE_HEADERS_SLOT,
+    RESPONSE_INTERNAL_HEADERS_SLOT, RESPONSE_INTERNAL_STATUS_SLOT,
+    RESPONSE_INTERNAL_STATUS_TEXT_SLOT, RESPONSE_OK_SLOT, RESPONSE_REDIRECTED_SLOT,
+    RESPONSE_STATUS_SLOT, RESPONSE_STATUS_TEXT_SLOT, RESPONSE_TYPE_SLOT, RESPONSE_URL_SLOT,
+};
+use moli_webapi::fetch_response::{clone_response_surface, response_value_attribute};
 
 #[derive(WebApiObject)]
 #[webapi(interface = web_api_interfaces::Request)]
 struct RequestCloneShellDeclaration {
     #[webapi(slot = REQUEST_BODY_USED_SLOT, init = false)]
     body_used: (),
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::Response)]
-struct ResponseCloneShellDeclaration<'scope> {
-    #[webapi(slot = RESPONSE_BODY_USED_SLOT, init = false)]
-    body_used: (),
-    #[webapi(slot = RESPONSE_BODY_SLOT)]
-    body: Option<v8::Local<'scope, v8::Value>>,
-}
-
-#[derive(WebApiObject)]
-#[webapi(plain, data_properties, enumerable)]
-struct ResponseInitObjectDeclaration<'scope> {
-    status: Option<f64>,
-    status_text: Option<String>,
-    headers: Option<v8::Local<'scope, v8::Value>>,
-}
-
-#[derive(Default, WebApiObject)]
-#[webapi(interface = web_api_interfaces::Response)]
-struct ResponseErrorStateDeclaration {
-    #[webapi(slot = RESPONSE_STATUS_SLOT, init = 0)]
-    status: (),
-    #[webapi(slot = RESPONSE_OK_SLOT, init = false)]
-    ok: (),
 }
 
 #[derive(WebApiFunctionTemplate)]
@@ -483,17 +454,8 @@ fn response_slot_attribute_getter_callback<'s>(
         rv.set(v8::Boolean::new(scope, body_used).into());
         return;
     }
-    if matches!(
-        slot,
-        RESPONSE_TYPE_SLOT | RESPONSE_URL_SLOT | RESPONSE_REDIRECTED_SLOT
-    ) {
-        let value = super::response::response_metadata_attribute(scope, this, slot)
-            .unwrap_or_else(|| v8::undefined(scope).into());
-        rv.set(value);
-        return;
-    }
     let value =
-        response_slot_value(scope, this, slot).unwrap_or_else(|| v8::undefined(scope).into());
+        response_value_attribute(scope, this, slot).unwrap_or_else(|| v8::undefined(scope).into());
     rv.set(value);
 }
 
@@ -550,28 +512,10 @@ fn response_static_error_callback<'s>(
     _args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let init = ResponseInitObjectDeclaration::new(None, None, None)
-        .bind(scope)
-        .expect("Response error init declaration should bind");
-    let Some(response) = new_response_instance(scope, v8::null(scope).into(), init.into()) else {
+    let Some(response) = new_error_response(scope) else {
         rv.set_undefined();
         return;
     };
-    ResponseErrorStateDeclaration::default()
-        .initialize(scope, response)
-        .expect("Response error state declaration should initialize");
-    super::response::set_response_metadata(
-        scope,
-        response,
-        &moli_fetch_types::FetchResponseMetadata {
-            response_type: moli_fetch_types::FetchResponseType::Error,
-            timing_allow_passed: false,
-            ..Default::default()
-        },
-    );
-    if let Some(headers) = response_slot_object(scope, response, RESPONSE_HEADERS_SLOT) {
-        mark_headers_immutable(scope, headers);
-    }
     rv.set(response.into());
 }
 
@@ -605,16 +549,12 @@ pub(crate) fn response_static_redirect_callback<'s>(
         );
         return;
     }
-    let init = build_response_init_object(
-        scope,
-        ParsedResponseInit {
-            status: parsed.status,
-            status_text: String::new(),
-            headers: Vec::new(),
-        },
-        &[("Location", location.as_str())],
-    );
-    let Some(response) = new_response_instance(scope, v8::null(scope).into(), init.into()) else {
+    let init = ParsedResponseInit {
+        status: parsed.status,
+        headers: vec![("location".to_owned(), location.as_str().to_owned())],
+        ..ParsedResponseInit::default()
+    };
+    let Some(response) = new_response_with_init(scope, v8::null(scope).into(), init) else {
         rv.set_undefined();
         return;
     };
@@ -646,9 +586,9 @@ fn response_static_json_callback<'s>(
         Some(body) => body,
         None => return,
     };
-    let init =
-        build_response_init_object(scope, parsed.init, &[("Content-Type", "application/json")]);
-    let Some(response) = new_response_instance(scope, body, init.into()) else {
+    let mut init = parsed.init;
+    init.append_default_header("content-type", "application/json");
+    let Some(response) = new_response_with_init(scope, body, init) else {
         rv.set_undefined();
         return;
     };
@@ -701,48 +641,6 @@ fn response_json_body<'s>(
             None
         }
     }
-}
-
-fn build_response_init_object<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    mut parsed: ParsedResponseInit,
-    extra_headers: &[(&str, &str)],
-) -> v8::Local<'s, v8::Object> {
-    for (name, value) in extra_headers {
-        if !parsed
-            .headers
-            .iter()
-            .any(|(entry_name, _): &(String, String)| entry_name.eq_ignore_ascii_case(name))
-        {
-            parsed
-                .headers
-                .push((name.to_ascii_lowercase(), (*value).to_owned()));
-        }
-    }
-
-    ResponseInitObjectDeclaration::new(
-        Some(parsed.status as f64),
-        (!parsed.status_text.is_empty()).then_some(parsed.status_text),
-        if parsed.headers.is_empty() {
-            None
-        } else {
-            Some(build_headers_object(scope, &parsed.headers).into())
-        },
-    )
-    .bind(scope)
-    .expect("Response init declaration should bind")
-}
-
-fn new_response_instance<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    body: v8::Local<'s, v8::Value>,
-    init: v8::Local<'s, v8::Value>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    let global = scope.get_current_context().global(scope);
-    let ctor = global
-        .get(scope, v8str(scope, "Response").into())
-        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())?;
-    ctor.new_instance(scope, &[body, init])
 }
 
 fn request_clone_callback<'s>(
@@ -845,11 +743,7 @@ fn response_clone_callback<'s>(
         return;
     };
     let scope = &mut v8::ContextScope::new(scope, realm);
-    let null_body = v8::null(scope).into();
-    let clone = ResponseCloneShellDeclaration::new(Some(null_body))
-        .bind(scope)
-        .expect("Response clone shell declaration should bind");
-    copy_response_surface_slots(scope, response, clone);
+    let clone = clone_response_surface(scope, response);
     if response_slot_number(scope, response, RESPONSE_STATUS_SLOT) == Some(0.0) {
         clone_filtered_response_internal_body_source(scope, response, clone);
     } else {
@@ -865,47 +759,6 @@ fn response_clone_callback<'s>(
     }
     mark_response_object(scope, clone);
     rv.set(clone.into());
-}
-
-fn copy_response_surface_slots<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    from: v8::Local<'s, v8::Object>,
-    to: v8::Local<'s, v8::Object>,
-) {
-    for slot in [
-        RESPONSE_STATUS_SLOT,
-        RESPONSE_STATUS_TEXT_SLOT,
-        RESPONSE_OK_SLOT,
-        RESPONSE_URL_SLOT,
-        RESPONSE_INTERNAL_STATUS_SLOT,
-        RESPONSE_INTERNAL_STATUS_TEXT_SLOT,
-        super::response::RESPONSE_METADATA_SLOT,
-    ] {
-        if let Some(value) = response_slot_value(scope, from, slot) {
-            set_response_slot_value(scope, to, slot, value);
-        }
-    }
-    let headers = response_slot_object(scope, from, RESPONSE_HEADERS_SLOT);
-    let cloned_headers =
-        headers.map(|headers| super::headers::clone_headers_object(scope, headers));
-    if let Some(cloned_headers) = cloned_headers {
-        set_response_slot_value(scope, to, RESPONSE_HEADERS_SLOT, cloned_headers.into());
-    }
-    if let Some(internal_headers) =
-        response_slot_object(scope, from, RESPONSE_INTERNAL_HEADERS_SLOT)
-    {
-        let cloned_internal = if Some(internal_headers) == headers {
-            cloned_headers.expect("public response headers were cloned")
-        } else {
-            super::headers::clone_headers_object(scope, internal_headers)
-        };
-        set_response_slot_value(
-            scope,
-            to,
-            RESPONSE_INTERNAL_HEADERS_SLOT,
-            cloned_internal.into(),
-        );
-    }
 }
 
 fn clone_response_readable_stream_body<'s>(

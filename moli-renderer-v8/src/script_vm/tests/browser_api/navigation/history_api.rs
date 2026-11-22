@@ -209,6 +209,47 @@ fn history_activity_is_checked_after_argument_conversion() {
 }
 
 #[test]
+fn history_mutation_empty_url_preserves_current_document_url() {
+    let mut vm = new_storage_test_vm("https://example.com/path/page.html?query=value#initial");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              const root = document.documentElement ||
+                document.appendChild(document.createElement("html"));
+              const head = document.head ||
+                root.insertBefore(document.createElement("head"), root.firstChild);
+              const base = document.createElement("base");
+              base.href = "https://example.com/different/base/";
+              head.appendChild(base);
+
+              const before = location.href;
+              history.pushState({ kind: "push" }, "", "");
+              const afterPush = location.href;
+              history.replaceState({ kind: "replace" }, "", "");
+
+              return JSON.stringify({
+                before,
+                afterPush,
+                afterReplace: location.href,
+                baseURI: document.baseURI,
+                length: history.length,
+                state: history.state.kind,
+                entryUrl: navigation.currentEntry.url
+              });
+            })()
+            "#,
+        )
+        .expect("empty history URL should preserve the current document URL");
+
+    assert_eq!(
+        result,
+        r#"{"before":"https://example.com/path/page.html?query=value#initial","afterPush":"https://example.com/path/page.html?query=value#initial","afterReplace":"https://example.com/path/page.html?query=value#initial","baseURI":"https://example.com/different/base/","length":2,"state":"replace","entryUrl":"https://example.com/path/page.html?query=value#initial"}"#
+    );
+}
+
+#[test]
 fn history_state_preserves_structured_clone_values_not_representable_as_json() {
     let mut vm = new_storage_test_vm("https://example.com/base");
 
@@ -591,4 +632,36 @@ fn location_hash_empty_fragment_serializes_empty_and_clears_target() {
         .expect("empty fragment hash probe should evaluate");
 
     assert_eq!(result, "#target/true|true||false|true");
+}
+
+#[test]
+fn empty_location_urls_follow_the_live_entry_document_base() {
+    for operation in [
+        "location.href = input",
+        "location.assign(input)",
+        "location.replace(input)",
+    ] {
+        let mut vm = new_parsed_test_vm(
+            "https://navigation-base.test/entry/page.html",
+            "<!doctype html><head><base href='/initial/'></head><body></body>",
+        );
+        vm.eval(&format!(
+            r#"
+const input = {{toString() {{
+  document.querySelector('base').href = '/converted/target.html?q=empty#discard';
+  return '';
+}}}};
+{operation};
+"#
+        ))
+        .unwrap();
+        let pending = vm
+            .take_pending_location_navigation_with_seed()
+            .expect("empty URL resolves to a cross-document navigation");
+        assert_eq!(
+            pending.url.as_str(),
+            "https://navigation-base.test/converted/target.html?q=empty",
+            "{operation}"
+        );
+    }
 }

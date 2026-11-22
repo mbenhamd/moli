@@ -4,7 +4,9 @@ use crate::native_bridge::document::detached_tree_query_version;
 use crate::util::{get_private_value, set_private_value};
 use crate::web_api_interfaces;
 use crate::webidl;
-use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
+use moli_webapi::xpath_values::XPathResultConstantsDeclaration;
+use moli_webapi::xpath_values::build_xpath_result_base;
+use moli_webapi_declare::WebApiFunctionTemplate;
 use moli_xpath::SnapshotValue;
 use std::ffi::c_void;
 
@@ -25,27 +27,6 @@ pub(super) enum XPathIteratorMutationState<'s> {
 struct XPathResultSnapshotItemArgs {
     #[webidl(required)]
     index: u32,
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::XPathResult)]
-struct XPathResultBaseDeclaration<'scope> {
-    #[webapi(slot = XPATH_RESULT_TYPE_SLOT)]
-    result_type: u32,
-    #[webapi(slot = XPATH_RESULT_STRING_VALUE_SLOT, constructor_default = "")]
-    string_value: &'static str,
-    #[webapi(slot = XPATH_RESULT_NUMBER_VALUE_SLOT, constructor_default = 0.0)]
-    number_value: f64,
-    #[webapi(slot = XPATH_RESULT_BOOLEAN_VALUE_SLOT, constructor_default = false)]
-    boolean_value: bool,
-    #[webapi(slot = XPATH_RESULT_SINGLE_NODE_VALUE_SLOT, init = "null")]
-    _single_node_value: (),
-    #[webapi(slot = XPATH_RESULT_SNAPSHOT_LENGTH_SLOT, constructor_default = 0)]
-    snapshot_length: u32,
-    #[webapi(slot = XPATH_RESULT_INDEX_SLOT, constructor_default = 0)]
-    index: i32,
-    #[webapi(slot = XPATH_RESULT_NODES_SLOT, constructor_default = Vec::new())]
-    nodes: Vec<v8::Local<'scope, v8::Value>>,
 }
 
 #[derive(WebApiFunctionTemplate)]
@@ -69,58 +50,6 @@ struct XPathResultPrototypeDeclaration {
     iterate_next: (),
     #[webapi(method, length = 1, callback = xpath_result_snapshot_item_callback)]
     snapshot_item: (),
-}
-
-#[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::XPathResult)]
-struct XPathResultConstantsDeclaration {
-    #[webapi(constant = "ANY_TYPE", value = XPATH_ANY_TYPE)]
-    any_type: (),
-
-    #[webapi(constant = "NUMBER_TYPE", value = XPATH_NUMBER_TYPE)]
-    number_type: (),
-
-    #[webapi(constant = "STRING_TYPE", value = XPATH_STRING_TYPE)]
-    string_type: (),
-
-    #[webapi(constant = "BOOLEAN_TYPE", value = XPATH_BOOLEAN_TYPE)]
-    boolean_type: (),
-
-    #[webapi(
-        constant = "UNORDERED_NODE_ITERATOR_TYPE",
-        value = XPATH_UNORDERED_NODE_ITERATOR_TYPE
-    )]
-    unordered_node_iterator_type: (),
-
-    #[webapi(
-        constant = "ORDERED_NODE_ITERATOR_TYPE",
-        value = XPATH_ORDERED_NODE_ITERATOR_TYPE
-    )]
-    ordered_node_iterator_type: (),
-
-    #[webapi(
-        constant = "UNORDERED_NODE_SNAPSHOT_TYPE",
-        value = XPATH_UNORDERED_NODE_SNAPSHOT_TYPE
-    )]
-    unordered_node_snapshot_type: (),
-
-    #[webapi(
-        constant = "ORDERED_NODE_SNAPSHOT_TYPE",
-        value = XPATH_ORDERED_NODE_SNAPSHOT_TYPE
-    )]
-    ordered_node_snapshot_type: (),
-
-    #[webapi(
-        constant = "ANY_UNORDERED_NODE_TYPE",
-        value = XPATH_ANY_UNORDERED_NODE_TYPE
-    )]
-    any_unordered_node_type: (),
-
-    #[webapi(
-        constant = "FIRST_ORDERED_NODE_TYPE",
-        value = XPATH_FIRST_ORDERED_NODE_TYPE
-    )]
-    first_ordered_node_type: (),
 }
 
 pub(super) fn install_xpath_result_template_bindings<'s>(
@@ -152,15 +81,6 @@ fn set_xpath_result_slot<'s>(
         return;
     };
     set_private_value(scope, object, name, value);
-}
-
-fn build_xpath_result_base<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    result_type: u32,
-) -> Option<v8::Local<'s, v8::Object>> {
-    XPathResultBaseDeclaration::new(result_type)
-        .bind(scope)
-        .ok()
 }
 
 pub(super) fn build_xpath_nodes_result<'s>(

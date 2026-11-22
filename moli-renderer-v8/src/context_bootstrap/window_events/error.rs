@@ -1,24 +1,6 @@
 use super::*;
-use moli_webapi_declare::WebApiObject;
-
-#[derive(WebApiObject)]
-#[webapi(plain)]
-struct ErrorEventInitDeclaration<'scope> {
-    #[webapi(data_property, enumerable)]
-    cancelable: bool,
-    #[webapi(data_property, enumerable)]
-    bubbles: bool,
-    #[webapi(data_property, enumerable)]
-    message: v8::Local<'scope, v8::Value>,
-    #[webapi(data_property, enumerable)]
-    filename: v8::Local<'scope, v8::Value>,
-    #[webapi(data_property, enumerable)]
-    lineno: u32,
-    #[webapi(data_property, enumerable)]
-    colno: u32,
-    #[webapi(data_property, enumerable)]
-    error: v8::Local<'scope, v8::Value>,
-}
+use crate::{document_runtime::DomHandle, exception_reporting::V8ExceptionReport};
+use moli_webapi::events::subclasses::error::construct_original_error_event;
 
 const BODY_ONERROR_RESOLUTION_GUARD_SLOT: &str = "__moliBodyOnerrorResolutionGuard";
 
@@ -136,38 +118,130 @@ pub(crate) fn dispatch_window_error_event_with_details<'s>(
     colno: u32,
     error_value: Option<v8::Local<'s, v8::Value>>,
 ) -> std::result::Result<(), String> {
-    ensure_window_reflecting_body_onerror_handler(scope);
+    let event = dispatch_window_error_event(
+        scope,
+        host_ptr,
+        message,
+        filename,
+        lineno,
+        colno,
+        error_value,
+    )?;
+    if let Some(event) = event {
+        emit_window_exception_diagnostic(
+            scope,
+            unsafe { &*host_ptr },
+            event,
+            message,
+            filename,
+            (lineno, colno),
+            error_value,
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn dispatch_window_callback_exception<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    host_ptr: *mut PageScriptHost,
+    child_event: Option<(DomHandle, v8::Local<'s, v8::Object>)>,
+    report: &V8ExceptionReport,
+) {
+    let filename = report.source.as_deref().unwrap_or("");
+    let lineno = report.line.unwrap_or(0) as u32;
+    let colno = report.column.unwrap_or(0) as u32;
+    if let Some((handle, event)) = child_event {
+        unsafe { &mut *host_ptr }.dispatch_child_window_event(scope, handle, "error", event);
+        emit_window_exception_diagnostic(
+            scope,
+            unsafe { &*host_ptr },
+            event,
+            &report.summary,
+            filename,
+            (lineno, colno),
+            report.exception.as_ref(),
+        );
+    } else {
+        let exception = report
+            .exception
+            .as_ref()
+            .map(|exception| v8::Local::new(scope, exception));
+        let _ = dispatch_window_error_event_with_details(
+            scope,
+            host_ptr,
+            &report.summary,
+            filename,
+            lineno,
+            colno,
+            exception,
+        );
+    }
+}
+
+fn emit_window_exception_diagnostic<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    host: &PageScriptHost,
+    event: v8::Local<'s, v8::Object>,
+    message: &str,
+    filename: &str,
+    location: (u32, u32),
+    exception: Option<impl v8::Handle<Data = v8::Value>>,
+) {
+    host.emit_diagnostic(|source| {
+        let default_prevented =
+            crate::context_bootstrap::event_bool_attribute(scope, event, "defaultPrevented");
+        let stack = if default_prevented {
+            None
+        } else {
+            exception.and_then(|exception| {
+                let value = v8::Local::new(scope, exception);
+                crate::exception_reporting::captured_exception_stack(scope, value)
+            })
+        };
+        Some(crate::DiagnosticEvent::runtime_exception(
+            source,
+            crate::ExceptionOrigin::UncaughtException,
+            message,
+            filename,
+            location,
+            stack,
+            crate::ErrorReportOutcome::from_default_prevented(default_prevented),
+        ))
+    });
+}
+
+pub(crate) fn dispatch_window_error_event<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    host_ptr: *mut PageScriptHost,
+    message: &str,
+    filename: &str,
+    lineno: u32,
+    colno: u32,
+    error_value: Option<v8::Local<'s, v8::Value>>,
+) -> std::result::Result<Option<v8::Local<'s, v8::Object>>, String> {
+    let popup_id = crate::native_bridge::active_lightweight_popup_id(scope);
+    if popup_id.is_none() {
+        ensure_window_reflecting_body_onerror_handler(scope);
+    }
     let error_value = error_value.unwrap_or_else(|| v8::null(scope).into());
 
-    let message = v8_string(scope, message)
-        .map(|s| s.into())
-        .unwrap_or_else(|| v8::null(scope).into());
-    let filename = v8_string(scope, filename)
-        .map(|s| s.into())
-        .unwrap_or_else(|| v8::null(scope).into());
-    let init =
-        ErrorEventInitDeclaration::new(true, false, message, filename, lineno, colno, error_value)
-            .bind(scope)
-            .expect("ErrorEvent init declaration should bind");
-
-    let event_type = v8str(scope, "error");
-    let event = super::super::exposed_interfaces::ensure_intrinsic_interface_constructor(
-        scope,
-        "ErrorEvent",
-    )
-    .ok()
-    .and_then(|ctor| ctor.new_instance(scope, &[event_type.into(), init.into()]));
-    let Some(event) = event else {
-        return Ok(());
+    let Some(event) =
+        construct_original_error_event(scope, message, filename, lineno, colno, error_value)
+    else {
+        return Ok(None);
     };
     mark_event_trusted(scope, event);
 
     let runtime = unsafe { &mut *host_ptr };
+    if let Some(popup_id) = popup_id {
+        runtime.dispatch_lightweight_popup_window_event(scope, popup_id, "error", event);
+        return Ok(Some(event));
+    }
     if let Some(child_handle) =
         crate::context_bootstrap::child_browsing_context_handle_for_current_realm_scope(scope)
     {
         runtime.dispatch_child_window_event(scope, child_handle, "error", event);
-        return Ok(());
+        return Ok(Some(event));
     }
     runtime.dispatch_public_event(scope, host_ptr, EventTargetHandle::Window, event)?;
 
@@ -183,7 +257,7 @@ pub(crate) fn dispatch_window_error_event_with_details<'s>(
         v8str(scope, "currentTarget").into(),
         global_value,
     );
-    Ok(())
+    Ok(Some(event))
 }
 
 pub(in crate::context_bootstrap) fn window_report_error_callback<'s>(

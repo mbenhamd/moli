@@ -228,45 +228,186 @@ where
     R: LayoutStyleResolver<S::NodeId>,
     F: EmbeddedFrameRenderer<S::NodeId>,
 {
-    let started = Instant::now();
-    let mut box_tree_elapsed = Duration::ZERO;
-    let mut list_marker_elapsed = Duration::ZERO;
-    let mut form_control_elapsed = Duration::ZERO;
-    let mut inline_preparation_elapsed = Duration::ZERO;
-    let mut numeric_layout_elapsed = Duration::ZERO;
-    let mut container_query_iteration_count = 0usize;
-    // Container query sizes feed back into style, so a changed size rebuilds
-    // the world from restyled elements. `seen` holds every vector applied so
-    // far in this pass: reaching one again without converging means auto
-    // scrollbars (or equivalent) oscillate, and the pass keeps the current
-    // world rather than alternate forever. Only the last world is published.
-    let mut seen_sizes: Vec<Vec<(S::NodeId, crate::LayoutQueryContainerSize)>> = Vec::new();
+    let mut preparation = LayoutPassPreparation::new(services, request);
+    let mut prepared = loop {
+        match preparation.prepare(source, styles, services)? {
+            LayoutPassStep::Ready(prepared) => break *prepared,
+            LayoutPassStep::Restyle(next) => preparation = *next,
+        }
+    };
+    let used_retained_world = prepared.used_retained_world;
+    let applied_sizes = prepared.take_applied_query_container_sizes();
+    let result = finish_prepared_layout_pass(prepared, source, services, frames)?;
+    verify_incremental_layout_pass(&result, services, used_retained_world, |services| {
+        // Embedded frames verify in their own recursive passes, so the check
+        // passes no frame renderer and compares this document's geometry.
+        let full = build_layout_pass_with_embedded_frames(
+            source,
+            styles,
+            services,
+            LayoutPassRequest {
+                retain_world: false,
+                ..request
+            },
+            &mut NoEmbeddedFrames,
+        );
+        // The full pass ran its own container-query loop on the shared
+        // resolver. Put back the sizes the incremental pass ended with so
+        // later passes start from the same state as without the check.
+        if let Some(sizes) = &applied_sizes
+            && let Err(error) = styles.update_query_container_sizes(sizes)
+        {
+            record_verify_comparison(false);
+            tracing::error!(
+                target: "moli_layout_incremental",
+                %error,
+                "restoring container sizes after the incremental layout check failed"
+            );
+        }
+        full
+    });
+    Ok(result)
+}
+
+/// Container-query convergence state for one layout demand.
+///
+/// Container query sizes feed back into style, so a changed size rebuilds the
+/// world from restyled elements. Each [`Self::prepare`] call builds and lays
+/// out one world with the given style resolver. A [`LayoutPassStep::Restyle`]
+/// result means the resolver accepted new container sizes and the caller must
+/// call `prepare` again, with a fresh resolver when its styles are pinned to
+/// one resolution pass. The style resolver can be released once the step is
+/// [`LayoutPassStep::Ready`], before SVG content, child documents, and the
+/// frozen tree consume the prepared world.
+pub struct LayoutPassPreparation<N>
+where
+    N: Copy + std::fmt::Debug + Eq + std::hash::Hash,
+{
+    request: LayoutPassRequest,
+    started: Instant,
+    box_tree_elapsed: Duration,
+    list_marker_elapsed: Duration,
+    form_control_elapsed: Duration,
+    inline_preparation_elapsed: Duration,
+    numeric_layout_elapsed: Duration,
+    container_query_iteration_count: usize,
+    // `seen` holds every vector applied so far in this pass: reaching one
+    // again without converging means auto scrollbars (or equivalent)
+    // oscillate, and the pass keeps the current world rather than alternate
+    // forever. Only the last world is published.
+    seen_sizes: Vec<Vec<(N, crate::LayoutQueryContainerSize)>>,
     // Container sizes last handed to the style resolver, so the differential
     // check can put the resolver back after its own full pass.
-    let mut applied_sizes: Option<Vec<(S::NodeId, crate::LayoutQueryContainerSize)>> = None;
+    applied_sizes: Option<Vec<(N, crate::LayoutQueryContainerSize)>>,
     // Web fonts change shaping through registration and per-pass face order,
     // neither of which a box comparison can see, so a world shaped under
     // other web-font inputs is dropped.
-    let can_retain = request.retain_world;
-    let web_fonts = services.web_font_retention_key();
-    let mut retained: Option<RetainedLayout<S::NodeId>> = if can_retain {
-        services
-            .take_retained_world::<RetainedLayout<S::NodeId>>()
-            .filter(|prior| prior.web_fonts == web_fonts)
-    } else {
-        services.clear_retained_world();
-        None
-    };
-    let mut reused_box_count = 0usize;
-    let mut reused_inline_count = 0usize;
-    let mut reused_numeric_count = 0usize;
-    let mut used_retained_world = false;
-    let (mut world, numeric_metrics, numeric_unrounded, structural_len, built_policy) = loop {
-        container_query_iteration_count += 1;
+    can_retain: bool,
+    web_fonts: crate::text::WebFontRetentionKey,
+    retained: Option<RetainedLayout<N>>,
+    reused_box_count: usize,
+    reused_inline_count: usize,
+    reused_numeric_count: usize,
+    used_retained_world: bool,
+}
+
+/// One [`LayoutPassPreparation::prepare`] outcome.
+pub enum LayoutPassStep<N>
+where
+    N: Copy + std::fmt::Debug + Eq + std::hash::Hash,
+{
+    /// Container-query sizes converged; the style resolver can be released.
+    Ready(Box<PreparedLayoutPass<N>>),
+    /// The resolver accepted changed container sizes; prepare again.
+    Restyle(Box<LayoutPassPreparation<N>>),
+}
+
+/// A converged, numerically laid-out world for one layout demand.
+pub struct PreparedLayoutPass<N>
+where
+    N: Copy + std::fmt::Debug + Eq + std::hash::Hash,
+{
+    state: LayoutPassPreparation<N>,
+    world: crate::LayoutWorld<N>,
+    numeric_metrics: NumericLayoutMetrics,
+    numeric_unrounded: Vec<taffy::Layout>,
+    structural_len: usize,
+    built_policy: crate::world::ViewportScrollPolicy,
+    used_retained_world: bool,
+    applied_sizes: Option<Vec<(N, crate::LayoutQueryContainerSize)>>,
+}
+
+impl<N> PreparedLayoutPass<N>
+where
+    N: Copy + std::fmt::Debug + Eq + std::hash::Hash,
+{
+    /// Whether this pass reused a retained world, so an incremental check can
+    /// compare it against a full pass.
+    pub fn used_retained_world(&self) -> bool {
+        self.used_retained_world
+    }
+
+    /// Moves out the container sizes last handed to the style resolver, so an
+    /// incremental check can restore them after its full pass.
+    pub fn take_applied_query_container_sizes(
+        &mut self,
+    ) -> Option<Vec<(N, crate::LayoutQueryContainerSize)>> {
+        self.applied_sizes.take()
+    }
+}
+
+impl<N> LayoutPassPreparation<N>
+where
+    N: Copy + std::fmt::Debug + Eq + std::hash::Hash + 'static,
+{
+    pub fn new(services: &mut DocumentLayoutServices, request: LayoutPassRequest) -> Self {
+        let can_retain = request.retain_world;
+        let web_fonts = services.web_font_retention_key();
+        let retained: Option<RetainedLayout<N>> = if can_retain {
+            services
+                .take_retained_world::<RetainedLayout<N>>()
+                .filter(|prior| prior.web_fonts == web_fonts)
+        } else {
+            services.clear_retained_world();
+            None
+        };
+        Self {
+            request,
+            started: Instant::now(),
+            box_tree_elapsed: Duration::ZERO,
+            list_marker_elapsed: Duration::ZERO,
+            form_control_elapsed: Duration::ZERO,
+            inline_preparation_elapsed: Duration::ZERO,
+            numeric_layout_elapsed: Duration::ZERO,
+            container_query_iteration_count: 0,
+            seen_sizes: Vec::new(),
+            applied_sizes: None,
+            can_retain,
+            web_fonts,
+            retained,
+            reused_box_count: 0,
+            reused_inline_count: 0,
+            reused_numeric_count: 0,
+            used_retained_world: false,
+        }
+    }
+
+    pub fn prepare<S, R>(
+        mut self,
+        source: &S,
+        styles: &mut R,
+        services: &mut DocumentLayoutServices,
+    ) -> Result<LayoutPassStep<N>, LayoutError>
+    where
+        S: LayoutSource<NodeId = N>,
+        R: LayoutStyleResolver<N>,
+    {
+        let request = self.request;
+        self.container_query_iteration_count += 1;
         let phase_started = Instant::now();
         let mut world = build_layout_world(source, styles)?;
         world.environment = request.environment;
-        box_tree_elapsed += phase_started.elapsed();
+        self.box_tree_elapsed += phase_started.elapsed();
         debug_assert!(
             world
                 .viewport_scroll_policy
@@ -276,17 +417,20 @@ where
         );
         let phase_started = Instant::now();
         prepare_list_markers(&mut world)?;
-        list_marker_elapsed += phase_started.elapsed();
+        self.list_marker_elapsed += phase_started.elapsed();
         let phase_started = Instant::now();
         prepare_form_controls(&mut world, styles)?;
-        form_control_elapsed += phase_started.elapsed();
+        self.form_control_elapsed += phase_started.elapsed();
         let phase_started = Instant::now();
         let structural_len = world.boxes.len();
         let built_policy = world.viewport_scroll_policy;
-        let mut reuse = retained.take().and_then(|prior| diff_worlds(&world, prior));
-        used_retained_world |= reuse.is_some();
+        let mut reuse = self
+            .retained
+            .take()
+            .and_then(|prior| diff_worlds(&world, prior));
+        self.used_retained_world |= reuse.is_some();
         prepare_inline_contexts(&mut world, services, reuse.as_mut());
-        inline_preparation_elapsed += phase_started.elapsed();
+        self.inline_preparation_elapsed += phase_started.elapsed();
         world.validate_invariants()?;
         let phase_started = Instant::now();
         let (numeric_metrics, numeric_unrounded) = compute_world_layout_with_scrollbars(
@@ -296,45 +440,92 @@ where
             reuse.as_mut(),
         );
         if let Some(reuse) = reuse {
-            reused_box_count += reuse.reused_box_count;
-            reused_inline_count += reuse.reused_inline_count;
-            reused_numeric_count += reuse.reused_numeric_count;
+            self.reused_box_count += reuse.reused_box_count;
+            self.reused_inline_count += reuse.reused_inline_count;
+            self.reused_numeric_count += reuse.reused_numeric_count;
             crate::retention::record_numeric_reused(reuse.reused_numeric_count);
         }
-        numeric_layout_elapsed += phase_started.elapsed();
+        self.numeric_layout_elapsed += phase_started.elapsed();
 
         let (sizes, depth) = world.query_container_sizes();
         let hard_cap = (depth + 3).max(MIN_CONTAINER_QUERY_ITERATION_CAP);
-        let converged =
-            seen_sizes.contains(&sizes) || container_query_iteration_count >= hard_cap || {
+        let converged = self.seen_sizes.contains(&sizes)
+            || self.container_query_iteration_count >= hard_cap
+            || {
                 let changed = styles.update_query_container_sizes(&sizes)?;
-                applied_sizes = Some(sizes.clone());
+                self.applied_sizes = Some(sizes.clone());
                 !changed
             };
         if converged {
-            break (
+            let used_retained_world = self.used_retained_world;
+            let applied_sizes = self.applied_sizes.take();
+            return Ok(LayoutPassStep::Ready(Box::new(PreparedLayoutPass {
+                state: self,
                 world,
                 numeric_metrics,
                 numeric_unrounded,
                 structural_len,
                 built_policy,
-            );
+                used_retained_world,
+                applied_sizes,
+            })));
         }
-        seen_sizes.push(sizes);
-        if can_retain {
+        self.seen_sizes.push(sizes);
+        if self.can_retain {
             // The next iteration diffs against this world, so a restyle that
             // touched few containers pays only for what it changed.
-            retained = Some(RetainedLayout {
+            self.retained = Some(RetainedLayout {
                 world,
                 numeric_unrounded,
                 structural_len,
                 viewport: request.viewport,
                 environment: request.environment,
                 viewport_policy: built_policy,
-                web_fonts: web_fonts.clone(),
+                web_fonts: self.web_fonts.clone(),
             });
         }
-    };
+        Ok(LayoutPassStep::Restyle(Box::new(self)))
+    }
+}
+
+/// Resolves SVG content and embedded frames against a converged world and
+/// freezes the pass result. No style resolver is borrowed here.
+pub fn finish_prepared_layout_pass<S, F>(
+    prepared: PreparedLayoutPass<S::NodeId>,
+    source: &S,
+    services: &mut DocumentLayoutServices,
+    frames: &mut F,
+) -> Result<LayoutPassResult<S::NodeId>, LayoutError>
+where
+    S: LayoutSource,
+    S::NodeId: 'static,
+    F: EmbeddedFrameRenderer<S::NodeId>,
+{
+    let PreparedLayoutPass {
+        state,
+        mut world,
+        numeric_metrics,
+        numeric_unrounded,
+        structural_len,
+        built_policy,
+        ..
+    } = prepared;
+    let LayoutPassPreparation {
+        request,
+        started,
+        box_tree_elapsed,
+        list_marker_elapsed,
+        form_control_elapsed,
+        inline_preparation_elapsed,
+        mut numeric_layout_elapsed,
+        container_query_iteration_count,
+        can_retain,
+        web_fonts,
+        reused_box_count,
+        reused_inline_count,
+        reused_numeric_count,
+        ..
+    } = state;
     // SVG content depends only on the final used size, so it resolves once
     // against the converged world rather than on every container-query
     // iteration.
@@ -423,51 +614,41 @@ where
             web_fonts,
         });
     }
-    if used_retained_world && verify_incremental_layout() {
-        // Run the same demand with no retained products, then compare.
-        // Embedded frames verify in their own recursive passes, so the check
-        // passes no frame renderer and compares this document's geometry.
-        if let Some(retained) = services.take_retained_world::<RetainedLayout<S::NodeId>>() {
-            let full = build_layout_pass_with_embedded_frames(
-                source,
-                styles,
-                services,
-                LayoutPassRequest {
-                    retain_world: false,
-                    ..request
-                },
-                &mut NoEmbeddedFrames,
+    Ok(result)
+}
+
+/// With incremental verification on, runs `full_pass` for a demand that
+/// reused a retained world and compares its geometry with `result`. The
+/// retained world is set aside for the full pass and kept afterwards. The
+/// incremental result stands on its own; a failed check is reported, never
+/// turned into a failed read.
+pub fn verify_incremental_layout_pass<N>(
+    result: &LayoutPassResult<N>,
+    services: &mut DocumentLayoutServices,
+    used_retained_world: bool,
+    full_pass: impl FnOnce(&mut DocumentLayoutServices) -> Result<LayoutPassResult<N>, LayoutError>,
+) where
+    N: Copy + std::fmt::Debug + Eq + std::hash::Hash + 'static,
+{
+    if !used_retained_world || !verify_incremental_layout() {
+        return;
+    }
+    let Some(retained) = services.take_retained_world::<RetainedLayout<N>>() else {
+        return;
+    };
+    let full = full_pass(services);
+    services.store_retained_world(retained);
+    match full {
+        Ok(full) => record_verify_result(result, &full),
+        Err(error) => {
+            record_verify_comparison(false);
+            tracing::error!(
+                target: "moli_layout_incremental",
+                %error,
+                "full rebuild for the incremental layout check failed"
             );
-            services.store_retained_world(retained);
-            // The full pass ran its own container-query loop on the shared
-            // resolver. Put back the sizes the incremental pass ended with so
-            // later passes start from the same state as without the check.
-            if let Some(sizes) = &applied_sizes
-                && let Err(error) = styles.update_query_container_sizes(sizes)
-            {
-                record_verify_comparison(false);
-                tracing::error!(
-                    target: "moli_layout_incremental",
-                    %error,
-                    "restoring container sizes after the incremental layout check failed"
-                );
-            }
-            // The incremental result stands on its own; a failed check is
-            // reported, never turned into a failed read.
-            match full {
-                Ok(full) => record_verify_result(&result, &full),
-                Err(error) => {
-                    record_verify_comparison(false);
-                    tracing::error!(
-                        target: "moli_layout_incremental",
-                        %error,
-                        "full rebuild for the incremental layout check failed"
-                    );
-                }
-            }
         }
     }
-    Ok(result)
 }
 
 /// Whether incremental passes must also run and compare against a full pass.

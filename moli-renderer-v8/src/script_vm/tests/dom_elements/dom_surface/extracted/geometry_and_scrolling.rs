@@ -1467,6 +1467,7 @@ fn element_scroll_methods_leave_a_detached_element_at_zero() {
     );
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn live_geometry_read_during_an_active_pass_fails_instead_of_returning_stale_geometry() {
     let mut vm = new_parsed_test_vm(
@@ -1567,6 +1568,7 @@ fn live_geometry_intersection_round_keeps_last_reported_state_when_layout_fails(
     );
 }
 
+#[cfg(feature = "devtools")]
 #[test]
 fn live_geometry_scroll_in_a_batched_action_is_read_back_immediately() {
     let mut vm = new_parsed_test_vm(

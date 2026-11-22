@@ -11,21 +11,21 @@ mod font_selection;
 mod math;
 mod media;
 mod root_margin;
+mod stylesheet_imports;
 mod stylo_stylesheet;
 mod transform;
 mod util;
 mod value;
 
 pub use color::{
-    css_system_color_srgb, parse_css_color_scheme_flags, parse_css_color_to_opaque_srgb_hex,
-    parse_css_color_to_srgb_bytes,
+    css_system_color_srgb, parse_absolute_css_color, parse_css_color_scheme_flags,
+    parse_css_color_to_opaque_srgb_hex, parse_css_color_to_srgb_bytes,
 };
 pub use declaration::{CssDeclaration, DeclarationParseOptions, parse_declaration_list};
 pub use font_face::{
     CssFontFace, CssFontFamily, CssFontShorthand, CssFontSource, font_family_name_key,
     font_load_query_contains_css_wide_keyword, font_load_query_family, font_load_query_is_valid,
-    legacy_variations_font_format, normalize_font_face_src, parse_font_face_sources,
-    parse_font_faces, parse_font_shorthand,
+    normalize_font_face_src, parse_font_face_sources, parse_font_faces, parse_font_shorthand,
 };
 pub use font_palette::{
     CssFontPaletteValuesProperty, parse_font_palette_values_property_with_stylo,
@@ -47,6 +47,12 @@ pub use root_margin::{normalize_root_margin, root_margin_components};
 pub use style::moli_declaration_block::{
     CssDeclarationBlock, CssDeclarationEntry, CssMutationProjection, CssRemoveResult, CssSetResult,
     parse_declaration_block,
+};
+pub use stylesheet_imports::{
+    StylesheetImportPlaceholderLoader, StylesheetImports,
+    clone_detached_stylesheet_contents_with_stylo, native_stylesheet_import_rules,
+    parse_detached_author_stylesheet_with_stylo, stylesheet_import_urls_with_stylo,
+    stylesheet_imports_from_native_with_stylo,
 };
 pub use stylo_stylesheet::{
     CssConditionRuleView, CssCounterStyleRuleView, CssDetachedRuleListMutation,
@@ -77,7 +83,7 @@ pub use stylo_stylesheet::{
     parse_page_selectors_with_stylo_context, parse_property_rule_view_with_stylo,
     parse_stylesheet_rule_snapshot_for_insert_with_stylo,
     parse_stylesheet_rule_snapshots_with_stylo, parse_stylesheet_rule_texts_with_stylo,
-    refresh_native_stylesheet_namespaces_after_cssom_mutation, stylesheet_import_urls_with_stylo,
+    refresh_native_stylesheet_namespaces_after_cssom_mutation,
 };
 pub use transform::{CssTransformFunction, parse_transform_function_list};
 pub use util::{
