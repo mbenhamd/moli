@@ -2796,9 +2796,12 @@ fn tab_default_action_restores_the_null_target_of_a_nested_load() {
     assert_eq!(result, "true true");
 }
 
-// PF-9474. A dispatch builds each tree scope's visible composedPath only
-// when one of its entries runs script, and once per scope. A listener-free
-// dispatch on a deep chain builds none, so its cost stays linear in depth.
+// PF-9474. A dispatch builds a tree scope's visible composedPath only when
+// one of its entries can run script, and at most once per scope, never once
+// per entry. The target and every bubbling entry look up their `on<type>`
+// handler property, which an author accessor can observe, so even a
+// listener-free dispatch builds its scope's path once: one build on a
+// 2048-deep chain, not one per entry.
 #[test]
 fn visible_event_paths_are_built_lazily_once_per_tree_scope() {
     let mut vm = new_storage_test_vm("https://event-dispatch-lazy-visible-path.test/");
@@ -2822,13 +2825,8 @@ fn visible_event_paths_are_built_lazily_once_per_tree_scope() {
     .expect("deep chain setup should evaluate");
 
     let builds = crate::host::visible_event_path_builds;
-    // The first turn after setup counted one build that no listener of this
-    // dispatch asked for, likely page work the setup queued. A warm-up turn
-    // absorbs it, so the counted turn measures only its own dispatch.
-    let probe = "deepLeaf.dispatchEvent(new Event('probe', { bubbles: true, composed: true }))";
-    vm.eval(probe).expect("warm-up dispatch should evaluate");
     let before = builds();
-    vm.eval(probe)
+    vm.eval("deepLeaf.dispatchEvent(new Event('probe', { bubbles: true, composed: true }))")
         .expect("listener-free dispatch should evaluate");
     let listener_free = builds() - before;
 
@@ -2867,6 +2865,6 @@ fn visible_event_paths_are_built_lazily_once_per_tree_scope() {
 
     assert_eq!(
         (listener_free, light_tree, two_scopes, lengths.as_str()),
-        (0, 1, 2, "8 8 5 5")
+        (1, 1, 2, "8 8 5 5")
     );
 }
