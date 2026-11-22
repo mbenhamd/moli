@@ -272,16 +272,8 @@ pub(super) fn commit_css_transition_styles<'s>(
     else {
         return;
     };
-    let Some(set_property) =
-        v8::Function::builder(crate::native_bridge::element::style_set_property_callback)
-            .build(scope)
-    else {
-        return;
-    };
-    let (Some(name), Some(value)) = (v8_string(scope, &property), v8_string(scope, &value)) else {
-        return;
-    };
-    let _ = set_property.call(scope, style.into(), &[name.into(), value.into()]);
+    // The native declaration, not a `setProperty` that script replaced.
+    crate::native_bridge::element::set_style_property(scope, style, &property, &value, "");
 }
 
 /// The transition's two keyframes, as `getKeyframes()` reports them.

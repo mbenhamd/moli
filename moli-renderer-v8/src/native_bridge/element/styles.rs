@@ -45,8 +45,8 @@ pub(crate) use declaration::{
 };
 pub(crate) use methods::{
     computed_style_property_names_from_object, computed_style_property_value_from_object,
-    style_get_property_priority_callback, style_get_property_value_callback, style_item_callback,
-    style_remove_property_callback, style_set_property_callback,
+    set_style_property, style_get_property_priority_callback, style_get_property_value_callback,
+    style_item_callback, style_remove_property_callback, style_set_property_callback,
 };
 pub(crate) use named::{live_style_named_property_value, set_live_style_named_property_value};
 use named::{
