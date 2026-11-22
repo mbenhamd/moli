@@ -31,11 +31,14 @@ use self::document::{EVENT_STOP_IMMEDIATE_SLOT, EVENT_STOP_PROPAGATION_SLOT};
 #[cfg(feature = "devtools")]
 pub(crate) use self::events::EventListenerInspectorSnapshot;
 pub(crate) use self::events::EventListenerRegistration;
+#[cfg(test)]
+pub(super) use self::events::visible_event_path_builds;
 pub(super) use self::events::{
     DispatchStatus, HostEventTargetRegistry, PublicEventDispatchResult, create_host_event,
     dispatch_host_event, dispatch_public_event, dispatch_public_event_with_original_target,
     event_dispatch_status, event_target_value, host_event_defaults, invoke_prepared_event_callback,
-    report_event_callback_exception, report_event_listener_exception,
+    report_event_callback_exception, report_event_listener_exception, retarget_event_target,
+    retargeted_event_source,
 };
 pub(super) use self::scripts::{
     CommittedInlineClassicScript, FailedDynamicScript, HostScriptScheduler, ModuleFailurePolicy,
