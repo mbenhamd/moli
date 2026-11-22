@@ -890,9 +890,11 @@ pub(crate) fn update_css_transition_styles(host: &PageScriptHost, resolve_subtre
     resolve_unresolved_css_transition_frame_roots(host);
     let engine = host.style_engine_ref();
     let dom = host.dom_host();
-    // The frame's DOM changes become invalidation roots before the update
-    // takes them, so a node inserted during this frame is styled now.
+    // The frame's DOM and stylesheet changes become invalidation roots
+    // before the update takes them, so a node inserted or a rule changed
+    // during this frame is styled now.
     host.drain_pending_style_invalidations_for_computed_style_read();
+    apply_unapplied_css_transition_sheets(host);
     let targets = engine.css_transition_style_update_targets(dom);
     let mut roots = engine.take_css_transition_style_roots();
     if let Some(document) = engine.take_unstyled_css_transition_document(host.document_handle()) {
@@ -941,11 +943,36 @@ pub(crate) fn resolve_unresolved_css_transition_frame_roots(host: &PageScriptHos
 /// can specify a transition skipped, once due: a task or command starts
 /// with it, as it would follow the frame.
 pub(crate) fn run_skipped_css_transition_frame(host: &PageScriptHost) {
+    if !host
+        .style_engine_ref()
+        .skipped_css_transition_frame_is_due()
+    {
+        return;
+    }
+    apply_unapplied_css_transition_sheets(host);
     let roots = host
         .style_engine_ref()
         .take_skipped_css_transition_frame_roots(host.dom_host());
     if !roots.is_empty() {
         update_changed_subtree_styles(host, roots);
+    }
+}
+
+/// Applies the stylesheet changes no style update has applied yet, as a
+/// frame's style recalc does first: reading the root element's style updates
+/// its Document's retained styles, which notes the subtrees the changes
+/// restyle as roots for the update that follows.
+fn apply_unapplied_css_transition_sheets(host: &PageScriptHost) {
+    let dom = host.dom_host();
+    for document in host
+        .style_engine_ref()
+        .css_transition_documents_with_unapplied_sheets()
+    {
+        if let Some(root) = dom.document_element_handle_for_document(document) {
+            let _ = crate::native_bridge::element::computed_style_property_for_handle(
+                host, root, "display",
+            );
+        }
     }
 }
 

@@ -3668,3 +3668,146 @@ fn css_transition_skipped_frame_styles_an_unread_class_change() {
     );
     assert_eq!(observed, "1");
 }
+
+async fn run_frames_for_ms(
+    vm: &mut StandaloneScriptVmHarness,
+    loader: &ResourceRequestClient,
+    milliseconds: u64,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(milliseconds);
+    vm.advance_timers_until_deadline_for_test_with_deadline(loader, deadline)
+        .await
+        .expect("frames should run");
+}
+
+/// Chromium 156: while a transition runs, a frame still restyles the
+/// candidates under its element: a descendant that inherits a transitioned
+/// color, or resolves `em` against a transitioned font size, starts its own
+/// transition within the first frames, though no script reads it.
+#[tokio::test]
+async fn css_transition_frames_restyle_candidates_under_a_running_transition() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-inherited-sample.test/",
+        r#"<html><head><style>
+#p { color: rgb(0, 0, 0); font-size: 10px; transition: color 1s linear, font-size 1s linear; }
+#p.on { color: rgb(255, 0, 0); font-size: 20px; }
+#c { transition: color 3600s linear; }
+#e { width: 1em; height: 1px; transition: width 3600s linear; }
+</style></head><body><div id="p"><span id="c">x</span><div id="e"></div></div></body></html>"#,
+    );
+    eval_string(
+        &mut vm,
+        r#"
+(() => {
+  const p = document.getElementById('p');
+  const c = document.getElementById('c');
+  const e = document.getElementById('e');
+  getComputedStyle(c).color;
+  getComputedStyle(e).width;
+  getComputedStyle(p).color;
+  globalThis.__runs = { c: 0, e: 0 };
+  c.addEventListener('transitionrun', (event) => { if (event.target === c) __runs.c++; });
+  e.addEventListener('transitionrun', (event) => { if (event.target === e) __runs.e++; });
+  return '';
+})()
+"#,
+    );
+    eval_string(
+        &mut vm,
+        "(() => { document.getElementById('p').className = 'on'; return ''; })()",
+    );
+    run_frames_for_ms(&mut vm, &loader, 100).await;
+    assert_eq!(
+        eval_string(&mut vm, "[__runs.c > 0, __runs.e > 0].join('|')"),
+        "true|true"
+    );
+}
+
+/// Chromium 156: a stylesheet change no task reads is applied by the frame
+/// that follows. A Document without transitions restyles the elements it
+/// changes, so a later task's first transition starts from that style, for
+/// an inserted rule and an appended `style` element alike; an element whose
+/// style specifies a transition starts it, though no script reads it.
+#[tokio::test]
+async fn css_transition_frames_apply_unread_stylesheet_changes() {
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-unread-sheet.test/",
+        r#"<html><head><style>#t { opacity: 1; } #u { opacity: 1; }</style></head>
+<body><div id="t"></div><div id="u"></div></body></html>"#,
+    );
+    eval_string(
+        &mut vm,
+        "(() => { getComputedStyle(document.getElementById('t')).opacity; \
+         getComputedStyle(document.getElementById('u')).opacity; return ''; })()",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    vm.resolve_unresolved_css_transition_frame_roots();
+    eval_string(
+        &mut vm,
+        "(() => { document.styleSheets[0].insertRule('#t { opacity: 0; }', 2); \
+         document.head.appendChild(document.createElement('style')).textContent = \
+         '#u { opacity: 0; }'; return ''; })()",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    vm.resolve_unresolved_css_transition_frame_roots();
+    let observed = eval_string(
+        &mut vm,
+        r#"
+(() => {
+  const t = document.getElementById('t');
+  const u = document.getElementById('u');
+  t.style.transition = 'opacity 3600s linear';
+  u.style.transition = 'opacity 3600s linear';
+  return [t.getAnimations().length, u.getAnimations().length,
+    getComputedStyle(t).opacity, getComputedStyle(u).opacity].join('|');
+})()
+"#,
+    );
+    assert_eq!(observed, "0|0|0|0");
+
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-unread-rule.test/",
+        r#"<html><head><style>#t { opacity: 1; transition: opacity 20ms linear; }</style></head>
+<body><div id="t"></div></body></html>"#,
+    );
+    eval_string(
+        &mut vm,
+        "(() => { const t = document.getElementById('t'); getComputedStyle(t).opacity; \
+         globalThis.__ended = 0; t.addEventListener('transitionend', () => { __ended++; }); \
+         return ''; })()",
+    );
+    eval_string(
+        &mut vm,
+        "(() => { document.styleSheets[0].insertRule('#t { opacity: 0; }', 1); return ''; })()",
+    );
+    run_frames_for_ms(&mut vm, &loader, 300).await;
+    assert_eq!(eval_string(&mut vm, "String(__ended)"), "1");
+}
+
+/// Chromium 156: a class change no task reads gets the frame that follows,
+/// so the transition it starts runs and ends without another task.
+#[tokio::test]
+async fn css_transition_unread_class_change_gets_its_frame() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-unread-class-frame.test/",
+        r#"<html><head><style>
+#b { opacity: 1; }
+#b.fade { opacity: 0; transition: opacity 20ms linear; }
+</style></head><body><div id="b"></div></body></html>"#,
+    );
+    eval_string(
+        &mut vm,
+        "(() => { const b = document.getElementById('b'); getComputedStyle(b).opacity; \
+         globalThis.__ended = 0; b.addEventListener('transitionend', () => { __ended++; }); \
+         return ''; })()",
+    );
+    eval_string(
+        &mut vm,
+        "(() => { document.getElementById('b').classList.add('fade'); return ''; })()",
+    );
+    run_frames_for_ms(&mut vm, &loader, 300).await;
+    assert_eq!(eval_string(&mut vm, "String(__ended)"), "1");
+}

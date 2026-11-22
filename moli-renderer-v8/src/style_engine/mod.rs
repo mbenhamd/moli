@@ -1123,19 +1123,33 @@ impl MoliStyleEngine {
                     None
                 }
             } else {
-                if Self::css_transition_style_changes_undrained(&world) {
-                    // The frame those changes need is skipped: no task
-                    // waits for it, and the next task starts with its style
-                    // update, as for a Document that cannot specify a
-                    // transition.
-                    self.arm_skipped_css_transition_frame(&world, now);
-                }
                 // While a transition runs, its values change every frame:
                 // the task stands in for the rendering update's "update
                 // animations and send events" step at a 60Hz frame rate.
-                transitions.next_phase_change().map(|time| {
+                let phase_change = transitions.next_phase_change().map(|time| {
                     ((time - now) * 1000.0).clamp(0.0, CSS_TRANSITION_FRAME_INTERVAL_MS)
-                })
+                });
+                let undrained = Self::css_transition_style_changes_undrained(&world);
+                if (undrained || transitions.has_unresolved_frame_roots())
+                    && self.css_transition_frame_specified_for_world(host, &world)
+                {
+                    // A style change the turn-exit drain notes after this
+                    // check may start a transition: the next frame runs its
+                    // style change event, and the frame after it resolves
+                    // the subtrees that frame left, unless a task runs first.
+                    Some(phase_change.unwrap_or(CSS_TRANSITION_FRAME_INTERVAL_MS))
+                } else {
+                    if undrained || world.document_state.has_unapplied_source_changes() {
+                        // The frame those changes need is skipped: no task
+                        // waits for it, and the next task starts with its
+                        // style update, as for a Document that cannot
+                        // specify a transition. A stylesheet change of a
+                        // Document with candidates changes its style
+                        // generation, so its frame is due above.
+                        self.arm_skipped_css_transition_frame(&world, now);
+                    }
+                    phase_change
+                }
             };
             if let Some(due) = due {
                 delay = Some(delay.map_or(due, |delay| delay.min(due)));
@@ -1144,12 +1158,15 @@ impl MoliStyleEngine {
         delay
     }
 
+    /// Changes with every style change of `world`'s Document, a stylesheet
+    /// change included, before any style update applies it.
     fn css_transition_style_generation(world: &DocumentStyleWorld) -> u64 {
         world
             .document_state
             .lazy_invalidation_roots
             .generation()
             .saturating_add(world.document_state.computed_cache_generation())
+            .saturating_add(world.document_state.source_set_generation())
     }
 
     /// Whether a style change of `world`'s Document may start a transition,
@@ -1170,6 +1187,45 @@ impl MoliStyleEngine {
                 .borrow()
                 .contains(&world.document)
             || world.document_state.author_styles_may_specify_transitions()
+    }
+
+    /// `css_transition_frame_needed_for_world` without its guesses: a
+    /// stylesheet change no retained style update has scanned yet, or a
+    /// Document without retained styles, does not count. A task queued for a
+    /// change it has not drained yet waits on this.
+    fn css_transition_frame_specified_for_world(
+        &self,
+        host: &DomHost,
+        world: &DocumentStyleWorld,
+    ) -> bool {
+        world.css_transitions.has_candidates()
+            || host.style_attributes_may_specify_transitions(world.document)
+            || self
+                .inline_style_texts_may_specify_transitions
+                .borrow()
+                .contains(&world.document)
+            || world.document_state.author_styles_specify_transitions()
+    }
+
+    /// Whether the frame a Document skipped is due
+    /// (`take_skipped_css_transition_frame_roots`).
+    pub(crate) fn skipped_css_transition_frame_is_due(&self) -> bool {
+        self.css_transition_skipped_frame_due
+            .get()
+            .is_some_and(|due| transitions::animation_clock_now() >= due)
+    }
+
+    /// The Documents with retained styles whose stylesheet changes no style
+    /// update has applied yet. Applying them notes the subtrees they
+    /// restyle, so a frame's style update applies them before it takes its
+    /// roots.
+    pub(crate) fn css_transition_documents_with_unapplied_sheets(&self) -> Vec<DomHandle> {
+        self.document_worlds
+            .active_worlds()
+            .iter()
+            .filter(|world| world.document_state.has_unapplied_source_changes())
+            .map(|world| world.document)
+            .collect()
     }
 
     /// Takes the changed subtrees of the Documents whose frame was skipped,
@@ -1220,8 +1276,8 @@ impl MoliStyleEngine {
                         != Some(Self::css_transition_style_generation(world))))
     }
 
-    /// Whether `world` has style changes the turn-exit drain has not noted
-    /// as roots yet. It runs after the task's due check.
+    /// Whether `world` has DOM changes the turn-exit drain has not noted as
+    /// roots yet. It runs after the task's due check.
     fn css_transition_style_changes_undrained(world: &DocumentStyleWorld) -> bool {
         world.pending_structural_mutations.has_work() || world.pending_invalidations.has_work()
     }
@@ -1236,8 +1292,10 @@ impl MoliStyleEngine {
 
     /// Whether only transition samples changed `world`'s styles since its
     /// last frame's style update: the roots they noted are the running
-    /// targets, which the frame reads anyway, and nothing else changed.
-    fn css_transition_sample_only_frame(&self, world: &DocumentStyleWorld) -> bool {
+    /// targets, which the frame reads anyway, nothing else changed, and no
+    /// other candidate is a flat-tree descendant of a running target, whose
+    /// sampled values it can inherit or resolve relative units against.
+    fn css_transition_sample_only_frame(&self, host: &DomHost, world: &DocumentStyleWorld) -> bool {
         let transitions = &world.css_transitions;
         if world.pending_structural_mutations.has_work()
             || world.pending_invalidations.has_work()
@@ -1250,9 +1308,25 @@ impl MoliStyleEngine {
             .running_targets()
             .into_iter()
             .collect::<std::collections::HashSet<_>>();
-        world
+        if !world
             .document_state
             .transition_style_roots_all(|root| running.contains(&root))
+        {
+            return false;
+        }
+        !transitions.any_candidate(|candidate| {
+            if running.contains(&candidate) {
+                return false;
+            }
+            let mut ancestor = host.flat_tree_parent(candidate);
+            while let Some(handle) = ancestor {
+                if running.contains(&handle) {
+                    return true;
+                }
+                ancestor = host.flat_tree_parent(handle);
+            }
+            false
+        })
     }
 
     /// Returns subtrees a frame's style update did not reach to their
@@ -1344,7 +1418,7 @@ impl MoliStyleEngine {
             .iter()
             .filter(|world| self.css_transition_style_update_due_for_world(world))
             .flat_map(|world| {
-                if self.css_transition_sample_only_frame(world) {
+                if self.css_transition_sample_only_frame(host, world) {
                     // No candidate's style changed: only the running
                     // targets have style change events to run.
                     return world.css_transitions.running_targets();

@@ -539,6 +539,13 @@ impl DocumentCssTransitions {
             .collect()
     }
 
+    pub(super) fn any_candidate(&self, predicate: impl Fn(DomHandle) -> bool) -> bool {
+        self.candidates
+            .borrow()
+            .iter()
+            .any(|&candidate| predicate(candidate))
+    }
+
     pub(super) fn has_candidates(&self) -> bool {
         !self.candidates.borrow().is_empty() || !self.store.borrow().records.is_empty()
     }

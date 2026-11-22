@@ -1053,8 +1053,9 @@ pub use host::is_builtin_reassociateable_form_associated_element;
 /// Whether `style` attribute text can declare a `transition-*` longhand.
 ///
 /// Every declaration ends at a `;` and names its property before its first
-/// `:`, so a declaration that names `transition` or `transition-*` (ASCII
-/// case-insensitively, or through a CSS escape) is found. Splitting inside a
+/// `:`, so a declaration that names `transition` or `transition-*`, or their
+/// `-webkit-` aliases (ASCII case-insensitively, or through a CSS escape), is
+/// found. Splitting inside a
 /// string or a custom property value can only find more names, so the
 /// answer may be a false `true`, never a false `false`. Custom properties,
 /// such as `--label: transition`, name no transition.
@@ -1074,6 +1075,14 @@ pub fn style_attribute_may_specify_transitions(value: &str) -> bool {
             return false;
         };
         let name = name.trim_matches(|c: char| c.is_ascii_whitespace());
+        let alias = b"-webkit-";
+        let name = if name.len() > alias.len()
+            && name.as_bytes()[..alias.len()].eq_ignore_ascii_case(alias)
+        {
+            &name[alias.len()..]
+        } else {
+            name
+        };
         let prefix = b"transition";
         name.contains('\\')
             || name.len() >= prefix.len()
@@ -1098,6 +1107,22 @@ mod tests {
 
     fn test_url() -> url::Url {
         url::Url::parse("https://example.test/").expect("valid test url")
+    }
+
+    /// Chromium 156 parses `-webkit-transition` and `-webkit-transition-*`
+    /// as aliases of the transition properties: a style attribute that
+    /// declares one has a transition duration.
+    #[test]
+    fn style_attribute_transition_scan_finds_webkit_aliases() {
+        assert!(style_attribute_may_specify_transitions(
+            "-webkit-transition: opacity 1s"
+        ));
+        assert!(style_attribute_may_specify_transitions(
+            "color: red; -WEBKIT-Transition-Duration: 1s"
+        ));
+        assert!(!style_attribute_may_specify_transitions(
+            "-webkit-transform: none; --webkit-transition: x"
+        ));
     }
 
     #[test]

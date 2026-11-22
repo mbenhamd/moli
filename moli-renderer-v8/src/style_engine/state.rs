@@ -274,6 +274,24 @@ impl StyleDocumentState {
                 .map_or(true, |retained| retained.is_none())
     }
 
+    /// Whether a retained style update has found an author stylesheet that
+    /// declares a `transition-*` longhand. Unlike
+    /// `author_styles_may_specify_transitions`, a stylesheet change no update
+    /// has scanned yet does not count.
+    pub(super) fn author_styles_specify_transitions(&self) -> bool {
+        self.author_styles_may_specify_transitions.get()
+    }
+
+    /// Whether the Document has retained styles and stylesheet changes no
+    /// retained style update has applied yet.
+    pub(super) fn has_unapplied_source_changes(&self) -> bool {
+        self.source_dirty_scopes.requires_retained_style_update()
+            && self
+                .retained_style_system
+                .try_borrow()
+                .is_ok_and(|retained| retained.is_some())
+    }
+
     fn note_author_transition_styles(&self, retained: &RetainedStyleSystem) {
         if !self.author_styles_may_specify_transitions.get()
             && super::retained::retained_author_styles_may_specify_transitions(retained)
