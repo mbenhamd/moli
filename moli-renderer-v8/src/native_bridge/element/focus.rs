@@ -755,26 +755,70 @@ pub(crate) fn perform_hover_interest_default_action_for_dispatched_event(
     show_interest_popover_if_needed(scope, runtime_ptr, source_handle, target);
 }
 
-pub(crate) fn perform_access_key_default_action_for_dispatched_event(
+/// The keyboard default action a trusted, uncanceled keydown selects. It is
+/// chosen from the event's state when its dispatch ended, before any script
+/// the action reaches can reinitialize the event. Tab, Escape and an access
+/// key are mutually exclusive.
+pub(crate) enum KeyboardDefaultAction {
+    TabFocus { reverse: bool },
+    DialogEscape { document: DomHandle },
+    AccessKey { key: String, document: DomHandle },
+}
+
+impl KeyboardDefaultAction {
+    pub(crate) fn select(
+        scope: &mut v8::PinScope<'_, '_>,
+        event: v8::Local<'_, v8::Object>,
+        document: Option<DomHandle>,
+    ) -> Option<Self> {
+        let key = event_string_property(scope, event, "key")?;
+        match key.as_str() {
+            "Tab" => Some(Self::TabFocus {
+                reverse: event_boolean_property(scope, event, "shiftKey"),
+            }),
+            "Escape" => document.map(|document| Self::DialogEscape { document }),
+            _ => {
+                let document = document?;
+                let access_key_modifiers = event_boolean_property(scope, event, "altKey")
+                    && event_boolean_property(scope, event, "ctrlKey") == cfg!(target_os = "macos")
+                    && !event_boolean_property(scope, event, "metaKey");
+                (access_key_modifiers && key.chars().count() == 1)
+                    .then_some(Self::AccessKey { key, document })
+            }
+        }
+    }
+
+    pub(crate) fn perform(
+        self,
+        scope: &mut v8::PinScope<'_, '_>,
+        runtime_ptr: *mut PageScriptHost,
+    ) {
+        match self {
+            Self::TabFocus { reverse } => {
+                perform_tab_focus_default_action(scope, runtime_ptr, reverse)
+            }
+            Self::DialogEscape { document } => {
+                super::details_dialog::perform_dialog_escape_default_action(
+                    scope,
+                    runtime_ptr,
+                    document,
+                );
+            }
+            Self::AccessKey { key, document } => {
+                perform_access_key_default_action(scope, runtime_ptr, &key, document);
+            }
+        }
+    }
+}
+
+fn perform_access_key_default_action(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
-    event: v8::Local<'_, v8::Object>,
+    key: &str,
     document: DomHandle,
 ) {
-    if !event_boolean_property(scope, event, "altKey")
-        || event_boolean_property(scope, event, "ctrlKey") != cfg!(target_os = "macos")
-        || event_boolean_property(scope, event, "metaKey")
-    {
-        return;
-    }
-    let Some(key) = event_string_property(scope, event, "key") else {
-        return;
-    };
-    if key.chars().count() != 1 {
-        return;
-    }
     let runtime = unsafe { &*runtime_ptr };
-    let Some(target) = access_key_target(runtime, document, &key) else {
+    let Some(target) = access_key_target(runtime, document, key) else {
         return;
     };
     let _ = super::activation::dispatch_click_event(
@@ -790,21 +834,17 @@ pub(crate) fn perform_access_key_default_action_for_dispatched_event(
     );
 }
 
-pub(crate) fn perform_tab_focus_default_action_for_dispatched_event(
+fn perform_tab_focus_default_action(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut PageScriptHost,
-    event: v8::Local<'_, v8::Object>,
+    reverse: bool,
 ) {
-    if event_string_property(scope, event, "key").as_deref() != Some("Tab") {
-        return;
-    }
     let runtime = unsafe { &*runtime_ptr };
     let active = runtime.active_element_handle();
     let order = sequential_focus_order(runtime, active);
     if order.is_empty() {
         return;
     }
-    let reverse = event_boolean_property(scope, event, "shiftKey");
     let next_handle = active
         .and_then(|active| order.iter().position(|candidate| *candidate == active))
         .map(|index| {

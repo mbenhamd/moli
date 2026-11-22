@@ -19,6 +19,7 @@ mod main_parser_continuation;
 mod meta_refresh;
 mod mutation_commands;
 mod native_events;
+pub(crate) use events::mark_event_source_composed;
 pub(crate) use native_events::NativeEventDispatch;
 mod parser_blocking;
 mod parser_modulepreload;
