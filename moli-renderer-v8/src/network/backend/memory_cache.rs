@@ -12,7 +12,6 @@ use indexmap::IndexMap;
 use moli_fetch::{BrowserRequestMetadata, RawResponse, Request, RequestResourceType, Response};
 use moli_http_cache::{cacheable_response_parts_policy, unix_now_ms};
 use parking_lot::Mutex;
-use tokio::sync::Notify;
 use url::Url;
 
 /// Strong-reference budget for renderer subresources.
@@ -125,16 +124,15 @@ impl MemoryCacheEntry {
     fn is_expired(&self, now_unix_ms: u64) -> bool {
         match self {
             Self::ScriptText {
-                expires_at_unix_ms: Some(expires_at_unix_ms),
+                load,
+                expires_at_unix_ms,
                 ..
+            } => {
+                load.is_closed() || expires_at_unix_ms.is_some_and(|expires| expires <= now_unix_ms)
             }
-            | Self::RawSubresource {
+            Self::RawSubresource {
                 expires_at_unix_ms, ..
             } => *expires_at_unix_ms <= now_unix_ms,
-            Self::ScriptText {
-                expires_at_unix_ms: None,
-                ..
-            } => false,
         }
     }
 }
@@ -147,31 +145,65 @@ pub(in crate::network) struct SharedMemoryResourceCache {
 }
 
 pub(in crate::network) enum ScriptTextCacheLookup {
-    Owner(SharedScriptTextLoad),
-    PendingWaiter(SharedScriptTextLoad),
+    Owner(ScriptTextSubscription),
+    PendingWaiter(ScriptTextSubscription),
     CompletedHit(Box<ScriptTextLoadResult>),
+}
+
+/// A shared download paired with the consumer reserved during cache lookup.
+/// Installing a callback consumes the subscription and returns only its weak
+/// cancellation lease, so resource cancellation hooks never retain the load.
+pub(in crate::network) struct ScriptTextSubscription {
+    // Cancel the consumer before releasing the last strong reference to its load.
+    consumer: ScriptTextConsumerLease,
+    load: SharedScriptTextLoad,
+}
+
+impl ScriptTextSubscription {
+    pub(in crate::network) fn load(&self) -> &SharedScriptTextLoad {
+        &self.load
+    }
+
+    pub(in crate::network) async fn wait(self) -> ScriptTextLoadResult {
+        self.load.wait(self.consumer).await
+    }
+
+    pub(in crate::network) fn wait_callback(
+        self,
+        callback: ScriptTextLoadCallback,
+    ) -> Option<ScriptTextConsumerLease> {
+        self.load.wait_callback(self.consumer, callback)
+    }
+}
+
+enum ScriptTextLoadAdmission {
+    Pending(ScriptTextConsumerLease),
+    Completed(Box<ScriptTextLoadResult>),
+    Closed,
 }
 
 pub(in crate::network) struct ScriptTextLoad {
     state: Mutex<ScriptTextLoadState>,
-    notify: Notify,
 }
 
 #[derive(Default)]
 struct ScriptTextLoadState {
     result: Option<ScriptTextLoadResult>,
+    closed: bool,
     next_consumer_id: u64,
     // Preserve the callback order of the former Vec implementation. Different
     // consumers may enqueue observable parser tasks when the shared load
     // completes, so cancellation must not make the survivors unordered.
-    callbacks: IndexMap<u64, ScriptTextLoadCallback>,
+    // A reserved consumer has no callback until its caller starts waiting.
+    callbacks: IndexMap<u64, Option<ScriptTextLoadCallback>>,
     transport_cancel: Option<moli_fetch::FetchCancelHandle>,
 }
 
 /// Cancellable registration for one context waiting on a shared script load.
 ///
-/// Dropping one lease removes only that callback. If it was the last pending
-/// consumer, the shared transport is cancelled; other Documents or Workers
+/// Both future and callback waiters own a lease. Dropping one removes only
+/// that consumer. If it was the last pending consumer, the shared transport
+/// is cancelled; other Documents or Workers
 /// are never affected by a sibling consumer retiring.
 pub(in crate::network) struct ScriptTextConsumerLease {
     load: Weak<ScriptTextLoad>,
@@ -196,47 +228,73 @@ impl ScriptTextLoad {
     fn pending() -> SharedScriptTextLoad {
         Arc::new(Self {
             state: Mutex::new(ScriptTextLoadState::default()),
-            notify: Notify::new(),
         })
     }
 
+    #[cfg(test)]
     fn try_result(&self) -> Option<ScriptTextLoadResult> {
         self.state.lock().result.clone()
     }
 
-    pub(in crate::network) async fn wait(&self) -> ScriptTextLoadResult {
-        loop {
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if let Some(result) = self.try_result() {
-                return result;
-            }
-            notified.await;
-        }
-    }
-
-    pub(in crate::network) fn wait_callback(
-        self: &Arc<Self>,
-        callback: ScriptTextLoadCallback,
-    ) -> Option<ScriptTextConsumerLease> {
+    fn admit(self: &Arc<Self>) -> ScriptTextLoadAdmission {
         let mut state = self.state.lock();
+        if state.closed {
+            return ScriptTextLoadAdmission::Closed;
+        }
         if let Some(result) = state.result.clone() {
-            drop(state);
-            callback(result);
-            return None;
+            return ScriptTextLoadAdmission::Completed(Box::new(result));
         }
         state.next_consumer_id = state
             .next_consumer_id
             .checked_add(1)
             .expect("script text consumer id exhausted");
         let consumer_id = state.next_consumer_id;
-        let previous = state.callbacks.insert(consumer_id, callback);
-        debug_assert!(previous.is_none());
-        Some(ScriptTextConsumerLease {
+        assert!(state.callbacks.insert(consumer_id, None).is_none());
+        ScriptTextLoadAdmission::Pending(ScriptTextConsumerLease {
             load: Arc::downgrade(self),
             consumer_id,
         })
+    }
+
+    fn is_closed(&self) -> bool {
+        self.state.lock().closed
+    }
+
+    async fn wait(self: &Arc<Self>, consumer: ScriptTextConsumerLease) -> ScriptTextLoadResult {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _consumer = self.wait_callback(
+            consumer,
+            Box::new(move |result| {
+                let _ = tx.send(result);
+            }),
+        );
+        rx.await
+            .expect("a registered script consumer must receive its result")
+    }
+
+    fn wait_callback(
+        self: &Arc<Self>,
+        consumer: ScriptTextConsumerLease,
+        callback: ScriptTextLoadCallback,
+    ) -> Option<ScriptTextConsumerLease> {
+        debug_assert!(consumer.load.ptr_eq(&Arc::downgrade(self)));
+        let mut state = self.state.lock();
+        if state.closed {
+            drop(state);
+            callback(Err(moli_fetch::NET_ERR_ABORTED_ERROR_TEXT.to_owned()));
+            return None;
+        }
+        if let Some(result) = state.result.clone() {
+            drop(state);
+            callback(result);
+            return None;
+        }
+        let slot = state
+            .callbacks
+            .get_mut(&consumer.consumer_id)
+            .expect("an admitted script consumer must remain registered until waiting");
+        assert!(slot.replace(callback).is_none());
+        Some(consumer)
     }
 
     pub(in crate::network) fn attach_transport_cancel(
@@ -245,7 +303,7 @@ impl ScriptTextLoad {
     ) {
         let cancel_immediately = {
             let mut state = self.state.lock();
-            if state.result.is_some() || state.callbacks.is_empty() {
+            if state.closed || state.result.is_some() || state.callbacks.is_empty() {
                 true
             } else {
                 debug_assert!(
@@ -270,6 +328,9 @@ impl ScriptTextLoad {
             {
                 None
             } else {
+                // Seal admission before releasing the lock or signalling curl.
+                // A later cache lookup must allocate a different download.
+                state.closed = true;
                 state.transport_cancel.take()
             }
         };
@@ -281,17 +342,17 @@ impl ScriptTextLoad {
     pub(in crate::network) fn finish(&self, result: ScriptTextLoadResult) {
         let callbacks = {
             let mut state = self.state.lock();
-            if state.result.is_none() {
+            if !state.closed && state.result.is_none() {
                 state.result = Some(result.clone());
                 state.transport_cancel.take();
                 std::mem::take(&mut state.callbacks)
                     .into_values()
+                    .flatten()
                     .collect::<Vec<_>>()
             } else {
                 Vec::new()
             }
         };
-        self.notify.notify_waiters();
         for callback in callbacks {
             callback(result.clone());
         }
@@ -336,7 +397,10 @@ impl SharedMemoryResourceCache {
                 return self.insert_pending_script(cache_key);
             }
 
-            let result = load.try_result();
+            let admission = load.admit();
+            if matches!(admission, ScriptTextLoadAdmission::Closed) {
+                return self.insert_pending_script(cache_key);
+            }
             self.insert_entry(
                 cache_key,
                 MemoryCacheEntry::ScriptText {
@@ -345,9 +409,16 @@ impl SharedMemoryResourceCache {
                     retained_bytes,
                 },
             );
-            return match result {
-                Some(result) => ScriptTextCacheLookup::CompletedHit(Box::new(result)),
-                None => ScriptTextCacheLookup::PendingWaiter(load),
+            return match admission {
+                ScriptTextLoadAdmission::Completed(result) => {
+                    ScriptTextCacheLookup::CompletedHit(result)
+                }
+                ScriptTextLoadAdmission::Pending(consumer) => {
+                    ScriptTextCacheLookup::PendingWaiter(ScriptTextSubscription { load, consumer })
+                }
+                ScriptTextLoadAdmission::Closed => {
+                    unreachable!("closed downloads were replaced above")
+                }
             };
         }
 
@@ -364,7 +435,11 @@ impl SharedMemoryResourceCache {
     }
 
     fn insert_pending_script(&mut self, key: MemoryCacheKey) -> ScriptTextCacheLookup {
+        self.evict_to_budget();
         let load = ScriptTextLoad::pending();
+        let ScriptTextLoadAdmission::Pending(consumer) = load.admit() else {
+            unreachable!("a new script download admits its first consumer");
+        };
         self.insert_entry(
             key,
             MemoryCacheEntry::ScriptText {
@@ -373,7 +448,7 @@ impl SharedMemoryResourceCache {
                 retained_bytes: 0,
             },
         );
-        ScriptTextCacheLookup::Owner(load)
+        ScriptTextCacheLookup::Owner(ScriptTextSubscription { load, consumer })
     }
 
     /// Finalizes cache metadata before `ScriptTextLoad::finish()` invokes
@@ -408,6 +483,10 @@ impl SharedMemoryResourceCache {
                     retained_bytes,
                 },
             );
+            return;
+        }
+
+        if load.is_closed() {
             return;
         }
 
@@ -832,6 +911,207 @@ mod tests {
 
     use super::*;
 
+    fn pending_consumer(load: &SharedScriptTextLoad) -> ScriptTextConsumerLease {
+        let ScriptTextLoadAdmission::Pending(consumer) = load.admit() else {
+            panic!("a pending script download must admit its consumer");
+        };
+        consumer
+    }
+
+    #[test]
+    fn dropping_evicted_script_subscription_cancels_transport() {
+        let request = script_request("https://cache.test/app.js");
+        let mut cache = SharedMemoryResourceCache::default();
+        let ScriptTextCacheLookup::Owner(subscription) =
+            cache.lookup_script_text(script_text_cache_key(&request))
+        else {
+            panic!("first consumer owns the download");
+        };
+        let transport = moli_fetch::FetchCancelHandle::new();
+        subscription
+            .load()
+            .attach_transport_cancel(transport.clone());
+
+        drop(cache);
+        assert!(!transport.is_cancelled());
+        drop(subscription);
+        assert!(transport.is_cancelled());
+    }
+
+    #[test]
+    fn installed_script_subscription_returns_a_weak_cancellation_lease() {
+        let request = script_request("https://cache.test/app.js");
+        let mut cache = SharedMemoryResourceCache::default();
+        let ScriptTextCacheLookup::Owner(subscription) =
+            cache.lookup_script_text(script_text_cache_key(&request))
+        else {
+            panic!("first consumer owns the download");
+        };
+        let weak = Arc::downgrade(subscription.load());
+        let _cancel = subscription
+            .wait_callback(Box::new(|_| {}))
+            .expect("pending consumer");
+        drop(cache);
+        assert!(
+            weak.upgrade().is_none(),
+            "cancellation hooks must not keep the shared download alive"
+        );
+    }
+
+    #[test]
+    fn cancelled_script_download_is_replaced_before_transport_acknowledges() {
+        let request = script_request("https://cache.test/app.js");
+        let key = script_text_cache_key(&request);
+        let mut cache = SharedMemoryResourceCache::default();
+        let ScriptTextCacheLookup::Owner(ScriptTextSubscription {
+            load: old,
+            consumer,
+        }) = cache.lookup_script_text(key.clone())
+        else {
+            panic!("first download");
+        };
+        let consumer = old
+            .wait_callback(consumer, Box::new(|_| panic!("cancelled consumer")))
+            .unwrap();
+        let transport = moli_fetch::FetchCancelHandle::new();
+        old.attach_transport_cancel(transport.clone());
+        consumer.cancel();
+        assert!(transport.is_cancelled());
+        assert!(matches!(old.admit(), ScriptTextLoadAdmission::Closed));
+
+        let ScriptTextCacheLookup::Owner(ScriptTextSubscription {
+            load: fresh,
+            consumer: fresh_consumer,
+        }) = cache.lookup_script_text(key.clone())
+        else {
+            panic!("a request after the last cancellation must start a fresh download");
+        };
+        assert!(!Arc::ptr_eq(&old, &fresh));
+        let late = Ok(response(request.url.as_str(), "old"));
+        cache.complete_script_text(&key, &old, &request, &late);
+        old.finish(late);
+        let ScriptTextCacheLookup::PendingWaiter(ScriptTextSubscription {
+            load: joined,
+            consumer: _joined_consumer,
+        }) = cache.lookup_script_text(key.clone())
+        else {
+            panic!("fresh download remains pending");
+        };
+        assert!(Arc::ptr_eq(&joined, &fresh));
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&delivered);
+        let _fresh_consumer = fresh.wait_callback(
+            fresh_consumer,
+            Box::new(move |result| {
+                assert_eq!(result.unwrap().body_text(), "fresh");
+                observed.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        let result = Ok(response(request.url.as_str(), "fresh"));
+        cache.complete_script_text(&key, &fresh, &request, &result);
+        fresh.finish(result);
+        assert_eq!(delivered.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn cancelled_script_success_is_not_retained_before_the_next_lookup() {
+        let request = script_request("https://cache.test/app.js");
+        let key = script_text_cache_key(&request);
+        let mut cache = SharedMemoryResourceCache::default();
+        let ScriptTextCacheLookup::Owner(ScriptTextSubscription {
+            load: old,
+            consumer,
+        }) = cache.lookup_script_text(key.clone())
+        else {
+            panic!("first download");
+        };
+        consumer.cancel();
+        let transport = moli_fetch::FetchCancelHandle::new();
+        old.attach_transport_cancel(transport.clone());
+        assert!(
+            transport.is_cancelled(),
+            "late transport attachment cannot reopen admission"
+        );
+        let late = Ok(response(request.url.as_str(), "cancelled"));
+        cache.complete_script_text(&key, &old, &request, &late);
+        old.finish(late);
+        let ScriptTextCacheLookup::Owner(ScriptTextSubscription {
+            load: fresh,
+            consumer: _consumer,
+        }) = cache.lookup_script_text(key)
+        else {
+            panic!("cancelled success must not become a cache hit");
+        };
+        assert!(!Arc::ptr_eq(&old, &fresh));
+    }
+
+    #[test]
+    fn cache_lookup_reserves_a_consumer_before_its_callback_is_installed() {
+        let request = script_request("https://cache.test/app.js");
+        let key = script_text_cache_key(&request);
+        let mut cache = SharedMemoryResourceCache::default();
+        let ScriptTextCacheLookup::Owner(ScriptTextSubscription {
+            load,
+            consumer: first,
+        }) = cache.lookup_script_text(key.clone())
+        else {
+            panic!("first download");
+        };
+        let first = load
+            .wait_callback(first, Box::new(|_| panic!("retired first consumer")))
+            .unwrap();
+        let transport = moli_fetch::FetchCancelHandle::new();
+        load.attach_transport_cancel(transport.clone());
+        let ScriptTextCacheLookup::PendingWaiter(ScriptTextSubscription {
+            load: joined,
+            consumer: reserved,
+        }) = cache.lookup_script_text(key)
+        else {
+            panic!("shared download");
+        };
+        first.cancel();
+        assert!(
+            !transport.is_cancelled(),
+            "the cache lookup already admitted a new consumer"
+        );
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&delivered);
+        let _consumer = joined.wait_callback(
+            reserved,
+            Box::new(move |result| {
+                assert!(result.is_ok());
+                observed.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        load.finish(Ok(response(request.url.as_str(), "shared")));
+        assert_eq!(delivered.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn inserting_another_resource_prunes_closed_downloads_without_transport_ack() {
+        let request = script_request("https://cache.test/cancelled.js");
+        let key = script_text_cache_key(&request);
+        let mut cache = SharedMemoryResourceCache::default();
+        let ScriptTextCacheLookup::Owner(ScriptTextSubscription {
+            load: _load,
+            consumer,
+        }) = cache.lookup_script_text(key.clone())
+        else {
+            panic!("first download");
+        };
+        consumer.cancel();
+        let other = script_request("https://cache.test/other.js");
+        let ScriptTextCacheLookup::Owner(ScriptTextSubscription {
+            load: _other,
+            consumer: _consumer,
+        }) = cache.lookup_script_text(script_text_cache_key(&other))
+        else {
+            panic!("other download");
+        };
+        assert!(!cache.contains_script_text(&key));
+        assert_eq!(cache.diagnostics().pending_script_entry_count, 1);
+    }
+
     fn script_request(url: &str) -> Request {
         Request::get(url)
             .expect("script request URL")
@@ -882,7 +1162,11 @@ mod tests {
         response: Response,
     ) -> SharedScriptTextLoad {
         let key = script_text_cache_key(request);
-        let ScriptTextCacheLookup::Owner(load) = cache.lookup_script_text(key.clone()) else {
+        let ScriptTextCacheLookup::Owner(ScriptTextSubscription {
+            load,
+            consumer: _consumer,
+        }) = cache.lookup_script_text(key.clone())
+        else {
             panic!("new script key should own its load");
         };
         let result = Ok(response);
@@ -897,15 +1181,21 @@ mod tests {
         let delivered = Arc::new(AtomicUsize::new(0));
         let first_delivered = Arc::clone(&delivered);
         let first = load
-            .wait_callback(Box::new(move |_| {
-                first_delivered.fetch_add(1, Ordering::Relaxed);
-            }))
+            .wait_callback(
+                pending_consumer(&load),
+                Box::new(move |_| {
+                    first_delivered.fetch_add(1, Ordering::Relaxed);
+                }),
+            )
             .expect("first pending consumer");
         let second_delivered = Arc::clone(&delivered);
         let second = load
-            .wait_callback(Box::new(move |_| {
-                second_delivered.fetch_add(1, Ordering::Relaxed);
-            }))
+            .wait_callback(
+                pending_consumer(&load),
+                Box::new(move |_| {
+                    second_delivered.fetch_add(1, Ordering::Relaxed);
+                }),
+            )
             .expect("second pending consumer");
         let transport_cancel = moli_fetch::FetchCancelHandle::new();
         load.attach_transport_cancel(transport_cancel.clone());
@@ -922,10 +1212,10 @@ mod tests {
     fn cancelling_last_shared_script_consumer_cancels_transport() {
         let load = ScriptTextLoad::pending();
         let first = load
-            .wait_callback(Box::new(|_| {}))
+            .wait_callback(pending_consumer(&load), Box::new(|_| {}))
             .expect("first pending consumer");
         let second = load
-            .wait_callback(Box::new(|_| {}))
+            .wait_callback(pending_consumer(&load), Box::new(|_| {}))
             .expect("second pending consumer");
         let transport_cancel = moli_fetch::FetchCancelHandle::new();
         load.attach_transport_cancel(transport_cancel.clone());
@@ -934,6 +1224,46 @@ mod tests {
         assert!(!transport_cancel.is_cancelled());
         second.cancel();
 
+        assert!(transport_cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancelling_callback_keeps_shared_script_future_consumer_alive() {
+        let load = ScriptTextLoad::pending();
+        let callback = load
+            .wait_callback(
+                pending_consumer(&load),
+                Box::new(|_| panic!("cancelled consumer must not run")),
+            )
+            .expect("pending callback consumer");
+        let mut waiter = Box::pin(load.wait(pending_consumer(&load)));
+        assert!(futures_util::poll!(waiter.as_mut()).is_pending());
+        let transport_cancel = moli_fetch::FetchCancelHandle::new();
+        load.attach_transport_cancel(transport_cancel.clone());
+
+        callback.cancel();
+        assert!(!transport_cancel.is_cancelled());
+        let expected = response("https://cache.test/app.js", "window.loaded = true;");
+        load.finish(Ok(expected.clone()));
+        let result = waiter.await.unwrap();
+        assert_eq!(result.status, 200);
+        assert_eq!(result.body_text(), expected.body_text());
+    }
+
+    #[tokio::test]
+    async fn dropping_last_shared_script_future_consumer_cancels_transport() {
+        let load = ScriptTextLoad::pending();
+        let callback = load
+            .wait_callback(pending_consumer(&load), Box::new(|_| {}))
+            .expect("pending callback consumer");
+        let mut waiter = Box::pin(load.wait(pending_consumer(&load)));
+        assert!(futures_util::poll!(waiter.as_mut()).is_pending());
+        let transport_cancel = moli_fetch::FetchCancelHandle::new();
+        load.attach_transport_cancel(transport_cancel.clone());
+
+        callback.cancel();
+        assert!(!transport_cancel.is_cancelled());
+        drop(waiter);
         assert!(transport_cancel.is_cancelled());
     }
 
@@ -1002,7 +1332,11 @@ mod tests {
         let request = script_request("https://cache.test/large.js");
         let key = script_text_cache_key(&request);
         let mut cache = SharedMemoryResourceCache::with_limits(1024, 32);
-        let ScriptTextCacheLookup::Owner(load) = cache.lookup_script_text(key.clone()) else {
+        let ScriptTextCacheLookup::Owner(ScriptTextSubscription {
+            load,
+            consumer: _consumer,
+        }) = cache.lookup_script_text(key.clone())
+        else {
             panic!("new script key should own its load");
         };
         let result = Ok(response(request.url.as_str(), &"x".repeat(64)));
@@ -1019,7 +1353,11 @@ mod tests {
         let request = script_request("https://cache.test/expanded.js");
         let key = script_text_cache_key(&request);
         let mut cache = SharedMemoryResourceCache::with_limits(1024, 32);
-        let ScriptTextCacheLookup::Owner(load) = cache.lookup_script_text(key.clone()) else {
+        let ScriptTextCacheLookup::Owner(ScriptTextSubscription {
+            load,
+            consumer: _consumer,
+        }) = cache.lookup_script_text(key.clone())
+        else {
             panic!("new script key should own its load");
         };
         let response = Response::from_head_and_body(
@@ -1078,7 +1416,11 @@ mod tests {
         let request = script_request("https://cache.test/expired.js");
         let key = script_text_cache_key(&request);
         let mut cache = SharedMemoryResourceCache::with_limits(usize::MAX, usize::MAX);
-        let ScriptTextCacheLookup::Owner(load) = cache.lookup_script_text(key.clone()) else {
+        let ScriptTextCacheLookup::Owner(ScriptTextSubscription {
+            load,
+            consumer: _consumer,
+        }) = cache.lookup_script_text(key.clone())
+        else {
             panic!("new script key should own its load");
         };
         let result = Ok(response(request.url.as_str(), "expired"));
@@ -1095,7 +1437,10 @@ mod tests {
 
         assert!(matches!(
             cache.lookup_script_text(key),
-            ScriptTextCacheLookup::Owner(_)
+            ScriptTextCacheLookup::Owner(ScriptTextSubscription {
+                load: _,
+                consumer: _
+            })
         ));
     }
 
@@ -1133,8 +1478,10 @@ mod tests {
         let fresh_key = script_text_cache_key(&fresh_request);
         let mut cache = SharedMemoryResourceCache::with_limits(usize::MAX, usize::MAX);
 
-        let ScriptTextCacheLookup::Owner(expired_load) =
-            cache.lookup_script_text(expired_key.clone())
+        let ScriptTextCacheLookup::Owner(ScriptTextSubscription {
+            load: expired_load,
+            consumer: _expired_consumer,
+        }) = cache.lookup_script_text(expired_key.clone())
         else {
             panic!("new expired script key should own its load");
         };

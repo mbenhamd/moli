@@ -1152,7 +1152,7 @@ impl PageScriptHost {
     }
 
     /// Runs `inspect` as if a layout pass were active on this host.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "devtools"))]
     pub(crate) fn with_active_layout_pass_for_test<T>(&self, inspect: impl FnOnce() -> T) -> T {
         let _active =
             ActiveLayoutPass::enter(&self.layout_pass_active).expect("no layout pass is active");

@@ -659,6 +659,21 @@ impl RendererServiceWorkerHost {
                     "failed to load service worker script"
                 );
                 self.mark_failed();
+                params
+                    .worker_context_runtime
+                    .with_diagnostic_source(crate::DiagnosticSource::ServiceWorker {
+                        version_id: params.run_owner.version_id().as_u64(),
+                    })
+                    .emit_diagnostic(|source| {
+                        let mut request_url = params.script_url.clone();
+                        request_url.set_fragment(None);
+                        crate::DiagnosticEvent::script_load_failure(
+                            source,
+                            params.script_url.as_str(),
+                            request_url.as_str(),
+                            &error,
+                        )
+                    });
                 service.enqueue_worker_start_failed(
                     params.run_owner.clone(),
                     ServiceWorkerVersionStartFailure::ScriptLoad { message: error },
@@ -829,8 +844,15 @@ fn spawn_parent_message_pump(
                     WorkerToParentMessage::ServiceWorkerClientsClaim {
                         registration_id,
                         version_id,
+                        request_id,
                     } => {
-                        service.enqueue_clients_claim_requested(registration_id, version_id);
+                        if version_id == source_host.version_id() {
+                            service.enqueue_clients_claim_requested(
+                                registration_id,
+                                source_host.run_owner(),
+                                request_id,
+                            );
+                        }
                     }
                     WorkerToParentMessage::ServiceWorkerImportedScriptLoaded {
                         registration_id,
@@ -846,25 +868,17 @@ fn spawn_parent_message_pump(
                             resource,
                         );
                     }
-                    WorkerToParentMessage::Error {
-                        message,
-                        filename,
-                        lineno,
-                        colno,
-                        event_kind,
-                        phase,
-                        source,
-                    } => {
+                    WorkerToParentMessage::Error(error) => {
                         service.enqueue_target_exception_message(
                             version_id,
                             source_run.clone(),
-                            message,
-                            filename,
-                            lineno,
-                            colno,
-                            event_kind,
-                            phase,
-                            source,
+                            error.message,
+                            error.filename,
+                            error.lineno,
+                            error.colno,
+                            error.event_kind,
+                            error.phase,
+                            error.source,
                         );
                     }
                     WorkerToParentMessage::Console(message) => {
@@ -881,6 +895,7 @@ fn spawn_parent_message_pump(
                             messages,
                         );
                     }
+                    #[cfg(feature = "devtools")]
                     WorkerToParentMessage::RuntimeInspectorResponse(publication) => {
                         let _ = publication.commit(None);
                     }
@@ -971,6 +986,9 @@ fn spawn_service_worker(
         .with_network_policy(params.network_policy)
         .with_policy_context(policy_context)
         .with_worker_context_runtime(params.worker_context_runtime)
+        .with_diagnostic_source(crate::DiagnosticSource::ServiceWorker {
+            version_id: params.run_owner.version_id().as_u64(),
+        })
         .with_service_worker_runtime(service)
         .with_global_kind(crate::worker::WorkerGlobalKind::Service {
             registration_id: params.registration_id,

@@ -1,4 +1,3 @@
-#[cfg(feature = "devtools")]
 use crate::{
     document_runtime::DomHandle,
     dom::{forms::InputType, native::Node},
@@ -16,7 +15,6 @@ pub(in crate::script_vm) struct KeyTargetInfo {
     pub(in crate::script_vm) is_select: bool,
 }
 
-#[cfg(feature = "devtools")]
 pub(in crate::script_vm) fn key_target_info(
     runtime: &PageScriptHost,
     handle: DomHandle,
@@ -81,7 +79,6 @@ pub(in crate::script_vm) fn key_target_info(
 /// already means nothing inside its Document is focused and one step suffices.
 /// Containers without a same-runtime child Document (out-of-process frames)
 /// stay the target.
-#[cfg(feature = "devtools")]
 pub(in crate::script_vm) fn keyboard_event_target(runtime: &PageScriptHost) -> Option<DomHandle> {
     let Some(active) = runtime.active_element_handle() else {
         return runtime.document_focus_fallback_handle();
@@ -97,7 +94,6 @@ pub(in crate::script_vm) fn keyboard_event_target(runtime: &PageScriptHost) -> O
     )
 }
 
-#[cfg(feature = "devtools")]
 pub(in crate::script_vm) fn is_space_key(key: &str) -> bool {
     matches!(key, " " | "space" | "spacebar")
 }
@@ -106,27 +102,22 @@ pub(in crate::script_vm) fn is_space_key(key: &str) -> bool {
 /// cycle through, minus disabled members. The group is scoped to the radio's
 /// own tree, so a radio inside a child frame's document or a shadow root finds
 /// its siblings there rather than in the top-level document.
-#[cfg(feature = "devtools")]
 pub(in crate::script_vm) fn radio_group_members(
     runtime: &PageScriptHost,
     handle: DomHandle,
 ) -> Vec<DomHandle> {
-    runtime
-        .dom_host()
-        .radio_group_members(handle)
+    let dom = runtime.dom_host();
+    dom.radio_group_members(handle)
         .into_iter()
         .filter(|candidate| {
-            runtime.dom_host().node(*candidate).is_some_and(|node| {
-                node.is_connected()
-                    && node
-                        .as_element()
-                        .is_some_and(|element| !element.has_attribute("disabled"))
-            })
+            dom.is_connected_to_document(*candidate)
+                && !crate::native_bridge::element::form_control_is_effectively_disabled(
+                    runtime, *candidate,
+                )
         })
         .collect()
 }
 
-#[cfg(feature = "devtools")]
 pub(in crate::script_vm) fn current_selection_state(
     runtime: &PageScriptHost,
     handle: DomHandle,
@@ -147,7 +138,6 @@ pub(in crate::script_vm) fn current_selection_state(
         .unwrap_or((0, 0, "none".to_owned()))
 }
 
-#[cfg(feature = "devtools")]
 pub(in crate::script_vm) fn option_is_disabled(
     runtime: &PageScriptHost,
     handle: DomHandle,

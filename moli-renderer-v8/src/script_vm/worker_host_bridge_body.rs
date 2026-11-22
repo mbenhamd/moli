@@ -115,6 +115,7 @@ impl ScriptVm {
             WorkerRuntimeEvent::SharedWorkerMessage { message, .. } => {
                 self.apply_shared_worker_host_bridge_record_body(*message)
             }
+            #[cfg(feature = "devtools")]
             WorkerRuntimeEvent::Message {
                 message,
                 worker_id: _,
@@ -238,13 +239,13 @@ impl ScriptVm {
                 context_host.borrow_mut().record_subresource_network(record);
             }
 
-            WorkerToParentMessage::Post(_) | WorkerToParentMessage::Error { .. }
+            WorkerToParentMessage::Post(_) | WorkerToParentMessage::Error(_)
                 if owner == WorkerHostRecordOwner::Dedicated =>
             {
                 bail!("client-facing DedicatedWorker event entered the host-bridge source");
             }
             WorkerToParentMessage::Post(_)
-            | WorkerToParentMessage::Error { .. }
+            | WorkerToParentMessage::Error(_)
             | WorkerToParentMessage::Console(_)
             | WorkerToParentMessage::RuntimeInspectorMessages(_)
             | WorkerToParentMessage::ServiceWorkerLifecycleCompleted(_)
@@ -276,8 +277,9 @@ impl ScriptVm {
             | WorkerToParentMessage::ServiceWorkerSkipWaiting { .. }
             | WorkerToParentMessage::ServiceWorkerClientsClaim { .. }
             | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-            | WorkerToParentMessage::SharedWorkerClosed
-            | WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
+            | WorkerToParentMessage::SharedWorkerClosed => {}
+            #[cfg(feature = "devtools")]
+            WorkerToParentMessage::RuntimeInspectorResponse(_) => {}
         }
         Ok(())
     }

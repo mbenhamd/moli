@@ -134,6 +134,9 @@ impl ScriptVm {
                         None,
                     )
                     .await;
+                if let Err(error) = &outcome.source_result {
+                    self.emit_script_load_failure(script.url.as_str(), error);
+                }
                 if let Some(network_result) = outcome.network_result.as_deref() {
                     self._context_host
                         .borrow_mut()
@@ -466,8 +469,10 @@ impl ScriptVm {
             completion_owner,
         )
         .await
-        .map_err(PreparedScriptExecutionError::from_module_load_error)?
-        {
+        .map_err(|error| {
+            self.emit_module_script_load_failure(&script.url, &error);
+            PreparedScriptExecutionError::from_module_load_error(error)
+        })? {
             ModuleScriptExecutionOutcome::CompletedModuleGraph(graph) => {
                 Ok(LoadedScriptExecutionOutcome::CompletedModuleGraph(graph))
             }
@@ -500,6 +505,7 @@ impl ScriptVm {
         let selector_before = self.document_runtime.selector_debug_snapshot();
         let started = Instant::now();
         debug!(url = %script.url, "execute_prepared_script_once executing source");
+        #[cfg(any(test, feature = "devtools"))]
         self.script_execution_memory.record(script, source.len());
         Self::reset_dom_binding_trace_window();
         let dom_binding_source_started =
@@ -641,8 +647,10 @@ impl ScriptVm {
                     completion_owner,
                 )
                 .await
-                .map_err(PreparedScriptExecutionError::from_module_load_error)?
-                {
+                .map_err(|error| {
+                    self.emit_module_script_load_failure(script_url, &error);
+                    PreparedScriptExecutionError::from_module_load_error(error)
+                })? {
                     ModuleScriptExecutionOutcome::CompletedModuleGraph(graph) => {
                         Ok(LoadedScriptExecutionOutcome::CompletedModuleGraph(graph))
                     }

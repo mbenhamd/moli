@@ -2,7 +2,14 @@ use super::*;
 use crate::web_api_interfaces;
 use moli_storage_service::SqlBucketOperation;
 use moli_v8_util::reject_promise_with_type_error as reject_type_error;
+use moli_webapi::navigator_options::{
+    MidiPermissionDescriptorMembers, PermissionDescriptorMembers,
+};
+use moli_webapi::network_options::{CacheQueryOptions, MultiCacheQueryOptions};
 use moli_webapi::storage_values::new_storage_estimate;
+use moli_webapi::window_values::{
+    PERMISSION_STATUS_NAME_SLOT, PERMISSION_STATUS_STATE_SLOT, new_permission_status,
+};
 use moli_webapi_declare::{ObjectLiteralDeclaration, WebApiFunctionTemplate, WebApiObject};
 
 use crate::context_bootstrap::navigator_runtime::{
@@ -35,8 +42,6 @@ pub(in crate::context_bootstrap) use legacy_storage_quota::{
     build_legacy_storage_info_object, build_legacy_storage_quota_object,
 };
 
-const PERMISSION_STATUS_NAME_SLOT: &str = "__moliPermissionStatusName";
-const PERMISSION_STATUS_STATE_SLOT: &str = "__moliPermissionStatusState";
 const VIBRATION_PATTERN_LENGTH_MAX: usize = 99;
 const VIBRATION_DURATION_MS_MAX: u32 = 10_000;
 const STORAGE_BUCKET_CACHES_OBJECT_SLOT: &str = "__moliStorageBucketCachesObject";
@@ -155,36 +160,6 @@ pub(in crate::context_bootstrap) fn install_cache_template_bindings<'s>(
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = web_api_interfaces::PermissionStatus)]
-struct PermissionStatusObjectDeclaration {
-    #[webapi(slot = PERMISSION_STATUS_NAME_SLOT)]
-    name: String,
-
-    #[webapi(slot = PERMISSION_STATUS_STATE_SLOT)]
-    state: String,
-
-    #[webapi(data_property, init = "null")]
-    onchange: (),
-}
-
-#[derive(webidl::WebIdlDictionary)]
-#[webidl(prefix = "PermissionDescriptor")]
-struct PermissionDescriptorMembers {
-    #[webidl(required)]
-    name: String,
-}
-
-#[derive(webidl::WebIdlDictionary)]
-#[webidl(prefix = "MidiPermissionDescriptor")]
-struct MidiPermissionDescriptorMembers {
-    #[webidl(required)]
-    name: String,
-
-    #[webidl(default = false)]
-    sysex: bool,
-}
-
-#[derive(WebApiObject)]
 #[webapi(interface = web_api_interfaces::BatteryManager, data_properties)]
 struct NavigatorBatteryStatusObjectDeclaration {
     #[webapi(data_property, enumerable)]
@@ -295,25 +270,6 @@ struct CachePutArgs<'s> {
     request: CacheRequestInput<'s>,
     #[webidl(required, interface = web_api_interfaces::Response)]
     response: v8::Local<'s, v8::Object>,
-}
-
-#[derive(Debug, Default, webidl::WebIdlDictionary)]
-#[webidl(prefix = "CacheQueryOptions")]
-struct CacheQueryOptions {
-    #[webidl(default = false)]
-    ignore_search: bool,
-    #[webidl(default = false)]
-    ignore_method: bool,
-    #[webidl(default = false)]
-    ignore_vary: bool,
-}
-
-#[derive(webidl::WebIdlDictionary)]
-#[webidl(prefix = "MultiCacheQueryOptions")]
-struct MultiCacheQueryOptions {
-    #[webidl(inherit)]
-    base: CacheQueryOptions,
-    cache_name: Option<String>,
 }
 
 #[derive(WebApiObject)]
@@ -516,9 +472,7 @@ fn build_permission_status_object<'s>(
     name: &str,
     state: &str,
 ) -> v8::Local<'s, v8::Object> {
-    let status = PermissionStatusObjectDeclaration::new(name.to_owned(), state.to_owned())
-        .bind(scope)
-        .expect("PermissionStatus declaration should bind");
+    let status = new_permission_status(scope, name, state);
     initialize_simple_event_target(scope, status);
     status
 }
@@ -2619,6 +2573,27 @@ fn storage_bucket_cached_response_from_value<'s>(
                 return None;
             }
         };
+    if head.status == 206 {
+        reject_type_error(
+            scope,
+            resolver,
+            "Cache.put rejected a Response with status 206.",
+        );
+        return None;
+    }
+    if head.headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("vary")
+            && value
+                .split(|byte| *byte == b',')
+                .any(|field| field.trim_ascii() == b"*")
+    }) {
+        reject_type_error(
+            scope,
+            resolver,
+            "Cache.put rejected a Response with Vary: *.",
+        );
+        return None;
+    }
     let body = match crate::network_host::materialize_response_object_body_preserving_error(
         scope,
         response,

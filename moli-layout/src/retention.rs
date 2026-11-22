@@ -246,11 +246,8 @@ where
         // also when the box itself changed: its clean descendants would still
         // answer from the cache.
         let clean_before_static_positions = numeric_clean.clone();
-        for index in 0..builder_len {
-            if self.prior.world.boxes[index]
-                .inline_static_position
-                .is_some()
-            {
+        for (index, prior) in self.prior.world.boxes.iter().enumerate().take(builder_len) {
+            if prior.inline_static_position.is_some() {
                 mark_subtree_unclean(new, LayoutBoxId::from_index(index), &mut numeric_clean);
             }
         }

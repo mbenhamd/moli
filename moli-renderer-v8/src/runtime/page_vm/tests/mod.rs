@@ -42,9 +42,10 @@ use crate::planning::{
     PreparedScript, PreparedScriptSourceLoadOutcome, ScriptFetchMetadata, ScriptSource,
     SharedScriptSourceLoad,
 };
+#[cfg(feature = "devtools")]
+use crate::runtime::RendererSharedWorkerTargetEvent;
 use crate::runtime::{
     RendererOwnerResourceActivitySource, RendererPageCommand, RendererRuntimeObservableSourceItem,
-    RendererSharedWorkerTargetEvent,
 };
 use crate::script_vm::{PostParseLifecycleAdvance, PostParseLifecycleCompletionAction};
 use crate::types::{
@@ -1356,6 +1357,7 @@ fn split_network_output_items(
                 lifecycle_events.push(event);
             }
             ScriptNetworkOutputItem::SubresourceRequestStarted(_)
+            | ScriptNetworkOutputItem::SubresourceRequestUpdated(_)
             | ScriptNetworkOutputItem::SubresourceResponseStarted(_)
             | ScriptNetworkOutputItem::SubresourceDataReceived(_)
             | ScriptNetworkOutputItem::SubresourceEventSourceMessageReceived(_)
@@ -1707,6 +1709,8 @@ async fn spawn_shutdown_path_response_http_server(
                         || path_without_query.ends_with(".mjs")
                     {
                         "text/javascript"
+                    } else if path_without_query.ends_with(".css") {
+                        "text/css"
                     } else {
                         "text/html"
                     };

@@ -322,56 +322,77 @@ async fn image_fetch_enabled_dispatches_http_error_after_resource_timing() {
 
 #[tokio::test]
 async fn image_fetch_enabled_dispatches_load_after_resource_timing() {
-    let (base_url, request_rx, server) =
-        spawn_image_response_server("200 OK", "image/gif", ONE_BY_ONE_GIF).await;
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
-    loader.set_image_fetch_enabled(true);
-    let mut vm = new_storage_page_task_executor_test_vm_with_loader(
-        &format!("{base_url}/page.html"),
-        &loader,
-    );
+    for (is_svg, initiator_type) in [(false, "img"), (true, "image")] {
+        let (base_url, request_rx, server) =
+            spawn_image_response_server("200 OK", "image/gif", ONE_BY_ONE_GIF).await;
+        let loader =
+            ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+        loader.set_image_fetch_enabled(true);
+        let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+            &format!("{base_url}/page.html"),
+            &loader,
+        );
 
-    vm.eval(
-        r#"
-        (() => {
-          const image = document.createElement("img");
-          (document.body || document.documentElement || document).appendChild(image);
-          const expectedUrl = new URL("image.png", location.href).href;
-          globalThis.__imageNetworkResult = "pending";
-          image.addEventListener("load", () => {
-            const entries = performance.getEntriesByName(expectedUrl);
-            globalThis.__imageNetworkResult = [
-              "load",
-              entries.length,
-              entries[0]?.responseStatus
-            ].join(":");
-          });
-          image.src = "image.png";
-        })()
-        "#,
-    )
-    .expect("image load setup should evaluate");
+        vm.eval(if is_svg {
+            "globalThis.__timedImageIsSvg = true"
+        } else {
+            "globalThis.__timedImageIsSvg = false"
+        })
+        .unwrap();
+        vm.eval(
+            r#"
+            (() => {
+              const svg = "http://www.w3.org/2000/svg";
+              const host = document.body || document.documentElement || document;
+              const image = __timedImageIsSvg ? document.createElementNS(svg, "image") : document.createElement("img");
+              if (__timedImageIsSvg) {
+                const root = document.createElementNS(svg, "svg");
+                image.setAttribute("width", "1");
+                image.setAttribute("height", "1");
+                root.appendChild(image);
+                host.appendChild(root);
+              } else {
+                host.appendChild(image);
+              }
+              const expectedUrl = new URL("image.png", location.href).href;
+              globalThis.__imageNetworkResult = "pending";
+              image.addEventListener("load", () => {
+                const entries = performance.getEntriesByName(expectedUrl);
+                globalThis.__imageNetworkResult = [
+                  "load",
+                  entries.length,
+                  entries[0]?.responseStatus,
+                  entries[0]?.initiatorType
+                ].join(":");
+              });
+              if (__timedImageIsSvg) image.setAttribute("href", "image.png");
+              else image.src = "image.png";
+            })()
+            "#,
+        )
+        .expect("image load setup should evaluate");
 
-    wait_for_and_apply_image_completions(&mut vm).await;
+        wait_for_and_apply_image_completions(&mut vm).await;
 
-    assert_eq!(
-        vm.eval("globalThis.__imageNetworkResult")
-            .expect("image network terminal result should evaluate"),
-        "pending",
-        "network completion must only enqueue the element event task"
-    );
-    run_next_image_event_task(&mut vm, &loader, "HTTP image load event").await;
+        assert_eq!(
+            vm.eval("globalThis.__imageNetworkResult")
+                .expect("image network terminal result should evaluate"),
+            "pending",
+            "network completion must only enqueue the element event task"
+        );
+        run_next_image_event_task(&mut vm, &loader, "HTTP image load event").await;
 
-    assert_eq!(
-        vm.eval("globalThis.__imageNetworkResult")
-            .expect("image load result should evaluate"),
-        "load:1:200"
-    );
-    let request = request_rx
-        .await
-        .expect("image request capture should remain connected");
-    assert!(request.starts_with("GET /image.png HTTP/1.1\r\n"));
-    server.await.expect("image response server should finish");
+        assert_eq!(
+            vm.eval("globalThis.__imageNetworkResult")
+                .expect("image load result should evaluate"),
+            format!("load:1:200:{initiator_type}")
+        );
+        let request = request_rx
+            .await
+            .expect("image request capture should remain connected");
+        assert!(request.starts_with("GET /image.png HTTP/1.1\r\n"));
+        server.await.expect("image response server should finish");
+    }
 }
 
 #[tokio::test]
@@ -1905,5 +1926,54 @@ async fn image_decode_keeps_owning_a_request_after_in_flight_picture_reuse() {
             assert_eq!(vm.eval("__reuseSecondDecode").unwrap(), decode);
             assert!(vm.take_pending_subresource_fetch_infos().is_empty());
         }
+    }
+}
+
+#[tokio::test]
+async fn responsive_image_natural_dimensions_truncate_fractional_raster_css_pixels() {
+    const BASE: &str = "https://image-natural-dimensions.test/";
+    for (density, expected) in [(1.5, 0), (2.0, 0), (0.75, 1), (0.4, 2)] {
+        let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).unwrap();
+        loader.set_image_fetch_enabled(true);
+        let mut vm = new_storage_page_task_executor_test_vm_with_loader(BASE, &loader);
+        vm.set_layout_policy(moli_page_types::LayoutPolicy::Mock);
+        vm.set_fetch_subresource_interception(
+            crate::types::SubresourceInterceptionClasses::for_resource_type(
+                crate::types::SubresourceResourceType::Image,
+            ),
+        );
+        vm.eval(&format!(
+            r#"
+            var image = new Image();
+            var loads = 0, errors = 0, decoded = false;
+            image.onload = () => loads++; image.onerror = () => errors++;
+            image.srcset = 'pixel.gif {density}x';
+            image.decode().then(() => decoded = true);
+            "#
+        ))
+        .unwrap();
+        let requests = vm.take_pending_subresource_fetch_infos();
+        assert_eq!(requests.len(), 1, "{density}");
+        assert_eq!(requests[0].url.as_str(), format!("{BASE}pixel.gif"));
+        vm.fulfill_pending_subresource_fetch(
+            requests[0].internal_id,
+            200,
+            vec![("Content-Type".into(), b"image/gif".to_vec())],
+            one_by_one_gif_response_body(),
+        )
+        .unwrap();
+        run_next_image_event_task(&mut vm, &loader, "fractional natural dimensions").await;
+        assert_eq!(
+            vm.eval("[loads, errors, image.complete, decoded].join('|')")
+                .unwrap(),
+            "1|0|true|true",
+            "{density}"
+        );
+        assert_eq!(
+            vm.eval("[image.naturalWidth, image.naturalHeight].join('|')")
+                .unwrap(),
+            format!("{expected}|{expected}"),
+            "{density}"
+        );
     }
 }

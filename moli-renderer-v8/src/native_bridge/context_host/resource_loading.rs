@@ -12,8 +12,8 @@ use crate::{
         ScriptNetworkOutput, ScriptNetworkOutputItem, StreamingSubresourceFetchState,
         SubresourceBodyFinished, SubresourceFetchRegistration, SubresourceNetworkRecord,
         SubresourceNetworkRequestHandle, SubresourceRequestInitiatorType,
-        SubresourceRequestStarted, SubresourceResourceType, SubresourceResponseBody,
-        SubresourceResponseStarted,
+        SubresourceRequestSnapshot, SubresourceRequestStart, SubresourceResourceType,
+        SubresourceResponseBody, SubresourceResponseStarted,
     },
 };
 
@@ -175,7 +175,7 @@ impl PageScriptHost {
 
     pub(crate) fn record_subresource_request_started(
         &mut self,
-        request: SubresourceRequestStarted,
+        request: SubresourceRequestSnapshot,
     ) {
         self.push_network_output_item(ScriptNetworkOutputItem::SubresourceRequestStarted(
             Box::new(request),
@@ -234,24 +234,6 @@ impl PageScriptHost {
         self.pending_network_output.push(item);
     }
 
-    pub(crate) fn record_get_subresource_network_result(
-        &mut self,
-        frame_id: Option<String>,
-        document_url: url::Url,
-        request_url: url::Url,
-        resource_type: SubresourceResourceType,
-        result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
-    ) {
-        self.record_get_subresource_network_result_with_initiator(
-            frame_id,
-            document_url,
-            request_url,
-            resource_type,
-            SubresourceRequestInitiatorType::Script,
-            result,
-        );
-    }
-
     pub(crate) fn record_get_subresource_network_result_with_initiator(
         &mut self,
         frame_id: Option<String>,
@@ -261,18 +243,18 @@ impl PageScriptHost {
         request_initiator_type: SubresourceRequestInitiatorType,
         result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
     ) {
-        self.record_get_subresource_network_result_with_handle(
+        self.record_get_subresource_network_result(
             frame_id,
             document_url,
             request_url,
             resource_type,
             request_initiator_type,
             result,
-            None,
+            SubresourceRequestStart::Unrecorded(None),
         );
     }
 
-    pub(crate) fn record_get_subresource_network_result_with_handle(
+    pub(crate) fn record_get_subresource_network_result(
         &mut self,
         frame_id: Option<String>,
         document_url: url::Url,
@@ -280,8 +262,12 @@ impl PageScriptHost {
         resource_type: SubresourceResourceType,
         request_initiator_type: SubresourceRequestInitiatorType,
         result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
-        request_handle: Option<SubresourceNetworkRequestHandle>,
+        request_start: SubresourceRequestStart,
     ) {
+        let (request_handle, needs_start) = match request_start {
+            SubresourceRequestStart::Unrecorded(handle) => (handle, true),
+            SubresourceRequestStart::Recorded(handle) => (Some(handle), false),
+        };
         if resource_type == SubresourceResourceType::Script
             && let Ok(response) = result
             && response.status >= 400
@@ -291,18 +277,20 @@ impl PageScriptHost {
             // then report the resource failure independently of script execution.
             let handle =
                 request_handle.unwrap_or_else(|| self.next_subresource_network_request_handle());
-            self.record_subresource_request_started(SubresourceRequestStarted::new(
-                handle,
-                frame_id,
-                document_url,
-                request_url,
-                "GET".to_owned(),
-                Default::default(),
-                None,
-                resource_type,
-                request_initiator_type,
-                response.request_cookie_report.clone(),
-            ));
+            if needs_start {
+                self.record_subresource_request_started(SubresourceRequestSnapshot::new(
+                    handle,
+                    frame_id,
+                    document_url,
+                    request_url,
+                    "GET".to_owned(),
+                    Default::default(),
+                    None,
+                    resource_type,
+                    request_initiator_type,
+                    response.request_cookie_report.clone(),
+                ));
+            }
             self.record_subresource_response_started(
                 SubresourceResponseStarted::new(
                     handle,
@@ -314,11 +302,7 @@ impl PageScriptHost {
                 )
                 .with_from_cache(response.from_cache)
                 .with_negotiated_http_version(response.negotiated_http_version)
-                .with_network_request_headers(
-                    response
-                        .network_request_headers()
-                        .map(|headers| headers.to_vec()),
-                ),
+                .with_network_request_extra_info(response.network_request_extra_info().cloned()),
             );
             self.record_subresource_body_finished(SubresourceBodyFinished::failed(
                 handle,
@@ -374,7 +358,7 @@ impl PageScriptHost {
         request_initiator_type: SubresourceRequestInitiatorType,
         result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
     ) {
-        let record = Self::get_subresource_network_record_with_initiator(
+        self.record_historical_get_subresource_network_result_with_handle(
             frame_id,
             document_url,
             request_url,
@@ -383,6 +367,30 @@ impl PageScriptHost {
             result,
             None,
         );
+    }
+
+    pub(crate) fn record_historical_get_subresource_network_result_with_handle(
+        &mut self,
+        frame_id: Option<String>,
+        document_url: url::Url,
+        request_url: url::Url,
+        resource_type: SubresourceResourceType,
+        request_initiator_type: SubresourceRequestInitiatorType,
+        result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
+        request_handle: Option<SubresourceNetworkRequestHandle>,
+    ) {
+        let mut record = Self::get_subresource_network_record_with_initiator(
+            frame_id,
+            document_url,
+            request_url,
+            resource_type,
+            request_initiator_type,
+            result,
+            None,
+        );
+        if let Some(handle) = request_handle {
+            record = record.with_request_handle(handle);
+        }
         self.push_network_output_item(ScriptNetworkOutputItem::SubresourceNetworkRecord(Box::new(
             record,
         )));
@@ -406,7 +414,10 @@ impl PageScriptHost {
                 Default::default(),
                 None,
                 resource_type,
-                response.request_cookie_report.clone(),
+                response
+                    .network_request_extra_info()
+                    .map(|info| info.cookie_report.clone())
+                    .or_else(|| response.request_cookie_report.clone()),
                 response.redirect_chain.clone().into_iter().collect(),
                 response.final_url.clone(),
                 response.status,
@@ -448,7 +459,7 @@ impl PageScriptHost {
         result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
     ) {
         let handle = self.next_subresource_network_request_handle();
-        self.record_subresource_request_started(SubresourceRequestStarted::new(
+        self.record_subresource_request_started(SubresourceRequestSnapshot::new(
             handle,
             frame_id,
             document_url,
@@ -473,10 +484,8 @@ impl PageScriptHost {
                     )
                     .with_from_cache(response.from_cache)
                     .with_negotiated_http_version(response.negotiated_http_version)
-                    .with_network_request_headers(
-                        response
-                            .network_request_headers()
-                            .map(|headers| headers.to_vec()),
+                    .with_network_request_extra_info(
+                        response.network_request_extra_info().cloned(),
                     ),
                 );
                 self.record_subresource_body_finished(SubresourceBodyFinished::ready(
@@ -630,7 +639,7 @@ impl PageScriptHost {
             return;
         };
         self.record_subresource_request_started(
-            SubresourceRequestStarted::new(
+            SubresourceRequestSnapshot::new(
                 handle,
                 info.frame_id.clone(),
                 info.document_url.clone(),
@@ -1261,6 +1270,8 @@ impl PageScriptHost {
         policy_context: crate::types::SubresourcePolicyContext,
         mut info: PendingSubresourceFetchInfo,
     ) -> u64 {
+        #[cfg(not(any(test, feature = "devtools")))]
+        let _ = client_id;
         self.assign_pending_subresource_fetch_identity(&mut info);
         let internal_id = info.internal_id;
         debug_assert_eq!(
@@ -1284,7 +1295,10 @@ impl PageScriptHost {
                 request_mode: moli_fetch::RequestMode::NoCors,
                 network_partition_key,
                 policy_context,
-                continuation: PendingSubresourceContinuation::CspReport { client_id },
+                continuation: PendingSubresourceContinuation::CspReport {
+                    #[cfg(any(test, feature = "devtools"))]
+                    client_id,
+                },
                 deferred_request_started: false,
             },
         );
@@ -1341,6 +1355,8 @@ impl PageScriptHost {
         policy_context: crate::types::SubresourcePolicyContext,
         mut info: PendingSubresourceFetchInfo,
     ) -> u64 {
+        #[cfg(not(any(test, feature = "devtools")))]
+        let _ = client_id;
         self.assign_pending_subresource_fetch_identity(&mut info);
         let internal_id = info.internal_id;
         debug_assert_eq!(
@@ -1364,7 +1380,10 @@ impl PageScriptHost {
                 request_mode: moli_fetch::RequestMode::NoCors,
                 network_partition_key,
                 policy_context,
-                continuation: PendingSubresourceContinuation::CspReport { client_id },
+                continuation: PendingSubresourceContinuation::CspReport {
+                    #[cfg(any(test, feature = "devtools"))]
+                    client_id,
+                },
                 deferred_request_started: false,
             },
         );
@@ -1424,6 +1443,8 @@ impl PageScriptHost {
         connection: PendingWebSocketConnection,
         mut info: PendingSubresourceFetchInfo,
     ) -> u64 {
+        #[cfg(not(any(test, feature = "devtools")))]
+        let _ = connection;
         self.assign_pending_subresource_fetch_identity(&mut info);
         let internal_id = info.internal_id;
         let (load, request_origin) = self.require_document_resource_load_for_dispatch_scope(
@@ -1446,7 +1467,10 @@ impl PageScriptHost {
                 request_mode: moli_fetch::RequestMode::Cors,
                 network_partition_key: None,
                 policy_context: Default::default(),
-                continuation: PendingSubresourceContinuation::WebSocket(connection),
+                continuation: PendingSubresourceContinuation::WebSocket(
+                    #[cfg(any(test, feature = "devtools"))]
+                    connection,
+                ),
                 deferred_request_started: false,
             },
         );
@@ -1643,6 +1667,7 @@ impl PageScriptHost {
         self.restore_pending_subresource_fetch(pending);
     }
 
+    #[cfg(any(test, feature = "devtools"))]
     pub(crate) fn record_running_subresource_fetch(&mut self, state: RunningSubresourceFetchState) {
         self.running_subresource_fetches
             .insert(state.pending.info.internal_id, state);
@@ -1839,7 +1864,18 @@ impl PageScriptHost {
                 )
                 .with_from_cache(streaming.head.from_cache)
                 .with_negotiated_http_version(streaming.head.negotiated_http_version)
-                .with_network_request_headers(streaming.network_request_headers.clone()),
+                .with_network_request_extra_info(
+                    (streaming.network_request_headers.clone()).map(|headers| {
+                        moli_fetch::NetworkRequestExtraInfo {
+                            headers,
+                            cookie_report: streaming
+                                .head
+                                .request_cookie_report
+                                .clone()
+                                .unwrap_or_default(),
+                        }
+                    }),
+                ),
             );
             self.record_subresource_body_finished(
                 SubresourceBodyFinished::failed_with_partial_body(handle, error_text, partial_body),
@@ -1947,11 +1983,8 @@ impl PageScriptHost {
                 )
                 .with_from_cache(pending.response.from_cache)
                 .with_negotiated_http_version(pending.response.negotiated_http_version)
-                .with_network_request_headers(
-                    pending
-                        .response
-                        .network_request_headers()
-                        .map(|headers| headers.to_vec()),
+                .with_network_request_extra_info(
+                    pending.response.network_request_extra_info().cloned(),
                 ),
             );
             self.record_subresource_body_finished(
@@ -2141,7 +2174,7 @@ impl PageScriptHost {
             }
         });
 
-        let mut aborted = 0;
+        let mut aborted = self.retire_child_classic_script_network_loads(registry_id);
         for internal_id in ordinary_ids.iter().copied() {
             let _ = self
                 .browser_context_runtime
@@ -2756,6 +2789,7 @@ impl PageScriptHost {
         self.note_subresource_activity();
     }
 
+    #[cfg(any(test, feature = "devtools"))]
     pub(crate) fn take_pending_subresource_response(
         &mut self,
         internal_id: u64,
@@ -2763,6 +2797,7 @@ impl PageScriptHost {
         self.pending_subresource_responses.remove(&internal_id)
     }
 
+    #[cfg(any(test, feature = "devtools"))]
     pub(crate) fn take_pending_websocket_response(
         &mut self,
         internal_id: u64,
@@ -2770,6 +2805,7 @@ impl PageScriptHost {
         self.pending_websocket_responses.remove(&internal_id)
     }
 
+    #[cfg(any(test, feature = "devtools"))]
     pub(crate) fn take_pending_subresource_auth(
         &mut self,
         internal_id: u64,
@@ -2777,6 +2813,7 @@ impl PageScriptHost {
         self.pending_subresource_auths.remove(&internal_id)
     }
 
+    #[cfg(any(test, feature = "devtools"))]
     pub(crate) fn begin_active_subresource_request(&mut self) {
         self.active_subresource_requests += 1;
         self.note_subresource_activity();

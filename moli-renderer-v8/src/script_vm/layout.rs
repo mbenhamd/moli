@@ -198,7 +198,7 @@ impl ScriptVm {
             .visual_state_token(document, viewport, base_background_color)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "devtools"))]
     pub(crate) fn visual_resource_generation_handle_for_test(
         &self,
     ) -> crate::native_bridge::visual_resource_generation::VisualResourceGeneration {
@@ -514,15 +514,24 @@ impl ScriptVm {
         )
     }
 
+    #[cfg(feature = "devtools")]
     pub(crate) fn marker_pseudo_element_is_generated_for_document_snapshot(
         &self,
         handle: DomHandle,
     ) -> bool {
-        crate::native_bridge::element::marker_pseudo_element_is_generated_for_document_snapshot(
+        self.marker_hosts_for_document_snapshot([handle])
+            .contains(&handle)
+    }
+
+    #[cfg(feature = "devtools")]
+    pub(crate) fn marker_hosts_for_document_snapshot(
+        &self,
+        handles: impl IntoIterator<Item = DomHandle>,
+    ) -> std::collections::HashSet<DomHandle> {
+        crate::native_bridge::element::marker_hosts_for_document_snapshot(
             &self._context_host.borrow(),
-            handle,
+            handles,
         )
-        .unwrap_or(false)
     }
 
     #[cfg(feature = "devtools")]

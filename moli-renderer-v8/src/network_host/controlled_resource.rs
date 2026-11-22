@@ -10,7 +10,9 @@ use result::BufferedXhrResponse;
 pub(crate) use result::{XhrLoadResult, start_buffered_xhr};
 pub(crate) use stream::{ControlledResourceStream, ControlledXhrCompletion};
 
-use moli_fetch::{FetchCancelHandle, Request, Response, ResponseHead};
+#[cfg(any(test, feature = "devtools"))]
+use moli_fetch::ResponseHead;
+use moli_fetch::{FetchCancelHandle, NetworkObservationJournal, Request, Response};
 use tokio::sync::oneshot;
 
 use crate::{
@@ -170,14 +172,10 @@ impl ControlledResourceLoad {
             .network_record
             .with_request_initiator_type(self.request_initiator_type);
         if completed.info.network_request_handle.is_some() {
-            // Redirects already crossed their own native request-pause boundary.
-            // Diagnostics retain the full chain; protocol sees only the terminal.
-            self.interception.record_subresource_network(
-                completed
-                    .network_record
-                    .clone()
-                    .with_redirect_chain(Vec::new()),
-            );
+            // Keep each hop's transport metadata. Protocol delivery skips
+            // redirect announcements already published at the native boundary.
+            self.interception
+                .record_subresource_network(completed.network_record.clone());
         }
         self.publish_completed();
         ControlledXhrCompletion::Buffered(Box::new(completed))
@@ -269,41 +267,45 @@ impl ControlledResourceLoad {
         }
         self.sync_info();
         if request_changed && self.interception.is_worker() {
-            // The request ID is already announced before its Fetch pause. An
-            // updated snapshot refreshes body capture and subsequent response
-            // metadata; Network's existing announcement claim suppresses a
-            // second requestWillBeSent for this hop.
-            self.publish_worker_request(None);
+            self.interception.publish_network(
+                crate::types::ScriptNetworkOutputItem::SubresourceRequestUpdated(Box::new(
+                    self.worker_request_snapshot(None),
+                )),
+            );
         }
     }
 
     fn publish_worker_request(&self, redirect: Option<crate::types::NavigationRedirect>) {
-        let handle = self
-            .info
-            .network_request_handle
-            .expect("native resource load has a handle");
         self.interception.publish_network(
             crate::types::ScriptNetworkOutputItem::SubresourceRequestStarted(Box::new(
-                crate::types::SubresourceRequestStarted::new(
-                    handle,
-                    self.info.frame_id.clone(),
-                    self.info.document_url.clone(),
-                    self.info.url.clone(),
-                    self.info.method.clone(),
-                    self.info.request_headers.clone(),
-                    self.info.request_body.clone(),
-                    self.info.resource_type,
-                    self.request_initiator_type,
-                    self.info.request_cookie_report.clone(),
-                )
-                .with_request_body_bytes(self.info.request_body_bytes.clone())
-                .with_redirect(redirect)
-                .with_keepalive(
-                    self.load.disposition()
-                        == crate::network::loads::ResourceLoadDisposition::Keepalive,
-                ),
+                self.worker_request_snapshot(redirect),
             )),
         );
+    }
+
+    fn worker_request_snapshot(
+        &self,
+        redirect: Option<crate::types::NavigationRedirect>,
+    ) -> crate::types::SubresourceRequestSnapshot {
+        crate::types::SubresourceRequestSnapshot::new(
+            self.info
+                .network_request_handle
+                .expect("native resource load has a handle"),
+            self.info.frame_id.clone(),
+            self.info.document_url.clone(),
+            self.info.url.clone(),
+            self.info.method.clone(),
+            self.info.request_headers.clone(),
+            self.info.request_body.clone(),
+            self.info.resource_type,
+            self.request_initiator_type,
+            self.info.request_cookie_report.clone(),
+        )
+        .with_request_body_bytes(self.info.request_body_bytes.clone())
+        .with_redirect(redirect)
+        .with_keepalive(
+            self.load.disposition() == crate::network::loads::ResourceLoadDisposition::Keepalive,
+        )
     }
 
     fn check_request(&mut self) -> Result<(), String> {
@@ -367,6 +369,7 @@ impl ControlledResourceLoad {
             .map_err(|error| error.to_string())
     }
 
+    #[cfg(any(test, feature = "devtools"))]
     fn synthetic_response(
         &self,
         status: u16,
@@ -422,7 +425,6 @@ impl ControlledResourceLoad {
                         .cloned()
                         .map(Into::into),
                 );
-                announce_request = false;
             }
             if self.interception.worker_control_closed() {
                 if self.load.disposition()
@@ -466,7 +468,9 @@ impl ControlledResourceLoad {
                         intercept_response = response;
                         handle_auth_requests = auth;
                     }
+                    #[cfg(any(test, feature = "devtools"))]
                     D::Fail(error) => return Err(error),
+                    #[cfg(any(test, feature = "devtools"))]
                     D::Fulfill {
                         request_overrides,
                         status,
@@ -503,8 +507,12 @@ impl ControlledResourceLoad {
             }
             let loader: ResourceRequestClient = self.load.request_client();
             let hop_cancel = self.cancel.child_for_subrequest();
-            let (response, mut is_synthetic, observed_request_headers) = match synthetic.take() {
-                Some(response) => (LoadedResponse::from_response(response), true, None),
+            let (response, is_synthetic, observations) = match synthetic.take() {
+                Some(response) => (
+                    LoadedResponse::from_response(response),
+                    true,
+                    NetworkObservationJournal::default(),
+                ),
                 None => {
                     if self.load.network_offline() {
                         return Err("Network emulation offline".into());
@@ -517,14 +525,19 @@ impl ControlledResourceLoad {
                         Some(&preflight_observer),
                     )
                     .await?;
-                    let (response, observation) = observed.into_parts();
-                    let headers = observation.map(|observation| observation.into_headers());
-                    (response, false, headers)
+                    let (response, observations) = observed.into_parts_with_observation_journal();
+                    (response, false, observations)
                 }
             };
+            #[cfg(any(test, feature = "devtools"))]
+            let mut is_synthetic = is_synthetic;
             if network_request_headers.is_none() {
-                network_request_headers = observed_request_headers;
+                network_request_headers = observations
+                    .final_request_observation()
+                    .map(|request| request.headers().to_vec());
             }
+            let network_response_extra_info =
+                super::response_hop::network_response_extra_info(&response.head, &observations);
             let mut response = response;
             if handle_auth_requests
                 && matches!(response.head.status, 401 | 407)
@@ -559,15 +572,18 @@ impl ControlledResourceLoad {
                     return Err("network authentication output owner is closed".into());
                 }
                 match self.decision(rx, InterceptionPhase::Auth).await? {
+                    #[cfg(any(test, feature = "devtools"))]
                     D::Auth(auth) => {
                         if !self.load.try_restart_with_auth() {
                             return Err(moli_fetch::AuthRetryBudget::ERROR_TEXT.into());
                         }
                         self.request = self.request.clone().with_auth(auth.into());
+                        announce_request = false;
                         next_request_pause = false;
                         continue;
                     }
                     D::CancelAuth => {}
+                    #[cfg(any(test, feature = "devtools"))]
                     D::Fail(error) => return Err(error),
                     _ => unreachable!("auth pause accepts only auth decisions"),
                 }
@@ -609,6 +625,7 @@ impl ControlledResourceLoad {
                             response.head.headers = headers;
                         }
                     }
+                    #[cfg(any(test, feature = "devtools"))]
                     D::Fulfill {
                         request_overrides: _,
                         status,
@@ -621,6 +638,7 @@ impl ControlledResourceLoad {
                         self.response_filter = None;
                         is_synthetic = true;
                     }
+                    #[cfg(any(test, feature = "devtools"))]
                     D::Fail(error) => return Err(error),
                     _ => unreachable!("response pause accepts only response decisions"),
                 }
@@ -650,14 +668,14 @@ impl ControlledResourceLoad {
                 super::response_hop::advance_validated_subresource_response(
                     &mut self.request,
                     response.head.clone(),
-                    false,
+                    network_response_extra_info,
                     self.load.request_client().web_security_disabled(),
                 )?
             } else {
                 advance_subresource_response(
                     &mut self.request,
                     response.head.clone(),
-                    false,
+                    network_response_extra_info,
                     self.load.request_client().web_security_disabled(),
                 )?
             };

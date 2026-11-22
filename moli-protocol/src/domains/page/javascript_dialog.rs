@@ -83,6 +83,22 @@ impl CdpConnection {
         self.command_owner_scope_for_devtools_context(context)
             .is_some_and(|owner| current_javascript_dialog_for_owner(self, &owner).is_some())
     }
+
+    #[cfg(test)]
+    pub(crate) fn has_current_javascript_dialog_for_owner(
+        &self,
+        owner: &CommandOwnerScope,
+    ) -> bool {
+        let page_owners = javascript_dialog_page_owners(self, owner);
+        self.target_javascript_dialog_state_for_owner(owner)
+            .and_then(|state| state.peek_next())
+            .is_some_and(|dialog| {
+                page_owners
+                    .iter()
+                    .flatten()
+                    .any(|page| page == dialog.page_owner())
+            })
+    }
 }
 
 fn javascript_dialog_page_owners(

@@ -1,5 +1,188 @@
 use super::*;
 
+#[tokio::test]
+async fn page_subscription_changes_apply_before_initial_adoption_and_are_not_replayed() {
+    use futures_util::FutureExt as _;
+
+    for reenable in [false, true] {
+        let mut ctx = crate::testing::TestContext::from_conn(CdpConnection::new());
+        ctx.with_fixture(|conn| {
+            let mut browser = BrowserContext::new("BID-page-admission".into());
+            browser.set_active_target_id("TID-page-admission");
+            browser.attach_active_session("SID-page-admission");
+            conn.install_browser_context_fixture_for_test(browser);
+            let owner = crate::conn::CommandOwnerScope::capture(conn, Some("SID-page-admission"));
+            conn.runtime_session_owner_slot_mut_for_owner(&owner)
+                .unwrap()
+                .start_initial_document_page_build();
+        });
+        let start = |ctx: &mut crate::testing::TestContext, id, method, params| {
+            let command = ParsedCdpCommand::from_serializable(json!({
+                "id":id,"method":method,"sessionId":"SID-page-admission","params":params,
+            }))
+            .unwrap();
+            ctx.with_fixture(|conn| {
+                conn.start_parsed_command_dispatch_with_context(&command, &mut Default::default())
+            })
+        };
+        let CdpCommandTaskStep::Pending(enable) = start(
+            &mut ctx,
+            1,
+            "Page.enable",
+            json!({"enableFileChooserOpenedEvent":true}),
+        ) else {
+            panic!("only the Page-dependent tail waits for adoption");
+        };
+        let mut enabled = Box::pin(enable.wait());
+        assert!(enabled.as_mut().now_or_never().is_none());
+        ctx.with_fixture(|conn| {
+            assert_eq!(
+                conn.page_domain_enabled_for_session_owner(Some("SID-page-admission")),
+                Some(true),
+                "the subscription is active before the installer completes"
+            );
+        });
+        assert!(matches!(
+            start(&mut ctx, 2, "Page.disable", json!({})),
+            CdpCommandTaskStep::Complete(_)
+        ));
+        let newer_enable = reenable.then(|| {
+            let CdpCommandTaskStep::Pending(enable) = start(
+                &mut ctx,
+                3,
+                "Page.enable",
+                json!({"enableFileChooserOpenedEvent":false}),
+            ) else {
+                panic!("a later enable joins the same initial installer");
+            };
+            enable
+        });
+        let generation = ctx.with_fixture(|conn| {
+            assert_eq!(
+                conn.page_domain_enabled_for_session_owner(Some("SID-page-admission")),
+                Some(reenable)
+            );
+            let generation = conn
+                .page_domain_subscription_generation_for_session_owner(Some("SID-page-admission"));
+            let owner = crate::conn::CommandOwnerScope::capture(conn, Some("SID-page-admission"));
+            conn.runtime_session_owner_slot_mut_for_owner(&owner)
+                .unwrap()
+                .complete_initial_document_page_build();
+            generation
+        });
+        for completed in std::iter::once(enabled.await).chain(match newer_enable {
+            Some(enable) => Some(enable.wait().await),
+            None => None,
+        }) {
+            let step = ctx.with_fixture(|conn| {
+                conn.complete_command_dispatch_with_context(completed, &mut Default::default())
+            });
+            let (messages, _) = ctx.complete_command_task_step_for_test(step).await;
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message["result"] == json!({})),
+                "{messages:?}"
+            );
+        }
+        ctx.with_fixture(|conn| {
+            assert_eq!(
+                conn.page_domain_enabled_for_session_owner(Some("SID-page-admission")),
+                Some(reenable),
+                "resuming old work must not reapply its Browser subscription"
+            );
+            assert_eq!(
+                conn.page_domain_subscription_generation_for_session_owner(Some(
+                    "SID-page-admission"
+                )),
+                generation
+            );
+            let owner = crate::conn::CommandOwnerScope::capture(conn, Some("SID-page-admission"));
+            assert!(
+                !conn
+                    .target_devtools_session_state_for_owner(&owner)
+                    .unwrap()
+                    .page_session_state
+                    .page_file_chooser_opened_event_enabled
+            );
+        });
+    }
+}
+
+#[tokio::test]
+async fn invalid_page_enable_is_rejected_before_waiting_for_initial_adoption() {
+    let mut ctx = crate::testing::TestContext::from_conn(CdpConnection::new());
+    ctx.with_fixture(|conn| {
+        let mut browser = BrowserContext::new("BID-invalid-enable".into());
+        browser.set_active_target_id("TID-invalid-enable");
+        conn.install_browser_context_fixture_for_test(browser);
+        let owner = crate::conn::CommandOwnerScope::capture(conn, None);
+        conn.runtime_session_owner_slot_mut_for_owner(&owner)
+            .unwrap()
+            .start_initial_document_page_build();
+    });
+    let command = ParsedCdpCommand::from_serializable(json!({
+        "id":1,"method":"Page.enable","params":{"enableFileChooserOpenedEvent":"yes"},
+    }))
+    .unwrap();
+    let step = ctx.with_fixture(|conn| {
+        conn.start_parsed_command_dispatch_with_context(&command, &mut Default::default())
+    });
+    assert!(matches!(step, CdpCommandTaskStep::Complete(_)));
+    let (messages, _) = ctx.complete_command_task_step_for_test(step).await;
+    assert_eq!(messages[0]["error"]["code"], -32602);
+    ctx.with_fixture(|conn| {
+        assert_eq!(
+            conn.page_domain_enabled_for_session_owner(None),
+            Some(false)
+        );
+    });
+}
+
+#[tokio::test]
+async fn runtime_disable_follows_queued_main_work_without_requiring_its_own_page_build() {
+    use futures_util::FutureExt as _;
+
+    let mut ctx = crate::testing::TestContext::from_conn(CdpConnection::new());
+    ctx.with_fixture(|conn| {
+        let mut browser = BrowserContext::new("BID-runtime-admission".into());
+        browser.set_active_target_id("TID-runtime-admission");
+        conn.install_browser_context_fixture_for_test(browser);
+        let owner = crate::conn::CommandOwnerScope::capture(conn, None);
+        conn.runtime_session_owner_slot_mut_for_owner(&owner)
+            .unwrap()
+            .start_initial_document_page_build();
+    });
+    let start = |ctx: &mut crate::testing::TestContext, id, method| {
+        let command =
+            ParsedCdpCommand::from_serializable(json!({"id":id,"method":method})).unwrap();
+        ctx.with_fixture(|conn| {
+            conn.start_parsed_command_dispatch_with_context(&command, &mut Default::default())
+        })
+    };
+    assert!(matches!(
+        start(&mut ctx, 1, "Runtime.disable"),
+        CdpCommandTaskStep::Complete(_)
+    ));
+    let CdpCommandTaskStep::Pending(enable) = start(&mut ctx, 2, "Runtime.enable") else {
+        panic!("enable waits for the target's Page");
+    };
+    let CdpCommandTaskStep::Pending(disable) = start(&mut ctx, 3, "Runtime.disable") else {
+        panic!("disable must follow the already admitted enable");
+    };
+    let mut disabled = Box::pin(disable.wait());
+    assert!(disabled.as_mut().now_or_never().is_none());
+    drop(enable);
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), disabled)
+        .await
+        .expect("canceling the predecessor releases disable without a Page");
+    let step = ctx.with_fixture(|conn| {
+        conn.complete_command_dispatch_with_context(completed, &mut Default::default())
+    });
+    let (messages, _) = ctx.complete_command_task_step_for_test(step).await;
+    assert_eq!(messages, vec![json!({"id":3,"result":{}})]);
+}
+
 #[test]
 fn command_dispatch_completes_parse_errors_without_legacy_fallback() {
     let mut conn = CdpConnection::new();
@@ -1052,13 +1235,13 @@ async fn command_dispatch_completes_target_detach_without_legacy_fallback() {
         }
     }))
     .unwrap();
-    let pending = match ctx.with_fixture(|conn| conn.start_command_dispatch(&raw)) {
-        CdpCommandTaskStep::Pending(pending) => pending,
-        CdpCommandTaskStep::Complete(_) => {
-            panic!("Target.detachFromTarget should use the Target pending dispatcher")
-        }
-    };
-    let messages = complete_command_task_for_test(&mut ctx, *pending).await;
+    let step = ctx.with_fixture(|conn| conn.start_command_dispatch(&raw));
+    assert!(matches!(&step, CdpCommandTaskStep::Complete(_)));
+    let (messages, work) = ctx.complete_command_task_step_for_test(step).await;
+    ctx.route_direct_command_output_for_test(Vec::new(), work)
+        .await;
+    ctx.wait_for_direct_command_work_completion_for_test("native detachment")
+        .await;
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0], json!({ "id": 58, "result": {} }));
     assert_eq!(messages[1]["method"], json!("Target.detachedFromTarget"));

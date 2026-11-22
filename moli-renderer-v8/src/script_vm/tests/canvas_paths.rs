@@ -352,3 +352,214 @@ fn canvas_curves_are_transformed_when_recorded() {
         &[255, 0],
     );
 }
+
+#[test]
+fn canvas_path2d_stroke_uses_the_paint_transform_and_keeps_the_current_path() {
+    canvas_pixels(
+        r#"
+        const line = new Path2D();
+        line.moveTo(8,8);
+        line.lineTo(32,8);
+        ctx.moveTo(8,12);
+        ctx.lineTo(26,12);
+        ctx.translate(32,24);
+        ctx.scale(1,2);
+        ctx.stroke(line);
+        ctx.resetTransform();
+        ctx.stroke();
+        ctx.translate(0,56);
+        ctx.stroke(line);
+        "#,
+        &[
+            (52, 39),
+            (52, 40),
+            (52, 37),
+            (20, 12),
+            (20, 64),
+            (20, 8),
+            (20, 40),
+            (52, 64),
+        ],
+        &[255, 255, 0, 255, 255, 0, 0, 0],
+    );
+}
+
+#[test]
+fn canvas_path_rasterization_clips_to_the_bitmap_with_transformed_caps() {
+    canvas_pixels(
+        r#"
+        ctx.lineWidth = 8;
+        ctx.lineCap = 'square';
+        ctx.translate(1,1);
+        ctx.scale(2,1);
+        ctx.moveTo(-6,-3);
+        ctx.lineTo(3,-3);
+        ctx.stroke();
+        ctx.resetTransform();
+        ctx.fillRect(92,92,10,10);
+        "#,
+        &[
+            (0, 0),
+            (12, 0),
+            (17, 0),
+            (12, 3),
+            (95, 95),
+            (91, 95),
+            (90, 92),
+        ],
+        &[255, 255, 0, 0, 255, 0, 0],
+    );
+}
+
+#[test]
+fn canvas_path_drawing_uses_a_snapshot_during_dimension_reads() {
+    fn append_rect<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        args: v8::FunctionCallbackArguments<'s>,
+        mut result: v8::ReturnValue<'_, v8::Value>,
+    ) {
+        let updated = v8::Local::<v8::Object>::try_from(args.get(0)).is_ok_and(|target| {
+            crate::context_bootstrap::try_append_canvas_path_rect_for_test(
+                scope,
+                target,
+                [24.0, 4.0, 8.0, 8.0],
+            )
+        });
+        result.set(v8::Boolean::new(scope, updated).into());
+    }
+
+    let mut vm = new_storage_test_vm("https://canvas-paths.test/");
+    vm.with_default_context_scope(|scope, _| {
+        let append_rect = v8::Function::new(scope, append_rect).unwrap();
+        let global = scope.get_current_context().global(scope);
+        let name = crate::util::v8str(scope, "tryAppendTestRect");
+        assert_eq!(
+            global.set(scope, name.into(), append_rect.into()),
+            Some(true)
+        );
+        Ok(())
+    })
+    .unwrap();
+
+    for (operation, y) in [("fill", 6), ("stroke", 4)] {
+        for (target, argument) in [("ctx", ""), ("new Path2D()", "target")] {
+            let result = vm
+                .eval(&format!(
+                    r#"(() => {{
+                    const canvas = document.createElement('canvas');
+                    canvas.width = canvas.height = 40;
+                    const ctx = canvas.getContext('2d');
+                    ctx.lineWidth = 2;
+                    const target = {target};
+                    target.rect(4, 4, 8, 8);
+                    const edits = [];
+                    Object.defineProperty(canvas, 'width', {{
+                        configurable: true,
+                        get() {{
+                            edits.push(tryAppendTestRect(target));
+                            return 40;
+                        }}
+                    }});
+                    ctx.{operation}({argument});
+                    delete canvas.width;
+                    const alpha = x => ctx.getImageData(x, {y}, 1, 1).data[3];
+                    const painted = [alpha(8), alpha(28)];
+                    ctx.{operation}({argument});
+                    return JSON.stringify([
+                        edits.length > 0 && edits.every(Boolean), ...painted, alpha(28)
+                    ]);
+                }})()"#
+                ))
+                .expect("canvas path draw should succeed");
+            assert_eq!(result, "[true,255,0,255]", "{operation} on {target}");
+        }
+    }
+}
+
+#[test]
+fn canvas_path_rasterization_keeps_far_edges_after_wide_bounds() {
+    canvas_pixels(
+        r#"
+        ctx.moveTo(-100000000, 4);
+        ctx.rect(0, 4, 20, 16);
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.lineWidth = 2;
+        ctx.miterLimit = 1;
+        ctx.moveTo(-100000000, 36);
+        ctx.moveTo(0, 36);
+        ctx.lineTo(20, 36);
+        ctx.stroke();
+        "#,
+        &[(18, 8), (19, 8), (20, 8), (19, 36), (20, 36)],
+        &[255, 255, 0, 255, 0],
+    );
+}
+
+#[test]
+fn canvas_path2d_copies_svg_paths_and_appends_with_a_matrix() {
+    canvas_pixels(
+        r#"
+        const source = new Path2D('M 8 8 h 24 v 24 H 8 z M 14 14 h 10 v 10 H 14 z X');
+        const copy = new Path2D(source);
+        source.rect(78,8,8,8);
+        copy.addPath(copy, new DOMMatrix([1,0,0,1,32,0]));
+        copy.addPath(source, {e: Infinity});
+        ctx.translate(4,0);
+        ctx.fill(copy, 'evenodd');
+        ctx.setTransform(1,0,0,1,0,40);
+        ctx.fill(copy);
+        "#,
+        &[
+            (14, 10),
+            (46, 10),
+            (20, 19),
+            (53, 19),
+            (84, 10),
+            (18, 59),
+            (50, 59),
+        ],
+        &[255, 255, 0, 0, 0, 255, 255],
+    );
+}
+
+#[test]
+fn canvas_path2d_uses_native_brands_across_realms_and_converts_arguments() {
+    let mut vm = new_storage_page_task_executor_test_vm("https://canvas-path2d.test/");
+    vm.eval("document.body.innerHTML = '<iframe id=child></iframe>'")
+        .unwrap();
+    let result = vm
+        .eval(
+            r#"(() => {
+                const child = document.getElementById('child').contentWindow;
+                class CustomPath extends child.Path2D {}
+                const source = new CustomPath();
+                Path2D.prototype.rect.call(source, 2, 2, 6, 6);
+                const path = new Path2D(source);
+                const ctx = document.createElement('canvas').getContext('2d');
+                ctx.fill(path);
+                const throws = (name, action) => {
+                    try { action(); } catch (error) { return error.name === name; }
+                    return false;
+                };
+                const spoof = Object.create(Path2D.prototype);
+                return [
+                    Path2D.length === 0 && Path2D.prototype.addPath.length === 1,
+                    path instanceof Path2D && source instanceof CustomPath,
+                    ctx.getImageData(4,4,1,1).data[3] === 255,
+                    throws('TypeError', () => Path2D()),
+                    throws('TypeError', () => Path2D.prototype.rect.call(spoof, 0,0,1,1)),
+                    throws('TypeError', () => ctx.rect.call(path, 0,0,1,1)),
+                    throws('TypeError', () => path.moveTo(1)),
+                    throws('IndexSizeError', () => path.arc(1,1,-1,0,1)),
+                    throws('TypeError', () => path.addPath(spoof)),
+                    throws('TypeError', () => path.addPath(source, { e: 2, m41: 3 })),
+                    throws('TypeError', () => ctx.stroke(spoof)),
+                    throws('TypeError', () => ctx.fill(path, 'invalid'))
+                ].every(Boolean);
+            })()"#,
+        )
+        .expect("Path2D bindings should execute across realms");
+    assert_eq!(result, "true");
+}

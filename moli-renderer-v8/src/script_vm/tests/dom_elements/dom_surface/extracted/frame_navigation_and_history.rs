@@ -2360,7 +2360,17 @@ async fn child_window_load_replacement_stops_old_delivery_before_owner_output() 
           parent.__childLoadPhaseReplacement;
       });
       addEventListener("pagehide", () => parent.__childLoadPhaseEvents.push("old-pagehide"));
-      addEventListener("unload", () => parent.__childLoadPhaseEvents.push("old-unload"));
+      addEventListener("unload", event => {
+        parent.__childLoadPhaseEvents.push("old-unload");
+        const path = event.composedPath();
+        parent.__childUnloadDispatchState = JSON.stringify([
+          event.target === document,
+          event.srcElement === document,
+          event.currentTarget === window,
+          event.eventPhase === Event.AT_TARGET,
+          path.length === 1 && path[0] === window,
+        ]);
+      });
       addEventListener("pageshow", () => parent.__childLoadPhaseEvents.push("old-pageshow"));
     <\/script>
     <body data-version="old">old</body>`;
@@ -2481,6 +2491,12 @@ async fn child_window_load_replacement_stops_old_delivery_before_owner_output() 
             .expect("replacement child load-phase trace should evaluate"),
         "old-window|old-pagehide|old-unload|new-window|frame:new|new-pageshow",
         "started old load must unload once in pagehide-before-unload order before replacement"
+    );
+    assert_eq!(
+        vm.eval("__childUnloadDispatchState")
+            .expect("child unload dispatch state should evaluate"),
+        "[true,true,true,true,true]",
+        "unload exposes the Document while invoking the child Window"
     );
     let snapshots = vm.take_completed_child_frame_navigation_loads();
     assert_eq!(snapshots.len(), 1);
@@ -3712,4 +3728,119 @@ async fn child_frame_link_to_another_path_still_loads_a_new_document() {
         r##"{"sameDocument":false,"loads":2,"hashChanges":0,"path":"/other#ref-1"}"##
     );
     assert_eq!(targets, vec!["/child?x=1", "/other"]);
+}
+
+#[tokio::test]
+async fn nested_initial_blank_load_compiles_inline_handlers_before_the_first_script() {
+    let server = StaticHttpServer::spawn_with_bodies(vec![
+        r#"<!doctype html>
+<body onload="parent.recordNestedLoad('window')">
+<iframe onload="parent.recordNestedLoad('first:' + document.compatMode)"></iframe>
+<iframe onload="parent.recordNestedLoad('second:' + document.compatMode)"></iframe>"#
+            .to_owned(),
+    ])
+    .await;
+    let loader = static_http_loader([server.resolve_entry("www.example.test")]);
+    let parent_url = server.url_for_host("www.example.test", "/parent.html");
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(parent_url.as_str(), &loader);
+    vm.exec(
+        r#"
+globalThis.nestedLoadEvents = [];
+globalThis.recordNestedLoad = value => nestedLoadEvents.push(value);
+const frame = document.createElement('iframe');
+frame.src = '/child.html';
+frame.onload = () => nestedLoadEvents.push('owner');
+(document.body || document.documentElement || document).appendChild(frame);
+"#,
+        None,
+    )
+    .expect("nested frame setup should evaluate");
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(nestedLoadEvents.includes('owner'))",
+        "true",
+        "the outer iframe load should finish",
+    )
+    .await;
+    assert_eq!(
+        vm.eval("nestedLoadEvents.join('|')").unwrap(),
+        "first:CSS1Compat|second:CSS1Compat|window|owner"
+    );
+    assert_eq!(server.finish_targets().await, ["/child.html"]);
+}
+
+#[test]
+fn constructed_documents_share_legacy_unforgeable_location_accessors() {
+    let mut vm = new_storage_test_vm("https://example.com/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              const first = new Document();
+              const second = new Document();
+              const firstDescriptor = Object.getOwnPropertyDescriptor(first, "location");
+              const secondDescriptor = Object.getOwnPropertyDescriptor(second, "location");
+              const throwsName = callback => {
+                try {
+                  callback();
+                  return "returned";
+                } catch (error) {
+                  return error && error.name;
+                }
+              };
+
+              return JSON.stringify({
+                firstValue: first.location,
+                secondValue: second.location,
+                own: Object.prototype.hasOwnProperty.call(first, "location"),
+                getType: typeof firstDescriptor.get,
+                setType: typeof firstDescriptor.set,
+                getName: firstDescriptor.get.name,
+                getLength: firstDescriptor.get.length,
+                setName: firstDescriptor.set.name,
+                setLength: firstDescriptor.set.length,
+                getSame: firstDescriptor.get === secondDescriptor.get,
+                setSame: firstDescriptor.set === secondDescriptor.set,
+                enumerable: firstDescriptor.enumerable,
+                configurable: firstDescriptor.configurable,
+                assign: throwsName(() => {
+                  "use strict";
+                  first.location = "https://example.org/";
+                }),
+                badGet: throwsName(() => firstDescriptor.get.call({})),
+                badSet: throwsName(() => firstDescriptor.set.call({}, "x")),
+              });
+            })()
+            "#,
+        )
+        .expect("constructed Document location accessor probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"firstValue":null,"secondValue":null,"own":true,"getType":"function","setType":"function","getName":"get location","getLength":0,"setName":"set location","setLength":1,"getSame":true,"setSame":true,"enumerable":true,"configurable":false,"assign":"TypeError","badGet":"TypeError","badSet":"TypeError"}"#
+    );
+}
+
+#[test]
+fn embedded_resource_selection_skips_non_fetchable_script_scheme() {
+    let mut vm = new_storage_html_test_vm("https://embedded-resource.test/");
+    let result = vm
+        .eval(
+            r#"(() => {
+                const object = document.createElement('object');
+                object.type = 'text/html';
+                object.data = 'javascript:';
+                const embed = document.createElement('embed');
+                embed.type = 'text/html';
+                embed.src = 'javascript:';
+                const frame = document.createElement('iframe');
+                document.body.append(object, embed, frame);
+                return [window.length, object.contentWindow === null,
+                    object.contentDocument === null, frame.contentDocument !== null].join('|');
+            })()"#,
+        )
+        .expect("embedded resource selection probe should evaluate");
+    assert_eq!(result, "1|true|true|true");
 }

@@ -6,6 +6,8 @@ mod attribute_lookup;
 mod custom_elements;
 mod detached;
 mod dom_surface;
+// Keyboard focus traversal drives the DevTools-only input dispatcher.
+#[cfg(feature = "devtools")]
 mod focus;
 mod form_data_brands;
 mod live_document;

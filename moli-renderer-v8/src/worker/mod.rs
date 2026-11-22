@@ -39,15 +39,16 @@ pub(crate) use global_scope::{
     dispatch_worker_trusted_types_sink_violation_event,
     ensure_worker_opfs_directory_iterator_registry, ensure_worker_opfs_handle_registry,
     forget_nested_worker_context, forget_worker_broadcast_channel_wrapper,
-    forget_worker_message_port_wrapper, get_worker_state, register_worker_blob_read_task,
-    register_worker_broadcast_channel_wrapper, register_worker_message_port_wrapper,
-    register_worker_opfs_iterator_task, register_worker_opfs_move_task, register_worker_opfs_task,
-    register_worker_webcrypto_task, register_worker_websocket, reserve_nested_worker_context,
-    send_worker_websocket_binary, send_worker_websocket_blob, send_worker_websocket_text,
-    service_worker_runtime_identity, try_worker_xhr_abort_callback,
-    try_worker_xhr_reschedule_timeout_after_timeout_change, try_worker_xhr_send_callback,
-    worker_allows_eval_code_generation_by_csp, worker_allows_trusted_type_policy_name,
-    worker_allows_trusted_types_eval, worker_broadcast_channel_registry,
+    forget_worker_message_port_wrapper, forward_nested_worker_error_after_owner_close,
+    get_worker_state, register_worker_blob_read_task, register_worker_broadcast_channel_wrapper,
+    register_worker_message_port_wrapper, register_worker_opfs_iterator_task,
+    register_worker_opfs_move_task, register_worker_opfs_task, register_worker_webcrypto_task,
+    register_worker_websocket, reserve_nested_worker_context, send_worker_websocket_binary,
+    send_worker_websocket_blob, send_worker_websocket_text, service_worker_runtime_identity,
+    try_worker_xhr_abort_callback, try_worker_xhr_reschedule_timeout_after_timeout_change,
+    try_worker_xhr_send_callback, worker_allows_eval_code_generation_by_csp,
+    worker_allows_trusted_type_policy_name, worker_allows_trusted_types_eval,
+    worker_allows_wasm_code_generation_by_csp, worker_broadcast_channel_registry,
     worker_broadcast_channel_storage_key, worker_broadcast_channel_wake_sender,
     worker_broadcast_channel_wrapper, worker_current_script_url, worker_global_is_closed,
     worker_global_origin, worker_message_port_registry, worker_message_port_wake_sender,
@@ -60,9 +61,10 @@ pub(crate) use global_scope::{
 pub(crate) use handle::WorkerMessage;
 pub(crate) use handle::{
     WorkerBootstrapCompletion, WorkerBootstrapFailure, WorkerBootstrapSuccess,
-    WorkerConsoleMessage, WorkerErrorPhase, WorkerErrorSource, WorkerFetchHandlerType,
-    WorkerParentErrorEventKind, WorkerRuntimeEvent, WorkerRuntimeInspectorMessageBatch,
-    WorkerScriptResource, WorkerScriptResourceKind, WorkerToParentMessage,
+    WorkerConsoleMessage, WorkerErrorPhase, WorkerErrorReport, WorkerErrorSource,
+    WorkerFetchHandlerType, WorkerParentErrorEventKind, WorkerRuntimeEvent,
+    WorkerRuntimeInspectorMessageBatch, WorkerScriptResource, WorkerScriptResourceKind,
+    WorkerToParentMessage,
 };
 pub(crate) use handle::{
     WorkerControlHandle, WorkerHandle, WorkerNetworkPolicy, WorkerSecureContextPolicy,
@@ -79,6 +81,9 @@ pub(crate) use thread::{
     WorkerGlobalKind, WorkerScriptKind, WorkerScriptSource, WorkerSpawnOptions,
     dispatch_current_worker_callback_exception, spawn_worker_with_options,
 };
+
+#[cfg(test)]
+pub(crate) use thread::with_nested_error_selection_gate_for_test;
 
 #[cfg(test)]
 pub(crate) use handle::{

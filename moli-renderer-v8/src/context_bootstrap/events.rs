@@ -15,12 +15,10 @@ mod subclasses;
 pub(crate) use moli_webapi::events::subclasses::submit::{
     mark_agent_submit_event, take_submit_event_response,
 };
-use moli_webapi::events::ui;
 use moli_webapi::events::value;
 pub(crate) use subclasses::clear_input_event_target_ranges;
 pub(crate) use subclasses::initialize_native_security_policy_violation_event;
 pub(in crate::context_bootstrap) use subclasses::input_event_get_target_ranges_callback;
-pub(in crate::context_bootstrap) use ui::initialize_legacy_ui_event;
 mod wrappers;
 
 pub(in crate::context_bootstrap) use moli_webapi::events::{audio, speech};
@@ -30,7 +28,6 @@ pub(in crate::context_bootstrap) use device::{
     install_device_event_template_bindings,
 };
 
-pub(in crate::context_bootstrap) use modifiers::initialize_legacy_event_modifiers;
 pub(in crate::context_bootstrap) use value::{
     ValueEventKind, build_value_event_template, install_value_event_template_bindings,
 };
@@ -50,13 +47,10 @@ pub(crate) fn construct_original_event<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     event_type: &str,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let event_ctor =
-        super::exposed_interfaces::ensure_intrinsic_interface_constructor(scope, "Event").ok()?;
-    let event_type = v8_string(scope, event_type)?;
     let event = {
         let try_catch = std::pin::pin!(v8::TryCatch::new(scope));
-        let scope = try_catch.init();
-        event_ctor.new_instance(&scope, &[event_type.into()])
+        let mut scope = try_catch.init();
+        moli_webapi::events::construct_native_event(&mut scope, event_type, Default::default())
     }?;
     mark_event_trusted(scope, event);
     Some(event)
@@ -105,7 +99,7 @@ pub(crate) fn construct_original_text_input_event<'s>(
         v8::Boolean::new(scope, true).into(),
     );
     let view = scope.get_current_context().global(scope);
-    ui::initialize_legacy_ui_event(scope, backing, Some(view), 0);
+    moli_webapi::events::ui::initialize_legacy_ui_event(scope, backing, Some(view), 0);
     let data = v8_string(scope, text)?;
     define_event_property(scope, backing, "data", data.into());
     base::set_event_initialized(scope, backing, true);
@@ -117,8 +111,7 @@ pub(crate) use base::{
     EVENT_DISPATCHING_SLOT, EVENT_PASSIVE_SLOT, EVENT_STOP_IMMEDIATE_PROPAGATION_SLOT,
     EVENT_STOP_PROPAGATION_SLOT, clear_event_composed_path, define_event_property, event_backing,
     event_initialized, event_internal_bool_flag, event_is_dispatching, initialize_event_object,
-    mark_event_trusted, reinitialize_event_object, set_event_composed_path,
-    set_event_internal_flag, set_event_trusted,
+    mark_event_trusted, set_event_composed_path, set_event_internal_flag, set_event_trusted,
 };
 
 /// How a CommandEvent, ToggleEvent, InterestEvent or SubmitEvent starts
@@ -253,12 +246,11 @@ pub(super) fn mouse_event_related_target_getter_function<'s>(
 }
 
 pub(super) use base::{
-    clear_event_dispatch_fields, event_bubbles_getter_function, event_cancelable_getter_function,
+    event_bubbles_getter_function, event_cancelable_getter_function,
     event_composed_getter_function, event_constructor_callback,
     event_current_target_getter_function, event_default_prevented_getter_function,
     event_event_phase_getter_function, event_src_element_getter_function,
-    event_target_getter_function, event_type_getter_function, set_event_dispatch_fields,
-    set_event_initialized,
+    event_target_getter_function, event_type_getter_function, set_event_initialized,
 };
 pub(in crate::context_bootstrap) use init::{EventInit, parse_event_dictionary};
 pub(super) use kind::EventSubclassKind;

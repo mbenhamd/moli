@@ -8,6 +8,7 @@ use super::stream::reject_websocket_stream_abort;
 use super::*;
 use crate::web_api_interfaces;
 use crate::webidl;
+use moli_webapi::websocket_values::WebSocketStreamConstructorArgs;
 use moli_webapi_declare::WebApiObject;
 use moli_websocket::websocket_url_is_potentially_trustworthy;
 
@@ -79,13 +80,6 @@ struct WebSocketStreamAbortListenerDataDeclaration<'scope> {
     stream: v8::Local<'scope, v8::Object>,
 }
 
-#[derive(WebApiObject)]
-#[webapi(plain)]
-struct WebSocketStreamAbortListenerOptionsDeclaration {
-    #[webapi(data_property, enumerable)]
-    once: bool,
-}
-
 #[derive(webidl::WebIdlArgs)]
 #[webidl(prefix = "WebSocket")]
 struct WebSocketConstructorArgs<'s> {
@@ -98,29 +92,6 @@ struct WebSocketConstructorArgs<'s> {
     url: String,
     #[webidl(index = 1, converter = "raw")]
     protocols: Option<v8::Local<'s, v8::Value>>,
-}
-
-#[derive(webidl::WebIdlArgs)]
-#[webidl(prefix = "WebSocketStream")]
-struct WebSocketStreamConstructorArgs<'s> {
-    #[webidl(
-        required,
-        name = "url",
-        converter = "usv_string",
-        missing_message = "Failed to construct 'WebSocketStream': 1 argument required, but only 0 present."
-    )]
-    url: String,
-    #[webidl(index = 1, dictionary)]
-    options: WebSocketStreamOptionsMembers<'s>,
-}
-
-#[derive(Default, webidl::WebIdlDictionary)]
-#[webidl(prefix = "WebSocketStreamOptions")]
-struct WebSocketStreamOptionsMembers<'s> {
-    #[webidl(sequence, converter = "usv_string", default = Vec::new())]
-    protocols: Vec<String>,
-    #[webidl(interface = web_api_interfaces::AbortSignal)]
-    signal: Option<v8::Local<'s, v8::Object>>,
 }
 
 pub(in crate::context_bootstrap) fn websocket_constructor_callback<'s>(
@@ -468,9 +439,7 @@ fn install_websocket_stream_abort_listener<'s>(
     else {
         return;
     };
-    let options = WebSocketStreamAbortListenerOptionsDeclaration::new(true)
-        .bind(scope)
-        .expect("WebSocketStream abort listener options declaration should bind");
+    let options = moli_webapi::abort_signal::abort_listener_options(scope);
     let _ = add_event_listener.call(
         scope,
         signal.into(),

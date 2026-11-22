@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use tracing::{debug, error, info, warn};
 
 use super::util::{v8_string, v8str};
+use crate::diagnostics::STACK_MAX_BYTES as DIAGNOSTIC_STACK_MAX_BYTES;
 
 const LOG_SUMMARY_MAX_BYTES: usize = 4 * 1024;
 const LOG_SOURCE_MAX_BYTES: usize = 2 * 1024;
@@ -114,6 +115,97 @@ fn exception_stack_property<'s>(
     let stack_key = v8str(scope, "stack");
     let stack = object.get(scope, stack_key.into())?;
     local_value_to_string(scope, stack).filter(|stack| !stack.is_empty())
+}
+
+/// Format V8-captured frames without reading the JavaScript stack property.
+pub(crate) fn captured_exception_stack<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    exception: v8::Local<'s, v8::Value>,
+) -> Option<String> {
+    if !exception.is_native_error() {
+        return None;
+    }
+    let stack = v8::Exception::get_stack_trace(scope, exception)?;
+    let names = (0..stack.get_frame_count().min(32))
+        .filter_map(|index| stack.get_frame(scope, index))
+        .map(|frame| {
+            // Source locations come from Message. Some rejection paths do
+            // not expose a valid Script for their captured frames.
+            let name = frame
+                .get_function_name(scope)
+                .map(|name| Cow::Owned(name.to_rust_string_lossy(scope)));
+            name.unwrap_or(Cow::Borrowed("<anonymous>"))
+        });
+    format_captured_stack(names)
+}
+
+fn format_captured_stack(names: impl Iterator<Item = impl AsRef<str>>) -> Option<String> {
+    let mut stack = String::new();
+    for name in names {
+        let prefix = if stack.is_empty() { "at " } else { "\nat " };
+        let remaining = DIAGNOSTIC_STACK_MAX_BYTES - stack.len();
+        if remaining <= prefix.len() {
+            stack.push_str(&prefix[..remaining]);
+            break;
+        }
+        stack.push_str(prefix);
+
+        let name = bounded_log_field(name.as_ref(), LOG_SOURCE_LINE_MAX_BYTES);
+        let remaining = DIAGNOSTIC_STACK_MAX_BYTES - stack.len();
+        let end = name.floor_char_boundary(remaining);
+        stack.push_str(&name[..end]);
+        if name.len() >= remaining {
+            break;
+        }
+    }
+    (!stack.is_empty()).then_some(stack)
+}
+
+pub(crate) fn exception_message_details<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+) -> (String, String, u32, u32) {
+    let description = v8::Exception::create_message(scope, value);
+    let message = description.get(scope).to_rust_string_lossy(scope);
+    let filename = description
+        .get_script_resource_name(scope)
+        .filter(|value| value.is_string())
+        .map(|value| value.to_rust_string_lossy(scope))
+        .unwrap_or_default();
+    let lineno = description
+        .get_line_number(scope)
+        .and_then(|line| u32::try_from(line).ok())
+        .unwrap_or(0);
+    let colno = description
+        .get_start_column()
+        .checked_add(1)
+        .and_then(|column| u32::try_from(column).ok())
+        .unwrap_or(0);
+    (message, filename, lineno, colno)
+}
+
+pub(crate) fn diagnostic_from_unhandled_rejection<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    source: crate::DiagnosticSource,
+    value: Option<v8::Local<'s, v8::Value>>,
+    default_prevented: bool,
+) -> crate::DiagnosticEvent {
+    let value = value.unwrap_or_else(|| v8::undefined(scope).into());
+    let (message, filename, lineno, colno) = exception_message_details(scope, value);
+    let stack = if default_prevented {
+        None
+    } else {
+        captured_exception_stack(scope, value)
+    };
+    crate::DiagnosticEvent::runtime_exception(
+        source,
+        crate::ExceptionOrigin::UnhandledRejection,
+        &message,
+        &filename,
+        (lineno, colno),
+        stack,
+        crate::ErrorReportOutcome::from_default_prevented(default_prevented),
+    )
 }
 
 /// Module creation must not eagerly read Error.stack or call an author's
@@ -838,10 +930,12 @@ pub(super) fn invoke_callback<'s>(
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
+    use std::cell::Cell;
 
     use super::{
-        DiagnosticLogLevel, LOG_STACK_MAX_BYTES, VALUE_DEBUG_SUMMARY_MAX_BYTES, bounded_log_field,
-        safe_split_at, stack_log_field, truncated_to_byte_limit, v8_message_log_level,
+        DIAGNOSTIC_STACK_MAX_BYTES, DiagnosticLogLevel, LOG_STACK_MAX_BYTES,
+        VALUE_DEBUG_SUMMARY_MAX_BYTES, bounded_log_field, format_captured_stack, safe_split_at,
+        stack_log_field, truncated_to_byte_limit, v8_message_log_level,
     };
 
     #[test]
@@ -869,6 +963,22 @@ mod tests {
 
         assert!(bounded.len() <= 97);
         assert!(bounded.contains("[truncated; original_bytes=600]"));
+    }
+
+    #[test]
+    fn captured_stack_stops_decoding_frames_at_the_utf8_limit() {
+        let name = format!("{}ab", "诊".repeat(339));
+        let consumed = Cell::new(0);
+        let frames =
+            std::iter::repeat_n(name.as_str(), 32).inspect(|_| consumed.set(consumed.get() + 1));
+        let old_format = vec![format!("at {name}"); 32].join("\n");
+        let end = old_format.floor_char_boundary(DIAGNOSTIC_STACK_MAX_BYTES);
+        assert!(end < DIAGNOSTIC_STACK_MAX_BYTES);
+        assert_eq!(
+            format_captured_stack(frames).as_deref(),
+            Some(&old_format[..end])
+        );
+        assert_eq!(consumed.get(), 17);
     }
 
     #[test]

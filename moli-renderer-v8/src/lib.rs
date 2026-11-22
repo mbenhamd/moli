@@ -8,7 +8,6 @@
 
 #[path = "planning.rs"]
 mod script_planning;
-mod service_worker_api_values;
 mod stylesheet_blocking;
 mod subresource_integrity;
 
@@ -50,6 +49,7 @@ mod detached_css_style;
 mod detached_dom_surface;
 mod detached_event_target;
 mod devtools;
+mod diagnostics;
 mod document_color_scheme;
 mod document_cookie_owner;
 mod document_language;
@@ -109,7 +109,7 @@ mod script_execution;
 mod script_execution_control;
 mod script_provenance;
 mod script_vm;
-mod scroll_options;
+pub(crate) use moli_webapi::scroll_options;
 mod service_worker_runtime;
 mod shared_worker_runtime;
 mod structured_clone;
@@ -222,6 +222,9 @@ pub(crate) use context_bootstrap::{
     construct_form_data_entries_for_form, form_data_entries_multipart_body,
     form_data_entries_to_string_pairs, form_data_object_from_entries_for_window,
     snapshot_form_data_value,
+};
+pub use diagnostics::{
+    DiagnosticEvent, DiagnosticSource, DiagnosticsSubscription, ErrorReportOutcome, ExceptionOrigin,
 };
 pub use document_cookie_owner::{
     DocumentCookieBackendConnectionState, DocumentCookieBrowserContextSnapshot,
@@ -358,9 +361,10 @@ pub use service_worker_runtime::{
     new_shared_service_worker_resource_store,
 };
 pub use shared_worker_runtime::RendererSharedWorkerRuntimeDiagnostics;
+#[cfg(any(test, feature = "devtools"))]
+pub(crate) use types::SubresourceAuthCredentials;
 pub(crate) use types::{
-    DocumentStartScript, PendingSubresourceContinueOutcome, SubresourceAuthCredentials,
-    SubresourceInterceptionClasses,
+    DocumentStartScript, PendingSubresourceContinueOutcome, SubresourceInterceptionClasses,
 };
 #[allow(unused_imports)]
 pub use types::{ScriptKind, ScriptMode, ScriptRunOutcome, ScriptSourceKind};
@@ -434,4 +438,7 @@ pub mod renderer {
 pub(crate) use moli_webapi::interfaces as web_api_interfaces;
 
 #[cfg(feature = "devtools")]
-pub use runtime::{RendererDevToolsPageCommand, RendererDevToolsPageReply};
+pub use runtime::{
+    RendererDevToolsPageCommand, RendererDevToolsPageReply, RendererPageInspectorEndpoint,
+    RendererRuntimeInspectorSessionRetirement,
+};

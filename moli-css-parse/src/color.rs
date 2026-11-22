@@ -41,6 +41,13 @@ pub fn parse_css_color_to_srgb_bytes(value: &str) -> Option<[u8; 4]> {
     Some(absolute_srgb_bytes(absolute))
 }
 
+/// Parse a context-independent CSS color and retain its color space and alpha.
+/// Colors requiring an owner foreground or theme cannot be computed here.
+pub fn parse_absolute_css_color(value: &str) -> Option<AbsoluteColor> {
+    let color = parse_specified_color(value)?.to_computed_color(None).ok()?;
+    color.as_absolute().copied()
+}
+
 /// Resolve a CSS system-color keyword through the headless Servo light
 /// palette.
 pub fn css_system_color_srgb(value: &str) -> Option<(u8, u8, u8)> {
@@ -150,6 +157,28 @@ fn absolute_srgb_bytes(color: AbsoluteColor) -> [u8; 4] {
 mod tests {
     use super::*;
     use style_traits::ToCss;
+
+    #[test]
+    fn absolute_colors_preserve_space_and_alpha_without_an_owner() {
+        let p3 = parse_absolute_css_color("color(display-p3 1 0 0 / 0.1234567)").unwrap();
+        assert_eq!(p3.color_space, ColorSpace::DisplayP3);
+        assert_eq!(*p3.raw_components(), [1.0, 0.0, 0.0, 0.1234567]);
+        let mix = parse_absolute_css_color("color-mix(in srgb, red 50%, blue 50%)").unwrap();
+        assert_eq!(absolute_srgb_bytes(mix), [128, 0, 128, 255]);
+        for value in [
+            "currentcolor",
+            "\\63 urrentcolor",
+            "color-mix(in srgb, currentcolor 50%, red 50%)",
+            "CanvasText",
+            "light-dark(red, blue)",
+            "oklch(invalid)",
+            "rgb(1, 2, 3, 1, 0)",
+            "rgb(50%, 0, 0)",
+            "#💚",
+        ] {
+            assert_eq!(parse_absolute_css_color(value), None, "{value}");
+        }
+    }
 
     #[test]
     fn color_mix_preserves_zero_weights_and_serializes_omitted_percentages() {
