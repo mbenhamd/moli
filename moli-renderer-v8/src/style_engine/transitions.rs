@@ -291,6 +291,10 @@ pub(crate) struct DocumentCssTransitions {
     /// The document's style changes wait for a skipped frame's style
     /// update (`take_skipped_css_transition_frame_roots`).
     skipped_frame_armed: Cell<bool>,
+    /// A frame task was queued for changes no drain or style update had
+    /// reached yet. Until they are gone, they queue no other: a change no
+    /// frame can reach arms the skipped frame instead of looping.
+    pending_change_frame_queued: Cell<bool>,
 }
 
 impl DocumentCssTransitions {
@@ -308,6 +312,7 @@ impl DocumentCssTransitions {
             fresh: RefCell::default(),
             transition_styles_seen: Cell::new(false),
             skipped_frame_armed: Cell::new(false),
+            pending_change_frame_queued: Cell::new(false),
         }
     }
 }
@@ -346,6 +351,7 @@ impl DocumentCssTransitions {
         self.in_frame.set(false);
         self.document_styled.set(false);
         self.skipped_frame_armed.set(false);
+        self.pending_change_frame_queued.set(false);
         self.unresolved_frame_roots.borrow_mut().clear();
         self.fresh.borrow_mut().clear();
         self.transition_styles_seen.set(false);
@@ -471,6 +477,16 @@ impl DocumentCssTransitions {
 
     pub(super) fn arm_skipped_frame(&self) {
         self.skipped_frame_armed.set(true);
+    }
+
+    /// Whether a frame may be queued for pending changes: true once per
+    /// episode of pending changes (`end_pending_change_episode`).
+    pub(super) fn queue_pending_change_frame_once(&self) -> bool {
+        !self.pending_change_frame_queued.replace(true)
+    }
+
+    pub(super) fn end_pending_change_episode(&self) {
+        self.pending_change_frame_queued.set(false);
     }
 
     pub(super) fn take_skipped_frame_armed(&self) -> bool {

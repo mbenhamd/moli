@@ -1130,22 +1130,31 @@ impl MoliStyleEngine {
                     ((time - now) * 1000.0).clamp(0.0, CSS_TRANSITION_FRAME_INTERVAL_MS)
                 });
                 let undrained = Self::css_transition_style_changes_undrained(&world);
-                if (undrained || transitions.has_unresolved_frame_roots())
-                    && self.css_transition_frame_specified_for_world(host, &world)
+                let unapplied = world.document_state.has_unapplied_source_changes();
+                if !undrained && !unapplied {
+                    transitions.end_pending_change_episode();
+                }
+                let specified = self.css_transition_frame_specified_for_world(host, &world);
+                if transitions.has_unresolved_frame_roots() && specified {
+                    // The frame after a frame resolves the subtrees that
+                    // frame left, unless a task runs first.
+                    Some(phase_change.unwrap_or(CSS_TRANSITION_FRAME_INTERVAL_MS))
+                } else if ((undrained && specified) || unapplied)
+                    && transitions.queue_pending_change_frame_once()
                 {
-                    // A style change the turn-exit drain notes after this
-                    // check may start a transition: the next frame runs its
-                    // style change event, and the frame after it resolves
-                    // the subtrees that frame left, unless a task runs first.
+                    // A DOM change the turn-exit drain notes after this check
+                    // may start a transition, and so may a stylesheet change,
+                    // which can bring the first transition rule: the next
+                    // frame drains and applies them and runs the style
+                    // change events. One frame per episode: changes that
+                    // frame cannot reach arm the skipped frame below.
                     Some(phase_change.unwrap_or(CSS_TRANSITION_FRAME_INTERVAL_MS))
                 } else {
-                    if undrained || world.document_state.has_unapplied_source_changes() {
+                    if undrained || unapplied {
                         // The frame those changes need is skipped: no task
                         // waits for it, and the next task starts with its
                         // style update, as for a Document that cannot
-                        // specify a transition. A stylesheet change of a
-                        // Document with candidates changes its style
-                        // generation, so its frame is due above.
+                        // specify a transition.
                         self.arm_skipped_css_transition_frame(&world, now);
                     }
                     phase_change
@@ -1213,6 +1222,18 @@ impl MoliStyleEngine {
         self.css_transition_skipped_frame_due
             .get()
             .is_some_and(|due| transitions::animation_clock_now() >= due)
+    }
+
+    /// The Documents with DOM changes no drain has noted as roots yet. A
+    /// frame drains them all: the turn-exit and frame drains reach only the
+    /// page's Document and its child browsing contexts, not a popup's.
+    pub(crate) fn css_transition_documents_with_undrained_changes(&self) -> Vec<DomHandle> {
+        self.document_worlds
+            .active_worlds()
+            .iter()
+            .filter(|world| Self::css_transition_style_changes_undrained(world))
+            .map(|world| world.document)
+            .collect()
     }
 
     /// The Documents with retained styles whose stylesheet changes no style

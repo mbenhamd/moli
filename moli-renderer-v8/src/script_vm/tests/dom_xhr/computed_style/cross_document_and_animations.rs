@@ -3717,7 +3717,7 @@ async fn css_transition_frames_restyle_candidates_under_a_running_transition() {
         &mut vm,
         "(() => { document.getElementById('p').className = 'on'; return ''; })()",
     );
-    run_frames_for_ms(&mut vm, &loader, 100).await;
+    run_frames_for_ms(&mut vm, &loader, 300).await;
     assert_eq!(
         eval_string(&mut vm, "[__runs.c > 0, __runs.e > 0].join('|')"),
         "true|true"
@@ -3778,6 +3778,8 @@ async fn css_transition_frames_apply_unread_stylesheet_changes() {
          globalThis.__ended = 0; t.addEventListener('transitionend', () => { __ended++; }); \
          return ''; })()",
     );
+    // The frames the first read queued run before the rule changes.
+    run_frames_for_ms(&mut vm, &loader, 50).await;
     eval_string(
         &mut vm,
         "(() => { document.styleSheets[0].insertRule('#t { opacity: 0; }', 1); return ''; })()",
@@ -3810,4 +3812,80 @@ async fn css_transition_unread_class_change_gets_its_frame() {
     );
     run_frames_for_ms(&mut vm, &loader, 300).await;
     assert_eq!(eval_string(&mut vm, "String(__ended)"), "1");
+}
+
+/// Chromium 156: a stylesheet change that brings a Document's first
+/// transition rule starts the transition it specifies, though no script
+/// reads the element: an inserted rule and an appended `style` element both
+/// run their transitions to the end.
+#[tokio::test]
+async fn css_transition_unread_stylesheet_change_brings_the_first_transition() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-first-rule.test/",
+        r#"<html><head><style>#t { opacity: 1; } #u { opacity: 1; }</style></head>
+<body><div id="t"></div><div id="u"></div></body></html>"#,
+    );
+    eval_string(
+        &mut vm,
+        r#"
+(() => {
+  globalThis.__ended = { t: 0, u: 0 };
+  for (const id of ['t', 'u']) {
+    const element = document.getElementById(id);
+    getComputedStyle(element).opacity;
+    element.addEventListener('transitionend', () => { __ended[id]++; });
+  }
+  return '';
+})()
+"#,
+    );
+    run_frames_for_ms(&mut vm, &loader, 50).await;
+    eval_string(
+        &mut vm,
+        "(() => { document.styleSheets[0].insertRule( \
+         '#t { opacity: 0; transition: opacity 20ms linear; }', 2); \
+         document.head.appendChild(document.createElement('style')).textContent = \
+         '#u { opacity: 0; transition: opacity 20ms linear; }'; return ''; })()",
+    );
+    run_frames_for_ms(&mut vm, &loader, 300).await;
+    assert_eq!(eval_string(&mut vm, "__ended.t + '|' + __ended.u"), "1|1");
+}
+
+/// A change in a popup's Document, which neither the turn-exit drain nor the
+/// frame's drain of the page reaches, queues no endless frames. Chromium 156:
+/// the popup gets the element and its transition target starts nothing.
+#[tokio::test]
+async fn css_transition_popup_change_does_not_queue_frames_forever() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm("https://css-transition-popup-frames.test/", BODY_ONLY);
+    eval_string(
+        &mut vm,
+        r#"
+(() => {
+  const w = open('about:blank');
+  const t = w.document.body.appendChild(w.document.createElement('div'));
+  t.style.transition = 'opacity 1s';
+  w.getComputedStyle(t).opacity;
+  globalThis.__popup = w;
+  globalThis.__t = t;
+  return '';
+})()
+"#,
+    );
+    run_frames_for_ms(&mut vm, &loader, 50).await;
+    eval_string(
+        &mut vm,
+        "(() => { __popup.document.body.appendChild(__popup.document.createElement('p')); \
+         return ''; })()",
+    );
+    run_frames_for_ms(&mut vm, &loader, 200).await;
+    assert!(!css_transition_task_queued(&vm));
+    assert_eq!(
+        eval_string(
+            &mut vm,
+            "[__popup.document.body.children.length, __t.getAnimations().length].join('|')"
+        ),
+        "2|0"
+    );
 }

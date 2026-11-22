@@ -894,6 +894,9 @@ pub(crate) fn update_css_transition_styles(host: &PageScriptHost, resolve_subtre
     // before the update takes them, so a node inserted or a rule changed
     // during this frame is styled now.
     host.drain_pending_style_invalidations_for_computed_style_read();
+    for document in engine.css_transition_documents_with_undrained_changes() {
+        host.drain_pending_style_invalidations_for_computed_style_read_for_document(document);
+    }
     apply_unapplied_css_transition_sheets(host);
     let targets = engine.css_transition_style_update_targets(dom);
     let mut roots = engine.take_css_transition_style_roots();
