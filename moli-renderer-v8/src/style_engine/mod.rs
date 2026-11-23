@@ -176,6 +176,9 @@ pub(crate) struct MoliStyleEngine {
     linked_stylesheet_owner_documents: RefCell<HashMap<DomHandle, DomHandle>>,
     inline_style_metadata_documents: RefCell<HashMap<DomHandle, DomHandle>>,
     css_transition_task_due: Cell<Option<f64>>,
+    /// The token of the queued CSS transition task that `css_transition_task_due`
+    /// describes; a task queued before it carries an older token.
+    css_transition_task_token: Cell<u64>,
     css_transition_frame_timestamp: Cell<Option<f64>>,
     /// Settled transition events whose dispatch waits for the microtask
     /// checkpoint that follows their animations' settlement.
@@ -214,6 +217,7 @@ impl MoliStyleEngine {
             linked_stylesheet_owner_documents: RefCell::new(HashMap::new()),
             inline_style_metadata_documents: RefCell::new(HashMap::new()),
             css_transition_task_due: Cell::new(None),
+            css_transition_task_token: Cell::new(0),
             css_transition_frame_timestamp: Cell::new(None),
             css_transition_dispatch_queue: std::cell::RefCell::default(),
             inline_style_texts_may_specify_transitions: RefCell::default(),
@@ -848,6 +852,9 @@ impl MoliStyleEngine {
 
     pub(crate) fn clear_for_document_replacement(&mut self, document: DomHandle) {
         self.css_transition_task_due.set(None);
+        // The tasks queued for the replaced Document run no frame.
+        self.css_transition_task_token
+            .set(self.css_transition_task_token.get().wrapping_add(1));
         self.css_transition_skipped_frame_due.set(None);
         self.css_transition_frame_timestamp.set(None);
         self.css_transition_dispatch_queue.borrow_mut().clear();
@@ -1537,6 +1544,12 @@ impl MoliStyleEngine {
     /// runs, which the queuer sets and the task clears.
     pub(crate) fn css_transition_task_due(&self) -> &Cell<Option<f64>> {
         &self.css_transition_task_due
+    }
+
+    /// The token of the queued CSS transition task that runs the next frame.
+    /// A sooner task replaces a queued one, which then runs nothing.
+    pub(crate) fn css_transition_task_token(&self) -> &Cell<u64> {
+        &self.css_transition_task_token
     }
 
     /// The running CSS transitions of `element`, in composite order.

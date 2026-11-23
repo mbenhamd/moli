@@ -592,7 +592,16 @@ pub(crate) fn queue_css_transition_task_if_due(scope: &mut v8::PinScope<'_, '_>)
         return;
     };
     let scope = &mut v8::ContextScope::new(scope, main_context);
+    // A sooner task replaces the queued one: the queued task stays in the
+    // scheduler, and its older token makes it run nothing.
+    let token = unsafe { &*host_ptr }
+        .style_engine_ref()
+        .css_transition_task_token()
+        .get()
+        .wrapping_add(1);
+    let token_value = v8::BigInt::new_from_u64(scope, token);
     let Some(callback) = v8::FunctionTemplate::builder(css_transition_task_callback)
+        .data(token_value.into())
         .build(scope)
         .get_function(scope)
     else {
@@ -601,25 +610,31 @@ pub(crate) fn queue_css_transition_task_if_due(scope: &mut v8::PinScope<'_, '_>)
     let due = animation_clock_now() + delay_ms / 1000.0;
     let host = unsafe { &mut *host_ptr };
     if host.queue_internal_task_after(scope, callback, delay_ms.ceil() as u64) {
-        host.style_engine_ref()
-            .css_transition_task_due()
-            .set(Some(due));
+        let engine = host.style_engine_ref();
+        engine.css_transition_task_token().set(token);
+        engine.css_transition_task_due().set(Some(due));
     }
 }
 
 fn css_transition_task_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    _args: v8::FunctionCallbackArguments<'s>,
+    args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
     rv.set_undefined();
     let Some(host_ptr) = crate::util::context_host_ptr_from_global_bridge(scope) else {
         return;
     };
-    unsafe { &*host_ptr }
-        .style_engine_ref()
-        .css_transition_task_due()
-        .set(None);
+    let engine = unsafe { &*host_ptr }.style_engine_ref();
+    let token = v8::Local::<v8::BigInt>::try_from(args.data())
+        .ok()
+        .map(|token| token.u64_value().0);
+    // A task a sooner one replaced runs no frame and queues no task: the
+    // sooner task runs this frame and queues the next.
+    if token != Some(engine.css_transition_task_token().get()) {
+        return;
+    }
+    engine.css_transition_task_due().set(None);
     // A queued animation frame runs this frame's work and sends its events
     // at its start, as Chromium's rendering update does; it queues the next
     // task.
