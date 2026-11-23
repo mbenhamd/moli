@@ -300,7 +300,7 @@ impl PageScriptHost {
             dom: self.dom_host().dom_version_excluding_interaction_state(),
             styles: self
                 .style_engine
-                .visual_style_input_generations(self.active_layout_document_handles()),
+                .layout_style_input_generations(self.active_layout_document_handles()),
             used_geometry: self.visual_state_generation(),
             resources: self.visual_resource_generation(),
             viewport: (

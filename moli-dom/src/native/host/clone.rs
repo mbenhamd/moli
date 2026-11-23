@@ -543,6 +543,13 @@ impl DomHost {
         else {
             return;
         };
+        let style_may_specify_transitions = element.attributes().iter().any(|attribute| {
+            crate::native::attribute_may_specify_transitions(
+                attribute.namespace(),
+                attribute.local_name(),
+                attribute.value(),
+            )
+        });
         for attribute in element.attributes() {
             let _ = clone_element.set_attribute(
                 attribute.local_name().to_owned(),
@@ -574,6 +581,9 @@ impl DomHost {
         // Cloning copies attributes directly, bypassing set_attribute's index updates.
         // Detached clones must be queryable before any tree insertion refreshes them.
         self.record_named_index_candidate(clone);
+        if style_may_specify_transitions {
+            self.dom.note_element_attributes(clone);
+        }
     }
 }
 

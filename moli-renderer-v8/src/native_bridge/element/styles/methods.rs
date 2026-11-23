@@ -31,8 +31,7 @@ pub(crate) fn style_set_property_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Ok((runtime_ptr, handle, mode)) = style_runtime_and_handle_from_object(scope, args.this())
-    else {
+    let Ok((_, _, mode)) = style_runtime_and_handle_from_object(scope, args.this()) else {
         throw_style_declaration_method_illegal_invocation(scope, "setProperty");
         return;
     };
@@ -49,25 +48,48 @@ pub(crate) fn style_set_property_callback<'s>(
         );
         return;
     }
-    if parsed.property.starts_with("--")
-        && !moli_css_parse::is_cssom_custom_property_name(&parsed.property)
-    {
+    set_style_property(
+        scope,
+        args.this(),
+        &parsed.property,
+        &parsed.value,
+        &parsed.priority,
+    );
+}
+
+/// `CSSStyleDeclaration.setProperty(property, value, priority)` on the
+/// declaration `this`, after its arguments are converted. A read-only or
+/// detached declaration is left unchanged.
+pub(crate) fn set_style_property<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    this: v8::Local<'s, v8::Object>,
+    property: &str,
+    value: &str,
+    priority_text: &str,
+) {
+    let Ok((runtime_ptr, handle, mode)) = style_runtime_and_handle_from_object(scope, this) else {
+        return;
+    };
+    if mode == StyleMode::Computed {
         return;
     }
-    let name = canonical_style_property_name(&parsed.property);
-    if !parsed.priority.is_empty() && !parsed.priority.eq_ignore_ascii_case("important") {
+    if property.starts_with("--") && !moli_css_parse::is_cssom_custom_property_name(property) {
+        return;
+    }
+    let name = canonical_style_property_name(property);
+    if !priority_text.is_empty() && !priority_text.eq_ignore_ascii_case("important") {
         return;
     }
     if !supported_declared_property(&name) {
         return;
     }
-    let priority = parsed.priority.eq_ignore_ascii_case("important");
+    let priority = priority_text.eq_ignore_ascii_case("important");
     if set_inline_style_property_with_pdb_storage(
         scope,
         runtime_ptr,
         handle,
         &name,
-        &parsed.value,
+        value,
         priority,
     )
     .is_some()
@@ -77,14 +99,14 @@ pub(crate) fn style_set_property_callback<'s>(
     let (style_object_entries, current_base_url) = {
         let runtime = unsafe { &*runtime_ptr };
         (
-            style_entries_for_style_object(scope, args.this(), runtime, handle),
+            style_entries_for_style_object(scope, this, runtime, handle),
             style_base_url(runtime, handle),
         )
     };
     let mut entries = style_object_entries.entries;
-    let update_inline_style_base = name == "background-image" && !parsed.value.is_empty();
+    let update_inline_style_base = name == "background-image" && !value.is_empty();
     if let Some(longhands) = shorthand_longhands(&name) {
-        if parsed.value.is_empty() {
+        if value.is_empty() {
             if !entries.iter().any(|entry| {
                 entry.name == name || longhands.iter().any(|longhand| entry.name == *longhand)
             }) {
@@ -97,7 +119,7 @@ pub(crate) fn style_set_property_callback<'s>(
             let Some(parsed_entries) = parse_style_property_entries_for_cssom_fallback_write(
                 &entries,
                 &name,
-                &parsed.value,
+                value,
                 priority,
                 Some(&current_base_url),
             ) else {
@@ -111,7 +133,7 @@ pub(crate) fn style_set_property_callback<'s>(
             entries.extend(parsed_entries.entries);
         }
     } else if name == "all" {
-        if parsed.value.is_empty() {
+        if value.is_empty() {
             if !entries
                 .iter()
                 .any(|entry| entry.name == "all" || all_shorthand_applies_to(&entry.name))
@@ -122,7 +144,7 @@ pub(crate) fn style_set_property_callback<'s>(
         } else {
             let Some(parsed_entries) = parse_style_property_entries_for_cssom_write(
                 &name,
-                &parsed.value,
+                value,
                 priority,
                 Some(&current_base_url),
             ) else {
@@ -131,7 +153,7 @@ pub(crate) fn style_set_property_callback<'s>(
             entries.retain(|entry| entry.name != "all");
             entries.extend(parsed_entries.entries);
         }
-    } else if parsed.value.is_empty() {
+    } else if value.is_empty() {
         let before_len = entries.len();
         if let Some(affected_names) = cssom_style_property_affected_names_with_pdb(&name) {
             retain_unaffected_style_entries(&mut entries, &name, &affected_names);
@@ -145,7 +167,7 @@ pub(crate) fn style_set_property_callback<'s>(
         let Some(parsed_entries) = parse_style_property_entries_for_cssom_fallback_write(
             &entries,
             &name,
-            &parsed.value,
+            value,
             priority,
             Some(&current_base_url),
         ) else {

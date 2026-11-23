@@ -20,7 +20,8 @@ use super::{
     document_world::DocumentStyleWorld,
     eligibility::child_list_effects_have_current_topology,
     mutation_effect::{
-        detached_style_subtree_roots_for_mutations, retain_live_structural_mutation_effects,
+        detached_style_subtree_roots_for_mutations, inserted_style_subtree_roots_for_mutations,
+        retain_live_structural_mutation_effects,
     },
     schedule::queue_style_invalidation_for_scope,
     scope::{
@@ -81,6 +82,12 @@ impl MoliStyleEngine {
             let world = self.world_for_document(document);
             let no_cached_style_started = profile_enabled.then(std::time::Instant::now);
             if self.style_invalidation_without_cached_styles_is_complete(document_effects, &world) {
+                // A subtree adopted into a Document without styles keeps the
+                // styles of its former Document: none is a before-change style.
+                self.reset_css_transitions_for_inserted_subtrees(
+                    host,
+                    inserted_style_subtree_roots_for_mutations(document_effects),
+                );
                 no_cached_style_us += no_cached_style_started
                     .map(|started| started.elapsed().as_micros())
                     .unwrap_or_default();
@@ -261,10 +268,15 @@ impl MoliStyleEngine {
             roots_by_document.entry(document).or_default().push(root);
         }
         for (document, roots) in roots_by_document {
+            self.reset_css_transitions_for_detached_subtrees(host, document, &roots);
             let world = self.world_for_document(document);
             self.invalidation_cleanup_for_world(&world)
                 .invalidate_detached_subtrees(host, roots);
         }
+        self.reset_css_transitions_for_inserted_subtrees(
+            host,
+            inserted_style_subtree_roots_for_mutations(effects),
+        );
     }
 
     #[cfg(test)]

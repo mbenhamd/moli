@@ -150,7 +150,8 @@ use self::table_elements::*;
 mod shadow_template;
 pub(in crate::native_bridge) use self::base_prototypes::BODY_LEGACY_PROTOTYPE_ACCESSORS;
 pub(crate) use self::base_prototypes::{
-    computed_style_property_for_handle, install_html_select_element_prototype_bindings,
+    computed_style_property_for_handle, computed_value_for_handle, element_has_layout_box,
+    install_html_select_element_prototype_bindings,
 };
 use self::shadow_template::*;
 
@@ -695,7 +696,7 @@ pub(crate) use styles::{
     computed_style_property_names_from_object, computed_style_property_value_from_object,
     cssom_style_entry_is_pdb_supplemental_side_entry, cssom_style_property_affected_names_with_pdb,
     is_live_style_declaration_object, live_style_named_property_value,
-    set_live_style_named_property_value, style_css_text_getter_callback,
+    set_live_style_named_property_value, set_style_property, style_css_text_getter_callback,
     style_css_text_setter_callback, style_get_property_priority_callback,
     style_get_property_value_callback, style_item_callback, style_length_getter_callback,
     style_remove_property_callback, style_set_property_callback,

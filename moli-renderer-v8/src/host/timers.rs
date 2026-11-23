@@ -216,6 +216,14 @@ impl ScheduledTimerTask {
         )
     }
 
+    fn is_animation_frame_task_at(&self, timestamp: f64) -> bool {
+        matches!(
+            &self.callback,
+            ScheduledTimerCallback::WindowWebIdl(callback)
+                if callback.animation_frame_timestamp() == Some(timestamp)
+        )
+    }
+
     fn matches_selection(&self, selection: RendererPageTimerSelection, now_ms: f64) -> bool {
         match selection {
             RendererPageTimerSelection::AnyReady => true,
@@ -432,6 +440,19 @@ impl HostTimeoutScheduler {
     pub(crate) fn has_pending_animation_frame(&self) -> bool {
         self.scheduler
             .has_pending_matching(ScheduledTimerTask::is_animation_frame_task)
+    }
+
+    /// Whether a callback of the animation frame at `timestamp`, live or
+    /// cancelled, still waits to run.
+    pub(crate) fn has_pending_animation_frame_at(&self, timestamp: f64) -> bool {
+        self.scheduler
+            .has_pending_matching(|task| task.is_animation_frame_task_at(timestamp))
+    }
+
+    /// The tasks waiting in the Window task scheduler.
+    #[cfg(test)]
+    pub(crate) fn pending_task_count_for_test(&self) -> usize {
+        self.scheduler.pending_count()
     }
 
     pub(crate) fn queue_window_idle_callback<'s>(

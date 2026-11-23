@@ -215,6 +215,11 @@ pub(crate) fn perform_microtask_checkpoint_and_report_pending_promise_rejections
             scope, host,
         );
         host.finish_deferred_child_subresource_request_scope_pop();
+        // Style changes made by animation frame callbacks start their
+        // transitions at that frame; others wait for the next frame, which
+        // the transition task stands in for.
+        crate::context_bootstrap::end_css_transition_animation_frame(host);
+        crate::context_bootstrap::queue_css_transition_task_if_due(scope);
     }
     let promise_stats = if trace_enabled {
         moli_trace::take_promise_hook_stats()

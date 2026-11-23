@@ -99,6 +99,10 @@ impl PendingStructuralStyleMutations {
         self.groups.take()
     }
 
+    pub(super) fn has_work(&self) -> bool {
+        !self.groups.borrow().is_empty()
+    }
+
     pub(super) fn clear(&self) {
         self.groups.borrow_mut().clear();
     }

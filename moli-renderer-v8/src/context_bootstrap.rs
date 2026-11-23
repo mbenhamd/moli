@@ -1,6 +1,11 @@
 pub(crate) use moli_webapi::abort_signal_values as abort_signal;
 pub(crate) mod abort_signal_events;
 mod animation_runtime;
+pub(crate) use animation_runtime::{
+    end_css_transition_animation_frame, flush_deferred_css_transition_dispatch,
+    queue_css_transition_task_if_due, resolve_unresolved_css_transition_frame_roots,
+    run_css_transition_frame, run_skipped_css_transition_frame,
+};
 mod assets;
 mod bar_prop;
 pub(crate) mod bridge_descriptor;

@@ -312,6 +312,30 @@ pub(super) fn detached_style_subtree_roots_for_mutations(
     roots
 }
 
+/// The roots of the subtrees `effects` inserted, connected or not.
+pub(super) fn inserted_style_subtree_roots_for_mutations(
+    effects: &[StyleMutationEffect],
+) -> IndexSet<DomHandle> {
+    let mut roots = IndexSet::new();
+    for effect in effects {
+        match effect {
+            StyleMutationEffect::ConnectedSubtrees {
+                roots: connected_roots,
+            } => {
+                roots.extend(connected_roots.iter().copied());
+            }
+            StyleMutationEffect::ChildList { added_nodes, .. } => {
+                roots.extend(added_nodes.iter().copied());
+            }
+            StyleMutationEffect::Attribute { .. }
+            | StyleMutationEffect::DisconnectedSubtrees { .. }
+            | StyleMutationEffect::SlotAssignment { .. }
+            | StyleMutationEffect::CharacterData { .. } => {}
+        }
+    }
+    roots
+}
+
 fn removed_element_dependency_snapshots_for_mutation(
     host: &DomHost,
     removed_nodes: &[DomHandle],

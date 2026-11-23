@@ -17,6 +17,7 @@ use super::{
     },
     source_owner_text::OwnerStyleSheetSources,
     state::{StyleDocumentGenerationSnapshot, StyleDocumentState},
+    transitions::{CssTransitionEvent, CssTransitionEventKind, DocumentCssTransitions},
 };
 
 pub(super) struct DocumentStyleWorld {
@@ -30,6 +31,7 @@ pub(super) struct DocumentStyleWorld {
     pub(super) linked_stylesheet_sources: RefCell<LinkedStylesheetSources>,
     pub(super) adopted_style_sheet_sources: RefCell<AdoptedStyleSheetSources>,
     pub(super) inline_style_metadata: InlineStyleMetadataStore,
+    pub(super) css_transitions: DocumentCssTransitions,
 }
 
 pub(super) struct DocumentStyleWorlds {
@@ -38,6 +40,9 @@ pub(super) struct DocumentStyleWorlds {
     /// computed-style wrappers distinguishable from later worlds without an
     /// O(navigations) tombstone map keyed by every retired Document.
     lifecycle_generation_floor: Cell<u64>,
+    /// The settlements of the transitions that retired Documents canceled:
+    /// script can still hold their `CSSTransition`s.
+    retired_css_transition_settlements: RefCell<Vec<CssTransitionEvent>>,
 }
 
 impl DocumentStyleWorld {
@@ -53,6 +58,7 @@ impl DocumentStyleWorld {
             linked_stylesheet_sources: RefCell::new(LinkedStylesheetSources::default()),
             adopted_style_sheet_sources: RefCell::new(AdoptedStyleSheetSources::default()),
             inline_style_metadata: InlineStyleMetadataStore::default(),
+            css_transitions: DocumentCssTransitions::new(document),
         }
     }
 
@@ -69,6 +75,7 @@ impl DocumentStyleWorld {
         *self.linked_stylesheet_sources.borrow_mut() = LinkedStylesheetSources::default();
         self.adopted_style_sheet_sources.borrow_mut().clear_all();
         self.inline_style_metadata.clear_all();
+        self.css_transitions.clear();
     }
 }
 
@@ -77,6 +84,7 @@ impl DocumentStyleWorlds {
         Self {
             worlds: RefCell::new(HashMap::new()),
             lifecycle_generation_floor: Cell::new(0),
+            retired_css_transition_settlements: RefCell::default(),
         }
     }
 
@@ -87,6 +95,22 @@ impl DocumentStyleWorlds {
         let world = Rc::new(DocumentStyleWorld::new(document));
         self.worlds.borrow_mut().insert(document, Rc::clone(&world));
         world
+    }
+
+    pub(super) fn active_worlds(&self) -> Vec<Rc<DocumentStyleWorld>> {
+        self.worlds.borrow().values().map(Rc::clone).collect()
+    }
+
+    pub(super) fn has_retired_css_transition_settlements(&self) -> bool {
+        !self.retired_css_transition_settlements.borrow().is_empty()
+    }
+
+    pub(super) fn retired_css_transition_settlements(&self) -> Vec<CssTransitionEvent> {
+        self.retired_css_transition_settlements.borrow().clone()
+    }
+
+    pub(super) fn take_retired_css_transition_settlements(&self) -> Vec<CssTransitionEvent> {
+        std::mem::take(&mut *self.retired_css_transition_settlements.borrow_mut())
     }
 
     pub(super) fn active_world(&self, document: DomHandle) -> Option<Rc<DocumentStyleWorld>> {
@@ -108,6 +132,24 @@ impl DocumentStyleWorlds {
         // keep the retired Stylist or stylesheet sources alive past this
         // lifecycle boundary.
         world.clear_for_document_replacement();
+        // The Document is gone: its elements get no events, but the objects
+        // of its transitions still settle.
+        self.retired_css_transition_settlements.borrow_mut().extend(
+            world
+                .css_transitions
+                .take_events()
+                .into_iter()
+                .filter(|event| {
+                    matches!(
+                        event.kind,
+                        CssTransitionEventKind::End | CssTransitionEventKind::Cancel
+                    )
+                })
+                .map(|event| CssTransitionEvent {
+                    dispatch: false,
+                    ..event
+                }),
+        );
         self.raise_lifecycle_generation_floor(world.document_state.generation_snapshot());
         true
     }
@@ -181,7 +223,7 @@ impl DocumentStyleWorlds {
                 let state = &self.for_document(document).document_state;
                 state
                     .lazy_invalidation_roots
-                    .generation()
+                    .layout_generation()
                     .saturating_add(state.computed_cache_generation())
             })
             .fold(0, u64::saturating_add)
@@ -202,6 +244,28 @@ impl DocumentStyleWorlds {
                     document,
                     world.document_state.source_set_generation(),
                     world.document_state.visual_input_generation(),
+                )
+            })
+            .collect()
+    }
+
+    /// `visual_input_generations` without the changes that only repaint: the
+    /// style inputs a published layout tree depends on.
+    pub(super) fn layout_input_generations(
+        &self,
+        documents: impl IntoIterator<Item = DomHandle>,
+    ) -> Vec<(DomHandle, u64, u64)> {
+        let mut documents = documents.into_iter().collect::<Vec<_>>();
+        documents.sort_by_key(|document| document.index());
+        documents.dedup();
+        documents
+            .into_iter()
+            .map(|document| {
+                let state = &self.for_document(document).document_state;
+                (
+                    document,
+                    state.source_set_generation(),
+                    state.layout_input_generation(),
                 )
             })
             .collect()

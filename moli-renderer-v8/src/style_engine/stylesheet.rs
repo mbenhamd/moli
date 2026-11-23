@@ -17,8 +17,8 @@ use style::{
     servo_arc::Arc as ServoArc,
     shared_lock::{Locked, SharedRwLock, ToCssWithGuard},
     stylesheets::{
-        AllowImportRules, CssRule, CustomMediaMap, DocumentStyleSheet, Origin, Stylesheet,
-        StylesheetInDocument, UrlExtraData, scope_rule::ImplicitScopeRoot,
+        AllRules, AllowImportRules, CssRule, CustomMediaMap, DocumentStyleSheet, Origin,
+        Stylesheet, StylesheetInDocument, UrlExtraData, scope_rule::ImplicitScopeRoot,
     },
     stylist::{CascadeData, Stylist},
     values::{
@@ -256,6 +256,43 @@ fn native_effective_font_face_rule_addresses_with_guard(
             _ => None,
         })
         .collect()
+}
+
+/// Whether any style rule of `stylesheet`, under any condition and in any
+/// imported sheet, declares a `transition-*` longhand that can start a
+/// transition. Conditions are ignored: a viewport or media change can make
+/// any rule apply later.
+pub(super) fn stylesheet_may_specify_transitions(
+    stylesheet: &DocumentStyleSheet,
+    device: &Device,
+) -> bool {
+    use style::properties::LonghandId;
+    let guard = stylesheet.0.shared_lock.read();
+    let custom_media = CustomMediaMap::default();
+    stylesheet
+        .contents(&guard)
+        .iter_rules::<AllRules, _>(device, &custom_media, &guard)
+        .any(|rule| {
+            let block = match rule {
+                CssRule::Style(rule) => rule.read_with(&guard).block.clone(),
+                CssRule::NestedDeclarations(rule) => rule.read_with(&guard).block.clone(),
+                _ => return false,
+            };
+            block
+                .read_with(&guard)
+                .declarations()
+                .iter()
+                .any(|declaration| {
+                    matches!(
+                        declaration.id().as_longhand(),
+                        Some(
+                            LonghandId::TransitionDuration
+                                | LonghandId::TransitionDelay
+                                | LonghandId::TransitionProperty
+                        )
+                    )
+                })
+        })
 }
 
 pub(crate) fn native_font_face_rules_for_stylesheet(

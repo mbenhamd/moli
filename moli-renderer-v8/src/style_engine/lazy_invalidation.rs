@@ -36,6 +36,8 @@ struct StylePathStamp {
 #[derive(Default)]
 pub(super) struct LazyStyleInvalidationRoots {
     generation: Cell<u64>,
+    /// How much of `generation` came from restyles that cannot move a box.
+    paint_only_generations: Cell<u64>,
     document_floor_generation: Cell<u64>,
     roots: RefCell<HashMap<DomHandle, u64>>,
     /// Memoized generation inherited from the nearest invalidation root.
@@ -201,6 +203,7 @@ impl LazyStyleInvalidationRoots {
 
     pub(super) fn clear(&self) {
         self.generation.set(0);
+        self.paint_only_generations.set(0);
         self.document_floor_generation.set(0);
         self.roots.borrow_mut().clear();
         self.path_stamps.borrow_mut().clear();
@@ -216,6 +219,21 @@ impl LazyStyleInvalidationRoots {
 
     pub(super) fn generation(&self) -> u64 {
         self.generation.get()
+    }
+
+    /// `generation` without the restyles that only repaint.
+    pub(super) fn layout_generation(&self) -> u64 {
+        self.generation
+            .get()
+            .saturating_sub(self.paint_only_generations.get())
+    }
+
+    /// Attributes the generations recorded since `before` to a restyle that
+    /// only repaints.
+    pub(super) fn note_paint_only_since(&self, before: u64) {
+        let recorded = self.generation.get().saturating_sub(before);
+        self.paint_only_generations
+            .set(self.paint_only_generations.get().saturating_add(recorded));
     }
 
     #[cfg(test)]

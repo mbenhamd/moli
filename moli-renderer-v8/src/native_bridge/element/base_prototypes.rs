@@ -35,6 +35,22 @@ pub(crate) fn computed_style_property_for_handle(
 ) -> String {
     styles::ComputedStyleRead::new(runtime, handle).property(property)
 }
+
+/// `property`'s computed value, not its resolved value: a unitless
+/// `line-height` stays a number.
+pub(crate) fn computed_value_for_handle(
+    runtime: &PageScriptHost,
+    handle: DomHandle,
+    property: &str,
+) -> Option<String> {
+    styles::ComputedStyleRead::new(runtime, handle).computed_value(property)
+}
+
+/// Whether `handle` generates a box (Blink: has a layout object).
+pub(crate) fn element_has_layout_box(runtime: &PageScriptHost, handle: DomHandle) -> bool {
+    rendered_state::ElementRenderedState::read(runtime, handle).box_state()
+        != rendered_state::ElementBoxState::NoBox
+}
 #[derive(WebApiFunctionTemplate)]
 #[webapi(interface = web_api_interfaces::Element)]
 pub(super) struct ElementPrototypeReflectionDeclaration {

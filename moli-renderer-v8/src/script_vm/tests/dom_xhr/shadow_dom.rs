@@ -2554,11 +2554,25 @@ async fn focused_display_none_shadow_host_blurs_on_timer_task() {
         )
         .expect("delegated display:none focus setup should evaluate");
 
-    assert!(
-        vm.run_next_due_timer_callback_for_test(&loader)
+    // The plain half's DOM changes queued a transition frame task that may
+    // be ready first; the blur runs in the timer task after it.
+    let mut ran = 0;
+    while ran < 4
+        && vm
+            .run_next_due_timer_callback_for_test(&loader)
             .await
             .expect("delegated display:none focus blur timer should run")
-    );
+    {
+        ran += 1;
+        if vm
+            .eval("String(globalThis.__displayNoneFocus.blurCount)")
+            .expect("blur count should be readable")
+            != "0"
+        {
+            break;
+        }
+    }
+    assert!(ran > 0, "a timer task should run");
 
     let delegated_async_state = vm
         .eval(

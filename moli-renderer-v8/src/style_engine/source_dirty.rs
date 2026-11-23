@@ -86,6 +86,13 @@ impl StyleSourceDirtyScopes {
     pub(super) fn clear(&self) {
         self.records.borrow_mut().clear();
     }
+
+    pub(super) fn requires_retained_style_update(&self) -> bool {
+        self.records
+            .borrow()
+            .iter()
+            .any(|record| record.scope_id.is_some())
+    }
 }
 
 impl StyleSourceDirtyScopeSnapshot {

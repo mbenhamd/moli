@@ -187,6 +187,15 @@ impl DocumentRuntime {
         self.timeouts.has_pending_animation_frame()
     }
 
+    pub(crate) fn has_pending_animation_frame_at(&self, timestamp: f64) -> bool {
+        self.timeouts.has_pending_animation_frame_at(timestamp)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_task_count_for_test(&self) -> usize {
+        self.timeouts.pending_task_count_for_test()
+    }
+
     pub(crate) fn queue_window_idle_callback<'s>(
         &mut self,
         scope: &mut v8::PinScope<'s, '_>,

@@ -14,7 +14,11 @@ const ANIMATION_ID_SLOT: &str = "__moliAnimationId";
 
 const ANIMATION_READY_SLOT: &str = "__moliAnimationReady";
 
-const ANIMATION_FINISHED_SLOT: &str = "__moliAnimationFinished";
+pub const ANIMATION_FINISHED_SLOT: &str = "__moliAnimationFinished";
+
+/// True once script read `finished`: Blink creates the promise on that
+/// first read, so a cancel before it rejects nothing.
+pub const ANIMATION_FINISHED_READ_SLOT: &str = "__moliAnimationFinishedRead";
 
 pub const ANIMATION_FINISHED_RESOLVE_SLOT: &str = "__moliAnimationFinishedResolve";
 
@@ -33,6 +37,8 @@ pub const ANIMATION_FINISH_TOKEN_SLOT: &str = "__moliAnimationFinishToken";
 pub const KEYFRAME_EFFECT_TARGET_SLOT: &str = "__moliKeyframeEffectTarget";
 
 pub const KEYFRAME_EFFECT_KEYFRAMES_SLOT: &str = "__moliKeyframeEffectKeyframes";
+
+const KEYFRAME_EFFECT_TIMING_SLOT: &str = "__moliKeyframeEffectTiming";
 
 /// Creation order of an `Animation`, which composite order sorts script
 /// animations by (Web Animations §5.4.2, "animation composite order").
@@ -86,6 +92,15 @@ struct KeyframeEffectObjectDeclaration<'s> {
 struct KeyframeEffectPrototypeDeclaration {
     #[webapi(method, length = 1, callback = keyframe_effect_set_keyframes_callback, receiver = false)]
     set_keyframes: (),
+}
+
+/// `getTiming()` belongs to `AnimationEffect.prototype` (Web Animations
+/// §4.5); `KeyframeEffect` inherits it.
+#[derive(WebApiFunctionTemplate)]
+#[webapi(interface = web_api_interfaces::AnimationEffect, enumerable)]
+struct AnimationEffectPrototypeDeclaration {
+    #[webapi(method, length = 0, callback = keyframe_effect_get_timing_callback, receiver = false)]
+    get_timing: (),
 }
 
 #[derive(WebApiObject)]
@@ -222,7 +237,60 @@ pub fn keyframe_effect_constructor_callback<'s>(
     KeyframeEffectObjectDeclaration::new(args.get(0), args.get(1))
         .initialize(scope, args.this())
         .expect("KeyframeEffect declaration should initialize object");
+    set_private_value(scope, args.this(), KEYFRAME_EFFECT_TIMING_SLOT, args.get(2));
     rv.set(args.this().into());
+}
+
+/// `AnimationEffect.getTiming()`: the specified timing, from the effect's
+/// options (a duration number or an `EffectTiming` dictionary) over the
+/// dictionary defaults (Web Animations §6.5.3).
+fn keyframe_effect_get_timing_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    if !web_api_interfaces::KeyframeEffect::is_instance(scope, args.this()) {
+        throw_type_error(
+            scope,
+            "KeyframeEffect.getTiming called on incompatible receiver.",
+        );
+        return;
+    }
+    let options = get_private_value(scope, args.this(), KEYFRAME_EFFECT_TIMING_SLOT);
+    let timing = v8::Object::new(scope);
+    let defaults: [(&'static str, v8::Local<v8::Value>); 8] = [
+        ("delay", v8::Number::new(scope, 0.0).into()),
+        ("direction", v8str(scope, "normal").into()),
+        ("duration", v8str(scope, "auto").into()),
+        ("easing", v8str(scope, "linear").into()),
+        ("endDelay", v8::Number::new(scope, 0.0).into()),
+        ("fill", v8str(scope, "auto").into()),
+        ("iterationStart", v8::Number::new(scope, 0.0).into()),
+        ("iterations", v8::Number::new(scope, 1.0).into()),
+    ];
+    for (name, default) in defaults {
+        let key = v8str(scope, name);
+        let value = match options {
+            Some(options) if options.is_number() => {
+                if name == "duration" {
+                    options
+                } else {
+                    default
+                }
+            }
+            Some(options) if options.is_object() => {
+                let options = v8::Local::<v8::Object>::try_from(options)
+                    .expect("an object value is an object");
+                options
+                    .get(scope, key.into())
+                    .filter(|value| !value.is_undefined())
+                    .unwrap_or(default)
+            }
+            _ => default,
+        };
+        let _ = timing.set(scope, key.into(), value);
+    }
+    rv.set(timing.into());
 }
 
 fn keyframe_effect_set_keyframes_callback<'s>(
@@ -323,6 +391,13 @@ fn animation_finished_getter<'s>(
     if !require_animation_receiver(scope, args.this(), "finished getter") {
         return;
     }
+    let read = v8::Boolean::new(scope, true);
+    set_private_value(
+        scope,
+        args.this(),
+        ANIMATION_FINISHED_READ_SLOT,
+        read.into(),
+    );
     rv.set(animation_finished_value(scope, args.this()));
 }
 
@@ -467,6 +542,9 @@ pub fn install_value_template_bindings<'s>(
         }
         "KeyframeEffect" => {
             KeyframeEffectPrototypeDeclaration::initialize_prototype_template(scope, prototype)
+        }
+        "AnimationEffect" => {
+            AnimationEffectPrototypeDeclaration::initialize_prototype_template(scope, prototype)
         }
         _ => (),
     }

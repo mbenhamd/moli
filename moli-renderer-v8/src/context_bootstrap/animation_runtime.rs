@@ -2,11 +2,12 @@ use super::*;
 use crate::document_runtime::DomHandle;
 use crate::web_api_interfaces;
 pub(super) use moli_webapi::animation::{
-    ANIMATION_EFFECT_SLOT, ANIMATION_FINISH_TOKEN_SLOT, ANIMATION_FINISHED_RESOLVE_SLOT,
-    ANIMATION_ONFINISH_SLOT, ANIMATION_PLAY_STATE_SLOT, ANIMATION_SEQUENCE_SLOT,
-    ANIMATION_START_TIME_SLOT, KEYFRAME_EFFECT_KEYFRAMES_SLOT, KEYFRAME_EFFECT_TARGET_SLOT,
-    animation_constructor_callback, animation_effect_getter, animation_start_time_getter,
-    keyframe_effect_constructor_callback, require_animation_receiver,
+    ANIMATION_EFFECT_SLOT, ANIMATION_FINISH_TOKEN_SLOT, ANIMATION_FINISHED_READ_SLOT,
+    ANIMATION_FINISHED_RESOLVE_SLOT, ANIMATION_FINISHED_SLOT, ANIMATION_ONFINISH_SLOT,
+    ANIMATION_PLAY_STATE_SLOT, ANIMATION_SEQUENCE_SLOT, ANIMATION_START_TIME_SLOT,
+    KEYFRAME_EFFECT_KEYFRAMES_SLOT, KEYFRAME_EFFECT_TARGET_SLOT, animation_constructor_callback,
+    animation_effect_getter, animation_start_time_getter, keyframe_effect_constructor_callback,
+    require_animation_receiver,
 };
 use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
 
@@ -15,7 +16,14 @@ use crate::util::{
     call_script_visible_function, get_private_object, get_private_value, set_private_value,
 };
 
+mod css_transitions;
 mod element_registry;
+
+pub(crate) use css_transitions::{
+    end_css_transition_animation_frame, flush_deferred_css_transition_dispatch,
+    queue_css_transition_task_if_due, resolve_unresolved_css_transition_frame_roots,
+    run_css_transition_frame, run_skipped_css_transition_frame,
+};
 
 const ANIMATION_MICROTASK_ANIMATION_SLOT: &str = "__moliAnimationMicrotaskAnimation";
 const ANIMATION_MICROTASK_TOKEN_SLOT: &str = "__moliAnimationMicrotaskToken";
@@ -89,6 +97,11 @@ pub(super) fn install_animation_template_bindings<'s>(
         "Animation" => {
             AnimationPrototypeMethodsDeclaration::initialize_prototype_template(scope, prototype);
         }
+        "CSSTransition" => {
+            css_transitions::CssTransitionPrototypeDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
         "Element" => {
             ElementAnimationPrototypeDeclaration::initialize_prototype_template(scope, prototype);
         }
@@ -121,7 +134,9 @@ pub(super) fn animation_start_time_setter<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if !require_animation_receiver(scope, args.this(), "startTime setter") {
+    if !require_animation_receiver(scope, args.this(), "startTime setter")
+        || reject_css_transition_control(scope, args.this())
+    {
         return;
     }
     set_animation_start_time_value(scope, args.this(), args.get(0));
@@ -133,6 +148,9 @@ pub(super) fn animation_play_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    if reject_css_transition_control(scope, args.this()) {
+        return;
+    }
     animation_play(scope, args.this());
     rv.set_undefined();
 }
@@ -142,6 +160,9 @@ pub(super) fn animation_pause_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    if reject_css_transition_control(scope, args.this()) {
+        return;
+    }
     set_animation_play_state(scope, args.this(), "paused");
     bump_animation_finish_token(scope, args.this());
     rv.set_undefined();
@@ -152,6 +173,11 @@ pub(super) fn animation_cancel_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    if let Some(id) = css_transitions::css_transition_id(scope, args.this()) {
+        css_transitions::settle_css_transition_from_script(scope, args.this(), id, false);
+        rv.set_undefined();
+        return;
+    }
     clear_animation_effect_style(scope, args.this());
     element_registry::unregister(scope, args.this());
     set_animation_play_state(scope, args.this(), "idle");
@@ -164,16 +190,43 @@ pub(super) fn animation_finish_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    if let Some(id) = css_transitions::css_transition_id(scope, args.this()) {
+        css_transitions::settle_css_transition_from_script(scope, args.this(), id, true);
+        rv.set_undefined();
+        return;
+    }
     animation_finish(scope, args.this(), true);
     rv.set_undefined();
 }
 
-pub(super) fn animation_reverse_callback(
-    _scope: &mut v8::PinScope<'_, '_>,
-    _args: v8::FunctionCallbackArguments<'_>,
+pub(super) fn animation_reverse_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    if reject_css_transition_control(scope, args.this()) {
+        return;
+    }
     rv.set_undefined();
+}
+
+/// A `CSSTransition` supports only `cancel()` and `finish()` until its
+/// playback control is wired to the engine (PF-9486); the other controls
+/// throw instead of silently diverging from the running transition.
+fn reject_css_transition_control<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    animation: v8::Local<'s, v8::Object>,
+) -> bool {
+    if css_transitions::css_transition_id(scope, animation).is_none() {
+        return false;
+    }
+    crate::native_bridge::throw_dom_exception(
+        scope,
+        "NotSupportedError",
+        9,
+        "This CSSTransition control is not supported",
+    );
+    true
 }
 
 pub(super) fn animation_commit_styles_callback<'s>(
@@ -183,6 +236,8 @@ pub(super) fn animation_commit_styles_callback<'s>(
 ) {
     if let Some(target) = get_private_object(scope, args.this(), CSS_ANIMATION_TARGET_SLOT) {
         commit_css_animation_styles(scope, target);
+    } else if css_transitions::css_transition_id(scope, args.this()).is_some() {
+        css_transitions::commit_css_transition_styles(scope, args.this());
     } else {
         commit_animation_effect_styles(scope, args.this());
     }
@@ -203,7 +258,7 @@ fn element_animate_callback<'s>(
     let effect = if args.get(0).is_null_or_undefined() && args.get(1).is_null_or_undefined() {
         v8::null(scope).into()
     } else {
-        new_keyframe_effect_for_target(scope, args.this(), args.get(0))
+        new_keyframe_effect_for_target(scope, args.this(), args.get(0), args.get(1))
             .map(v8::Local::<v8::Value>::from)
             .unwrap_or_else(|| v8::null(scope).into())
     };
@@ -223,12 +278,25 @@ fn element_get_animations_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let mut animations = element_registry::for_element(scope, args.this())
-        .into_iter()
-        .map(v8::Local::<v8::Value>::from)
-        .collect::<Vec<_>>();
+    // Composite order: CSS transitions, CSS animations, then script
+    // animations (Web Animations §5.4.2; CSS Transitions Level 2 §5.1).
+    let mut animations: Vec<v8::Local<v8::Value>> = Vec::new();
+    let mut css_animations: Vec<v8::Local<v8::Value>> = Vec::new();
+    let mut queue_transition_task = false;
     if let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, args.this()) {
+        // `getAnimations()` flushes style first, so a pending style change
+        // starts or cancels its transitions now, and their animations settle
+        // at once (Web Animations §6.10).
+        css_transitions::flush_element_css_transitions(unsafe { &*runtime_ptr }, handle);
+        css_transitions::settle_pending_css_transition_objects(scope, runtime_ptr);
         let runtime = unsafe { &*runtime_ptr };
+        let transitions =
+            css_transitions::element_css_transitions(scope, runtime, handle, args.this());
+        queue_transition_task = !transitions.is_empty()
+            || runtime
+                .style_engine_ref()
+                .has_pending_css_transition_events();
+        animations.extend(transitions.into_iter().map(v8::Local::<v8::Value>::from));
         if crate::native_bridge::element::css_animation_start_applies(runtime, handle)
             && let Some(animation) = new_running_animation(scope)
         {
@@ -238,9 +306,19 @@ fn element_get_animations_callback<'s>(
                 CSS_ANIMATION_TARGET_SLOT,
                 args.this().into(),
             );
-            animations.push(animation.into());
+            css_animations.push(animation.into());
         }
     }
+    // Queued once no reference to the runtime is held.
+    if queue_transition_task {
+        css_transitions::queue_css_transition_task_if_due(scope);
+    }
+    animations.extend(css_animations);
+    animations.extend(
+        element_registry::for_element(scope, args.this())
+            .into_iter()
+            .map(v8::Local::<v8::Value>::from),
+    );
     rv.set(v8::Array::new_with_elements(scope, &animations).into());
 }
 
@@ -252,11 +330,32 @@ fn document_or_shadow_root_get_animations_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    let mut css_transitions = Vec::new();
     let mut css_animations = Vec::new();
     let mut script_animations = Vec::new();
     if let Ok((runtime_ptr, root)) = node_runtime_and_handle_from_object(scope, args.this()) {
+        // `getAnimations()` flushes style first (Web Animations §6.10).
+        css_transitions::update_css_transition_styles(unsafe { &*runtime_ptr }, true);
+        css_transitions::settle_pending_css_transition_objects(scope, runtime_ptr);
         let elements = tree_element_handles(unsafe { &*runtime_ptr }, root);
         for handle in elements {
+            let has_transitions = !unsafe { &*runtime_ptr }
+                .style_engine_ref()
+                .css_transitions_for_element(unsafe { &*runtime_ptr }.dom_host(), handle)
+                .is_empty();
+            if has_transitions {
+                let target = unsafe { &mut *runtime_ptr }
+                    .native_bridge_mut()
+                    .wrap_handle(scope, runtime_ptr, handle);
+                if let Some(target) = target {
+                    css_transitions.extend(css_transitions::element_css_transitions(
+                        scope,
+                        unsafe { &*runtime_ptr },
+                        handle,
+                        target,
+                    ));
+                }
+            }
             // Script animations live on the element's wrapper, so an element
             // without one has none.
             let wrapper = unsafe { &*runtime_ptr }
@@ -292,8 +391,12 @@ fn document_or_shadow_root_get_animations_callback<'s>(
         })
         .collect::<Vec<_>>();
     script_animations.sort_by(|(left, _), (right, _)| left.total_cmp(right));
-    let animations = css_animations
+    if !css_transitions.is_empty() {
+        css_transitions::queue_css_transition_task_if_due(scope);
+    }
+    let animations = css_transitions
         .into_iter()
+        .chain(css_animations)
         .chain(
             script_animations
                 .into_iter()
@@ -325,10 +428,11 @@ fn new_keyframe_effect_for_target<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     target: v8::Local<'s, v8::Object>,
     keyframes: v8::Local<'s, v8::Value>,
+    options: v8::Local<'s, v8::Value>,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let constructor = global_constructor_object(scope, "KeyframeEffect")
         .and_then(|constructor| v8::Local::<v8::Function>::try_from(constructor).ok())?;
-    constructor.new_instance(scope, &[target.into(), keyframes])
+    constructor.new_instance(scope, &[target.into(), keyframes, options])
 }
 
 fn new_running_animation<'s>(
@@ -601,6 +705,12 @@ fn set_animation_effect_value<'s>(
     animation: v8::Local<'s, v8::Object>,
     value: v8::Local<'s, v8::Value>,
 ) {
+    // A `CSSTransition` is in its element's transitions, not its script
+    // animations.
+    if css_transitions::css_transition_id(scope, animation).is_some() {
+        set_private_value(scope, animation, ANIMATION_EFFECT_SLOT, value);
+        return;
+    }
     let is_current = matches!(
         animation_play_state(scope, animation).as_str(),
         "running" | "paused"

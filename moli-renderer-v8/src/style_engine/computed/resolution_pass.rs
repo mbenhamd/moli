@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use moli_selector::{StyloDomHostBinding, StyloElement};
 use style::{
     Atom,
-    animation::DocumentAnimationSet,
     context::{
         QuirksMode, RegisteredSpeculativePainter, RegisteredSpeculativePainters,
         SharedStyleContext, StyleContext, StyleSystemOptions, ThreadLocalStyleContext,
@@ -29,6 +28,7 @@ use super::{
     style_validation_path_needs_resolution, stylo_pseudo_element_for_computed_style,
     with_cached_lazy_pseudo_style,
 };
+use crate::style_engine::transitions::process_css_transitions;
 
 /// One binding and stylesheet read scope for a stable document world. Create
 /// Stylo's thread-local state only when an element actually needs resolving.
@@ -104,16 +104,17 @@ pub(super) fn with_resolution_context<'dom, R>(
     let snapshot_map = SnapshotMap::new();
     let empty_painters = EmptyRegisteredSpeculativePainters;
     let _layout_thread_state = StyloLayoutThreadStateGuard::enter();
+    let (animations, current_time_for_animations) = world.css_transitions.resolution_inputs();
     world.document_state.with_retained_style_system(|retained| {
         let shared = SharedStyleContext {
             stylist: &retained.stylist,
             visited_styles_enabled: false,
             options: StyleSystemOptions::default(),
             guards: StylesheetGuards::same(&guard),
-            current_time_for_animations: 0.0,
+            current_time_for_animations,
             traversal_flags: TraversalFlags::empty(),
             snapshot_map: &snapshot_map,
-            animations: DocumentAnimationSet::default(),
+            animations,
             registered_speculative_painters: &empty_painters,
         };
         resolve(ResolutionContext {
@@ -334,14 +335,14 @@ impl<'dom> StyleResolutionPass<'_, 'dom> {
                     handle,
                     self.quirks_mode,
                 );
-                clear_element_styles_for_resolution(world, element);
+                let old_primary = clear_element_styles_for_resolution(world, element);
                 let styles = self.context.with_stylo(|context| {
                     context
                         .thread_local
                         .bloom_filter
                         .insert_parents_recovering(element, depth);
                     context.thread_local.current_dom_depth = depth;
-                    let styles = StyleResolverForElement::new(
+                    let mut styles = StyleResolverForElement::new(
                         element,
                         context,
                         RuleInclusion::All,
@@ -349,6 +350,13 @@ impl<'dom> StyleResolutionPass<'_, 'dom> {
                     )
                     .resolve_style_with_default_parents()
                     .into();
+                    process_css_transitions(
+                        &world.css_transitions,
+                        context,
+                        element,
+                        old_primary,
+                        &mut styles,
+                    );
                     context.thread_local.bloom_filter.push(element);
                     styles
                 });

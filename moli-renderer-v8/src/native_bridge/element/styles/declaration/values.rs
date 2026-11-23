@@ -337,6 +337,13 @@ impl<'a> ComputedStyleRead<'a> {
             .unwrap_or_default()
     }
 
+    pub(in crate::native_bridge::element) fn computed_value(
+        &self,
+        property: &str,
+    ) -> Option<String> {
+        self.raw_primary_property(property)
+    }
+
     fn raw_primary_property(&self, property: &str) -> Option<String> {
         let property = canonical_computed_cssom_query_property_name(property)?;
         self.stylo_style

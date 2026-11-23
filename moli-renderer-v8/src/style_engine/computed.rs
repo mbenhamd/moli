@@ -51,6 +51,7 @@ use super::{
     document_world::DocumentStyleWorld,
     lazy_invalidation::StyleValidationPathEntry,
     source_lifecycle::StyleSourceDocumentContext,
+    transitions::process_css_transitions,
     world_key::StyleWorldKey,
     world_lifecycle::{
         ensure_retained_style_system, ensure_retained_style_system_incrementally,
@@ -928,13 +929,16 @@ fn with_resolved_style_in_current_world<R>(
 
 /// Both resolver entry points replace the same canonical ElementData. Keep
 /// pseudo invalidation and restyle publication independent of their scheduling.
-fn clear_element_styles_for_resolution<E: TElement>(world: &DocumentStyleWorld, element: E) {
+/// Returns the primary style being replaced, the before-change style of the
+/// style change event that publishing the new one completes.
+fn clear_element_styles_for_resolution<E: TElement>(
+    world: &DocumentStyleWorld,
+    element: E,
+) -> Option<ServoArc<ComputedValues>> {
     let handle = DomHandle::new(element.as_node().debug_id());
     world.pseudo_style_cache.invalidate_handles([handle]);
     // Keep dirty values published until an observation actually resolves them.
-    unsafe {
-        element.ensure_data().styles = ElementStyles::default();
-    }
+    unsafe { std::mem::take(&mut element.ensure_data().styles).primary }
 }
 
 fn publish_resolved_element_styles<E: TElement>(
@@ -990,8 +994,16 @@ fn resolve_element_styles<'dom>(
                 validation_path,
             );
             let target = DomHandle::new(element.as_node().debug_id());
-            clear_element_styles_for_resolution(world, element);
-            let styles = resolve_style(context, element, RuleInclusion::All, pseudo_element, None);
+            let old_primary = clear_element_styles_for_resolution(world, element);
+            let mut styles =
+                resolve_style(context, element, RuleInclusion::All, pseudo_element, None);
+            process_css_transitions(
+                &world.css_transitions,
+                context,
+                element,
+                old_primary,
+                &mut styles,
+            );
             let required_generation = world
                 .document_state
                 .lazy_invalidation_roots
@@ -1043,8 +1055,15 @@ where
         if element_style_is_current(world, ancestor, required_generation) && !force_descendants {
             continue;
         }
-        clear_element_styles_for_resolution(world, ancestor);
-        let styles = resolve_style(context, ancestor, RuleInclusion::All, None, None);
+        let old_primary = clear_element_styles_for_resolution(world, ancestor);
+        let mut styles = resolve_style(context, ancestor, RuleInclusion::All, None, None);
+        process_css_transitions(
+            &world.css_transitions,
+            context,
+            ancestor,
+            old_primary,
+            &mut styles,
+        );
         resolution_count = resolution_count.saturating_add(1);
         publish_resolved_element_styles(world, ancestor, styles, required_generation);
         force_descendants = true;

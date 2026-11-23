@@ -90,7 +90,15 @@ pub(super) struct StyleDocumentState {
     /// Source-side invalidation only. The target context also advances when
     /// derived styles are cleared, including temporary capture environments.
     visual_input_generation: Cell<u64>,
+    /// How much of `visual_input_generation` cannot change layout.
+    paint_only_visual_inputs: Cell<u64>,
     pub(super) lazy_invalidation_roots: LazyStyleInvalidationRoots,
+    /// The roots of the subtrees whose styles changed since the last frame's
+    /// style update, which runs their style change events.
+    transition_style_roots: RefCell<indexmap::IndexSet<DomHandle>>,
+    /// Sticky: an author stylesheet of the retained style system declared a
+    /// `transition-*` longhand at some update.
+    author_styles_may_specify_transitions: Cell<bool>,
     #[cfg(debug_assertions)]
     completed_style_observation: RefCell<Option<CompletedStyleObservation>>,
     #[cfg(all(test, debug_assertions))]
@@ -116,7 +124,10 @@ impl StyleDocumentState {
             retained_style_system_generation: Cell::new(0),
             target_context_epoch: Cell::new(0),
             visual_input_generation: Cell::new(0),
+            paint_only_visual_inputs: Cell::new(0),
             lazy_invalidation_roots: LazyStyleInvalidationRoots::default(),
+            transition_style_roots: RefCell::default(),
+            author_styles_may_specify_transitions: Cell::new(false),
             #[cfg(debug_assertions)]
             completed_style_observation: RefCell::new(None),
             #[cfg(all(test, debug_assertions))]
@@ -177,6 +188,19 @@ impl StyleDocumentState {
         self.visual_input_generation.get()
     }
 
+    /// `visual_input_generation` without the changes that only repaint.
+    pub(super) fn layout_input_generation(&self) -> u64 {
+        self.visual_input_generation
+            .get()
+            .saturating_sub(self.paint_only_visual_inputs.get())
+    }
+
+    pub(super) fn note_paint_only_visual_input_change(&self) {
+        self.note_visual_input_change();
+        self.paint_only_visual_inputs
+            .set(self.paint_only_visual_inputs.get().saturating_add(1));
+    }
+
     pub(super) fn note_visual_input_change(&self) {
         self.visual_input_generation
             .set(self.visual_input_generation.get().saturating_add(1));
@@ -230,6 +254,67 @@ impl StyleDocumentState {
     #[cfg(all(test, debug_assertions))]
     pub(super) fn completed_style_observation_stability_check_count(&self) -> u64 {
         self.completed_style_observation_stability_checks.get()
+    }
+
+    /// Notes subtrees whose styles changed, for the next frame's style
+    /// update, which takes them all.
+    pub(super) fn note_transition_style_roots(&self, roots: impl IntoIterator<Item = DomHandle>) {
+        self.transition_style_roots.borrow_mut().extend(roots);
+    }
+
+    /// Whether the author stylesheets can declare a `transition-*` longhand:
+    /// one did at a retained style update, or a stylesheet change is not
+    /// scanned yet because no retained style update applied it.
+    pub(super) fn author_styles_may_specify_transitions(&self) -> bool {
+        self.author_styles_may_specify_transitions.get()
+            || self.source_dirty_scopes.requires_retained_style_update()
+            || self
+                .retained_style_system
+                .try_borrow()
+                .map_or(true, |retained| retained.is_none())
+    }
+
+    /// Whether a retained style update has found an author stylesheet that
+    /// declares a `transition-*` longhand. Unlike
+    /// `author_styles_may_specify_transitions`, a stylesheet change no update
+    /// has scanned yet does not count.
+    pub(super) fn author_styles_specify_transitions(&self) -> bool {
+        self.author_styles_may_specify_transitions.get()
+    }
+
+    /// Whether the Document has retained styles and stylesheet changes no
+    /// retained style update has applied yet.
+    pub(super) fn has_unapplied_source_changes(&self) -> bool {
+        self.source_dirty_scopes.requires_retained_style_update()
+            && self
+                .retained_style_system
+                .try_borrow()
+                .is_ok_and(|retained| retained.is_some())
+    }
+
+    fn note_author_transition_styles(&self, retained: &RetainedStyleSystem) {
+        if !self.author_styles_may_specify_transitions.get()
+            && super::retained::retained_author_styles_may_specify_transitions(retained)
+        {
+            self.author_styles_may_specify_transitions.set(true);
+        }
+    }
+
+    pub(super) fn transition_style_roots_all(&self, predicate: impl Fn(DomHandle) -> bool) -> bool {
+        self.transition_style_roots
+            .borrow()
+            .iter()
+            .all(|&root| predicate(root))
+    }
+
+    pub(super) fn has_transition_style_roots(&self) -> bool {
+        !self.transition_style_roots.borrow().is_empty()
+    }
+
+    pub(super) fn take_transition_style_roots(&self) -> Vec<DomHandle> {
+        std::mem::take(&mut *self.transition_style_roots.borrow_mut())
+            .into_iter()
+            .collect()
     }
 
     pub(super) fn clear_retained_style_system(&self) {
@@ -343,6 +428,7 @@ impl StyleDocumentState {
         #[cfg(test)]
         self.retained_style_system_rebuilds
             .set(self.retained_style_system_rebuild_count().saturating_add(1));
+        self.note_author_transition_styles(&retained);
         *retained_slot = Some(retained);
     }
 
@@ -355,7 +441,9 @@ impl StyleDocumentState {
             let retained = retained
                 .as_mut()
                 .expect("retained style system should exist before an incremental update");
-            update(retained)
+            let result = update(retained);
+            self.note_author_transition_styles(retained);
+            result
         };
         self.retained_style_system_generation.set(
             self.retained_style_system_generation

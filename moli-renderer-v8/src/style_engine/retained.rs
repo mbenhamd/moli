@@ -466,6 +466,27 @@ fn refresh_retained_derived_state(
     }
 }
 
+/// Whether an author stylesheet of the document or of a connected shadow
+/// tree declares a `transition-*` longhand.
+pub(super) fn retained_author_styles_may_specify_transitions(
+    retained: &RetainedStyleSystem,
+) -> bool {
+    let device = retained.stylist.device();
+    retained
+        .document_stylesheets
+        .entries()
+        .iter()
+        .chain(
+            retained
+                .shadow_scopes
+                .iter()
+                .flat_map(|scope| scope.active_stylesheets().entries()),
+        )
+        .any(|stylesheet| {
+            super::stylesheet::stylesheet_may_specify_transitions(stylesheet.stylesheet(), device)
+        })
+}
+
 fn register_script_custom_properties(stylist: &mut Stylist, inputs: &FullStyleWorldSnapshot) {
     for record in &inputs.script_custom_property_registrations {
         let registration = &record.registration;

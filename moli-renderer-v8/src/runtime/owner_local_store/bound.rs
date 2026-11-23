@@ -289,7 +289,17 @@ where
     R: 'static,
     F: for<'a> FnOnce(&'a mut LivePageEntry) -> EntryLocalTaskFuture<'a, R> + 'static,
 {
-    run_typed_entry_on_bound_owner_local_store_local_task(local_executor, entry, operation).await
+    // Every owner operation on a live Page, script or not, starts by
+    // resolving the styles its last frame left unresolved, before it can
+    // change the DOM, a style or the viewport.
+    run_typed_entry_on_bound_owner_local_store_local_task(local_executor, entry, move |entry| {
+        entry
+            .page_vm()
+            .vm()
+            .resolve_unresolved_css_transition_frame_roots();
+        operation(entry)
+    })
+    .await
 }
 
 pub(in crate::runtime) fn take_entry_for_command_on_bound_owner_local_store(
