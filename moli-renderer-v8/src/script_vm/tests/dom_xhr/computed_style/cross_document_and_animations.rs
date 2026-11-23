@@ -3743,14 +3743,18 @@ async fn css_transition_frames_apply_unread_stylesheet_changes() {
          getComputedStyle(document.getElementById('u')).opacity; return ''; })()",
     );
     run_frames_for_ms(&mut vm, &loader, 50).await;
+    vm.resolve_unresolved_css_transition_frame_roots();
     eval_string(
         &mut vm,
         "(() => { document.styleSheets[0].insertRule('#t { opacity: 0; }', 2); \
          document.head.appendChild(document.createElement('style')).textContent = \
          '#u { opacity: 0; }'; return ''; })()",
     );
-    // The frame applies both changes before any task reads the elements.
+    // The frame applies both changes before any task reads the elements:
+    // a queued frame runs here, and a skipped one runs at the next task's
+    // start, before its script.
     run_frames_for_ms(&mut vm, &loader, 100).await;
+    vm.resolve_unresolved_css_transition_frame_roots();
     let observed = eval_string(
         &mut vm,
         r#"
