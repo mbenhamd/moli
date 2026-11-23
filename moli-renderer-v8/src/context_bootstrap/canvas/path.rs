@@ -256,29 +256,49 @@ impl Canvas2dPathState {
         true
     }
 
+    /// Canvas arcs connect the current point to the arc's start with a line.
     fn append_arc(&mut self, arc: kurbo::Arc) {
-        self.append_arc_ending_at(arc, None);
-    }
+        use kurbo::PathEl;
 
-    /// `end`, when given, replaces the final cubic's endpoint. Ellipse-center
-    /// arithmetic loses low coordinate bits at large radii, while an SVG arc's
-    /// authored endpoint is exact and anchors the next command.
-    fn append_arc_ending_at(&mut self, arc: kurbo::Arc, end: Option<(f64, f64)>) {
-        use kurbo::{PathEl, Shape};
-
-        // A relative floor also bounds subdivision for enormous but finite
-        // radii. It prevents resource usage growing without bound with radius.
-        let tolerance = 0.01_f64.max(arc.radii.x.max(arc.radii.y) / 4096.0);
-        let mut elements: Vec<PathEl> = arc.path_elements(tolerance).collect();
-        if let (Some((x, y)), Some(PathEl::CurveTo(_, _, last))) = (end, elements.last_mut()) {
-            *last = kurbo::Point::new(x, y);
-        }
-        for element in elements {
+        for element in arc_path_elements(&arc) {
             match element {
                 PathEl::MoveTo(p) => self.line_to(p.x, p.y),
                 PathEl::CurveTo(a, b, p) => self.bezier_curve_to(a.x, a.y, b.x, b.y, p.x, p.y),
                 _ => unreachable!("kurbo arcs contain only a start point and cubic segments"),
             }
+        }
+    }
+
+    /// An SVG arc runs from the current point `from` to its authored endpoint
+    /// `to`. Ellipse-center arithmetic loses low coordinate bits at large
+    /// radii, so kurbo's computed start and end can lie far from both. The
+    /// outer cubics are re-anchored at the authored points, carrying their
+    /// adjacent control points with them; an arc whose sweep rounds to no
+    /// cubic at all becomes a straight line to `to`.
+    fn append_svg_arc(&mut self, arc: kurbo::Arc, from: (f64, f64), to: (f64, f64)) {
+        use kurbo::{PathEl, Point};
+
+        let mut computed_start = Point::new(from.0, from.1);
+        let mut cubics = Vec::new();
+        for element in arc_path_elements(&arc) {
+            match element {
+                PathEl::MoveTo(p) => computed_start = p,
+                PathEl::CurveTo(a, b, p) => cubics.push((a, b, p)),
+                _ => unreachable!("kurbo arcs contain only a start point and cubic segments"),
+            }
+        }
+        let (from, to) = (Point::new(from.0, from.1), Point::new(to.0, to.1));
+        if let Some(first) = cubics.first_mut() {
+            first.0 += from - computed_start;
+        }
+        let Some(last) = cubics.last_mut() else {
+            self.line_to(to.x, to.y);
+            return;
+        };
+        last.1 += to - last.2;
+        last.2 = to;
+        for (a, b, p) in cubics {
+            self.bezier_curve_to(a.x, a.y, b.x, b.y, p.x, p.y);
         }
     }
 
@@ -477,7 +497,7 @@ impl Canvas2dPathState {
                         sweep,
                     });
                     match arc {
-                        Some(arc) => state.append_arc_ending_at(arc, Some(current)),
+                        Some(arc) => state.append_svg_arc(arc, from, current),
                         None if from != current => state.line_to(current.0, current.1),
                         None => {}
                     }
@@ -549,6 +569,15 @@ fn expand(min_x: &mut f64, min_y: &mut f64, max_x: &mut f64, max_y: &mut f64, po
     *min_y = (*min_y).min(y);
     *max_x = (*max_x).max(x);
     *max_y = (*max_y).max(y);
+}
+
+fn arc_path_elements(arc: &kurbo::Arc) -> impl Iterator<Item = kurbo::PathEl> + '_ {
+    use kurbo::Shape;
+
+    // A relative floor also bounds subdivision for enormous but finite
+    // radii. It prevents resource usage growing without bound with radius.
+    let tolerance = 0.01_f64.max(arc.radii.x.max(arc.radii.y) / 4096.0);
+    arc.path_elements(tolerance)
 }
 
 /// Normalize in constant time, including opposite-sign finite angles whose
@@ -670,6 +699,25 @@ mod tests {
         assert!(matches!(partial.elements[3], PaintPathElement::Close));
         let far = Canvas2dPathState::from_svg_path_data("M10 20 A1e17 1e17 0 0 1 45 20");
         assert_eq!(far.current, (45.0, 20.0));
+        // Like Chromium, a following command starts at the authored endpoint,
+        // and nothing jogs to the arc start kurbo computes at this radius.
+        assert!(matches!(
+            far.elements[..],
+            [PaintPathElement::MoveTo(a), PaintPathElement::CubicTo(b, c, d)]
+                if (a.x, a.y, d.x, d.y) == (10.0, 20.0, 45.0, 20.0)
+                    && [b, c].iter().all(|p| (p.y - 20.0).abs() < 1e-3
+                        && (10.0..=45.0).contains(&p.x))
+        ));
+        // The sweep rounds to no cubic: the arc is a line to its endpoint.
+        let flat = Canvas2dPathState::from_svg_path_data("M10 20 A1e17 1e17 0 0 1 11 20 L11 40");
+        assert!(matches!(
+            flat.elements[..],
+            [
+                PaintPathElement::MoveTo(a),
+                PaintPathElement::LineTo(b),
+                PaintPathElement::LineTo(c),
+            ] if (a.x, a.y, b.x, b.y, c.x, c.y) == (10.0, 20.0, 11.0, 20.0, 11.0, 40.0)
+        ));
     }
 
     #[test]
