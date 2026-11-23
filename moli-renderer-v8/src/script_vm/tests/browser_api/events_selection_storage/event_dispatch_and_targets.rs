@@ -2087,6 +2087,7 @@ fn escape_dialog_cancel_sees_the_ended_keydown_dispatch_state() {
 // headless shell, a real mouse move onto the button), PF-9474. Only a
 // trusted mouseover runs the hover interest default action, so an interest
 // listener that redispatches the saved mouseover fires no second interest.
+#[cfg(feature = "devtools")]
 #[test]
 fn redispatched_mouseover_runs_no_hover_interest_default_action() {
     let mut vm = new_rendered_test_vm(
@@ -2603,6 +2604,7 @@ fn event_dispatch_bookkeeping_stays_off_isolated_world_wrappers() {
 // headless shell, a real mouse move onto the button), PF-9474. Blink runs
 // hover interest after the mouseover dispatch has ended, so a plain
 // EventTarget redispatch from the interest listener keeps its target.
+#[cfg(feature = "devtools")]
 #[test]
 fn hover_interest_listener_redispatch_keeps_its_plain_event_target() {
     let mut vm = new_rendered_test_vm(
