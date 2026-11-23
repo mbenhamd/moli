@@ -449,6 +449,12 @@ impl HostTimeoutScheduler {
             .has_pending_matching(|task| task.is_animation_frame_task_at(timestamp))
     }
 
+    /// The tasks waiting in the Window task scheduler.
+    #[cfg(test)]
+    pub(crate) fn pending_task_count_for_test(&self) -> usize {
+        self.scheduler.pending_count()
+    }
+
     pub(crate) fn queue_window_idle_callback<'s>(
         &mut self,
         scope: &mut v8::PinScope<'s, '_>,

@@ -3899,3 +3899,41 @@ async fn css_transition_popup_change_does_not_queue_frames_forever() {
         "2|0"
     );
 }
+
+/// Chromium runs one rendering update per frame. A style change that starts
+/// a transition while the next transition frame waits queues a sooner task
+/// in its place, so a running transition keeps one task queued, not one
+/// frame chain per such change.
+#[tokio::test]
+async fn css_transition_change_before_a_queued_frame_keeps_one_frame_task() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-one-frame-task.test/",
+        r#"<html><head><style>
+.b { opacity: 0; transition: opacity 3600s linear; }
+.b.on { opacity: 1; }
+</style></head><body><div id="a" class="b"></div><div id="c" class="b"></div></body></html>"#,
+    );
+    eval_string(
+        &mut vm,
+        "(() => { const a = document.getElementById('a'); getComputedStyle(a).opacity; \
+         a.classList.add('on'); getComputedStyle(a).opacity; return ''; })()",
+    );
+    // The task that delivers `transitionrun` queues the next frame.
+    run_frames_for_ms(&mut vm, &loader, 5).await;
+    eval_string(
+        &mut vm,
+        "(() => { const c = document.getElementById('c'); getComputedStyle(c).opacity; \
+         c.classList.add('on'); getComputedStyle(c).opacity; return ''; })()",
+    );
+    run_frames_for_ms(&mut vm, &loader, 100).await;
+    assert_eq!(
+        eval_string(
+            &mut vm,
+            "[document.getElementById('a').getAnimations().length, \
+              document.getElementById('c').getAnimations().length].join('|')"
+        ),
+        "1|1"
+    );
+    assert_eq!(vm._context_host.borrow().pending_task_count_for_test(), 1);
+}
