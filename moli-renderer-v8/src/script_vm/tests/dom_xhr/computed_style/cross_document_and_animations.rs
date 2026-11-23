@@ -3937,3 +3937,59 @@ async fn css_transition_change_before_a_queued_frame_keeps_one_frame_task() {
     );
     assert_eq!(vm._context_host.borrow().pending_task_count_for_test(), 1);
 }
+
+/// A stylesheet change in a Document with no transition candidates waits for
+/// the frame the page has queued. When the only running transition is
+/// cancelled and its Document retired, the task that delivers the cancel
+/// replaces that frame and runs none; the change still gets its frame.
+/// Chromium 156: the sibling frame's rule starts its transition, which fires
+/// `transitionrun` without a style read.
+#[tokio::test]
+async fn css_transition_events_task_of_a_retired_document_keeps_a_sibling_change_frame() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-retired-events-task-frame.test/",
+        r#"<html><body><div id="m"></div></body></html>"#,
+    );
+    vm.eval(
+        "for (const id of ['f1', 'f2']) { \
+         const f = document.body.appendChild(document.createElement('iframe')); f.id = id; }",
+    )
+    .expect("frames should be inserted");
+    vm.drain_pending_child_frame_work_for_test();
+    eval_string(
+        &mut vm,
+        "(() => { getComputedStyle(document.getElementById('m')).opacity; \
+         const d1 = document.getElementById('f1').contentDocument; \
+         d1.head.appendChild(d1.createElement('style')).textContent = \
+         '#t { opacity: 0; transition: opacity 3600s linear; } #t.on { opacity: 1; }'; \
+         const t = d1.body.appendChild(d1.createElement('div')); t.id = 't'; \
+         d1.defaultView.getComputedStyle(t).opacity; \
+         const d2 = document.getElementById('f2').contentDocument; \
+         d2.head.appendChild(d2.createElement('style')).textContent = '#u { opacity: 0; }'; \
+         const u = d2.body.appendChild(d2.createElement('div')); u.id = 'u'; \
+         d2.defaultView.getComputedStyle(u).opacity; globalThis.__runs = 0; \
+         u.addEventListener('transitionrun', () => { __runs++; }); return ''; })()",
+    );
+    run_frames_for_ms(&mut vm, &loader, 50).await;
+    eval_string(
+        &mut vm,
+        "(() => { const d1 = document.getElementById('f1').contentDocument; \
+         const t = d1.getElementById('t'); t.classList.add('on'); \
+         d1.defaultView.getComputedStyle(t).opacity; \
+         globalThis.__anim = t.getAnimations()[0]; return String(!!__anim); })()",
+    );
+    // The task that delivers `transitionrun` for #t queues the next frame.
+    run_frames_for_ms(&mut vm, &loader, 5).await;
+    // No style read: f2's rule waits for that frame. The cancel's
+    // `transitioncancel` queues a sooner task that runs no frame, and the
+    // removal retires the only Document with a running transition.
+    eval_string(
+        &mut vm,
+        "(() => { document.getElementById('f2').contentDocument.styleSheets[0] \
+         .insertRule('#u { opacity: 1; transition: opacity 3600s linear; }', 1); \
+         __anim.cancel(); document.getElementById('f1').remove(); return ''; })()",
+    );
+    run_frames_for_ms(&mut vm, &loader, 100).await;
+    assert_eq!(eval_string(&mut vm, "String(__runs)"), "1");
+}
