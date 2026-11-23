@@ -3750,9 +3750,10 @@ async fn css_transition_frames_apply_unread_stylesheet_changes() {
          document.head.appendChild(document.createElement('style')).textContent = \
          '#u { opacity: 0; }'; return ''; })()",
     );
-    // The frame applies both changes before any task reads the elements:
-    // a queued frame runs here, and a skipped one runs at the next task's
-    // start, before its script.
+    // The stylesheet changes make the style update due, and no style of this
+    // Document specifies a transition: the frame is skipped, so no task
+    // waits for it, and the next task's start runs its style update, which
+    // applies both changes before any script reads the elements.
     run_frames_for_ms(&mut vm, &loader, 100).await;
     vm.resolve_unresolved_css_transition_frame_roots();
     let observed = eval_string(
@@ -3886,7 +3887,9 @@ async fn css_transition_popup_change_does_not_queue_frames_forever() {
         "(() => { __popup.document.body.appendChild(__popup.document.createElement('p')); \
          return ''; })()",
     );
-    run_frames_for_ms(&mut vm, &loader, 200).await;
+    // Frames return as soon as no task waits, so an endless frame loop holds
+    // them to this deadline.
+    run_frames_for_ms(&mut vm, &loader, 2000).await;
     assert!(!css_transition_task_queued(&vm));
     assert_eq!(
         eval_string(

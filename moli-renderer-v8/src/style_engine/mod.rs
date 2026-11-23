@@ -1134,8 +1134,10 @@ impl MoliStyleEngine {
                 if !undrained && !unapplied {
                     transitions.end_pending_change_episode();
                 }
-                let specified = self.css_transition_frame_specified_for_world(host, &world);
-                if transitions.has_unresolved_frame_roots() && specified {
+                let unresolved = transitions.has_unresolved_frame_roots();
+                let specified = (undrained || unresolved)
+                    && self.css_transition_frame_specified_for_world(host, &world);
+                if unresolved && specified {
                     // The frame after a frame resolves the subtrees that
                     // frame left, unless a task runs first.
                     Some(phase_change.unwrap_or(CSS_TRANSITION_FRAME_INTERVAL_MS))
