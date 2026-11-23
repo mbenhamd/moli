@@ -3731,6 +3731,7 @@ async fn css_transition_frames_restyle_candidates_under_a_running_transition() {
 /// style specifies a transition starts it, though no script reads it.
 #[tokio::test]
 async fn css_transition_frames_apply_unread_stylesheet_changes() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_rendered_test_vm(
         "https://css-transition-unread-sheet.test/",
         r#"<html><head><style>#t { opacity: 1; } #u { opacity: 1; }</style></head>
@@ -3741,16 +3742,15 @@ async fn css_transition_frames_apply_unread_stylesheet_changes() {
         "(() => { getComputedStyle(document.getElementById('t')).opacity; \
          getComputedStyle(document.getElementById('u')).opacity; return ''; })()",
     );
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    vm.resolve_unresolved_css_transition_frame_roots();
+    run_frames_for_ms(&mut vm, &loader, 50).await;
     eval_string(
         &mut vm,
         "(() => { document.styleSheets[0].insertRule('#t { opacity: 0; }', 2); \
          document.head.appendChild(document.createElement('style')).textContent = \
          '#u { opacity: 0; }'; return ''; })()",
     );
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    vm.resolve_unresolved_css_transition_frame_roots();
+    // The frame applies both changes before any task reads the elements.
+    run_frames_for_ms(&mut vm, &loader, 100).await;
     let observed = eval_string(
         &mut vm,
         r#"
@@ -3766,7 +3766,6 @@ async fn css_transition_frames_apply_unread_stylesheet_changes() {
     );
     assert_eq!(observed, "0|0|0|0");
 
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_rendered_test_vm(
         "https://css-transition-unread-rule.test/",
         r#"<html><head><style>#t { opacity: 1; transition: opacity 20ms linear; }</style></head>
@@ -3858,13 +3857,17 @@ async fn css_transition_unread_stylesheet_change_brings_the_first_transition() {
 #[tokio::test]
 async fn css_transition_popup_change_does_not_queue_frames_forever() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
-    let mut vm = new_rendered_test_vm("https://css-transition-popup-frames.test/", BODY_ONLY);
+    let mut vm = new_storage_html_test_vm("https://css-transition-popup-frames.test/");
+    publish_layout_for_test(&mut vm);
     eval_string(
         &mut vm,
         r#"
 (() => {
   const w = open('about:blank');
-  const t = w.document.body.appendChild(w.document.createElement('div'));
+  const d = w.document;
+  const root = d.documentElement || d.appendChild(d.createElement('html'));
+  const body = d.body || root.appendChild(d.createElement('body'));
+  const t = body.appendChild(d.createElement('div'));
   t.style.transition = 'opacity 1s';
   w.getComputedStyle(t).opacity;
   globalThis.__popup = w;
