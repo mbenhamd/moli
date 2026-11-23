@@ -3937,3 +3937,54 @@ async fn css_transition_change_before_a_queued_frame_keeps_one_frame_task() {
     );
     assert_eq!(vm._context_host.borrow().pending_task_count_for_test(), 1);
 }
+
+/// A stylesheet change in a Document with no transition candidates waits for
+/// the frame the page has queued. A task that only delivers events and
+/// replaces that frame leaves the change its frame. Chromium 156: the rule
+/// starts the child frame's transition, which fires `transitionrun` without a
+/// style read.
+#[tokio::test]
+async fn css_transition_events_task_keeps_the_frame_of_a_stylesheet_change() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_rendered_test_vm(
+        "https://css-transition-events-task-frame.test/",
+        r#"<html><head><style>
+.b { opacity: 0; transition: opacity 3600s linear; }
+.b.on { opacity: 1; }
+</style></head><body><div id="t" class="b"></div></body></html>"#,
+    );
+    vm.eval("document.body.appendChild(document.createElement('iframe'))")
+        .expect("frame should be inserted");
+    vm.drain_pending_child_frame_work_for_test();
+    eval_string(
+        &mut vm,
+        "(() => { const d = document.querySelector('iframe').contentDocument; \
+         d.head.appendChild(d.createElement('style')).textContent = '#u { opacity: 0; }'; \
+         const u = d.body.appendChild(d.createElement('div')); u.id = 'u'; \
+         d.defaultView.getComputedStyle(u).opacity; globalThis.__runs = 0; \
+         u.addEventListener('transitionrun', () => { __runs++; }); return ''; })()",
+    );
+    run_frames_for_ms(&mut vm, &loader, 50).await;
+    eval_string(
+        &mut vm,
+        "(() => { const t = document.getElementById('t'); getComputedStyle(t).opacity; \
+         t.classList.add('on'); getComputedStyle(t).opacity; \
+         globalThis.__anim = t.getAnimations()[0]; return ''; })()",
+    );
+    // The task that delivers `transitionrun` for #t queues the next frame.
+    run_frames_for_ms(&mut vm, &loader, 5).await;
+    // No style read: the child frame's rule waits for that frame.
+    eval_string(
+        &mut vm,
+        "(() => { document.querySelector('iframe').contentDocument.styleSheets[0] \
+         .insertRule('#u { opacity: 1; transition: opacity 3600s linear; }', 1); return ''; })()",
+    );
+    // The removal's `transitioncancel` queues a sooner task, which runs no
+    // frame.
+    eval_string(
+        &mut vm,
+        "(() => { document.getElementById('t').remove(); return ''; })()",
+    );
+    run_frames_for_ms(&mut vm, &loader, 100).await;
+    assert_eq!(eval_string(&mut vm, "String(__runs)"), "1");
+}
