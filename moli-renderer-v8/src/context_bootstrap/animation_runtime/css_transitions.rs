@@ -642,8 +642,8 @@ fn css_transition_task_callback<'s>(
 
 /// One frame of the CSS transitions: "update animations and send events" at
 /// the frame's time. Without animation frame callbacks (`update_styles`),
-/// the frame first runs the style change events of the elements whose
-/// styles changed. An animation frame runs them after its callbacks instead
+/// the frame then runs the style change events of the elements whose styles
+/// changed. An animation frame runs them after its callbacks instead
 /// (`end_css_transition_animation_frame`), as Chromium's style update
 /// follows the callbacks, so the callbacks start without that work.
 pub(crate) fn run_css_transition_frame(
@@ -654,16 +654,20 @@ pub(crate) fn run_css_transition_frame(
     {
         let host = unsafe { &*host_ptr };
         resolve_unresolved_css_transition_frame_roots(host);
-        if update_styles {
-            update_css_transition_styles(host, false);
-        } else {
-            // Removals since the last update cancel their transitions before
-            // the sample (`update_css_transition_styles` drains them too).
-            host.drain_pending_style_invalidations_for_computed_style_read();
-        }
+        // Removals since the last update cancel their transitions before
+        // the sample.
+        host.drain_pending_style_invalidations_for_computed_style_read();
         let engine = host.style_engine_ref();
         engine.sample_css_transitions(host.dom_host());
         if update_styles {
+            // The style update follows the sample, as Chromium's style
+            // recalc follows its animation update: the elements that inherit
+            // or resolve units against a sampled value get it at this
+            // frame's time, so a read before the next frame finds them
+            // current and runs no second style change event for them in
+            // this frame. The transitions the update starts begin at the
+            // frame's time.
+            engine.with_css_transition_frame_open(|| update_css_transition_styles(host, false));
             engine.note_css_transition_style_update();
         }
     }

@@ -11,10 +11,11 @@
 //! Moli has no continuous rendering loop, so a frame is either the start of
 //! an animation frame callback batch or, when no callback is queued, the
 //! transition task, which runs at a 60Hz frame interval while a transition
-//! runs or a style change may start one. Each frame first runs the style
+//! runs or a style change may start one. Each frame first samples the clock
+//! (the "update animations and send events" step) and then runs the style
 //! change events of the elements whose styles specify transitions, as the
-//! rendering update's style recalc does, and then samples the clock (the
-//! "update animations and send events" step). Style and geometry reads
+//! rendering update's style recalc does after the animation frame
+//! callbacks. Style and geometry reads
 //! between frames see the last frame's time, as in Chromium.
 //!
 //! A transition's start time is the time of the first frame that processes

@@ -1480,6 +1480,25 @@ impl MoliStyleEngine {
         }
     }
 
+    /// Runs `update`, a frame's style update outside an animation frame
+    /// callback batch, with the frame open: the transitions it starts begin
+    /// at the frame's time, which the sample before it set.
+    pub(crate) fn with_css_transition_frame_open(&self, update: impl FnOnce()) {
+        let opened = self
+            .document_worlds
+            .active_worlds()
+            .into_iter()
+            .filter(|world| !world.css_transitions.in_animation_frame())
+            .collect::<Vec<_>>();
+        for world in &opened {
+            world.css_transitions.begin_animation_frame();
+        }
+        update();
+        for world in &opened {
+            world.css_transitions.end_animation_frame();
+        }
+    }
+
     pub(crate) fn css_transition_animation_frame_open(&self) -> bool {
         self.document_worlds
             .active_worlds()
