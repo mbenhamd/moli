@@ -1044,6 +1044,14 @@ impl MoliStyleEngine {
         restyled
     }
 
+    /// Ends every Document's episode of pending changes, so the next delay
+    /// check queues a frame for the changes still waiting.
+    pub(crate) fn end_css_transition_pending_change_episodes(&self) {
+        for world in self.document_worlds.active_worlds() {
+            world.css_transitions.end_pending_change_episode();
+        }
+    }
+
     /// Whether transition events wait for delivery to script.
     pub(crate) fn has_pending_css_transition_events(&self) -> bool {
         self.document_worlds
