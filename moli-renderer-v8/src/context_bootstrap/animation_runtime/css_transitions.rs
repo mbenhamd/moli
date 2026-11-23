@@ -649,6 +649,12 @@ fn css_transition_task_callback<'s>(
         .has_pending_css_transition_events()
     {
         deliver_pending_css_transition_events(scope, host_ptr);
+        // This task runs no frame, though it may have replaced the task
+        // that carried the frame of pending changes: their episode ends, so
+        // the next check queues that frame.
+        unsafe { &*host_ptr }
+            .style_engine_ref()
+            .end_css_transition_pending_change_episodes();
         queue_css_transition_task_if_due(scope);
         return;
     }
